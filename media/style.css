@@ -145,6 +145,51 @@ body {
   opacity: 0.5;
 }
 
+#config-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg2);
+  flex: 0 0 auto;
+}
+
+#config-bar .cfg {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+#config-bar .cfg span {
+  flex: 0 0 auto;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+#config-bar select {
+  flex: 1 1 auto;
+  min-width: 0;
+  background: var(--bg3);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 6px;
+  font-family: inherit;
+  font-size: 12px;
+}
+
+#config-bar select:focus {
+  outline: 1px solid var(--accent);
+}
+
+#config-bar select:disabled {
+  opacity: 0.5;
+}
+
 button {
   font-family: inherit;
   font-size: 12px;
@@ -226,6 +271,85 @@ button.icon-btn {
   background: var(--error-bg);
   color: var(--error-text);
   border-color: var(--error-bg);
+}
+
+.notice {
+  align-self: stretch;
+  max-width: 100%;
+  padding: 7px 10px;
+  border-radius: 6px;
+  font-size: 12px;
+  line-height: 1.4;
+  border: 1px solid var(--border);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.notice.warning {
+  background: rgba(255, 184, 77, 0.12);
+  border-color: var(--warn);
+  color: var(--warn);
+}
+
+.notice.info {
+  background: rgba(79, 195, 247, 0.1);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.msg.assistant .answer {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.thinking {
+  margin-bottom: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg3);
+  overflow: hidden;
+}
+
+.thinking-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  padding: 5px 8px;
+}
+
+.thinking-head .chev {
+  color: var(--text-dim);
+  font-size: 10px;
+  transition: transform 0.15s ease;
+}
+
+.thinking-head .chev.open {
+  transform: rotate(90deg);
+}
+
+.thinking-head .thinking-label {
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.thinking-body {
+  padding: 0 8px 8px;
+  border-top: 1px solid var(--border);
+  color: var(--text-dim);
+  font-style: italic;
+  white-space: pre-wrap;
+  word-break: break-word;
+  line-height: 1.4;
+  max-height: 240px;
+  overflow: auto;
+}
+
+.thinking-body.hidden {
+  display: none;
 }
 
 .usage-line {

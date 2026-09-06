@@ -3,7 +3,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { Agent } from '../agent/agent';
 import { DeepSeekClient } from '../agent/deepseek';
-import { AgentEvent, ChatMessage, ContentPart, Usage } from '../agent/types';
+import { AgentEvent, ChatMessage, ContentPart, ThinkingEffort, Usage } from '../agent/types';
 import { ToolRegistry } from '../tools';
 
 /** Known context-window sizes (in tokens) per model, for the usage indicator. */
@@ -16,6 +16,13 @@ const CONTEXT_WINDOWS: Record<string, number> = {
 };
 const DEFAULT_CONTEXT_WINDOW = 1_000_000;
 const STORAGE_KEY = 'agentHarness.state';
+const CONFIG_KEY = 'agentHarness.runtimeConfig';
+
+/** Locally persists the active model + thinking-effort selection. */
+interface RuntimeConfig {
+  model: string;
+  thinkingEffort: ThinkingEffort;
+}
 
 interface UserAttachment {
   dataUrl: string;
@@ -23,9 +30,11 @@ interface UserAttachment {
 }
 
 interface DisplayItem {
-  kind: 'user' | 'assistant' | 'tool';
+  kind: 'user' | 'assistant' | 'tool' | 'notice';
   id?: string;
   text?: string;
+  thinking?: string;
+  noticeKind?: 'warning' | 'info';
   name?: string;
   args?: string;
   content?: string;
@@ -65,6 +74,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private lastStatus = '';
   private readonly output: vscode.OutputChannel;
   private model = 'deepseek-chat';
+  private thinkingEffort: ThinkingEffort = 'none';
   private contextWindow = DEFAULT_CONTEXT_WINDOW;
   private currentPromptTokens = 0;
   private sessions: AgentSession[] = [];
@@ -75,6 +85,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     private readonly storage: vscode.Memento,
   ) {
     this.output = vscode.window.createOutputChannel('Agent Harness');
+    // Resolve the active model/effort before loading sessions so the restored
+    // system prompt carries the correct identity.
+    const runtime = this.loadRuntimeConfig();
+    this.model = runtime.model;
+    this.thinkingEffort = runtime.thinkingEffort;
     this.loadSessions();
     this.buildAgent();
     const active = this.getActiveSession();
@@ -88,22 +103,27 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     model: string;
     baseUrl: string;
     maxTurns: number;
+    thinkingEffort: ThinkingEffort;
   } {
     const cfg = vscode.workspace.getConfiguration('agentHarness');
     const apiKey = (cfg.get<string>('apiKey') ?? '').trim() || (process.env.DEEPSEEK_API_KEY ?? '').trim();
     const model = cfg.get<string>('model') ?? 'deepseek-chat';
     const baseUrl = cfg.get<string>('baseUrl') ?? 'https://api.deepseek.com';
     const maxTurns = cfg.get<number>('maxTurns') ?? 20;
-    return { apiKey, model, baseUrl, maxTurns };
+    const thinkingEffort = (cfg.get<string>('thinkingEffort') ?? 'none') as ThinkingEffort;
+    return { apiKey, model, baseUrl, maxTurns, thinkingEffort };
   }
 
   private buildAgent(): void {
-    const { apiKey, model, baseUrl, maxTurns } = this.getConfig();
-    this.model = model;
-    this.contextWindow = this.getContextWindow(model);
-    const client = new DeepSeekClient({ apiKey, baseUrl, model });
+    const { apiKey, baseUrl, maxTurns } = this.getConfig();
+    // Model and effort were already resolved (incl. runtime persistence) in the
+    // constructor; apply them here so the client and agent are in sync.
+    this.contextWindow = this.getContextWindow(this.model);
+    const client = new DeepSeekClient({ apiKey, baseUrl, model: this.model });
     const tools = new ToolRegistry();
     this.agent = new Agent(client, tools, (event) => this.handleAgentEvent(event), maxTurns);
+    this.agent.setModel(this.model);
+    this.agent.setThinkingEffort(this.thinkingEffort);
   }
 
   private getContextWindow(model: string): number {
@@ -135,16 +155,57 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
+  private postConfig(): void {
+    this.post({
+      type: 'config',
+      model: this.model,
+      thinkingEffort: this.thinkingEffort,
+    });
+  }
+
+  /** Effective model/effort = persisted runtime selection, falling back to settings. */
+  private loadRuntimeConfig(): RuntimeConfig {
+    const defaults = this.getConfig();
+    const stored = this.storage.get<Partial<RuntimeConfig>>(CONFIG_KEY) ?? {};
+    return {
+      model: stored.model ?? defaults.model,
+      thinkingEffort: stored.thinkingEffort ?? defaults.thinkingEffort,
+    };
+  }
+
+  private persistRuntimeConfig(): void {
+    void this.storage.update(CONFIG_KEY, {
+      model: this.model,
+      thinkingEffort: this.thinkingEffort,
+    } satisfies RuntimeConfig);
+  }
+
+  /** True if the active session has any conversation beyond the system prompt. */
+  private hasHistory(): boolean {
+    const session = this.getActiveSession();
+    if (!session) {
+      return false;
+    }
+    return session.messages.some((m) => m.role !== 'system');
+  }
+
+  private postNotice(kind: 'warning' | 'info', text: string): void {
+    this.pushItem({ kind: 'notice', noticeKind: kind, text });
+    this.post({ type: 'notice', kind, text });
+  }
+
   // ---- Session management ----
 
   private loadSessions(): void {
     const state = this.storage.get<StoredState>(STORAGE_KEY);
     if (state && Array.isArray(state.sessions) && state.sessions.length > 0) {
       this.sessions = state.sessions.map((s) => {
-        const messages = s.messages ?? Agent.initialMessages();
-        // Refresh persisted sessions to use the current system prompt.
+        let messages = (s.messages ?? Agent.initialMessages()).slice();
+        // Heal corrupt persisted state (e.g. a dangling tool_calls message) and
+        // refresh to the current system prompt.
+        messages = Agent.sanitizeMessages(messages);
         if (messages[0] && messages[0].role === 'system') {
-          messages[0] = { role: 'system', content: Agent.systemPrompt() };
+          messages[0] = { role: 'system', content: Agent.systemPrompt(this.model, this.thinkingEffort) };
         }
         return { ...s, messages, displayItems: s.displayItems ?? [] };
       });
@@ -153,6 +214,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     } else {
       this.createSessionInMemory();
     }
+    // Persist the (possibly healed) state so a resumed session is always valid.
+    this.persist();
   }
 
   private persist(): void {
@@ -180,7 +243,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       title: 'New session',
       createdAt: Date.now(),
       updatedAt: Date.now(),
-      messages: Agent.initialMessages(),
+      messages: Agent.initialMessages(this.model, this.thinkingEffort),
       displayItems: [],
     };
     this.sessions.push(session);
@@ -200,6 +263,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.post({ type: 'sessions', sessions: this.sessionsMeta(), activeId: this.activeSessionId });
     this.post({ type: 'reset' });
     this.post({ type: 'history', items: this.displayItems });
+    this.postConfig();
     this.postContext();
   }
 
@@ -286,6 +350,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           });
           this.post({ type: 'state', busy: this.busy, status: this.lastStatus });
           this.post({ type: 'history', items: this.displayItems });
+          this.postConfig();
           this.postContext();
           break;
         case 'userMessage':
@@ -305,6 +370,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
           break;
         case 'stop':
           this.onStop();
+          break;
+        case 'setModel':
+          this.onSetModel(String(message.model ?? ''));
+          break;
+        case 'setThinkingEffort':
+          this.onSetThinkingEffort(String(message.effort ?? 'none') as ThinkingEffort);
           break;
         case 'clear':
           this.clear();
@@ -362,6 +433,48 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     void this.agent.sendUserMessage(content);
   }
 
+  private onSetModel(model: string): void {
+    if (this.busy) {
+      return;
+    }
+    if (!model || model === this.model) {
+      return;
+    }
+    this.model = model;
+    this.agent.setModel(model);
+    this.contextWindow = this.getContextWindow(model);
+    this.persistRuntimeConfig();
+    this.postConfig();
+    this.postContext();
+    if (this.hasHistory()) {
+      this.postNotice(
+        'warning',
+        'Model changed to ' + model + '. Existing conversation history was produced under a different model, so the next request may miss the prompt cache and reprocess the full context.',
+      );
+    }
+    this.output.appendLine(`[config] model=${model}`);
+  }
+
+  private onSetThinkingEffort(effort: ThinkingEffort): void {
+    if (this.busy) {
+      return;
+    }
+    if (effort === this.thinkingEffort) {
+      return;
+    }
+    this.thinkingEffort = effort;
+    this.agent.setThinkingEffort(effort);
+    this.persistRuntimeConfig();
+    this.postConfig();
+    if (this.hasHistory()) {
+      this.postNotice(
+        'warning',
+        'Thinking effort changed to "' + effort + '". This affects the next request; the prompt cache may be missed.',
+      );
+    }
+    this.output.appendLine(`[config] thinkingEffort=${effort}`);
+  }
+
   /** Open a file picker, read the chosen image, and send a base64 data URL back. */
   private async handlePickImage(): Promise<void> {
     const result = await vscode.window.showOpenDialog({
@@ -414,6 +527,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         break;
       case 'streamDelta':
         this.appendDelta(event.content);
+        break;
+      case 'reasoningDelta':
+        this.appendThinkingDelta(event.content);
         break;
       case 'assistantDone':
         // Nothing to do; the assistant bubble is complete for now.
@@ -497,6 +613,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.post({ type: 'delta', text });
   }
 
+  private appendThinkingDelta(text: string): void {
+    const last = this.displayItems[this.displayItems.length - 1];
+    if (last && last.kind === 'assistant' && !last.error) {
+      last.thinking = (last.thinking ?? '') + text;
+    } else {
+      this.displayItems.push({ kind: 'assistant', thinking: text });
+    }
+    this.post({ type: 'thinkingDelta', text });
+  }
+
   private updateToolItem(id: string, content: string): void {
     const item = this.displayItems.find((it) => it.kind === 'tool' && it.id === id);
     if (item) {
@@ -541,6 +667,21 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     <select id="session-select" title="Switch session"></select>
     <button id="new-session-btn" class="icon-btn" title="New session">＋</button>
     <button id="delete-session-btn" class="icon-btn" title="Delete session">🗑</button>
+  </div>
+  <div id="config-bar">
+    <label class="cfg">
+      <span>Model</span>
+      <select id="model-select" title="Model"></select>
+    </label>
+    <label class="cfg">
+      <span>Effort</span>
+      <select id="effort-select" title="Thinking effort">
+        <option value="none">none</option>
+        <option value="low">low</option>
+        <option value="medium">medium</option>
+        <option value="high">high</option>
+      </select>
+    </label>
   </div>
   <div id="messages"></div>
   <div id="composer">
