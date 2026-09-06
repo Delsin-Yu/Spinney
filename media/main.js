@@ -15,9 +15,13 @@
   const sessionSelect = document.getElementById('session-select');
   const newSessionBtn = document.getElementById('new-session-btn');
   const deleteSessionBtn = document.getElementById('delete-session-btn');
+  const modelSelect = document.getElementById('model-select');
+  const effortSelect = document.getElementById('effort-select');
 
   let busy = false;
   let pendingAttachments = [];
+  let currentModel = 'deepseek-chat';
+  let currentEffort = 'none';
 
   // ---- Element helpers (textContent only; no unsanitized HTML) ----
   function el(tag, className, text) {
@@ -56,9 +60,38 @@
     return node;
   }
 
-  function addAssistant(text, error) {
-    const node = el('div', 'msg assistant' + (error ? ' error' : ''), text);
+  function addNotice(kind, text) {
+    const node = el('div', 'notice ' + (kind || 'info'), text);
+    node.dataset.kind = 'notice';
+    messagesEl.appendChild(node);
+    scrollToBottom();
+    return node;
+  }
+
+  function makeThinkingBlock(thinking) {
+    const box = el('div', 'thinking');
+    const head = el('div', 'thinking-head');
+    const chev = el('span', 'chev', '▶');
+    head.appendChild(chev);
+    head.appendChild(el('span', 'thinking-label', 'Thinking'));
+    box.appendChild(head);
+    const body = el('div', 'thinking-body hidden');
+    if (thinking) body.textContent = thinking;
+    box.appendChild(body);
+    head.addEventListener('click', () => {
+      body.classList.toggle('hidden');
+      chev.classList.toggle('open');
+    });
+    return box;
+  }
+
+  function addAssistant(text, error, thinking) {
+    const node = el('div', 'msg assistant' + (error ? ' error' : ''));
     node.dataset.kind = 'assistant';
+    if (thinking) {
+      node.appendChild(makeThinkingBlock(thinking));
+    }
+    node.appendChild(el('div', 'answer', text));
     messagesEl.appendChild(node);
     scrollToBottom();
     return node;
@@ -67,11 +100,33 @@
   function appendAssistant(text) {
     const last = messagesEl.lastElementChild;
     if (last && last.dataset.kind === 'assistant' && !last.classList.contains('error')) {
-      last.textContent += text;
+      const answer = last.querySelector('.answer') || last;
+      answer.textContent = (answer.textContent || '') + text;
       scrollToBottom();
       return last;
     }
     return addAssistant(text, false);
+  }
+
+  function appendThinking(text) {
+    let last = messagesEl.lastElementChild;
+    if (!last || last.dataset.kind !== 'assistant' || last.classList.contains('error')) {
+      last = addAssistant('', false);
+    }
+    let box = last.querySelector('.thinking');
+    if (!box) {
+      box = makeThinkingBlock('');
+      const answer = last.querySelector('.answer');
+      if (answer) last.insertBefore(box, answer);
+      else last.appendChild(box);
+    }
+    const body = box.querySelector('.thinking-body');
+    body.textContent = (body.textContent || '') + text;
+    body.classList.remove('hidden');
+    const chev = box.querySelector('.chev');
+    if (chev) chev.classList.add('open');
+    scrollToBottom();
+    return last;
   }
 
   function formatUsage(usage) {
@@ -178,11 +233,13 @@
       if (item.kind === 'user') {
         addUser(item.text, item.attachments);
       } else if (item.kind === 'assistant') {
-        addAssistant(item.text, item.error);
+        addAssistant(item.text, item.error, item.thinking);
         if (item.usage) {
           const node = messagesEl.lastElementChild;
           if (node) node.appendChild(el('div', 'usage-line', formatUsage(item.usage)));
         }
+      } else if (item.kind === 'notice') {
+        addNotice(item.noticeKind, item.text);
       } else if (item.kind === 'tool') {
         const toolId = item.id || 'history-' + item.name + '-' + (item.status || '');
         const node = addTool(item.name, item.args, toolId);
@@ -211,6 +268,8 @@
     sessionSelect.disabled = value;
     newSessionBtn.disabled = value;
     deleteSessionBtn.disabled = value;
+    modelSelect.disabled = value;
+    effortSelect.disabled = value;
     if (value) {
       stopBtn.classList.remove('hidden');
       sendBtn.classList.add('hidden');
@@ -219,6 +278,33 @@
       stopBtn.classList.add('hidden');
       sendBtn.classList.remove('hidden');
       statusDot.className = 'dot idle';
+    }
+  }
+
+  const MODELS = [
+    'deepseek-chat',
+    'deepseek-reasoner',
+    'deepseek-v4-flash',
+    'deepseek-v4-pro',
+    'deepseek-v4-flash-vision-exp',
+  ];
+
+  function renderModelSelect(model) {
+    currentModel = model;
+    modelSelect.innerHTML = '';
+    for (const m of MODELS) {
+      const opt = document.createElement('option');
+      opt.value = m;
+      opt.textContent = m;
+      opt.selected = m === model;
+      modelSelect.appendChild(opt);
+    }
+  }
+
+  function renderEffortSelect(effort) {
+    currentEffort = effort;
+    for (const opt of effortSelect.options) {
+      opt.selected = opt.value === effort;
     }
   }
 
@@ -323,6 +409,10 @@
       case 'history':
         renderHistory(msg.items);
         break;
+      case 'config':
+        renderModelSelect(msg.model);
+        renderEffortSelect(msg.thinkingEffort);
+        break;
       case 'sessions':
         renderSessions(msg.sessions, msg.activeId);
         break;
@@ -344,6 +434,9 @@
         break;
       case 'delta':
         appendAssistant(msg.text);
+        break;
+      case 'thinkingDelta':
+        appendThinking(msg.text);
         break;
       case 'usage':
         appendUsage(msg.usage);
@@ -368,6 +461,9 @@
         setBusy(false);
         setStatus('Error');
         break;
+      case 'notice':
+        addNotice(msg.kind, msg.text);
+        break;
       case 'reset':
         messagesEl.innerHTML = '';
         showEmptyIfNeeded();
@@ -390,6 +486,22 @@
   });
   sessionSelect.addEventListener('change', () => {
     vscode.postMessage({ type: 'switchSession', id: sessionSelect.value });
+  });
+  modelSelect.addEventListener('change', () => {
+    if (busy) {
+      // reset the control if the provider rejects the change while busy
+      renderModelSelect(currentModel);
+      return;
+    }
+    vscode.postMessage({ type: 'setModel', model: modelSelect.value });
+  });
+  effortSelect.addEventListener('change', () => {
+    if (busy) {
+      // reset the control if the provider rejects the change while busy
+      renderEffortSelect(currentEffort);
+      return;
+    }
+    vscode.postMessage({ type: 'setThinkingEffort', effort: effortSelect.value });
   });
   newSessionBtn.addEventListener('click', () => {
     vscode.postMessage({ type: 'newSession' });

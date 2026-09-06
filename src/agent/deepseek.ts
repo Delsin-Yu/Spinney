@@ -1,4 +1,4 @@
-import { ChatMessage, StreamChunk, ToolDefinition } from './types';
+import { ChatMessage, StreamChunk, ThinkingEffort, ToolDefinition } from './types';
 
 export interface DeepSeekOptions {
   apiKey: string;
@@ -10,6 +10,10 @@ export interface CompletionRequest {
   messages: ChatMessage[];
   tools?: ToolDefinition[];
   signal?: AbortSignal;
+  /** Override the model for this request. Defaults to the client's configured model. */
+  model?: string;
+  /** Reasoning effort for this request. Omitted when 'none' / undefined. */
+  thinkingEffort?: ThinkingEffort;
 }
 
 export class DeepSeekError extends Error {
@@ -44,13 +48,16 @@ export class DeepSeekClient {
 
     const url = `${this.options.baseUrl.replace(/\/$/, '')}/chat/completions`;
     const body: Record<string, unknown> = {
-      model: this.options.model,
+      model: request.model && request.model.trim() ? request.model : this.options.model,
       messages,
       stream: true,
       stream_options: { include_usage: true },
     };
     if (tools && tools.length > 0) {
       body.tools = tools;
+    }
+    if (request.thinkingEffort && request.thinkingEffort !== 'none') {
+      body.reasoning_effort = request.thinkingEffort;
     }
 
     let response: Response;

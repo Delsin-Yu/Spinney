@@ -1,8 +1,8 @@
 import { DeepSeekClient } from './deepseek';
 import { ToolRegistry } from '../tools';
-import { AgentEvent, ChatMessage, ContentPart, ToolCall, Usage } from './types';
+import { AgentEvent, ChatMessage, ContentPart, ThinkingEffort, ToolCall, Usage } from './types';
 
-const SYSTEM_PROMPT = [
+const CORE_PROMPT = [
   'You are an autonomous, all-purpose agent running inside a Visual Studio Code workspace.',
   'Help the user with any agentic task — coding, debugging, research, data or file work,',
   'running commands, automating workflows, and more — using the tools available to you.',
@@ -35,20 +35,89 @@ const SYSTEM_PROMPT = [
   '- When you change several files, do them one at a time.',
 ].join('\n');
 
+/**
+ * Build the system prompt, telling the model who it is (identity + active model
+ * and reasoning effort). Changing the model/effort rebuilds this prompt, which
+ * is the first message of every request.
+ */
+function buildSystemPrompt(model: string, effort: ThinkingEffort): string {
+  const lines: string[] = [
+    'You are the "Minimal Agent Harness" (agentHarness) — an autonomous, all-purpose coding agent.',
+    'You are currently running on the "' + (model || 'deepseek-chat') + '" model.',
+  ];
+  if (effort && effort !== 'none') {
+    lines.push('Your reasoning effort is currently set to "' + effort + '".');
+  }
+  return lines.join('\n') + '\n\n' + CORE_PROMPT;
+}
+
 export class Agent {
   /** Fresh conversation history consisting of just the system prompt. */
-  static initialMessages(): ChatMessage[] {
-    return [{ role: 'system', content: SYSTEM_PROMPT }];
+  static initialMessages(model = '', effort: ThinkingEffort = 'none'): ChatMessage[] {
+    return [{ role: 'system', content: buildSystemPrompt(model, effort) }];
   }
 
   /** The current system prompt (used to refresh persisted sessions). */
-  static systemPrompt(): string {
-    return SYSTEM_PROMPT;
+  static systemPrompt(model = '', effort: ThinkingEffort = 'none'): string {
+    return buildSystemPrompt(model, effort);
+  }
+
+  /**
+   * Ensure the message history is API-valid: every assistant message with
+   * `tool_calls` must be immediately followed by a `tool` response for each
+   * `tool_call_id`. Drops dangling tool_calls blocks and orphan tool messages
+   * that would otherwise cause a 400 error when a session is resumed.
+   */
+  static sanitizeMessages(messages: ChatMessage[]): ChatMessage[] {
+    const result: ChatMessage[] = [];
+    for (let i = 0; i < messages.length; i++) {
+      const msg = messages[i];
+
+      if (msg.role === 'tool') {
+        const prev = result[result.length - 1];
+        const valid = prev && prev.role === 'assistant' && prev.tool_calls && prev.tool_calls.length > 0;
+        if (!valid) {
+          continue; // drop orphan tool message
+        }
+        result.push(msg);
+        continue;
+      }
+
+      result.push(msg);
+
+      if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+        const ids = new Set(msg.tool_calls.map((tc) => tc.id));
+        let j = i + 1;
+        while (j < messages.length && ids.size > 0) {
+          const next = messages[j];
+          if (next.role === 'tool' && next.tool_call_id && ids.has(next.tool_call_id)) {
+            ids.delete(next.tool_call_id);
+            result.push(next);
+            j++;
+          } else {
+            break;
+          }
+        }
+        if (ids.size > 0) {
+          // Incomplete: remove any tool responses we appended, then the
+          // assistant message carrying the unresolved tool_calls.
+          while (result.length > 0 && result[result.length - 1].role === 'tool') {
+            result.pop();
+          }
+          result.pop();
+        } else {
+          i = j - 1; // continue after the tool responses
+        }
+      }
+    }
+    return result;
   }
 
   private messages: ChatMessage[] = [];
   private abortController: AbortController | null = null;
   private isRunning = false;
+  private model = '';
+  private thinkingEffort: ThinkingEffort = 'none';
 
   constructor(
     private readonly client: DeepSeekClient,
@@ -59,13 +128,33 @@ export class Agent {
     this.reset();
   }
 
+  /** Set the model used for subsequent completions (also refreshes identity). */
+  setModel(model: string): void {
+    this.model = model;
+    this.applySystemIdentity();
+  }
+
+  /** Set the reasoning-effort mode for subsequent completions. */
+  setThinkingEffort(effort: ThinkingEffort): void {
+    this.thinkingEffort = effort;
+    this.applySystemIdentity();
+  }
+
+  /** Refresh the assistant identity (model + effort) in the system message. */
+  private applySystemIdentity(): void {
+    if (this.messages[0]?.role === 'system') {
+      this.messages[0].content = buildSystemPrompt(this.model, this.thinkingEffort);
+    }
+  }
+
   reset(): void {
-    this.messages = Agent.initialMessages();
+    this.messages = Agent.initialMessages(this.model, this.thinkingEffort);
   }
 
   /** Replace the conversation history (used when switching sessions). */
   setMessages(messages: ChatMessage[]): void {
     this.messages = messages;
+    this.applySystemIdentity();
   }
 
   getMessages(): ChatMessage[] {
@@ -113,11 +202,16 @@ export class Agent {
 
         this.onEvent({ type: 'status', text: 'Thinking…' });
         const assistant = await this.requestAssistantMessage(signal);
+        const iterationStart = this.messages.length;
         this.messages.push(assistant);
 
         if (assistant.tool_calls && assistant.tool_calls.length > 0) {
           toolTurnCount++;
           if (toolTurnCount > this.maxTurns) {
+            // Roll back the just-added assistant message that carries tool_calls
+            // (without its tool responses) so the persisted transcript stays valid
+            // across restarts and never triggers a 400 on resume.
+            this.messages.splice(iterationStart);
             this.onEvent({
               type: 'status',
               text: `Stopped after ${this.maxTurns} tool rounds (loop limit).`,
@@ -171,12 +265,15 @@ export class Agent {
   private async requestAssistantMessage(signal: AbortSignal): Promise<ChatMessage> {
     const toolCallMap = new Map<number, { id: string; name: string; arguments: string }>();
     let content = '';
+    let reasoning = '';
     let usage: Usage | undefined;
 
     for await (const chunk of this.client.stream({
       messages: this.messages,
       tools: this.tools.definitions,
       signal,
+      model: this.model || undefined,
+      thinkingEffort: this.thinkingEffort,
     })) {
       if (chunk.usage) {
         usage = chunk.usage;
@@ -187,6 +284,10 @@ export class Agent {
       }
 
       const delta = choice.delta;
+      if (delta?.reasoning_content) {
+        reasoning += delta.reasoning_content;
+        this.onEvent({ type: 'reasoningDelta', content: delta.reasoning_content });
+      }
       if (delta?.content) {
         content += delta.content;
         this.onEvent({ type: 'streamDelta', content: delta.content });
@@ -226,6 +327,7 @@ export class Agent {
     return {
       role: 'assistant',
       content: content || null,
+      reasoning_content: reasoning || undefined,
       tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
     };
   }

@@ -4,6 +4,7 @@
   "description": "A minimalistic agent harness — sidebar chat with file read/write and command execution, powered by the official DeepSeek API.",
   "version": "0.0.1",
   "publisher": "minimal-host",
+  "license": "MIT",
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -99,6 +100,13 @@
           "type": "number",
           "default": 0,
           "description": "Context window (in tokens) for the context-usage indicator. Leave 0 to auto-detect from the selected model.",
+          "scope": "window"
+        },
+        "agentHarness.thinkingEffort": {
+          "type": "string",
+          "default": "none",
+          "enum": ["none", "low", "medium", "high"],
+          "description": "How much effort the model should spend reasoning before answering. 'none' uses the API default; 'low'/'medium'/'high' send a reasoning_effort hint (supported by DeepSeek reasoner models).",
           "scope": "window"
         }
       }
