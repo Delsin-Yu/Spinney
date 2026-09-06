@@ -1,0 +1,118 @@
+{
+  "name": "minimal-agent-harness",
+  "displayName": "Minimal Agent Harness",
+  "description": "A minimalistic agent harness — sidebar chat with file read/write and command execution, powered by the official DeepSeek API.",
+  "version": "0.0.1",
+  "publisher": "minimal-host",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "AI",
+    "Other"
+  ],
+  "activationEvents": [
+    "onView:agentHarness.chat"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "agentHarness",
+          "title": "Agent Harness",
+          "icon": "$(comment-discussion)"
+        }
+      ]
+    },
+    "views": {
+      "agentHarness": [
+        {
+          "type": "webview",
+          "id": "agentHarness.chat",
+          "name": "Agent Chat",
+          "contextualTitle": "Agent Harness"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "agentHarness.focus",
+        "title": "Agent Harness: Focus Chat",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "agentHarness.clear",
+        "title": "Agent Harness: Clear Conversation"
+      }
+    ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "agentHarness.clear",
+          "when": "view == agentHarness.chat",
+          "group": "navigation"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Minimal Agent Harness",
+      "properties": {
+        "agentHarness.apiKey": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "DeepSeek API key. Get one at https://platform.deepseek.com. Alternatively set the `DEEPSEEK_API_KEY` environment variable.",
+          "scope": "window"
+        },
+        "agentHarness.model": {
+          "type": "string",
+          "default": "deepseek-chat",
+          "enum": [
+            "deepseek-chat",
+            "deepseek-reasoner",
+            "deepseek-v4-flash",
+            "deepseek-v4-pro",
+            "deepseek-v4-flash-vision-exp"
+          ],
+          "markdownDescription": "DeepSeek model to use. `deepseek-v4-flash-vision-exp` accepts image input (attach/paste images in the chat).",
+          "scope": "window"
+        },
+        "agentHarness.baseUrl": {
+          "type": "string",
+          "default": "https://api.deepseek.com",
+          "description": "DeepSeek API base URL.",
+          "scope": "window"
+        },
+        "agentHarness.commandTimeout": {
+          "type": "number",
+          "default": 120,
+          "description": "Maximum time (seconds) a command may run before being killed.",
+          "scope": "window"
+        },
+        "agentHarness.maxTurns": {
+          "type": "number",
+          "default": 20,
+          "description": "Maximum tool-call rounds per user message to prevent runaway loops.",
+          "scope": "window"
+        },
+        "agentHarness.contextWindow": {
+          "type": "number",
+          "default": 0,
+          "description": "Context window (in tokens) for the context-usage indicator. Leave 0 to auto-detect from the selected model.",
+          "scope": "window"
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.85.0",
+    "@vscode/vsce": "^3.9.2",
+    "typescript": "^5.3.3"
+  }
+}
