@@ -1391,8 +1391,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 <body>
   <div id="session-bar">
     <select id="session-select" title="Switch session"></select>
-    <button id="new-session-btn" class="icon-btn" title="New session">＋</button>
-    <button id="delete-session-btn" class="icon-btn" title="Delete session">🗑</button>
+    <button id="new-session-btn" class="icon-btn" title="New session" aria-label="New session">
+      <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
+    </button>
+    <button id="delete-session-btn" class="icon-btn" title="Delete session" aria-label="Delete session">
+      <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6M10 11v6M14 11v6"/></svg>
+    </button>
   </div>
   <div id="messages-wrap">
     <div id="messages"></div>
@@ -1408,9 +1412,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   <div id="composer">
     <div id="attachments"></div>
     <div id="composer-row">
-      <textarea id="input" placeholder="Ask the agent… (Enter to send, Shift+Enter for newline)" rows="4" spellcheck="false" autocorrect="off" autocapitalize="off" autocomplete="off"></textarea>
+      <textarea id="input" placeholder="Ask the agent… (Enter to send, Shift+Enter for newline)" rows="1" spellcheck="false" autocorrect="off" autocapitalize="off" autocomplete="off"></textarea>
       <div id="composer-controls">
-        <button id="attach-btn" class="icon-btn" title="Attach image">📎</button>
+        <button id="attach-btn" class="icon-btn" title="Attach image" aria-label="Attach image">
+          <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
+        </button>
         <select id="model-select" title="Model"></select>
         <select id="effort-select" title="Thinking effort">
           <option value="none">none</option>

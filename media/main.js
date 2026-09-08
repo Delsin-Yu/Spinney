@@ -823,6 +823,8 @@
       const opt = document.createElement('option');
       opt.value = s.id;
       opt.textContent = s.title;
+      // Full title on hover; the select clips long titles with no ellipsis.
+      opt.title = s.title;
       opt.selected = s.id === activeId;
       sessionSelect.appendChild(opt);
     }
