@@ -344,6 +344,9 @@ content. See `parseArgs` in `src/tools/index.ts`.
   `ChatViewProvider.getConfig()` / `buildAgent()`.
 - **Change the UI** → `media/main.js` (behavior) and/or `media/style.css`
   (styling); the HTML shell is in `getHtml()` in `ChatViewProvider.ts`.
+  `style.css` maps every colour token in `:root` to a `--vscode-*` theme variable
+  (the hex values are fallbacks only) so the panel follows light/dark/HC themes —
+  keep any new colour theme-driven rather than hardcoded.
 - **Change session persistence** → `loadSessions`/`persist`/`activateSession` in
   `ChatViewProvider.ts` and the `StorageKey`s.
 - **Change the API client** → `src/agent/deepseek.ts`.
