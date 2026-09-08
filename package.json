@@ -13,7 +13,8 @@
     "Other"
   ],
   "activationEvents": [
-    "onView:agentHarness.chat"
+    "onView:agentHarness.sessions",
+    "onCommand:agentHarness.openChat"
   ],
   "main": "./out/extension.js",
   "contributes": {
@@ -29,24 +30,69 @@
     "views": {
       "agentHarness": [
         {
-          "type": "webview",
-          "id": "agentHarness.chat",
-          "name": "Agent Chat",
+          "id": "agentHarness.sessions",
+          "name": "Sessions",
           "contextualTitle": "Agent Harness"
         }
       ]
     },
     "commands": [
       {
+        "command": "agentHarness.openChat",
+        "title": "Agent Harness: Open Chat Tree",
+        "icon": "$(comment-discussion)"
+      },
+      {
         "command": "agentHarness.focus",
         "title": "Agent Harness: Focus Chat",
         "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "agentHarness.openSession",
+        "title": "Open Session",
+        "icon": "$(comment-discussion)"
+      },
+      {
+        "command": "agentHarness.newSession",
+        "title": "New Session",
+        "icon": "$(add)"
+      },
+      {
+        "command": "agentHarness.deleteSession",
+        "title": "Delete Session",
+        "icon": "$(trash)"
       },
       {
         "command": "agentHarness.clear",
         "title": "Agent Harness: Clear Conversation"
       }
     ],
+    "menus": {
+      "view/title": [
+        {
+          "command": "agentHarness.newSession",
+          "when": "view == agentHarness.sessions",
+          "group": "navigation"
+        },
+        {
+          "command": "agentHarness.openChat",
+          "when": "view == agentHarness.sessions",
+          "group": "navigation"
+        }
+      ],
+      "view/item/context": [
+        {
+          "command": "agentHarness.openSession",
+          "when": "view == agentHarness.sessions",
+          "group": "inline"
+        },
+        {
+          "command": "agentHarness.deleteSession",
+          "when": "view == agentHarness.sessions",
+          "group": "inline"
+        }
+      ]
+    },
     "configuration": {
       "title": "Minimal Agent Harness",
       "properties": {
@@ -99,6 +145,30 @@
           "default": "none",
           "enum": ["none", "low", "medium", "high"],
           "description": "How much effort the model should spend reasoning before answering. 'none' uses the API default; 'low'/'medium'/'high' send a reasoning_effort hint (supported by DeepSeek reasoner models).",
+          "scope": "window"
+        },
+        "agentHarness.foldToolCalls": {
+          "type": "boolean",
+          "default": true,
+          "description": "Collapse tool-call cards by default in the chat tree; expand them by clicking the header.",
+          "scope": "window"
+        },
+        "agentHarness.foldThinking": {
+          "type": "boolean",
+          "default": true,
+          "description": "Collapse the reasoning/thinking block by default in the chat tree; expand it by clicking its header.",
+          "scope": "window"
+        },
+        "agentHarness.maxConcurrentSubagents": {
+          "type": "number",
+          "default": 15,
+          "description": "How many level-1 sub-agents the main agent may run concurrently (a slot pool; extra tasks queue).",
+          "scope": "window"
+        },
+        "agentHarness.maxLevel2Subagents": {
+          "type": "number",
+          "default": 2,
+          "description": "How many sub-sub-agents each sub-agent may start. Depth is hard-capped at 2 (no sub-sub-sub-agent).",
           "scope": "window"
         }
       }

@@ -29,9 +29,6 @@ function ensureNotAborted(signal?: AbortSignal): void {
 }
 
 // ---- Line-ending helpers ----
-// Text files on Windows often use CRLF. Keep matching and writing endian-agnostic
-// so the model can work in LF (the canonical form returned by read_file) while
-// the file on disk keeps its original style.
 function detectEol(content: string): string {
   if (content.indexOf('\r\n') !== -1) return '\r\n';
   if (content.indexOf('\n') !== -1) return '\n';
@@ -283,6 +280,106 @@ const listDirTool: AgentTool = {
   },
 };
 
+// ---- search_files (grep) ----
+const MAX_SEARCH_FILE = 1_000_000;
+const MAX_SEARCH_FILES = 4000;
+const MAX_SEARCH_MATCHES = 300;
+const SKIP_DIRS = new Set(['node_modules', '.git', 'out', 'dist', 'build']);
+
+function globToRegex(glob: string): RegExp {
+  const s = glob
+    .replace(/\./g, '\\.')
+    // **/ = zero or more directory segments, so **/*.ts also matches top-level files.
+    .replace(/\*\*\//g, '\u0000')
+    .replace(/\*\*/g, '\u0001')
+    .replace(/\*/g, '[^/]*')
+    .replace(/\u0000/g, '(?:.*/)?')
+    .replace(/\u0001/g, '.*');
+  return new RegExp('^' + s + '$');
+}
+
+const searchFilesTool: AgentTool = {
+  definition: {
+    type: 'function',
+    function: {
+      name: 'search_files',
+      description:
+        'Search files in the workspace for a regex pattern and return matching "file:line: text" lines. Path may be absolute or relative to the workspace root (default = root). An optional glob (e.g. "**/*.ts") filters the files; caseSensitive defaults to false; maxResults caps the matches (default 200, hard cap 300). Heavy dirs (node_modules/.git/out...) are skipped automatically.',
+      parameters: {
+        type: 'object',
+        properties: {
+          pattern: { type: 'string', description: 'Regex to search for (JS regex syntax).' },
+          path: { type: 'string', description: 'File or directory to search (default = workspace root).' },
+          glob: { type: 'string', description: 'Optional glob filter, e.g. "**/*.ts".' },
+          caseSensitive: { type: 'boolean', description: 'Default false.' },
+          maxResults: { type: 'number', description: 'Default 200 (capped at 300).' },
+        },
+        required: ['pattern'],
+      },
+    },
+  },
+  async execute(args, signal) {
+    ensureNotAborted(signal);
+    const pattern = String(args.pattern ?? '');
+    if (!pattern) {
+      return 'Error: search_files requires a "pattern".';
+    }
+    let re: RegExp;
+    try {
+      re = new RegExp(pattern, args.caseSensitive ? '' : 'i');
+    } catch (err) {
+      return `Error: invalid regex: ${err instanceof Error ? err.message : String(err)}`;
+    }
+    const root = args.path ? resolvePath(String(args.path)) : getWorkspaceRoot();
+    const glob = args.glob ? globToRegex(String(args.glob)) : null;
+    const maxResults =
+      typeof args.maxResults === 'number' ? Math.min(Math.max(1, args.maxResults), MAX_SEARCH_MATCHES) : 200;
+    const results: string[] = [];
+    let files = 0;
+
+    async function walk(dir: string, rel: string): Promise<void> {
+      if (signal?.aborted) throw new Error('Operation aborted.');
+      if (files > MAX_SEARCH_FILES || results.length >= maxResults) return;
+      let entries;
+      try {
+        entries = await fs.promises.readdir(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        if (signal?.aborted) throw new Error('Operation aborted.');
+        if (SKIP_DIRS.has(entry.name)) continue;
+        const full = path.join(dir, entry.name);
+        const relPath = rel ? path.join(rel, entry.name).split(path.sep).join('/') : entry.name;
+        if (entry.isDirectory()) {
+          await walk(full, relPath);
+          continue;
+        }
+        if (glob && !glob.test(relPath)) continue;
+        files++;
+        let text: string;
+        try {
+          const stat = await fs.promises.stat(full);
+          if (stat.size > MAX_SEARCH_FILE) continue;
+          text = await fs.promises.readFile(full, 'utf8');
+        } catch {
+          continue;
+        }
+        const lines = text.split('\n');
+        for (let i = 0; i < lines.length; i++) {
+          if (results.length >= maxResults) break;
+          if (re.test(lines[i])) {
+            results.push(`${relPath}:${i + 1}: ${lines[i].trim().slice(0, 160)}`);
+          }
+        }
+      }
+    }
+
+    await walk(root, '');
+    return results.length ? results.join('\n') : '(no matches)';
+  },
+};
+
 /**
  * Run a command in the foreground and resolve with a human-readable result
  * (mirroring the original exec_command contract). When `moveOnTimeout` is set
@@ -341,9 +438,6 @@ function runForeground(
     timer = setTimeout(() => {
       if (settled) return;
       if (moveOnTimeout && registry) {
-        // Promote the still-running process to a background terminal rather than
-        // killing it. The foreground listeners stay attached but are inert
-        // (settled is true) once the process eventually exits.
         settled = true;
         cleanup();
         const id = registry.register(handle, command, cwd);
@@ -513,8 +607,6 @@ function makeKillBackgroundTool(getRegistry: () => BackgroundRegistry | null): A
       if (task.status !== 'running') {
         return `Background terminal ${id} is not running (exit code ${task.exitCode ?? 'unknown'}).`;
       }
-      // Tool-initiated kill: the result below already informs the agent, so the
-      // harness must not emit a second (injected) completion notification.
       registry.kill(id, { notifyAgent: false });
       return `Killed background terminal ${id} (command: ${task.command}).`;
     },
@@ -591,6 +683,7 @@ export class ToolRegistry {
       writeFileTool,
       replaceInFileTool,
       listDirTool,
+      searchFilesTool,
       makeExecCommandTool(getRegistry),
       makeCheckBackgroundTool(getRegistry),
       makeKillBackgroundTool(getRegistry),
@@ -608,6 +701,57 @@ export class ToolRegistry {
   setBackgroundRegistry(registry: BackgroundRegistry | null): void {
     this.backgroundRegistry = registry;
     this.buildTools();
+  }
+
+  /** A registry with only the named tools (scopes a sub-agent's surface). */
+  subset(names: string[]): ToolRegistry {
+    const sub = new ToolRegistry();
+    sub.tools.clear();
+    for (const name of names) {
+      const tool = this.tools.get(name);
+      if (tool) {
+        sub.tools.set(name, tool);
+      }
+    }
+    // Background-aware sub-agents share the same session registry as the parent.
+    sub.backgroundRegistry = this.backgroundRegistry;
+    return sub;
+  }
+
+  /**
+   * Expose the named tools' *definitions* alongside whatever is already present
+   * (so a read-only sub-agent's model sees them and may propose them) but make
+   * their execution return a clear denial. Defense-in-depth: the tool is visible
+   * on the API surface yet denied at the runtime layer.
+   */
+  withBlocked(names: string[]): ToolRegistry {
+    for (const name of names) {
+      const tool = this.tools.get(name);
+      if (tool) {
+        this.tools.set(name, {
+          definition: tool.definition,
+          execute: async () => `Error: "${name}" is not permitted for this read-only sub-agent.`,
+        });
+      }
+    }
+    return this;
+  }
+
+  /** Declare tools with their real *definitions* but a rejecting execution. */
+  blocked(names: string[]): ToolRegistry {
+    const sub = new ToolRegistry();
+    sub.tools.clear();
+    for (const name of names) {
+      const tool = this.tools.get(name);
+      if (tool) {
+        sub.tools.set(name, {
+          definition: tool.definition,
+          execute: async () => `Error: "${name}" is not permitted for this read-only sub-agent.`,
+        });
+      }
+    }
+    sub.backgroundRegistry = this.backgroundRegistry;
+    return sub;
   }
 
   get definitions(): ToolDefinition[] {

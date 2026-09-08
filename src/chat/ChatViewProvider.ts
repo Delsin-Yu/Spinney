@@ -4,8 +4,28 @@ import * as vscode from 'vscode';
 import { Agent } from '../agent/agent';
 import { DeepSeekClient, DeepSeekBalance } from '../agent/deepseek';
 import { AgentEvent, ChatMessage, ContentPart, ThinkingEffort, Usage, isVisionModel } from '../agent/types';
+import {
+  AgentSession,
+  DisplayItem,
+  StoredState,
+  STORED_STATE_VERSION,
+  TreeNode,
+  TurnStatus,
+  UserAttachment,
+  attachNode,
+  createNode,
+  migrateState,
+  newId,
+  nodeUsage,
+  pathIds,
+  pathMessages,
+  titleFromPrompt,
+} from './tree';
 import { getWorkspaceRoot, ToolRegistry } from '../tools';
 import { BackgroundRegistry, BackgroundTask } from '../tools/background';
+import { ChatPanel } from './ChatPanel';
+import { SessionTreeItem } from './SessionsProvider';
+import { SubAgentPool } from './SubAgentPool';
 import { perf, setPerfSink } from '../perf';
 
 /** Known context-window sizes (in tokens) per model, for the usage indicator. */
@@ -18,7 +38,11 @@ const CONTEXT_WINDOWS: Record<string, number> = {
   'deepseek-reasoner': 1_000_000,
 };
 const DEFAULT_CONTEXT_WINDOW = 1_000_000;
+/** Models the harness recognizes (sub-agent model overrides are validated against this). */
+const MODELS: ReadonlySet<string> = new Set(Object.keys(CONTEXT_WINDOWS));
 const STORAGE_KEY = 'agentHarness.state';
+/** One-shot copy of the pre-tree (v1) state, written before the first migration. */
+const STORAGE_BACKUP_KEY = 'agentHarness.state.v1backup';
 const CONFIG_KEY = 'agentHarness.runtimeConfig';
 /** Cap tool output stored/shown in the webview so a 16 MiB command dump cannot freeze the UI. */
 const UI_TOOL_CONTENT_CAP = 32 * 1024;
@@ -52,28 +76,6 @@ interface RuntimeConfig {
   thinkingEffort: ThinkingEffort;
 }
 
-interface UserAttachment {
-  dataUrl: string;
-  name?: string;
-}
-
-interface DisplayItem {
-  kind: 'user' | 'assistant' | 'tool' | 'notice' | 'background';
-  id?: string;
-  text?: string;
-  thinking?: string;
-  noticeKind?: 'warning' | 'info';
-  name?: string;
-  args?: string;
-  content?: string;
-  status?: 'running' | 'done';
-  error?: boolean;
-  attachments?: UserAttachment[];
-  usage?: Usage;
-  /** For a background notice card: the status phrase, e.g. "finished with exit code 0". */
-  doneText?: string;
-}
-
 /** A background terminal summarized for the webview UI. */
 interface BackgroundInfo {
   id: number;
@@ -101,26 +103,6 @@ interface BackgroundNotice {
   output: string;
 }
 
-/** A persisted agent conversation (its own history + UI transcript). */
-interface AgentSession {
-  id: string;
-  title: string;
-  createdAt: number;
-  updatedAt: number;
-  messages: ChatMessage[];
-  displayItems: DisplayItem[];
-}
-
-interface StoredState {
-  activeSessionId: string;
-  sessions: AgentSession[];
-}
-
-interface SessionMeta {
-  id: string;
-  title: string;
-}
-
 /** Decode the base64 payload of a `data:<mime>;base64,<data>` URL into bytes. */
 function dataUrlBytes(dataUrl: string): Buffer {
   const comma = dataUrl.indexOf(',');
@@ -128,14 +110,23 @@ function dataUrlBytes(dataUrl: string): Buffer {
   return Buffer.from(base64, 'base64');
 }
 
-export class ChatViewProvider implements vscode.WebviewViewProvider {
-  public static readonly viewType = 'agentHarness.chat';
+export class ChatViewProvider {
+  /** The chat is rendered in an editor panel (P1). A single panel for now; the
+   * multi-panel mouth is a list of ChatPanel keyed by sessionId. */
+  private panel: ChatPanel | null = null;
+  /** Fired when the sidebar's session list should re-read its items. */
+  onStateChanged?: () => void;
 
-  private view?: vscode.WebviewView;
   private agent!: Agent;
   private client!: DeepSeekClient;
   private tools!: ToolRegistry;
   private displayItems: DisplayItem[] = [];
+  /** The turn node currently being produced (null while the agent is idle). */
+  private activeTurnNode: TreeNode | null = null;
+  /** Length of the flat path before the current turn; the turn's messages are sliced from it. */
+  private turnPrefixLen = 0;
+  /** Node whose turn was interrupted last; a branch switch drops the pending notice. */
+  private lastInterruptedNodeId: string | null = null;
   private busy = false;
   /** Per-session background-terminal registries (one per conversation). */
   private sessionRegistries = new Map<string, BackgroundRegistry>();
@@ -146,6 +137,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   /** Aborts an in-flight image upload (attachment path) when the user stops. */
   private uploadController: AbortController | null = null;
   private lastStatus = '';
+  /** Cache-busting suffix for media URLs; changes per extension session. */
+  private readonly mediaVersion: string;
   private readonly output: vscode.OutputChannel;
   private model = 'deepseek-chat';
   private thinkingEffort: ThinkingEffort = 'none';
@@ -164,11 +157,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private streamFlushCount = 0;
   private streamFlushBytes = 0;
   private streamFlushWindow = 0;
+  /** Concurrency pool for the main agent's level-1 sub-agents (set per session). */
+  private subAgentPool: SubAgentPool | null = null;
+  /** Per-parent count of level-2 sub-agents spawned (budgeted by maxLevel2Subagents). */
+  private level2Counts = new Map<string, number>();
+  /** Running sub-agents: agentNodeId -> { agent, abort } for individual kill. */
+  private runningSubAgents = new Map<string, { agent: Agent; abort: AbortController }>();
+  /** Sub-agent completion notifications queued for the parent (async mode). */
+  private subAgentNoticeQueue: Array<{ nodeId: string; summary: string; status: string; count?: number }> = [];
+  /** Async depth-2 results queued for a still-running sub-agent parent, resumed on its finish. */
+  private subAgentChildNotices = new Map<string, Array<{ message: string }>>();
+  private lastSubAgentDrain: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
     private readonly storage: vscode.Memento,
   ) {
+    this.mediaVersion = Date.now().toString(36);
     this.output = vscode.window.createOutputChannel('Agent Harness');
     setPerfSink((line) => this.output.appendLine(line));
     // Resolve the active model/effort before loading sessions so the restored
@@ -193,6 +198,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     baseUrl: string;
     maxTurns: number;
     thinkingEffort: ThinkingEffort;
+    foldToolCalls: boolean;
+    foldThinking: boolean;
+    maxConcurrentSubagents: number;
+    maxLevel2Subagents: number;
   } {
     const cfg = vscode.workspace.getConfiguration('agentHarness');
     const apiKey = (cfg.get<string>('apiKey') ?? '').trim() || (process.env.DEEPSEEK_API_KEY ?? '').trim();
@@ -200,7 +209,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const baseUrl = cfg.get<string>('baseUrl') ?? 'https://api.deepseek.com';
     const maxTurns = cfg.get<number>('maxTurns') ?? 20;
     const thinkingEffort = (cfg.get<string>('thinkingEffort') ?? 'none') as ThinkingEffort;
-    return { apiKey, model, baseUrl, maxTurns, thinkingEffort };
+    const foldToolCalls = cfg.get<boolean>('foldToolCalls') ?? true;
+    const foldThinking = cfg.get<boolean>('foldThinking') ?? true;
+    const maxConcurrentSubagents = cfg.get<number>('maxConcurrentSubagents') ?? 15;
+    const maxLevel2Subagents = cfg.get<number>('maxLevel2Subagents') ?? 2;
+    return { apiKey, model, baseUrl, maxTurns, thinkingEffort, foldToolCalls, foldThinking, maxConcurrentSubagents, maxLevel2Subagents };
   }
 
   /**
@@ -236,6 +249,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.agent = new Agent(this.client, this.tools, (event) => this.handleAgentEvent(event), maxTurns);
     this.agent.setModel(this.model);
     this.agent.setThinkingEffort(this.thinkingEffort);
+    // The main agent can spawn sub-agents: hand it the provider's orchestrator.
+    this.agent.setSpawnHandler((args, signal) => this.handleSpawnAgents(args, signal));
+    // And it can resume a finished sub-agent with a follow-up message.
+    this.agent.setSendMessageHandler((args, signal) => this.handleSendAgentMessage(args, signal));
   }
 
   private getContextWindow(model: string): number {
@@ -248,9 +265,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     return CONTEXT_WINDOWS[model] ?? DEFAULT_CONTEXT_WINDOW;
   }
 
+  /** Prompt size of the checked-out branch, taken from its latest turn's usage. */
   private getLatestPromptTokens(): number {
-    for (let i = this.displayItems.length - 1; i >= 0; i--) {
-      const item = this.displayItems[i];
+    const items = this.activePathItems();
+    for (let i = items.length - 1; i >= 0; i--) {
+      const item = items[i];
       if (item.usage && typeof item.usage.prompt_tokens === 'number') {
         return item.usage.prompt_tokens;
       }
@@ -267,7 +286,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     });
   }
 
-  /** Session-wide token totals derived from the usage attached to each turn. */
+  /** Token totals for the checked-out branch, derived from each turn's usage. */
   private computeSessionStats(): {
     totalTokens: number;
     cacheHit: number;
@@ -278,7 +297,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     let totalTokens = 0;
     let cacheHit = 0;
     let cacheMiss = 0;
-    for (const item of this.displayItems) {
+    for (const item of this.activePathItems()) {
       if (!item.usage) continue;
       totalTokens += item.usage.total_tokens || 0;
       cacheHit += item.usage.prompt_cache_hit_tokens || 0;
@@ -311,10 +330,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private postConfig(): void {
+    const cfg = this.getConfig();
     this.post({
       type: 'config',
       model: this.model,
       thinkingEffort: this.thinkingEffort,
+      foldToolCalls: cfg.foldToolCalls,
+      foldThinking: cfg.foldThinking,
     });
   }
 
@@ -335,22 +357,18 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     } satisfies RuntimeConfig);
   }
 
-  /** True if the active session has any conversation beyond the system prompt. */
+  /** True if the checked-out branch has any conversation beyond the system prompt. */
   private hasHistory(): boolean {
-    const session = this.getActiveSession();
-    if (!session) {
-      return false;
-    }
-    return session.messages.some((m) => m.role !== 'system');
+    return this.activePathItems().length > 0;
   }
 
-  /** True if the active session's history carries any image content blocks. */
+  /** True if the checked-out branch's history carries any image content blocks. */
   private activeSessionHasImages(): boolean {
     const session = this.getActiveSession();
     if (!session) {
       return false;
     }
-    return session.messages.some(
+    return pathMessages(session, session.activeNodeId).some(
       (m) =>
         m.role === 'user' &&
         Array.isArray(m.content) &&
@@ -367,52 +385,57 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private loadSessions(): void {
     const t0 = Date.now();
-    const state = this.storage.get<StoredState>(STORAGE_KEY);
-    if (state && Array.isArray(state.sessions) && state.sessions.length > 0) {
-      this.sessions = state.sessions.map((s) => {
-        let messages = (s.messages ?? Agent.initialMessages()).slice();
-        // Heal corrupt persisted state (e.g. a dangling tool_calls message).
-        // The leading system prompt's identity is refreshed to the current
-        // model/effort selection; the core instructions and full history are
-        // preserved, so switching models keeps an authoritative identity.
-        messages = Agent.sanitizeMessages(messages);
-        if (messages[0]?.role === 'system') {
-          messages[0] = { role: 'system', content: Agent.systemPrompt(this.model, this.thinkingEffort) };
-        } else {
-          messages = [{ role: 'system', content: Agent.systemPrompt(this.model, this.thinkingEffort) }, ...messages];
-        }
-        const displayItems = (s.displayItems ?? []).map(clipDisplayItem);
-        return { ...s, messages, displayItems };
-      });
-      const active = this.sessions.find((s) => s.id === state.activeSessionId);
-      this.activeSessionId = active ? active.id : this.sessions[0].id;
-    } else {
+    const rawState = this.storage.get<unknown>(STORAGE_KEY);
+    const { activeSessionId, sessions, migrated } = migrateState(rawState);
+    // migrateState/normalizeTreeSession already prune every session (drop the
+    // stale system prompt, downgrade a turn that was still running, unlink
+    // dangling children), so the loaded tree is always API-valid on activation.
+    this.sessions = sessions;
+    if (migrated && rawState) {
+      // The tree format is not readable by the pre-tree build, so keep a copy of
+      // the original state before the first write in the new format.
+      void this.storage.update(STORAGE_BACKUP_KEY, rawState);
+      this.output.appendLine(`[migrate] pre-tree state backed up to ${STORAGE_BACKUP_KEY}`);
+    }
+    if (this.sessions.length === 0) {
       this.createSessionInMemory();
     }
+    const active = this.sessions.find((s) => s.id === activeSessionId);
+    this.activeSessionId = active ? active.id : this.sessions[0].id;
     // Ensure a background-terminal registry exists for every session.
     for (const s of this.sessions) {
       this.createRegistryForSession(s.id);
     }
-    // Persist the (possibly healed) state so a resumed session is always valid.
+    const nodes = this.sessions.reduce((n, s) => n + Object.keys(s.nodes).length, 0);
     perf(
-      `load-sessions ${Date.now() - t0}ms sessions=${this.sessions.length} ` +
-        `items=${this.getActiveSession()?.displayItems.length ?? 0}`,
+      `load-sessions ${Date.now() - t0}ms sessions=${this.sessions.length} nodes=${nodes}` +
+        (migrated ? ' migrated=v1' : ''),
     );
+    // Persist the (possibly migrated/healed) state so a resumed session is always valid.
     this.persist();
   }
 
   private persist(): void {
     const t0 = Date.now();
     const payload: StoredState = {
+      version: STORED_STATE_VERSION,
       activeSessionId: this.activeSessionId,
       sessions: this.sessions.map((s) => ({
         ...s,
-        displayItems: s.displayItems.map(clipDisplayItem),
+        orphanItems: s.orphanItems.map(clipDisplayItem),
+        nodes: Object.fromEntries(
+          Object.entries(s.nodes).map(([id, node]): [string, TreeNode] => [
+            id,
+            { ...node, displayItems: node.displayItems.map(clipDisplayItem) },
+          ]),
+        ),
       })),
     };
-    const msgCount = this.getActiveSession()?.messages.length ?? 0;
+    const session = this.getActiveSession();
+    const nodeCount = session ? Object.keys(session.nodes).length : 0;
+    const msgCount = session ? pathMessages(session, session.activeNodeId).length : 0;
     const extra =
-      `sessions=${this.sessions.length} items=${this.displayItems.length} msgs=${msgCount}`;
+      `sessions=${this.sessions.length} nodes=${nodeCount} items=${this.displayItems.length} msgs=${msgCount}`;
     const pending = this.storage.update(STORAGE_KEY, payload);
     perf(`persist-queued ${Date.now() - t0}ms ${extra}`);
     void pending.then(
@@ -422,26 +445,43 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     );
   }
 
-  private newId(): string {
-    return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
+  /** The session currently shown in the (single) panel. */
+  get currentSessionId(): string {
+    return this.activeSessionId;
   }
 
   private getActiveSession(): AgentSession | undefined {
     return this.sessions.find((s) => s.id === this.activeSessionId);
   }
 
-  private sessionsMeta(): SessionMeta[] {
-    return this.sessions.map((s) => ({ id: s.id, title: s.title }));
+  /** Sidebar rows: one per session, newest update first. */
+  getSessionTreeItems(): SessionTreeItem[] {
+    return this.sessions
+      .map((s) => {
+        const reg = this.sessionRegistries.get(s.id);
+        const runningBg = reg ? reg.runningCount() > 0 : false;
+        return {
+          id: s.id,
+          title: s.title,
+          updatedAt: s.updatedAt,
+          nodeCount: Object.keys(s.nodes).length,
+          active: s.id === this.activeSessionId,
+          busy: (s.id === this.activeSessionId ? this.busy : false) || runningBg,
+        };
+      })
+      .sort((a, b) => b.updatedAt - a.updatedAt);
   }
 
   private createSessionInMemory(): AgentSession {
     const session: AgentSession = {
-      id: this.newId(),
+      id: newId(),
       title: 'New session',
       createdAt: Date.now(),
       updatedAt: Date.now(),
-      messages: Agent.initialMessages(this.model, this.thinkingEffort),
-      displayItems: [],
+      nodes: {},
+      rootId: null,
+      activeNodeId: null,
+      orphanItems: [],
     };
     this.sessions.push(session);
     this.createRegistryForSession(session.id);
@@ -472,30 +512,815 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private activateSession(session: AgentSession): void {
     this.activeSessionId = session.id;
     this.uploadController = null;
-    // Point the provider and the agent at this session's live arrays so that
-    // in-memory mutations during a turn are reflected in the session.
-    this.displayItems = session.displayItems;
-    this.agent.setMessages(session.messages);
+    this.activeTurnNode = null;
+    this.turnPrefixLen = 0;
+    // A different conversation: any pending interruption notice belongs to the
+    // session we just left.
+    this.lastInterruptedNodeId = null;
+    this.agent.resetInterruptState();
+    // A fresh sub-agent pool + budget for the newly active session.
+    this.subAgentPool = new SubAgentPool(this.getConfig().maxConcurrentSubagents);
+    this.level2Counts.clear();
+    this.subAgentNoticeQueue.length = 0;
+    this.subAgentChildNotices.clear();
+    // Point the agent history and the transcript pointer at the checked-out node.
+    this.checkoutNode(session, session.activeNodeId);
     // Point the tool registry at this session's background registry so
     // exec_command and the background tools read the right one.
     this.tools.setBackgroundRegistry(this.createRegistryForSession(session.id));
     this.currentPromptTokens = this.getLatestPromptTokens();
     this.setBusy(false);
     this.lastStatus = '';
-    this.post({ type: 'sessions', sessions: this.sessionsMeta(), activeId: this.activeSessionId });
-    this.post({ type: 'reset' });
-    this.postHistory();
-    this.postConfig();
-    this.postContext();
-    this.postSessionStats();
-    this.postBackgrounds();
+    // The webview is repainted by the caller (postAllState) once the panel is
+    // ensured; here we only refresh the sidebar.
+    this.onStateChanged?.();
     // Deliver any background-completion notice queued for this session (e.g. it
     // finished while the agent was busy and the user switched away before the
     // drain ran).
     this.drainBackgroundQueue();
   }
 
-  private handleNewSession(): void {
+  /**
+   * Check out a node: the agent's history becomes root→node and the transcript
+   * pointer moves to that node's items (or the session's orphan bucket when the
+   * session has no node yet). Callers are responsible for posting to the webview.
+   */
+  private checkoutNode(session: AgentSession, nodeId: string | null): void {
+    session.activeNodeId = nodeId;
+    this.agent.setMessages(this.buildPath(session, nodeId));
+    const node = nodeId ? session.nodes[nodeId] : undefined;
+    this.displayItems = node ? node.displayItems : session.orphanItems;
+  }
+
+  /** The flat API history of a branch: a fresh system prompt + the path messages. */
+  private buildPath(session: AgentSession, nodeId: string | null): ChatMessage[] {
+    const system: ChatMessage = {
+      role: 'system',
+      content: Agent.systemPrompt(this.model, this.thinkingEffort),
+    };
+    // sanitizeMessages returns a derived copy; it is never written back into the
+    // nodes, so the stored history keeps its original shape.
+    return Agent.sanitizeMessages([system, ...pathMessages(session, nodeId)]);
+  }
+
+  /** Every transcript item of the checked-out branch, in reading order. */
+  private activePathItems(): DisplayItem[] {
+    const session = this.getActiveSession();
+    if (!session) {
+      return [];
+    }
+    const items: DisplayItem[] = [...session.orphanItems];
+    for (const id of pathIds(session, session.activeNodeId)) {
+      const node = session.nodes[id];
+      if (node) {
+        items.push(...node.displayItems);
+      }
+    }
+    return items;
+  }
+
+  /**
+   * Check out another node (tree UI "click a block"). Blocked while the agent is
+   * busy or a background terminal is running, like every other session change.
+   */
+  private handleCheckout(nodeId: string): void {
+    if (this.busy || this.activeSessionHasRunningBackground()) {
+      this.postNotice(
+        'warning',
+        'Cannot switch branches while the agent or a background terminal is running.',
+      );
+      return;
+    }
+    const session = this.getActiveSession();
+    if (!session || !session.nodes[nodeId] || nodeId === session.activeNodeId) {
+      return;
+    }
+    this.checkoutNode(session, nodeId);
+    this.currentPromptTokens = this.getLatestPromptTokens();
+    // No `reset`/`tree`: the structure is unchanged, so the webview just repaints
+    // the active path in place (no tear-down → no blink), then pans to it.
+    this.postPath();
+    this.post({ type: 'panTo', id: nodeId });
+    this.postContext();
+    this.postSessionStats();
+  }
+
+  /** The node that owns the main agent's streaming: the active turn node while a
+   * turn runs, else the checked-out node. Sub-agents route their own events by
+   * `nodeId`, so this is the ONLY target for `nodeId`-less (main) deltas — it must
+   * never be a sub-agent sidecar, or the main reply would be drawn into it. */
+  private mainStreamNodeId(session: AgentSession | null | undefined): string | null {
+    return this.activeTurnNode?.id ?? session?.activeNodeId ?? null;
+  }
+
+  /** Structural summary of the session tree (no transcript items). */
+  /** The checked-out branch's transcript, grouped by node (for the tree view). */
+  private postPath(): void {
+    const session = this.getActiveSession();
+    if (!session) {
+      this.post({ type: 'path', ids: [], nodes: [] });
+      return;
+    }
+    const ids = pathIds(session, this.mainStreamNodeId(session));
+    const nodes = ids.map((id) => {
+      const node = session.nodes[id];
+      return {
+        id,
+        status: node.status,
+        items: node.displayItems.map(clipDisplayItem),
+      };
+    });
+    this.post({ type: 'path', ids, nodes });
+  }
+  private postTree(): void {
+    const session = this.getActiveSession();
+    const nodes = session
+      ? Object.values(session.nodes).map((node) => ({
+          id: node.id,
+          parentId: node.parentId,
+          children: node.children.slice(),
+          title: node.title,
+          status: node.status,
+          createdAt: node.createdAt,
+          preview: this.nodePreview(node),
+          usage: nodeUsage(node),
+          size: node.customSize ?? null,
+          kind: node.kind,
+          agentDepth: node.agentDepth,
+          agentStatus: node.agentStatus,
+          agentModel: node.agentModel,
+          agentWrite: node.agentWrite,
+          // Agent nodes carry their own transcript so they re-render after reload.
+          items: node.kind === 'agent' ? node.displayItems.map(clipDisplayItem) : undefined,
+        }))
+      : [];
+    this.post({
+      type: 'tree',
+      activeId: this.mainStreamNodeId(session),
+      rootId: session?.rootId ?? null,
+      nodes,
+    });
+  }
+
+  /** First line of the turn's answer, used as a collapsed card preview. */
+  private nodePreview(node: TreeNode): string {
+    for (let i = node.displayItems.length - 1; i >= 0; i--) {
+      const item = node.displayItems[i];
+      if (item.kind === 'assistant' && item.text) {
+        return item.text.split('\n')[0].trim().slice(0, 120);
+      }
+    }
+    return node.title.slice(0, 80);
+  }
+
+  /** Persist a user-resized card's bounds onto a node (drag-resize finished). */
+  private onSetNodeSize(id: string, w: number, h: number): void {
+    const session = this.getActiveSession();
+    const node = session?.nodes[id];
+    if (!node || !Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) {
+      return;
+    }
+    node.customSize = { w, h };
+    this.persist();
+  }
+
+  // ---- Sub-agents ----
+
+  /** Tools a sub-agent may use, by `write` flag. */
+  private subAgentTools(write: boolean): ToolRegistry {
+    const read = ['read_file', 'list_dir', 'search_files'];
+    const writeTools = ['write_file', 'replace_in_file', 'exec_command'];
+    if (write) {
+      return this.tools.subset([...read, ...writeTools]);
+    }
+    // Read-only sub-agents get the read tools working, and the write tools are
+    // exposed with their definitions (so the model can propose them) but their
+    // execution is denied at the runtime layer — defense-in-depth.
+    return this.tools.subset([...read, ...writeTools]).withBlocked(writeTools);
+  }
+
+  /** The main agent spawned sub-agents: delegates to the shared orchestrator. */
+  private handleSpawnAgents(args: Record<string, unknown>, signal: AbortSignal): Promise<string> {
+    // Prefer the running turn's node; fall back to the checked-out node so a
+    // provider-injected turn (e.g. an async batch notice) can still spawn.
+    const parent =
+      this.activeTurnNode ?? (this.getActiveSession()?.nodes[this.getActiveSession()!.activeNodeId ?? ''] ?? null);
+    if (!parent) {
+      return Promise.resolve('Error: no active turn to attach sub-agents to.');
+    }
+    return this.spawnChildren(parent, args, signal);
+  }
+
+  /** A sub-agent spawned its own (level-2) sub-agents. */
+  private handleSubAgentSpawn(parent: TreeNode, args: Record<string, unknown>, signal: AbortSignal): Promise<string> {
+    return this.spawnChildren(parent, args, signal);
+  }
+
+  /** The main agent (or a depth-1 sub-agent) resumed a finished sub-agent via
+   * `send_agent_message`. Validates the id / mode / model, then runs it. */
+  private handleSendAgentMessage(args: Record<string, unknown>, signal: AbortSignal): Promise<string> {
+    const session = this.getActiveSession();
+    if (!session) {
+      return Promise.resolve('Error: no active session.');
+    }
+    const id = String(args.id ?? '');
+    const node = session.nodes[id];
+    if (!node || node.kind !== 'agent') {
+      return Promise.resolve(`Error: no sub-agent with id "${id}".`);
+    }
+    const message = String(args.message ?? '');
+    if (!message) {
+      return Promise.resolve('Error: send_agent_message requires a "message".');
+    }
+    const mode = String(args.mode ?? 'sync');
+    if (mode !== 'sync' && mode !== 'async') {
+      return Promise.resolve(`Error: invalid mode "${mode}". Use "sync" or "async".`);
+    }
+    if (this.runningSubAgents.has(id)) {
+      return Promise.resolve(
+        'Error: that sub-agent is still running. Wait for it to finish (or kill it) before sending a follow-up.',
+      );
+    }
+    let write = node.agentWrite ?? false;
+    if (typeof args.write === 'boolean') {
+      write = args.write;
+    }
+    let model = node.agentModel ?? this.model;
+    if (typeof args.model === 'string' && args.model) {
+      if (!MODELS.has(args.model)) {
+        return Promise.resolve(`Error: unknown model "${args.model}".`);
+      }
+      model = args.model;
+    }
+    node.agentWrite = write;
+    node.agentModel = model;
+    const job = {
+      node,
+      spec: { instruction: message, write, model: model !== this.model ? model : undefined },
+      resume: true,
+    };
+    if (mode === 'async') {
+      void this.runSubAgent(job, signal).then((r) => this.deliverResumeAsync(node, r), () => {});
+      return Promise.resolve(JSON.stringify({ resumed: true, id: node.id, async: true }));
+    }
+    return this.runSubAgent(job, signal).then((r) =>
+      JSON.stringify({ resumed: true, id: node.id, ok: r.ok, summary: r.summary, model: r.model }),
+    );
+  }
+
+  /** Async `send_agent_message`: deliver the resumed sub-agent's outcome to the
+   * main agent (a card in the turn node that owns the sub-agent + one notice). */
+  private deliverResumeAsync(node: TreeNode, result: { ok: boolean; summary: string; model?: string }): void {
+    const parent = this.getActiveSession()?.nodes[node.parentId ?? ''] ?? null;
+    if (!parent) {
+      return;
+    }
+    const cardText = `子代理 #${node.id.slice(-6)} ${result.ok ? '完成' : '失败'}: ${result.summary || '(no summary)'}`;
+    parent.displayItems.push({
+      kind: 'background',
+      id: `sub-msg-${node.id}`,
+      name: '子代理完成',
+      content: cardText,
+      doneText: '子代理完成',
+    });
+    this.post({
+      type: 'backgroundNotice',
+      item: { id: `sub-msg-${node.id}`, name: '子代理完成', doneText: '子代理完成', content: cardText },
+    });
+    this.subAgentNoticeQueue.push({ nodeId: parent.id, summary: cardText, status: 'done', count: 1 });
+    this.scheduleSubAgentDrain();
+    this.persist();
+  }
+
+  /**
+   * Create agent child nodes under `parent`, run them (in parallel, pool-limited
+   * for level-1), and return the spawn result. `sync` blocks and returns the
+   * summaries; `async` returns immediately and delivers per-job results as an
+   * injected notification to the parent when idle.
+   */
+  private async spawnChildren(parent: TreeNode, args: Record<string, unknown>, signal: AbortSignal): Promise<string> {
+    const session = this.getActiveSession();
+    if (!session) {
+      return 'Error: no active session.';
+    }
+    // Capture the checked-out node BEFORE attachNode below mutates it, so a spawn
+    // can restore it even when the spawn's `parent` is itself a sub-agent.
+    const prevActive = session.activeNodeId;
+    const rawAgents = Array.isArray(args.agents) ? args.agents : [];
+    if (rawAgents.length === 0) {
+      return 'Error: spawn_agents requires a non-empty "agents" array.';
+    }
+    const mode = String(args.mode ?? 'sync');
+    if (mode !== 'sync' && mode !== 'async') {
+      return `Error: invalid mode "${mode}". Use "sync" or "async".`;
+    }
+    const childDepth = (parent.agentDepth ?? 0) + 1;
+    if (childDepth > 2) {
+      return 'Error: a sub-sub-sub-agent is not allowed (max sub-agent depth is 2).';
+    }
+    // Level-2 budget: per-parent count.
+    if (childDepth === 2) {
+      const used = this.level2Counts.get(parent.id) ?? 0;
+      const budget = this.getConfig().maxLevel2Subagents;
+      if (rawAgents.length > Math.max(0, budget - used)) {
+        return `Error: this sub-agent may start at most ${budget} sub-sub-agents (${used} already started).`;
+      }
+      this.level2Counts.set(parent.id, used + rawAgents.length);
+    }
+
+    // Build a node + spec per task.
+    const jobs: Array<{ spec: { instruction: string; write: boolean; model?: string }; node: TreeNode }> = [];
+    for (const raw of rawAgents) {
+      const spec = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
+      const instruction = String(spec.instruction ?? '');
+      const write = spec.write === true;
+      const model = typeof spec.model === 'string' ? spec.model : undefined;
+      if (!instruction) {
+        return 'Error: each agent spec requires an "instruction".';
+      }
+      if (model && !MODELS.has(model)) {
+        return `Error: unknown model "${model}".`;
+      }
+      const node = createNode(newId(), parent.id, `子代理: ${instruction.slice(0, 32)}`, 'running');
+      node.kind = 'agent';
+      node.agentDepth = childDepth;
+      node.agentStatus = 'running';
+      node.agentModel = model || this.model;
+      node.agentWrite = write;
+      node.children = [];
+      node.displayItems.push({ kind: 'user', text: instruction });
+      attachNode(session, node);
+      jobs.push({ spec: { instruction, write, model }, node });
+    }
+    // Restore the checked-out node BEFORE repainting the tree: attachNode moved it
+    // to the last agent child, and postTree derives activeId from it. The active
+    // node must always be a real conversational node — the main turn node while a
+    // turn runs, otherwise the user's checkout — NEVER a sub-agent sidecar.
+    // Restoring to `parent.id` broke nested spawns (where parent is itself a
+    // sub-agent), which pinned messagesEl to that sub-agent card and let the main
+    // agent's reply leak into the sub-agent's window.
+    const streamTarget = this.activeTurnNode?.id ?? prevActive ?? parent.id;
+    if (session.activeNodeId !== streamTarget) {
+      session.activeNodeId = streamTarget;
+    }
+    this.postTree();
+
+    if (mode === 'async') {
+      const mainParent = parent.id === this.activeTurnNode?.id;
+      const tasks = jobs.map((job) => {
+        const run = () => this.runSubAgent(job, signal);
+        return (childDepth === 1 && this.subAgentPool ? this.subAgentPool.withSlot(run) : run()).then((result) => ({ job, result }));
+      });
+      // Notify the parent once the whole batch settles, so it reacts a single time.
+      void Promise.allSettled(tasks).then((settled) => {
+        const list = settled.map((s, i) =>
+          s.status === 'fulfilled' ? s.value : { job: jobs[i], result: { ok: false, summary: 'cancelled' } },
+        );
+        this.onAsyncBatchDone(mainParent, parent, list.map((l) => ({ ...l.result, node: l.job.node })));
+      });
+      return JSON.stringify({ spawned: jobs.length, async: true, ids: jobs.map((j) => j.node.id) });
+    }
+
+    const runAll = async () => {
+      const results = await Promise.all(
+        jobs.map((job) => (childDepth === 1 && this.subAgentPool ? this.subAgentPool.withSlot(() => this.runSubAgent(job, signal)) : this.runSubAgent(job, signal))),
+      );
+      return { results: results.map((r, i) => ({ agentNodeId: jobs[i].node.id, ...r })) };
+    };
+    return JSON.stringify(await runAll());
+  }
+
+  /** Run one sub-agent to completion and resolve its result. When `resume` is set,
+   * the sub-agent's stored conversation is prepended so a follow-up continues it. */
+  private runSubAgent(
+    job: { spec: { instruction: string; write: boolean; model?: string }; node: TreeNode; resume?: boolean },
+    signal: AbortSignal,
+  ): Promise<{ ok: boolean; summary: string; model?: string }> {
+    return new Promise((resolve) => {
+      const abort = new AbortController();
+      const onAbort = () => abort.abort();
+      signal.addEventListener('abort', onAbort, { once: true });
+
+      const subTools = this.subAgentTools(job.spec.write);
+      let finished = false;
+      let subAgent: Agent | null = null;
+      const finish = (status: 'done' | 'killed' | 'error', summary: string) => {
+        if (finished) return;
+        finished = true;
+        signal.removeEventListener('abort', onAbort);
+        this.runningSubAgents.delete(job.node.id);
+        job.node.agentStatus = status;
+        job.node.status = status === 'done' ? 'done' : status === 'error' ? 'error' : 'interrupted';
+        job.node.agentSummary = summary;
+        // Persist the sub-agent's conversation (minus the synthesized system prompt)
+        // so a later send_agent_message (or an async child-notice resume) can
+        // continue it, even across an extension-host restart.
+        if (subAgent) {
+          job.node.messages = subAgent.getMessages().filter((m) => m.role !== 'system');
+        }
+        this.post({ type: 'agentDone', id: job.node.id, status, summary });
+        this.persist();
+        // This sub-agent (depth-1) may have async depth-2 results queued while it ran.
+        this.flushSubAgentChildNotices(job.node);
+        resolve({ ok: status === 'done', summary, model: job.spec.model || this.model });
+      };
+
+      const sub = new Agent(this.client, subTools, (event) => this.handleSubAgentEvent(job.node, event, finish), this.getConfig().maxTurns);
+      subAgent = sub;
+      sub.setModel(job.spec.model || this.model);
+      sub.setThinkingEffort(this.thinkingEffort);
+      // A depth-2 sub-agent may not spawn its own sub-agents.
+      const depth = job.node.agentDepth ?? 1;
+      sub.setCanSpawn(depth < 2);
+      sub.setSpawnHandler((args2, sig2) => this.handleSubAgentSpawn(job.node, args2, sig2));
+      const effectiveModel = job.spec.model || this.model;
+      const system = Agent.subAgentSystemPrompt(effectiveModel, this.thinkingEffort, depth, job.spec.write);
+      // Lean system prompt (not the full CORE_PROMPT/AGENTS.md) + dispatched note.
+      // On a resume, prepend the stored conversation so the follow-up continues
+      // where the sub-agent left off.
+      sub.setMessages(
+        job.resume
+          ? Agent.sanitizeMessages([{ role: 'system', content: system }, ...(job.node.messages ?? [])])
+          : [{ role: 'system', content: system }],
+      );
+      job.node.agentStatus = 'running';
+      job.node.status = 'running';
+      if (job.resume) {
+        // The follow-up becomes a new user card in this sub-agent's transcript.
+        job.node.displayItems.push({ kind: 'user', text: job.spec.instruction });
+      }
+      this.runningSubAgents.set(job.node.id, { agent: sub, abort });
+      this.post({ type: 'agentStart', id: job.node.id, depth, model: effectiveModel, write: job.spec.write });
+      void sub.sendUserMessage(job.spec.instruction);
+    });
+  }
+
+  /**
+   * Async mode: the depth-1 sub-agent's own (depth-2) sub-agents finished while
+   * it was still running. If the parent is done we resume it with the notification
+   * so it can react; if it is still running we leave the notice queued and deliver
+   * it at the parent's next finish. This is the "parent receives its own children's
+   * results" counterpart to the main agent's async delivery.
+   */
+  private queueSubAgentChildNotice(parent: TreeNode, results: Array<{ ok: boolean; summary: string; node: TreeNode }>): void {
+    const lines = results.map(
+      (r) => `子代理 #${r.node.id.slice(-6)} ${r.ok ? '完成' : '失败'}: ${r.summary || '(no summary)'}`,
+    );
+    const notice = `[子代理批次] ${results.length} 个子代理完成\n${lines.join('\n')}`;
+    if (this.runningSubAgents.has(parent.id)) {
+      // Parent still working: deliver when it reaches a rest point (its finish).
+      const q = this.subAgentChildNotices.get(parent.id) ?? [];
+      q.push({ message: notice });
+      this.subAgentChildNotices.set(parent.id, q);
+      return;
+    }
+    // Parent already finished: resume it so it can react to its children.
+    const abort = new AbortController();
+    void this.runSubAgent(
+      { node: parent, spec: { instruction: notice, write: parent.agentWrite ?? false, model: undefined }, resume: true },
+      abort.signal,
+    );
+  }
+
+  /** Deliver queued async child results to a sub-agent that just finished. */
+  private flushSubAgentChildNotices(node: TreeNode): void {
+    const queued = this.subAgentChildNotices.get(node.id);
+    if (!queued || queued.length === 0) {
+      return;
+    }
+    const notice = queued.shift()!;
+    if (queued.length === 0) {
+      this.subAgentChildNotices.delete(node.id);
+    }
+    if (this.runningSubAgents.has(node.id)) {
+      // A newer run already owns this node; leave the notice for it.
+      return;
+    }
+    const abort = new AbortController();
+    void this.runSubAgent(
+      { node, spec: { instruction: notice.message, write: node.agentWrite ?? false, model: undefined }, resume: true },
+      abort.signal,
+    );
+  }
+
+  /** Route a sub-agent's events to its own node (streaming carries a nodeId). */
+  private handleSubAgentEvent(node: TreeNode, event: AgentEvent, finish: (status: 'done' | 'killed' | 'error', summary: string) => void): void {
+    const id = node.id;
+    const items = node.displayItems;
+    switch (event.type) {
+      case 'streamDelta':
+        this.commitSubText(items, event.content);
+        this.post({ type: 'delta', text: event.content, nodeId: id });
+        break;
+      case 'reasoningDelta':
+        this.commitSubThinking(items, event.content);
+        this.post({ type: 'thinkingDelta', text: event.content, nodeId: id });
+        break;
+      case 'toolStart':
+        this.commitSubTool(items, event.id, event.name, event.args);
+        this.post({ type: 'toolStart', id: event.id, name: event.name, args: clipForUi(event.args, 8 * 1024), index: event.index, nodeId: id });
+        break;
+      case 'toolEnd':
+        this.commitSubToolResult(items, event.id, event.content);
+        this.post({ type: 'toolEnd', id: event.id, name: event.name, content: clipForUi(event.content), nodeId: id });
+        break;
+      case 'usage':
+        this.commitSubUsage(items, event.usage);
+        this.post({ type: 'usage', usage: event.usage, nodeId: id });
+        break;
+      case 'status':
+        break;
+      case 'done':
+        finish('done', this.subAgentSummary(items));
+        break;
+      case 'interrupted':
+        finish('killed', 'interrupted');
+        break;
+      case 'error':
+        finish('error', event.message);
+        break;
+      default:
+        break;
+    }
+  }
+
+  // ---- Sub-agent displayItems commits (kept in sync with the main handler) ----
+  /** Prefer the last substantial assistant answer for the sub-agent summary. */
+  private subAgentSummary(items: DisplayItem[]): string {
+    for (let i = items.length - 1; i >= 0; i--) {
+      const item = items[i];
+      if (item.kind === 'assistant' && item.text && item.text.trim().length > 10) {
+        return item.text.trim();
+      }
+    }
+    const last = items[items.length - 1];
+    return last && last.kind === 'assistant' && last.text ? last.text.trim() : 'done';
+  }
+
+  private commitSubText(items: DisplayItem[], text: string): void {
+    const last = items[items.length - 1];
+    if (last && last.kind === 'assistant' && !last.error) {
+      last.text = (last.text ?? '') + text;
+    } else {
+      items.push({ kind: 'assistant', text });
+    }
+  }
+
+  private commitSubThinking(items: DisplayItem[], text: string): void {
+    const last = items[items.length - 1];
+    if (last && last.kind === 'assistant' && !last.error) {
+      last.thinking = (last.thinking ?? '') + text;
+    } else {
+      items.push({ kind: 'assistant', thinking: text });
+    }
+  }
+
+  private commitSubTool(items: DisplayItem[], id: string, name: string, args: string): void {
+    items.push({ kind: 'tool', id, name, args: clipForUi(args, 8 * 1024), status: 'running' });
+  }
+
+  private commitSubToolResult(items: DisplayItem[], id: string, content: string): void {
+    const item = items.find((it) => it.kind === 'tool' && it.id === id);
+    if (item) {
+      item.status = 'done';
+      item.content = clipForUi(content);
+    }
+  }
+
+  private commitSubUsage(items: DisplayItem[], usage: Usage): void {
+    const last = items[items.length - 1];
+    if (last && (last.kind === 'assistant' || last.kind === 'tool') && !last.error) {
+      last.usage = usage;
+    }
+  }
+
+  /** Individual kill of a running sub-agent (from the webview Kill button). */
+  private onKillAgent(id: string): void {
+    const entry = this.runningSubAgents.get(id);
+    if (!entry) {
+      return;
+    }
+    entry.abort.abort();
+    entry.agent.cancel();
+  }
+
+  /** Clean up a finished/killed sub-agent (no-op guard for stale kills). */
+  private onSubAgentDone(node: TreeNode, result: { ok: boolean; summary: string }): void {
+    if (node.agentStatus === 'running') {
+      node.agentStatus = result.ok ? 'done' : 'killed';
+      node.agentSummary = result.summary;
+      this.post({ type: 'agentDone', id: node.id, status: node.agentStatus, summary: result.summary });
+      this.persist();
+    }
+  }
+
+  /** Dump a layout diagnostic (overlapping cards + tree connections) to the log. */
+  private logLayoutDiagnostic(nodes: unknown, overlaps: unknown, connections: unknown, force: unknown): void {
+    const out = this.output;
+    out.appendLine(force ? '[layout] manual diagnostic:' : '[layout] overlaps detected (auto):');
+    if (Array.isArray(overlaps)) {
+      for (const o of overlaps) {
+        if (o && typeof o === 'object') {
+          const oo = o as { a?: string; b?: string; ta?: string; tb?: string; over?: number };
+          out.appendLine(`[layout] OVERLAP ${oo.a}("${oo.ta}") × ${oo.b}("${oo.tb}") area=${oo.over}`);
+        }
+      }
+    }
+    if (Array.isArray(nodes)) {
+      for (const n of nodes) {
+        if (n && typeof n === 'object') {
+          const nn = n as { id?: string; kind?: string; parent?: string; title?: string; x?: number; y?: number; w?: number; h?: number };
+          out.appendLine(`[layout] NODE ${nn.id} kind=${nn.kind} parent=${nn.parent} "${nn.title}" x=${nn.x} y=${nn.y} ${nn.w}x${nn.h}`);
+        }
+      }
+    }
+    if (Array.isArray(connections)) {
+      for (const c of connections) {
+        if (c && typeof c === 'object') {
+          const cc = c as { parent?: string; child?: string };
+          out.appendLine(`[layout] EDGE ${cc.parent} -> ${cc.child}`);
+        }
+      }
+    }
+  }
+
+  /**
+   * Async mode, all sub-agents of the batch settled: push one clearly-separated
+   * completion card into the parent node (like a background terminal card) and
+   * deliver one combined notice so the main agent reacts a single time. All
+   * still belongs to the single parent node.
+   */
+  private onAsyncBatchDone(mainParent: boolean, parent: TreeNode, results: Array<{ ok: boolean; summary: string; node: TreeNode }>): void {
+    if (!mainParent) {
+      // The parent is a sub-agent: deliver its children's completion to it so it
+      // can react (S2). It may still be running; queue or resume accordingly.
+      this.queueSubAgentChildNotice(parent, results);
+      return;
+    }
+    const lines = results.map((r) => `子代理 #${r.node.id.slice(-6)} ${r.ok ? '完成' : '失败'}: ${r.summary || '(no summary)'}`);
+    const cardText = lines.join('\n');
+    const doneText = `${results.length} 个子代理完成`;
+    // 1. A dedicated card at the end of the main node (visual separation).
+    parent.displayItems.push({ kind: 'background', id: `sub-aware-${parent.id}`, name: '子代理完成', content: cardText, doneText });
+    this.post({ type: 'backgroundNotice', item: { id: `sub-${parent.id}`, name: '子代理完成', doneText, content: cardText } });
+    // 2. One combined notice → the main agent answers once.
+    this.subAgentNoticeQueue.push({ nodeId: parent.id, summary: cardText, status: 'done', count: results.length });
+    this.scheduleSubAgentDrain();
+    this.persist();
+  }
+
+  private scheduleSubAgentDrain(): void {
+    if (this.busy) {
+      return;
+    }
+    if (this.lastSubAgentDrain != null) {
+      return;
+    }
+    this.lastSubAgentDrain = setTimeout(() => {
+      this.lastSubAgentDrain = null;
+      this.drainSubAgentNotices();
+    }, 75);
+  }
+
+  /** When the main agent is idle, deliver queued async sub-agent results. */
+  private drainSubAgentNotices(): void {
+    if (this.disposed || this.busy) {
+      return;
+    }
+    // The agent's `finally` hasn't reset `isRunning` yet when this is called from
+    // the `done` callback — sendUserMessage would drop the notice. Defer a tick.
+    if (this.agent.running) {
+      setTimeout(() => this.drainSubAgentNotices(), 0);
+      return;
+    }
+    const notices = this.subAgentNoticeQueue.splice(0);
+    if (notices.length === 0) {
+      return;
+    }
+    // Bind this injected turn to the parent node: it bypasses beginTurn, so
+    // activeTurnNode is null — but the reply (and any further spawn) must belong
+    // to that node. Set the context so events route there and spawn works.
+    const session = this.getActiveSession();
+    const parentId = notices[0].nodeId;
+    const parent = session?.nodes[parentId];
+    this.activeTurnNode = parent ?? null;
+    this.displayItems = parent ? parent.displayItems : this.displayItems;
+    this.turnPrefixLen = parent ? parent.messages.length : this.turnPrefixLen;
+    this.lastStatus = '子代理完成';
+    this.setBusy(true);
+    this.post({ type: 'status', text: this.lastStatus });
+    // Re-affirm the active node in the webview BEFORE the resumed turn streams: a
+    // nested sub-agent spawn may have left messagesEl pinned to a sub-agent card,
+    // and this injected turn has no `path`/`tree` round-trip of its own. postPath
+    // uses mainStreamNodeId (= this turn's parent), so setActiveLeaf re-pins
+    // messagesEl to the main node and the reply cannot leak into a sub-agent card.
+    this.postPath();
+    // One clean combined message: per batch, a header + the per-sub-agent lines.
+    const parts = notices.map((n) => {
+      const count = n.count ?? 1;
+      const head = n.status === 'done' ? `${count} 个子代理完成` : `${count} 个子代理完成（含失败/中断）`;
+      return `[子代理批次] ${head}\n${n.summary || '(no summary)'}`;
+    });
+    this.agent.sendUserMessage(`子代理通知：\n${parts.join('\n\n')}`);
+  }
+
+  private cleanupSubAgents(): void {
+    for (const [, entry] of this.runningSubAgents) {
+      entry.abort.abort();
+      entry.agent.cancel();
+    }
+    this.runningSubAgents.clear();
+  }
+
+  /**
+   * Create this turn's node, check it out, and record where its message slice
+   * starts. The caller pushes the turn's display items and then sends the
+   * prompt to the agent.
+   */
+  private beginTurn(title: string): TreeNode | null {
+    const session = this.getActiveSession();
+    if (!session) {
+      return null;
+    }
+    const parentId = session.activeNodeId;
+    // The interruption notice only makes sense when this turn continues from the
+    // turn that was actually interrupted.
+    if (parentId !== this.lastInterruptedNodeId) {
+      this.agent.resetInterruptState();
+    }
+    const node = createNode(newId(), parentId, title, 'running');
+    attachNode(session, node);
+    this.activeTurnNode = node;
+    this.displayItems = node.displayItems;
+    // The new node contributes no messages yet, so this is the parent's path.
+    this.agent.setMessages(this.buildPath(session, node.id));
+    this.turnPrefixLen = this.agent.getMessages().length;
+    this.postTree();
+    this.post({ type: 'panTo', id: node.id });
+    return node;
+  }
+
+  /**
+   * Close out the running turn: store exactly the messages the agent appended
+   * during it (the interrupt checkpoint and the error rollback both land here),
+   * then persist, and patch just this card instead of resending the whole tree.
+   */
+  private finishTurn(status: TurnStatus): void {
+    const node = this.activeTurnNode;
+    this.activeTurnNode = null;
+    const session = this.getActiveSession();
+    if (node && session && session.nodes[node.id]) {
+      node.messages = this.agent.getMessages().slice(this.turnPrefixLen);
+      node.status = status;
+      session.updatedAt = Date.now();
+    }
+    this.persist();
+    if (node && session?.nodes[node.id]) {
+      this.post({
+        type: 'nodeUpdate',
+        id: node.id,
+        status: node.status,
+        title: node.title,
+        usage: nodeUsage(node),
+      });
+    }
+  }
+
+  // ---- Public command entry points ----
+
+  /** Open the chat panel for the active session (agentHarness.openChat / focus). */
+  openChat(): void {
+    const session = this.getActiveSession();
+    if (!session) {
+      return;
+    }
+    this.ensurePanel(session.id);
+  }
+
+  /** Open (or rebind) the panel to a session and check it out. */
+  openSession(id: string): void {
+    const session = this.sessions.find((s) => s.id === id);
+    if (!session) {
+      return;
+    }
+    if (id === this.activeSessionId) {
+      // Already checked out; just bring the panel forward (allowed even while the
+      // session runs a background job).
+      this.ensurePanel(id);
+      return;
+    }
+    if (this.busy || this.activeSessionHasRunningBackground()) {
+      this.postNotice(
+        'warning',
+        'Cannot switch session while background terminals are running. Wait for them to finish or kill them from the Background panel first.',
+      );
+      return;
+    }
+    this.activateSession(session);
+    this.ensurePanel(session.id);
+  }
+
+  newSession(): void {
     if (this.busy || this.activeSessionHasRunningBackground()) {
       this.postNotice(
         'warning',
@@ -506,24 +1331,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     const session = this.createSessionInMemory();
     this.activateSession(session);
     this.persist();
+    this.ensurePanel(session.id);
   }
 
-  private handleSwitchSession(id: string): void {
-    if (this.busy || this.activeSessionHasRunningBackground()) {
-      this.postNotice(
-        'warning',
-        'Cannot switch session while background terminals are running. Wait for them to finish or kill them from the Background panel first.',
-      );
-      return;
-    }
-    const session = this.sessions.find((s) => s.id === id);
-    if (!session || id === this.activeSessionId) {
-      return;
-    }
-    this.activateSession(session);
-  }
-
-  private handleDeleteSession(id: string): void {
+  deleteSession(id: string): void {
     if (this.busy || this.activeSessionHasRunningBackground()) {
       this.postNotice(
         'warning',
@@ -552,6 +1363,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       : this.sessions[0].id;
     this.activateSession(this.getActiveSession()!);
     this.persist();
+    // If the deleted session owned the open panel, rebind it to the new active one.
+    this.ensurePanel(this.getActiveSession()!.id);
   }
 
   clear(): void {
@@ -563,12 +1376,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       return;
     }
     this.agent.reset();
+    this.agent.resetInterruptState();
+    this.lastInterruptedNodeId = null;
+    this.activeTurnNode = null;
+    this.turnPrefixLen = 0;
     this.uploadController = null;
     const session = this.getActiveSession();
     if (session) {
-      session.messages = this.agent.getMessages();
-      session.displayItems.length = 0;
-      this.displayItems = session.displayItems;
+      // A cleared conversation keeps its identity but loses the whole tree.
+      session.nodes = {};
+      session.rootId = null;
+      session.activeNodeId = null;
+      session.orphanItems.length = 0;
+      session.updatedAt = Date.now();
+      this.displayItems = session.orphanItems;
     }
     this.setBusy(false);
     this.lastStatus = '';
@@ -579,6 +1400,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.backgroundNotifQueue = this.backgroundNotifQueue.filter(
       (q) => q.sessionId !== this.activeSessionId,
     );
+    this.subAgentNoticeQueue.length = 0;
+    this.subAgentChildNotices.clear();
     if (this.backgroundDrainTimer != null) {
       clearTimeout(this.backgroundDrainTimer);
       this.backgroundDrainTimer = null;
@@ -587,90 +1410,130 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.postBackgrounds();
     this.postContext();
     this.postSessionStats();
+    this.postTree();
     this.persist();
   }
 
-  private persistActiveSession(): void {
-    const session = this.getActiveSession();
-    if (session) {
-      session.messages = this.agent.getMessages();
-      session.updatedAt = Date.now();
-      this.persist();
-    }
+  // ---- Panel lifecycle ----
+
+  private panelTitle(sessionId: string): string {
+    const session = this.sessions.find((s) => s.id === sessionId);
+    return `Agent Chat Tree — ${session ? session.title : 'Session'}`;
   }
 
-  resolveWebviewView(webviewView: vscode.WebviewView): void {
-    this.view = webviewView;
-    webviewView.webview.options = {
-      enableScripts: true,
-      localResourceRoots: [vscode.Uri.joinPath(this.extensionUri, 'media')],
-    };
-    webviewView.webview.html = this.getHtml(webviewView.webview);
-
-    webviewView.webview.onDidReceiveMessage(async (message) => {
-      switch (message.type) {
-        case 'ready':
-          this.currentPromptTokens = this.getLatestPromptTokens();
-          this.post({
-            type: 'sessions',
-            sessions: this.sessionsMeta(),
-            activeId: this.activeSessionId,
-          });
-          this.postState();
-          this.postHistory();
-          this.postConfig();
-          this.postContext();
-          this.postSessionStats();
-          this.postBackgrounds();
-          void this.refreshBalance();
-          break;
-        case 'userMessage':
-          await this.onUserMessage(String(message.text ?? ''), message.attachments ?? []);
-          break;
-        case 'newSession':
-          this.handleNewSession();
-          break;
-        case 'switchSession':
-          this.handleSwitchSession(String(message.id ?? ''));
-          break;
-        case 'deleteSession':
-          this.handleDeleteSession(String(message.id ?? this.activeSessionId));
-          break;
-        case 'pickImage':
-          void this.handlePickImage();
-          break;
-        case 'stop':
-          this.onStop();
-          break;
-        case 'setModel':
-          this.onSetModel(String(message.model ?? ''));
-          break;
-        case 'setThinkingEffort':
-          this.onSetThinkingEffort(String(message.effort ?? 'none') as ThinkingEffort);
-          break;
-        case 'openExternal': {
-          const url = String(message.url ?? '');
-          let uri: vscode.Uri;
-          try {
-            uri = vscode.Uri.parse(url);
-          } catch {
-            return;
-          }
-          if (uri.scheme === 'http' || uri.scheme === 'https' || uri.scheme === 'mailto') {
-            void vscode.env.openExternal(uri);
-          }
-          break;
+  private createPanel(sessionId: string): ChatPanel {
+    const created = new ChatPanel({
+      sessionId,
+      viewType: 'agentHarness.chatTree',
+      title: this.panelTitle(sessionId),
+      extensionUri: this.extensionUri,
+      getHtml: (webview) => this.getHtml(webview),
+      onMessage: (message) => this.handlePanelMessage(message),
+      onDispose: () => {
+        // The webview is gone; state stays in this provider so it can be reopened.
+        if (this.panel === created) {
+          this.panel = null;
         }
-        case 'killBackground':
-          this.onKillBackground(Number(message.id));
-          break;
-        case 'clear':
-          this.clear();
-          break;
-        default:
-          break;
-      }
+      },
     });
+    return created;
+  }
+
+  /**
+   * Bring a panel for `sessionId` to the foreground. A single panel is reused for
+   * v1 — switching sessions rebinds the open webview to the new session. (The
+   * mouth for several parallel chats is to keep a list of ChatPanel keyed by
+   * sessionId and create a new one here instead of rebinding.)
+   */
+  private ensurePanel(sessionId: string): void {
+    if (this.disposed) {
+      return;
+    }
+    if (this.panel && this.panel.sessionId === sessionId) {
+      this.panel.focus();
+      return;
+    }
+    if (this.panel) {
+      this.panel.sessionId = sessionId;
+      this.panel.setTitle(this.panelTitle(sessionId));
+      this.panel.focus();
+      // The webview is already loaded; repaint it for the new session.
+      this.postAllState();
+      return;
+    }
+    this.panel = this.createPanel(sessionId);
+    this.panel.focus();
+    // A fresh panel posts 'ready' once its script loads, and we repaint then.
+  }
+
+  /** Full repaint of the open panel (used on session switch / panel rerender). */
+  private postAllState(): void {
+    this.currentPromptTokens = this.getLatestPromptTokens();
+    this.post({ type: 'reset' });
+    this.postState();
+    this.postTree();
+    this.postPath();
+    this.postConfig();
+    this.postContext();
+    this.postSessionStats();
+    this.postBackgrounds();
+    void this.refreshBalance();
+  }
+
+  /** Messages from the webview, routed to the active session's handler. */
+  private handlePanelMessage(message: any): void | Promise<void> {
+    switch (message?.type) {
+      case 'ready':
+        this.postAllState();
+        return;
+      case 'userMessage':
+        return this.onUserMessage(String(message.text ?? ''), message.attachments ?? []);
+      case 'checkout':
+        this.handleCheckout(String(message.id ?? ''));
+        return;
+      case 'setNodeSize':
+        this.onSetNodeSize(String(message.id ?? ''), Math.round(Number(message.w)), Math.round(Number(message.h)));
+        return;
+      case 'killAgent':
+        this.onKillAgent(String(message.id ?? ''));
+        return;
+      case 'layoutDiagnostic':
+        this.logLayoutDiagnostic(message.nodes, message.overlaps, message.connections, message.force);
+        return;
+      case 'pickImage':
+        void this.handlePickImage();
+        return;
+      case 'stop':
+        this.onStop();
+        return;
+      case 'setModel':
+        this.onSetModel(String(message.model ?? ''));
+        return;
+      case 'setThinkingEffort':
+        this.onSetThinkingEffort(String(message.effort ?? 'none') as ThinkingEffort);
+        return;
+      case 'openExternal': {
+        const url = String(message.url ?? '');
+        let uri: vscode.Uri;
+        try {
+          uri = vscode.Uri.parse(url);
+        } catch {
+          return;
+        }
+        if (uri.scheme === 'http' || uri.scheme === 'https' || uri.scheme === 'mailto') {
+          void vscode.env.openExternal(uri);
+        }
+        return;
+      }
+      case 'killBackground':
+        this.onKillBackground(Number(message.id));
+        return;
+      case 'clear':
+        this.clear();
+        return;
+      default:
+        return;
+    }
   }
 
   private async onUserMessage(text: string, attachments: UserAttachment[] = []): Promise<void> {
@@ -755,11 +1618,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     if (session) {
       if (session.title === 'New session' && (userText || attachments.length > 0)) {
         session.title = (userText || 'New session').slice(0, 40);
-        this.post({ type: 'sessions', sessions: this.sessionsMeta(), activeId: this.activeSessionId });
+        this.onStateChanged?.();
       }
       session.updatedAt = Date.now();
     }
 
+    // This turn becomes a new node, checked out as a child of the currently
+    // selected node — a branch when that node already had children.
+    const node = this.beginTurn(titleFromPrompt(userText || attachments[0]?.name || ''));
+    if (!node) {
+      return;
+    }
     this.pushItem({ kind: 'user', text: userText, attachments });
     this.post({ type: 'user', text: userText, attachments });
     this.setBusy(true);
@@ -848,6 +1717,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   private setBusy(busy: boolean): void {
     this.busy = busy;
     this.postState();
+    this.onStateChanged?.();
   }
 
   /**
@@ -1010,6 +1880,16 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       this.backgroundNotifQueue.push(...notices);
       return;
     }
+    // The notice turn is a new node, checked out under the currently selected
+    // node, so the cards and the agent's reply land in their own block.
+    const title =
+      notices.length === 1
+        ? `Background #${notices[0].id}: ${notices[0].cmd}`
+        : `Background: ${notices.length} tasks finished`;
+    if (!this.beginTurn(titleFromPrompt(title))) {
+      this.backgroundNotifQueue.push(...notices);
+      return;
+    }
     for (const n of notices) {
       // The notice is now reaching the agent, so the task leaves the pending panel.
       this.markDelivered(n.sessionId, n.taskId);
@@ -1121,6 +2001,9 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     for (const reg of this.sessionRegistries.values()) {
       reg.killAll();
     }
+    this.cleanupSubAgents();
+    this.panel?.dispose();
+    this.panel = null;
     this.output.dispose();
   }
 
@@ -1213,18 +2096,23 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
         this.post({ type: 'status', text: this.lastStatus });
         this.post({ type: 'done' });
-        this.persistActiveSession();
+        this.finishTurn('done');
         void this.refreshBalance();
         this.drainBackgroundQueue();
+        this.drainSubAgentNotices();
         break;
       case 'interrupted':
         this.flushStreamDeltas();
         this.lastStatus = 'Interrupted';
         this.setBusy(false);
         this.post({ type: 'interrupted' });
-        this.persistActiveSession();
+        // Remember where the stop landed so a turn that continues from this same
+        // node still gets the interruption notice.
+        this.lastInterruptedNodeId = this.activeTurnNode?.id ?? null;
+        this.finishTurn('interrupted');
         void this.refreshBalance();
         this.drainBackgroundQueue();
+        this.drainSubAgentNotices();
         break;
       case 'error':
         this.flushStreamDeltas();
@@ -1232,9 +2120,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.pushItem({ kind: 'assistant', text: `⚠️ ${event.message}`, error: true });
         this.post({ type: 'error', message: event.message });
         this.setBusy(false);
-        this.persistActiveSession();
+        this.finishTurn('error');
         void this.refreshBalance();
         this.drainBackgroundQueue();
+        this.drainSubAgentNotices();
         break;
       default:
         break;
@@ -1357,26 +2246,19 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  private postHistory(): void {
-    const items = this.displayItems.map(clipDisplayItem);
-    perf(`post-history items=${items.length}`);
-    this.post({ type: 'history', items });
-  }
-
   private post(message: unknown): void {
-    void this.view?.webview.postMessage(message);
+    this.panel?.post(message);
   }
 
   private getHtml(webview: vscode.Webview): string {
-    const scriptUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this.extensionUri, 'media', 'main.js'),
-    );
-    const markdownItUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this.extensionUri, 'media', 'markdown-it.min.js'),
-    );
-    const styleUri = webview.asWebviewUri(
-      vscode.Uri.joinPath(this.extensionUri, 'media', 'style.css'),
-    );
+    // A cache-busting version suffix so the webview re-fetches media files when
+    // they change (asWebviewUri does not change with file content).
+    const v = this.mediaVersion;
+    const withV = (uri: string) => `${uri}${uri.includes('?') ? '&' : '?'}v=${v}`;
+    const scriptUri = withV(String(webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'main.js'))));
+    const markdownItUri = withV(String(webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'markdown-it.min.js'))));
+    const treeUri = withV(String(webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'tree.js'))));
+    const styleUri = withV(String(webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'style.css'))));
     const nonce = this.getNonce();
 
     return `<!DOCTYPE html>
@@ -1389,18 +2271,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   <title>Agent Harness</title>
 </head>
 <body>
-  <div id="session-bar">
-    <select id="session-select" title="Switch session"></select>
-    <button id="new-session-btn" class="icon-btn" title="New session" aria-label="New session">
-      <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>
-    </button>
-    <button id="delete-session-btn" class="icon-btn" title="Delete session" aria-label="Delete session">
-      <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6M10 11v6M14 11v6"/></svg>
-    </button>
+  <div id="tree-toolbar">
+    <button id="follow-btn" class="active" title="Follow the active node">⦿</button>
+    <button id="fit-btn" title="Fit the tree to view">⤢</button>
   </div>
-  <div id="messages-wrap">
-    <div id="messages"></div>
-    <div id="scroll-lock" class="locked" title="Auto-scroll locked to the newest output"></div>
+  <div id="tree-wrap">
+    <div id="tree-canvas">
+      <svg id="tree-edges"></svg>
+    </div>
   </div>
   <div id="bg-panel" class="hidden">
     <div id="bg-head">
@@ -1410,6 +2288,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     <div id="bg-list"></div>
   </div>
   <div id="composer">
+    <div id="branch-banner" class="hidden"></div>
     <div id="attachments"></div>
     <div id="composer-row">
       <textarea id="input" placeholder="Ask the agent… (Enter to send, Shift+Enter for newline)" rows="1" spellcheck="false" autocorrect="off" autocapitalize="off" autocomplete="off"></textarea>
@@ -1433,18 +2312,20 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     <div id="meter-row-readout" title="Session prompt-cache hit rate + wallet">
       <span id="status-dot" class="dot idle"></span>
       <span id="status-text"></span>
-      <span id="context" title="Context window usage">
-        <span id="context-label">ctx 0%</span>
-      </span>
-      <span id="stat-cache">cache –</span>
-      <span id="stat-balance">bal –</span>
-      <span id="tps-meter" title="Token generation rate (realtime estimate)">
-        <span id="tps-value">0</span>
-        <span id="tps-unit">tok/s</span>
+      <span id="metrics">
+        <span id="context" title="Context window usage">
+          <span id="context-label">ctx 0%</span>
+        </span>
+        <span id="stat-balance">bal –</span>
+        <span id="tps-meter" title="Token generation rate (realtime estimate)">
+          <span id="tps-value">0</span>
+          <span id="tps-unit">tok/s</span>
+        </span>
       </span>
     </div>
   </div>
   <script nonce="${nonce}" src="${markdownItUri}"></script>
+  <script nonce="${nonce}" src="${treeUri}"></script>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;

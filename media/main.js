@@ -1,7 +1,11 @@
 (function () {
   const vscode = acquireVsCodeApi();
 
-  const messagesEl = document.getElementById('messages');
+  const treeWrap = document.getElementById('tree-wrap');
+  const treeCanvas = document.getElementById('tree-canvas');
+  const treeEdges = document.getElementById('tree-edges');
+  const fitBtn = document.getElementById('fit-btn');
+  const followBtn = document.getElementById('follow-btn');
   const inputEl = document.getElementById('input');
   const sendBtn = document.getElementById('send-btn');
   const stopBtn = document.getElementById('stop-btn');
@@ -10,27 +14,55 @@
   const attachmentsEl = document.getElementById('attachments');
   const attachBtn = document.getElementById('attach-btn');
   const contextLabel = document.getElementById('context-label');
-  const sessionSelect = document.getElementById('session-select');
-  const newSessionBtn = document.getElementById('new-session-btn');
-  const deleteSessionBtn = document.getElementById('delete-session-btn');
   const modelSelect = document.getElementById('model-select');
   const effortSelect = document.getElementById('effort-select');
   const tpsMeter = document.getElementById('tps-meter');
   const tpsValue = document.getElementById('tps-value');
-  const statCacheEl = document.getElementById('stat-cache');
   const statBalanceEl = document.getElementById('stat-balance');
   const bgPanel = document.getElementById('bg-panel');
   const bgList = document.getElementById('bg-list');
   const bgCount = document.getElementById('bg-count');
-  const scrollLockEl = document.getElementById('scroll-lock');
+  const branchBanner = document.getElementById('branch-banner');
 
   let busy = false;
-  let sessionLocked = false;
   let pendingAttachments = [];
   let currentModel = 'deepseek-chat';
   let currentEffort = 'none';
 
-  // ---- Element helpers (textContent only; no unsanitized HTML) ----
+  const NODE_W = 320;
+  const H_GAP = 48;
+  const V_GAP = 72;
+
+  // The transcript is a pannable tree. `messagesEl` points at the currently
+  // checked-out node's items container — every append / stream lands there.
+  let messagesEl = null;
+  const nodeEls = Object.create(null);   // id -> card element
+  let treeNodes = Object.create(null);   // id -> { id, parentId, children, title, status, preview, usage }
+  let treeRootId = null;
+  let treeActiveId = null;
+  let activePathSet = new Set();
+  let pathNodes = Object.create(null);   // id -> { status, items }
+  let pan = { x: 0, y: 0 };
+  let zoom = 1;
+  let follow = true;
+  // Set while routing a sub-agent's streaming deltas into its own card, so the
+  // main tree's camera/relayout is not driven by every sub-agent token.
+  let routingSubAgent = false;
+  // User-configurable folding (set via the `config` message).
+  let foldToolCalls = true;
+  let foldThinking = true;
+  // The active node's pinned user prompt (sticky at the top of an expanded card).
+  let promptEl = null;
+  // Drag-to-resize a card: bounds for the custom size + a live wireframe preview.
+  const MIN_W = 320;
+  const MAX_W = 1600;
+  const MIN_H = 180;
+  const MAX_H = 1200;
+  let resizing = null;       // { id, startX, startY, startW, startH, target }
+  let resizePreview = null;  // wireframe element
+  let resizeRaf = null;
+
+  // ---- Element helpers ----
   function el(tag, className, text) {
     const node = document.createElement(tag);
     if (className) node.className = className;
@@ -38,143 +70,7 @@
     return node;
   }
 
-  /**
-   * Auto-scroll controller. A scroll container defaults to "locked" (stuck to
-   * the bottom). It unlocks when the user scrolls up and re-locks when they
-   * scroll back down to the bottom. Appends only auto-scroll while locked, so
-   * the user can read older content without being yanked to the newest.
-   *
-   * A scroll event cannot tell a user scroll from our own. A programmatic
-   * `scrollTop = max` still fires one, and by the time it is delivered the
-   * stream may have grown the content again, so `isNearBottom()` is false even
-   * though the user never scrolled. That used to unlock the view mid-stream and
-   * silently stop auto-scrolling. Two guards fix it:
-   *  - `programmaticTop` remembers the bottom we last aimed at, so events that
-   *    land on or below it are recognised as ours and ignored;
-   *  - while the user is actively scrolling (`interacting`) we stop snapping
-   *    and trust the events, so an intentional scroll up still wins.
-   */
-  function createScrollController(el, onChange) {
-    const state = { locked: true };
-    const NEAR_BOTTOM_PX = 2;
-    let programmaticTop = null;
-    let interacting = false;
-    let interactTimer = null;
-
-    function isNearBottom() {
-      return el.scrollHeight - el.scrollTop - el.clientHeight <= NEAR_BOTTOM_PX;
-    }
-
-    function setLocked(value) {
-      if (state.locked === value) {
-        return;
-      }
-      state.locked = value;
-      if (onChange) onChange(value);
-    }
-
-    function scrollToBottom() {
-      if (!state.locked || interacting) {
-        return;
-      }
-      const max = Math.max(0, el.scrollHeight - el.clientHeight);
-      programmaticTop = max;
-      if (el.scrollTop !== max) {
-        el.scrollTop = max;
-      }
-    }
-
-    function lock() {
-      setLocked(true);
-      scrollToBottom();
-    }
-
-    function noteInteraction() {
-      interacting = true;
-      if (interactTimer) clearTimeout(interactTimer);
-      interactTimer = setTimeout(() => {
-        interacting = false;
-      }, 150);
-    }
-
-    el.addEventListener('scroll', () => {
-      const top = el.scrollTop;
-      if (!interacting && state.locked && programmaticTop !== null && top >= programmaticTop) {
-        // Our own scroll (content may have grown since we set it).
-        return;
-      }
-      programmaticTop = top;
-      setLocked(isNearBottom());
-    });
-    // Any of these means the user is driving the scroll, not us.
-    el.addEventListener('wheel', noteInteraction, { passive: true });
-    el.addEventListener('touchmove', noteInteraction, { passive: true });
-    el.addEventListener('pointerdown', noteInteraction, { passive: true });
-    el.addEventListener('keydown', noteInteraction, { passive: true });
-
-    if (onChange) onChange(state.locked);
-
-    return {
-      get locked() {
-        return state.locked;
-      },
-      isNearBottom,
-      scrollToBottom,
-      lock,
-    };
-  }
-
-  // Green light at the bottom of the scrollbar: lit while auto-scroll is locked
-  // to the newest output, dim when the view is free to stay where the user left it.
-  function renderScrollLock(locked) {
-    if (!scrollLockEl) return;
-    scrollLockEl.classList.toggle('locked', !!locked);
-    scrollLockEl.title = locked
-      ? 'Auto-scroll locked to the newest output'
-      : 'Auto-scroll unlocked — scroll to the bottom to re-lock';
-  }
-
-  const messagesScroll = createScrollController(messagesEl, renderScrollLock);
-
-  // Scrolling the message panel (stays pinned to the bottom while locked).
-  // Coalesce to one layout per frame — streaming used to force layout on every token.
-  let scrollRaf = null;
-  function scrollToBottom() {
-    if (scrollRaf != null) return;
-    scrollRaf = requestAnimationFrame(() => {
-      scrollRaf = null;
-      messagesScroll.scrollToBottom();
-      updateScrollLockVisibility();
-    });
-  }
-
-  // Nothing to scroll (empty or short conversation) — the lock light would just
-  // be a stray dot, so hide it until the transcript overflows.
-  function updateScrollLockVisibility() {
-    if (!scrollLockEl) return;
-    scrollLockEl.classList.toggle(
-      'hidden',
-      messagesEl.scrollHeight - messagesEl.clientHeight <= 1,
-    );
-  }
-
-  // A container resize (sidebar resize, composer growing) moves the bottom
-  // without firing a scroll event, which used to leave a locked view stranded.
-  if (typeof ResizeObserver !== 'undefined') {
-    new ResizeObserver(() => {
-      updateScrollLockVisibility();
-      scrollToBottom();
-    }).observe(messagesEl);
-  }
-  updateScrollLockVisibility();
-
-  // ---- Markdown rendering ----
-  // The model replies in Markdown. This webview runs in a sandboxed iframe and
-  // cannot import the markdown-it instance bundled inside VS Code's own
-  // renderer, so we load the *same* library VS Code and its forks use
-  // (markdown-it, vendored in media/) and render client-side. We keep raw HTML
-  // escaped (html:false) and rely on markdown-it's default validateLink to
-  // reject javascript:/data: URLs, so model output can't inject scripts.
+  // ---- Markdown ----
   const md = window.markdownit
     ? window.markdownit({ html: false, breaks: true, linkify: true, typographer: false })
     : null;
@@ -198,10 +94,69 @@
     return escapeHtml(text);
   }
 
-  // ---- Message rendering ----
-  function addUser(text, attachments) {
-    const node = document.createElement('div');
-    node.className = 'msg user';
+  // ---- Scroll controller (kept only for the collapsible Thinking body) ----
+  function createScrollController(container, onChange) {
+    const state = { locked: true };
+    const NEAR_BOTTOM_PX = 2;
+    let programmaticTop = null;
+    let interacting = false;
+    let interactTimer = null;
+
+    function isNearBottom() {
+      return container.scrollHeight - container.scrollTop - container.clientHeight <= NEAR_BOTTOM_PX;
+    }
+
+    function setLocked(value) {
+      if (state.locked === value) return;
+      state.locked = value;
+      if (onChange) onChange(value);
+    }
+
+    function scrollToBottom() {
+      if (!state.locked || interacting) return;
+      const max = Math.max(0, container.scrollHeight - container.clientHeight);
+      programmaticTop = max;
+      if (container.scrollTop !== max) {
+        container.scrollTop = max;
+      }
+    }
+
+    container.addEventListener('scroll', () => {
+      const top = container.scrollTop;
+      if (!interacting && state.locked && programmaticTop !== null && top >= programmaticTop) {
+        return;
+      }
+      programmaticTop = top;
+      setLocked(isNearBottom());
+    });
+    container.addEventListener('wheel', () => { interacting = true; clearTimeout(interactTimer); interactTimer = setTimeout(() => { interacting = false; }, 150); }, { passive: true });
+    container.addEventListener('touchmove', () => { interacting = true; clearTimeout(interactTimer); interactTimer = setTimeout(() => { interacting = false; }, 150); }, { passive: true });
+
+    return {
+      get locked() { return state.locked; },
+      scrollToBottom,
+      lock() { setLocked(true); scrollToBottom(); },
+    };
+  }
+
+  // A green lock dot lives on the host of a scrollable container; it lights while
+  // the container is auto-scrolled to the bottom and dims once the user scrolls up.
+  // The lock is on by default, so the dot starts green.
+  function attachLock(container, host) {
+    const dot = el('div', 'scroll-lock-dot');
+    host.appendChild(dot);
+    const ctrl = createScrollController(container, (locked) => dot.classList.toggle('locked', locked));
+    dot.classList.add('locked');
+    return ctrl;
+  }
+
+  // ---- Message rendering into a container (defaults to the active node) ----
+  // The pinned user prompt of the active node (top of an expanded card). It does
+  // not scroll with the transcript and does not trigger tree panning.
+  function addUserPrompt(text, attachments) {
+    if (!promptEl) return;
+    promptEl.innerHTML = '';
+    const node = el('div', 'msg user prompt');
     node.dataset.kind = 'user';
     if (attachments && attachments.length) {
       const imgWrap = document.createElement('div');
@@ -218,16 +173,16 @@
     if (text) {
       node.appendChild(el('span', 'msg-text', text));
     }
-    messagesEl.appendChild(node);
-    scrollToBottom();
+    promptEl.appendChild(node);
     return node;
   }
 
   function addNotice(kind, text) {
+    if (!messagesEl) return;
     const node = el('div', 'notice ' + (kind || 'info'), text);
     node.dataset.kind = 'notice';
     messagesEl.appendChild(node);
-    scrollToBottom();
+    followActive();
     return node;
   }
 
@@ -237,20 +192,30 @@
     const chev = el('span', 'chev', '▶');
     head.appendChild(chev);
     head.appendChild(el('span', 'thinking-label', 'Thinking'));
+    // A green light that glows while there's (visible) reasoning content.
+    head.appendChild(el('span', 'thinking-light'));
     box.appendChild(head);
     const body = el('div', 'thinking-body hidden');
     if (thinking) body.textContent = thinking;
     box.appendChild(body);
-    // The thinking body scrolls independently with the same lock/unlock behavior.
-    body._scroll = createScrollController(body);
+    body._scroll = attachLock(body, box);
     head.addEventListener('click', () => {
       body.classList.toggle('hidden');
       chev.classList.toggle('open');
+      box.classList.toggle('open', !body.classList.contains('hidden'));
+      if (body._scroll && !body.classList.contains('hidden')) body._scroll.scrollToBottom();
     });
+    if (thinking) box.classList.add('has-content');
+    if (!foldThinking) {
+      body.classList.remove('hidden');
+      chev.classList.add('open');
+      box.classList.add('open');
+    }
     return box;
   }
 
   function addAssistant(text, error, thinking) {
+    if (!messagesEl) return;
     const node = el('div', 'msg assistant' + (error ? ' error' : ''));
     node.dataset.kind = 'assistant';
     if (thinking) {
@@ -263,16 +228,17 @@
     node._streaming = false;
     renderAnswer(node, true);
     messagesEl.appendChild(node);
-    scrollToBottom();
+    followActive();
     return node;
   }
 
   function appendAssistant(text) {
+    if (!messagesEl) return;
     const last = messagesEl.lastElementChild;
     if (last && last.dataset.kind === 'assistant' && !last.classList.contains('error')) {
       last._text = (last._text || '') + (text || '');
       renderAnswer(last, false);
-      scrollToBottom();
+      followActive();
       return last;
     }
     const node = addAssistant('', false);
@@ -281,10 +247,6 @@
     return node;
   }
 
-  // While a reply is still streaming, paint plain text via a Text node
-  // (appendData is O(chunk)). markdown-it runs only on finalize — re-parsing
-  // the whole answer on every SSE token was quadratic and froze the webview
-  // after a long session.
   function ensureStreamText(answer) {
     if (answer._streamText) return answer._streamText;
     answer.textContent = '';
@@ -320,12 +282,12 @@
   }
 
   function finalizeStreamingAnswer() {
+    if (!messagesEl) return;
     const last = messagesEl.lastElementChild;
     if (last && last.dataset.kind === 'assistant' && !last.classList.contains('error')) {
       renderAnswer(last, true);
-      // The markdown re-render changes the height (code blocks, lists, images),
-      // so re-pin instead of leaving the tail off-screen.
-      scrollToBottom();
+      followActive();
+      relayout();
     }
   }
 
@@ -340,6 +302,7 @@
   }
 
   function appendThinking(text) {
+    if (!messagesEl) return;
     let last = messagesEl.lastElementChild;
     if (!last || last.dataset.kind !== 'assistant' || last.classList.contains('error')) {
       last = addAssistant('', false);
@@ -353,29 +316,30 @@
     }
     const body = box.querySelector('.thinking-body');
     thinkingTextNode(body).appendData(text);
-    body.classList.remove('hidden');
-    const chev = box.querySelector('.chev');
-    if (chev) chev.classList.add('open');
+    // The reasoning feed is live, so light the indicator.
+    if (box) box.classList.add('has-content');
+    // Folded-by-default means we don't force it open while streaming.
+    if (!foldThinking) {
+      body.classList.remove('hidden');
+      const chev = box.querySelector('.chev');
+      if (chev) chev.classList.add('open');
+      box.classList.add('open');
+    }
     if (body._scroll) body._scroll.scrollToBottom();
-    scrollToBottom();
+    followActive();
     return last;
   }
 
   function formatUsage(usage) {
     const hit = usage.prompt_cache_hit_tokens ?? 0;
     const miss = usage.prompt_cache_miss_tokens ?? 0;
-    return (
-      'tokens ' + usage.total_tokens +
+    return 'tokens ' + usage.total_tokens +
       ' (prompt ' + usage.prompt_tokens + ' + completion ' + usage.completion_tokens + ')' +
-      ' · cache hit ' + hit + ' / miss ' + miss
-    );
+      ' · cache hit ' + hit + ' / miss ' + miss;
   }
 
   function appendUsage(usage) {
-    // Attach the turn's token count to the window that concluded it: the last
-    // assistant message bubble, or the last tool call card when the turn produced
-    // tool calls. Search backwards past any intermediate elements (e.g. notices)
-    // so we never hoist an empty message bubble just to hold the usage line.
+    if (!messagesEl) return;
     let target = messagesEl.lastElementChild;
     while (target) {
       const kind = target.dataset.kind;
@@ -386,21 +350,17 @@
       target = addAssistant('', false);
     }
     target.appendChild(el('div', 'usage-line', formatUsage(usage)));
-    scrollToBottom();
+    followActive();
   }
 
   function describeArgs(args) {
-    if (!args || args === '{}') {
-      return '';
-    }
+    if (!args || args === '{}') return '';
     try {
       return JSON.stringify(JSON.parse(args), null, 2);
     } catch {
       // Not strict JSON — try to summarize a verbatim frame.
     }
-    if (args.indexOf('<<<RAW:') === -1) {
-      return args;
-    }
+    if (args.indexOf('<<<RAW:') === -1) return args;
     const out = [];
     const header = args.split('<<<RAW:')[0].trim();
     if (header) {
@@ -429,7 +389,30 @@
     return out.join('\n');
   }
 
+  // One-line summary for a collapsed tool card, e.g. `write_file src/a.ts`.
+  function toolBrief(name, args) {
+    if (!args || args === '{}') return name;
+    let value = '';
+    try {
+      const obj = JSON.parse(args);
+      if (obj && typeof obj === 'object') {
+        const key = ['read_file', 'write_file', 'replace_in_file', 'read_image', 'list_dir'].includes(name)
+          ? 'path'
+          : name === 'exec_command'
+            ? 'command'
+            : obj.path ? 'path' : obj.command ? 'command' : 'cwd';
+        value = obj[key] || '';
+      }
+    } catch {
+      const m = String(args).match(/"path"\s*:\s*"((?:[^"\\]|\\.)*)"|"command"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+      value = m ? (m[1] || m[2] || '') : '';
+    }
+    value = String(value).replace(/\s+/g, ' ').trim();
+    return name + (value ? ' ' + value.slice(0, 60) : '');
+  }
+
   function addTool(name, args, id, usage) {
+    if (!messagesEl) return;
     const node = el('div', 'msg tool');
     node.dataset.id = id;
     node.dataset.kind = 'tool';
@@ -438,6 +421,8 @@
     const chev = el('span', 'chev', '▶');
     head.appendChild(chev);
     head.appendChild(el('span', 'tool-name', name));
+    // A brief (e.g. the path/command) so the collapsed card is still informative.
+    head.appendChild(el('span', 'tool-brief', toolBrief(name, args)));
     const status = el('span', 'tool-status running', 'running');
     status.dataset.role = 'status';
     head.appendChild(status);
@@ -455,31 +440,28 @@
 
     node.appendChild(body);
 
-    // The tool-call window carries its own token-count control (usage line), so
-    // a tool call's token count is shown in place rather than hoisted into a
-    // separate, empty message bubble.
     if (usage) {
       node.appendChild(el('div', 'usage-line', formatUsage(usage)));
     }
 
-    const statusEl = status;
-    statusEl.dataset.role = 'status';
-    // keep a stable reference via closure
-    node._statusEl = statusEl;
+    node._statusEl = status;
     node._bodyEl = body;
 
+    // Optional eager expand; folded by default.
+    if (!foldToolCalls) {
+      body.classList.remove('hidden');
+      chev.classList.add('open');
+    }
+
     messagesEl.appendChild(node);
-    scrollToBottom();
+    followActive();
     return node;
   }
 
-  // ---- Live (streaming) tool-call drafting ----
-  // While the model assembles a tool call, its name and JSON arguments arrive
-  // incrementally. We render a single "draft" card that grows in place (like the
-  // Thinking block), then finalize it into a normal tool card at toolStart.
   const liveTools = Object.create(null);
 
   function addLiveTool(index, id, name, args) {
+    if (!messagesEl) return;
     const node = el('div', 'msg tool live');
     node.dataset.index = String(index);
     node.dataset.kind = 'tool';
@@ -488,8 +470,6 @@
     const head = el('div', 'tool-head');
     const chev = el('span', 'chev', '▶');
     head.appendChild(chev);
-    // Name grows via incremental fragments; start empty (no '…' placeholder,
-    // otherwise the first fragment would be appended after the placeholder).
     const nameEl = el('span', 'tool-name', name || '');
     head.appendChild(nameEl);
     const status = el('span', 'tool-status streaming', 'streaming');
@@ -518,7 +498,7 @@
 
     messagesEl.appendChild(node);
     liveTools[index] = node;
-    scrollToBottom();
+    followActive();
     return node;
   }
 
@@ -527,19 +507,17 @@
     if (!node) {
       node = addLiveTool(index, id, '', '');
     }
-    if (id) node.dataset.id = idappend(nameDelta);
+    if (id) node.dataset.id = id;
     if (argsDelta && node._argsText) node._argsText.appendData(argsDelta);
     if (argsDelta) node._argsEl.textContent = (node._argsEl.textContent || '') + argsDelta;
-    // Auto-expand so the growth is visible, mirroring appendThinking.
     node._bodyEl.classList.remove('hidden');
     if (node._chevEl) node._chevEl.classList.add('open');
-    scrollToBottom();
+    followActive();
     return node;
   }
 
   function finalizeLiveTool(index, id, name, args) {
-    // Prefer the live card keyed by stream index; fall back to by-id lookup,
-    // then to a brand-new finalized card (e.g. non-streaming / history restore).
+    if (!messagesEl) return;
     let node = index !== undefined && index !== null ? liveTools[index] : null;
     if (!node && id) {
       node = messagesEl.querySelector('.msg.tool.live[data-id="' + id + '"]');
@@ -556,14 +534,13 @@
     node._statusEl.className = 'tool-status running';
     node._statusEl.textContent = 'running';
 
-    // Replace the raw streamed fragment with the pretty-printed summary.
     node._bodyEl.innerHTML = '';
     if (args && args !== '{}') {
       node._bodyEl.appendChild(el('pre', 'tool-args', describeArgs(args)));
     }
     node._bodyEl.classList.remove('hidden');
     if (node._chevEl) node._chevEl.classList.add('open');
-    scrollToBottom();
+    followActive();
     return node;
   }
 
@@ -576,6 +553,7 @@
   }
 
   function updateTool(id, content) {
+    if (!messagesEl) return;
     const node = messagesEl.querySelector('[data-id="' + id + '"]');
     if (!node) return;
     const statusEl = node.querySelector('.tool-status');
@@ -588,10 +566,11 @@
       body.appendChild(el('pre', 'tool-result', content));
       body.classList.remove('hidden');
     }
-    scrollToBottom();
+    followActive();
   }
 
   function setToolStatus(id, status) {
+    if (!messagesEl) return;
     const node = messagesEl.querySelector('[data-id="' + id + '"]');
     if (!node) return;
     const statusEl = node.querySelector('.tool-status');
@@ -606,49 +585,8 @@
     }
   }
 
-  function renderHistory(items) {
-    clearLiveTools();
-    messagesScroll.lock();
-    messagesEl.innerHTML = '';
-    if (!items || items.length === 0) {
-      messagesEl.appendChild(
-        el('div', 'empty', 'Welcome. Ask the agent to read or write files, or run a command.'),
-      );
-      updateScrollLockVisibility();
-      return;
-    }
-    for (const item of items) {
-      if (item.kind === 'user') {
-        addUser(item.text, item.attachments);
-      } else if (item.kind === 'assistant') {
-        addAssistant(item.text, item.error, item.thinking);
-        if (item.usage) {
-          const node = messagesEl.lastElementChild;
-          if (node) node.appendChild(el('div', 'usage-line', formatUsage(item.usage)));
-        }
-      } else if (item.kind === 'notice') {
-        addNotice(item.noticeKind, item.text);
-      } else if (item.kind === 'background') {
-        addBackgroundNotice(item);
-      } else if (item.kind === 'tool') {
-        const toolId = item.id || 'history-' + item.name + '-' + (item.status || '');
-        const node = addTool(item.name, item.args, toolId, item.usage);
-        if (item.status === 'done' && item.content) {
-          setToolStatus(node.dataset.id, 'done');
-          const body = node.querySelector('.tool-body');
-          body.appendChild(el('pre', 'tool-result', item.content));
-          body.classList.remove('hidden');
-        }
-      }
-    }
-    scrollToBottom();
-  }
-
-  // ---- Background completion card ----
-  // A dedicated card for a background job finishing/killed, instead of rendering
-  // it as a user bubble. Shows the task id, the status phrase, the command and
-  // the (truncated) output tail.
   function addBackgroundNotice(item) {
+    if (!messagesEl) return;
     const node = el('div', 'msg bgnotify');
     node.dataset.kind = 'background';
     const head = el('div', 'bgnotify-head');
@@ -663,8 +601,65 @@
       node.appendChild(el('pre', 'bgnotify-output', item.content));
     }
     messagesEl.appendChild(node);
-    scrollToBottom();
+    followActive();
     return node;
+  }
+
+  // Render a node's stored items: the user prompt goes to the pinned prompt area,
+  // everything else into the scrollable transcript. Sets messagesEl/promptEl to the
+  // node's containers for the duration.
+  function renderNodeItems(itemsEl, promptElCard, items) {
+    itemsEl.innerHTML = '';
+    promptElCard.innerHTML = '';
+    const prevMsg = messagesEl;
+    const prevPrompt = promptEl;
+    messagesEl = itemsEl;
+    promptEl = promptElCard;
+    let promptSet = false;
+    for (const item of items) {
+      if (item.kind === 'user') {
+        if (!promptSet) {
+          addUserPrompt(item.text, item.attachments);
+          promptSet = true;
+        }
+      } else {
+        renderItemInto(item);
+      }
+    }
+    messagesEl = prevMsg;
+    promptEl = prevPrompt;
+  }
+
+  // Render a stored DisplayItem into the current target container (messagesEl).
+  function renderItemInto(item) {
+    if (item.kind === 'user') {
+      addUserPrompt(item.text, item.attachments);
+    } else if (item.kind === 'assistant') {
+      addAssistant(item.text, item.error, item.thinking);
+      if (item.usage) {
+        const last = messagesEl.lastElementChild;
+        if (last) last.appendChild(el('div', 'usage-line', formatUsage(item.usage)));
+      }
+    } else if (item.kind === 'notice') {
+      addNotice(item.noticeKind, item.text);
+    } else if (item.kind === 'background') {
+      addBackgroundNotice(item);
+    } else if (item.kind === 'tool') {
+      const toolId = item.id || 'history-' + item.name + '-' + (item.status || '');
+      addTool(item.name, item.args, toolId, item.usage);
+      if (item.status === 'done' && item.content) {
+        setToolStatus(toolId, 'done');
+        const node = messagesEl.querySelector('[data-id="' + toolId + '"]');
+        if (node) {
+          const body = node.querySelector('.tool-body');
+          if (body) {
+            body.appendChild(el('pre', 'tool-result', item.content));
+            // Folded by default; the result is there but hidden until expanded.
+            if (!foldToolCalls) body.classList.remove('hidden');
+          }
+        }
+      }
+    }
   }
 
   // ---- Background terminals panel ----
@@ -710,7 +705,6 @@
       });
       item.appendChild(body);
 
-      // Only running terminals can be killed from the panel.
       if (t.status === 'running') {
         const killBtn = el('button', 'bg-kill', 'kill');
         killBtn.title = 'Kill background terminal ' + t.id;
@@ -725,28 +719,778 @@
     bgCount.textContent = list.length + ' task' + (list.length === 1 ? '' : 's');
   }
 
-  function showEmptyIfNeeded() {
-    if (messagesEl.children.length === 0) {
-      messagesEl.appendChild(
-        el('div', 'empty', 'Welcome. Ask the agent to read or write files, or run a command.'),
-      );
+  // ---- Tree rendering ----
+  function pathIdsFromTree(nodes, activeId) {
+    const out = [];
+    const seen = new Set();
+    let cur = activeId;
+    while (cur && !seen.has(cur) && nodes[cur]) {
+      seen.add(cur);
+      out.push(cur);
+      cur = nodes[cur].parentId;
+    }
+    return out.reverse();
+  }
+
+  function createNodeCard(id, meta) {
+    const card = el('div', 'node');
+    card.dataset.id = id;
+    // A persisted custom size (from a previous drag-resize) wins over the CSS default.
+    if (meta.size && meta.size.w && meta.size.h) {
+      card.style.width = meta.size.w + 'px';
+      card.style.maxHeight = meta.size.h + 'px';
+    }
+    const head = el('div', 'node-head');
+    const title = el('span', 'node-title', meta.title || '(no title)');
+    const status = el('span', 'node-status', meta.status || '');
+    status.dataset.role = 'status';
+    head.appendChild(title);
+    head.appendChild(status);
+    card.appendChild(head);
+
+    // Pinned user prompt (sticky at the top of an expanded card).
+    const prompt = el('div', 'node-prompt');
+    card.appendChild(prompt);
+
+    const body = el('div', 'node-body');
+    const items = el('div', 'node-items');
+    const excerpt = el('div', 'node-excerpt');
+    excerpt.textContent = meta.preview || meta.title || '';
+    body.appendChild(items);
+    body.appendChild(excerpt);
+    card.appendChild(body);
+
+    const usage = el('div', 'node-usage');
+    usage.textContent = meta.usage ? formatUsage(meta.usage) : '';
+    card.appendChild(usage);
+
+    // Drag handle to resize the card (bottom-right).
+    const handle = el('div', 'node-resize');
+    handle.title = 'Drag to resize';
+    card.appendChild(handle);
+
+    // Internal transcript scroll + green lock dot.
+    card._itemScroll = attachLock(items, body);
+
+    nodeEls[id] = card;
+    treeCanvas.appendChild(card);
+    return card;
+  }
+
+  function expandedCard(id, meta, pnode) {
+    const card = nodeEls[id];
+    card.classList.add('expanded');
+    card.classList.toggle('active', id === treeActiveId);
+    const itemsEl = card.querySelector('.node-items');
+    const promptElCard = card.querySelector('.node-prompt');
+    const excerptEl = card.querySelector('.node-excerpt');
+    // Populate from the path items, or (agent nodes) their own transcript; a
+    // freshly-streamed node is filled incrementally, so never wipe it here.
+    const source = pnode ? pnode.items : meta.items;
+    if (source && !card._itemsRendered) {
+      renderNodeItems(itemsEl, promptElCard, source);
+      card._itemsRendered = true;
+    }
+    promptElCard.classList.remove('hidden');
+    itemsEl.classList.remove('hidden');
+    excerptEl.classList.add('hidden');
+    // Unfolding scrolls the transcript to the bottom (locked).
+    if (card._itemScroll) card._itemScroll.lock();
+  }
+
+  function collapsedCard(id, meta) {
+    const card = nodeEls[id];
+    card.classList.remove('expanded', 'active');
+    const itemsEl = card.querySelector('.node-items');
+    const promptElCard = card.querySelector('.node-prompt');
+    const excerptEl = card.querySelector('.node-excerpt');
+    excerptEl.textContent = meta.preview || meta.title || '';
+    promptElCard.classList.add('hidden');
+    itemsEl.classList.add('hidden');
+    excerptEl.classList.remove('hidden');
+  }
+
+  function setActiveLeaf(id) {
+    const card = id ? nodeEls[id] : null;
+    messagesEl = card ? card.querySelector('.node-items') : null;
+    promptEl = card ? card.querySelector('.node-prompt') : null;
+    if (card && card._itemScroll) card._itemScroll.lock();
+  }
+
+  // Patch a single card's status/usage (turn finished) without re-rendering the tree.
+  function applyNodeUpdate(msg) {
+    const card = nodeEls[msg.id];
+    if (card) {
+      const statusEl = card.querySelector('.node-status');
+      if (statusEl && msg.status) {
+        statusEl.textContent = msg.status;
+        statusEl.dataset.status = msg.status;
+      }
+      const usageEl = card.querySelector('.node-usage');
+      if (usageEl && msg.usage) usageEl.textContent = formatUsage(msg.usage);
+    }
+    if (treeNodes[msg.id]) {
+      if (msg.status) treeNodes[msg.id].status = msg.status;
+      if (msg.usage) treeNodes[msg.id].usage = msg.usage;
+      if (msg.title) treeNodes[msg.id].title = msg.title;
     }
   }
 
-  // ---- State ----
-  function updateSessionControls() {
-    // Session switching/new/delete is locked while the agent is busy OR any
-    // background terminal is still running (so a session with a running job is
-    // never left behind). Model/effort stay enabled with background tasks.
-    const disabled = busy || sessionLocked;
-    sessionSelect.disabled = disabled;
-    newSessionBtn.disabled = disabled;
-    deleteSessionBtn.disabled = disabled;
+  // Composer banner + readonly: when the checked-out node already has children,
+  // sending creates a branch; when it is a read-only sub-agent node, the composer
+  // is disabled (only the main agent may drive a sub-agent via spawn/send).
+  function updateBranchBanner() {
+    if (!branchBanner) return;
+    const node = treeNodes[treeActiveId];
+    const isAgent = !!(node && node.kind === 'agent');
+    // Sub-agent nodes are display sidecars, not conversational branches — only a
+    // *turn* child makes the next message a branch.
+    const hasTurnChildren = !!(node && node.children && node.children.some((c) => treeNodes[c] && treeNodes[c].kind !== 'agent'));
+    if (isAgent) {
+      branchBanner.textContent = '子代理分支（只读）—— 由主 agent 通过 spawn_agents / send_agent_message 驱动';
+      branchBanner.classList.remove('hidden');
+    } else if (hasTurnChildren) {
+      branchBanner.textContent = '⤷ branching from ' + (node.title || '(no title)') + ' — your reply starts a new branch';
+      branchBanner.classList.remove('hidden');
+    } else {
+      branchBanner.classList.add('hidden');
+    }
+    // Read-only when the checked-out node is a sub-agent branch.
+    const readonly = isAgent;
+    inputEl.disabled = readonly;
+    sendBtn.disabled = readonly;
+    attachBtn.disabled = readonly;
   }
 
+  // An agent (sub-agent) branch is expanded when it is the checked-out node, when
+  // its parent is the active node, or when a parent AGENT is expanded — so the
+  // sub-agents a turn just spawned stream beside it, and a depth-2 sub-agent of an
+  // (expanded) depth-1 sub-agent stays open with it. Those on a branch you
+  // navigated away from collapse.
+  function agentExpanded(id) {
+    let n = treeNodes[id];
+    while (n && n.kind === 'agent') {
+      if (n.id === treeActiveId || n.parentId === treeActiveId) return true;
+      n = treeNodes[n.parentId];
+    }
+    return false;
+  }
+
+  // rAF-throttled relayout for a growing sub-agent card: its transcript grows as
+  // it streams but followActive (which schedules the main layout) is suppressed
+  // while routingSubAgent, so cards could overlap until agentDone. Throttle to
+  // one relayout per frame so a fast stream repositions siblings without jank.
+  let subAgentRelayoutRaf = null;
+  function scheduleSubAgentRelayout() {
+    if (subAgentRelayoutRaf != null) return;
+    subAgentRelayoutRaf = requestAnimationFrame(() => {
+      subAgentRelayoutRaf = null;
+      relayout();
+    });
+  }
+
+  // Route a streaming callback to a specific node's items container (sub-agents
+  // stream in parallel, so deltas must target their own card). A missing nodeId
+  // means the MAIN agent's turn → uses the current active-node container. After
+  // writing, the target card's transcript follows to the bottom (respects lock).
+  function routeTo(nodeId, fn) {
+    if (!nodeId) {
+      fn();
+      return;
+    }
+    const card = nodeEls[nodeId];
+    const el = card ? card.querySelector('.node-items') : null;
+    if (!el) return;
+    const prevMsg = messagesEl;
+    const prevPrompt = promptEl;
+    const prevRouting = routingSubAgent;
+    messagesEl = el;
+    promptEl = card.querySelector('.node-prompt');
+    routingSubAgent = true;
+    try {
+      fn();
+    } finally {
+      messagesEl = prevMsg;
+      promptEl = prevPrompt;
+      routingSubAgent = prevRouting;
+    }
+    if (card && card._itemScroll) card._itemScroll.scrollToBottom();
+    scheduleSubAgentRelayout();
+  }
+
+  // A sub-agent branch begins streaming: ensure its card, label it, add a Kill
+  // button, and expand it so the live run is visible.
+  function onAgentStart(msg) {
+    if (!nodeEls[msg.id]) {
+      createNodeCard(msg.id, treeNodes[msg.id] || { title: '子代理', status: 'running', kind: 'agent' });
+    }
+    const card = nodeEls[msg.id];
+    if (!card) return;
+    card.classList.add('agent');
+    card.classList.add('expanded');
+    card.querySelector('.node-items').classList.remove('hidden');
+    const head = card.querySelector('.node-head');
+    let badge = card.querySelector('.node-agent-badge');
+    if (!badge) {
+      badge = el('span', 'node-agent-badge', 'SUB');
+      head.insertBefore(badge, head.querySelector('.node-status'));
+    }
+    let info = card.querySelector('.node-agent-info');
+    if (!info) {
+      info = el('span', 'node-agent-info', '');
+      head.appendChild(info);
+    }
+    info.textContent = `d${msg.depth || 1} · ${msg.model || ''}${msg.write ? ' · write' : ' · ro'}`;
+    if (!card.querySelector('.node-kill')) {
+      const kill = el('button', 'node-kill', '✕');
+      kill.title = 'Kill this sub-agent';
+      kill.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        vscode.postMessage({ type: 'killAgent', id: msg.id });
+      });
+      head.appendChild(kill);
+    }
+    relayout();
+  }
+
+  // A sub-agent finished (done / killed / error): finalize its answer, patch the
+  // card status/summary, drop the Kill button, and colour its connector edge.
+  function onAgentDone(msg) {
+    const card = nodeEls[msg.id];
+    if (card) {
+      routeTo(msg.id, () => finalizeStreamingAnswer());
+      const statusEl = card.querySelector('.node-status');
+      if (statusEl) {
+        statusEl.textContent = msg.status === 'done' ? 'done' : msg.status === 'error' ? 'error' : 'interrupted';
+        statusEl.dataset.status = msg.status === 'done' ? 'done' : msg.status === 'error' ? 'error' : 'interrupted';
+      }
+      const kill = card.querySelector('.node-kill');
+      if (kill) kill.remove();
+      card.classList.toggle('agent-done', msg.status === 'done');
+      card.classList.toggle('agent-error', msg.status === 'error');
+      if (treeNodes[msg.id]) {
+        treeNodes[msg.id].agentStatus = msg.status;
+        treeNodes[msg.id].agentSummary = msg.summary || '';
+      }
+      const usageEl = card.querySelector('.node-usage');
+      if (usageEl && msg.summary) usageEl.textContent = msg.summary.slice(0, 120);
+    }
+    const edge = treeEdges.querySelector('[data-agent="' + msg.id + '"]');
+    if (edge) {
+      edge.classList.toggle('edge-done', msg.status === 'done');
+      edge.classList.toggle('edge-error', msg.status === 'error');
+    }
+    relayout();
+  }
+
+  function relayout() {
+    const heights = {};
+    const widths = {};
+    for (const id in nodeEls) {
+      heights[id] = nodeEls[id].offsetHeight || 120;
+      widths[id] = nodeEls[id].offsetWidth || NODE_W;
+    }
+    const result = window.treeLayout.layoutTree(treeNodes, treeRootId, heights, {
+      nodeW: NODE_W,
+      hGap: H_GAP,
+      vGap: V_GAP,
+      widths,
+      agentGap: 80,
+      agentVGap: 24,
+    });
+    treeCanvas.style.width = result.width + 'px';
+    treeCanvas.style.height = result.height + 'px';
+    for (const id in result.pos) {
+      const card = nodeEls[id];
+      if (card) {
+        card.style.left = result.pos[id].x + 'px';
+        card.style.top = result.pos[id].y + 'px';
+      }
+    }
+    drawEdges();
+    scheduleDiag();
+  }
+
+  // ---- Layout diagnostics: report overlapping cards + the tree's connections ----
+  let diagTimer = null;
+  function collectLayout() {
+    const nodes = [];
+    const boxes = [];
+    for (const id in nodeEls) {
+      const card = nodeEls[id];
+      const n = treeNodes[id] || {};
+      const b = {
+        id,
+        kind: n.kind || 'turn',
+        parent: n.parentId || '',
+        title: String(n.title || '').slice(0, 40),
+        x: Math.round(parseFloat(card.style.left) || 0),
+        y: Math.round(parseFloat(card.style.top) || 0),
+        w: card.offsetWidth || 0,
+        h: card.offsetHeight || 0,
+      };
+      nodes.push(b);
+      boxes.push(b);
+    }
+    const overlaps = [];
+    for (let i = 0; i < boxes.length; i++) {
+      for (let j = i + 1; j < boxes.length; j++) {
+        const a = boxes[i];
+        const b = boxes[j];
+        const ix = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+        const iy = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+        if (ix > 0 && iy > 0) {
+          overlaps.push({ a: a.id, b: b.id, ta: a.title, tb: b.title, over: Math.round(ix * iy) });
+        }
+      }
+    }
+    return { nodes, overlaps };
+  }
+
+  function collectConnections() {
+    return Object.keys(treeNodes || {}).map((id) => ({
+      parent: treeNodes[id].parentId || '',
+      child: id,
+    }));
+  }
+
+  function manualDiag() {
+    const { nodes, overlaps } = collectLayout();
+    vscode.postMessage({ type: 'layoutDiagnostic', nodes, overlaps, connections: collectConnections(), force: true });
+  }
+
+  // Auto-report only when a layout actually has overlapping cards (so a clean
+  // layout stays silent), throttled.
+  function scheduleDiag() {
+    if (diagTimer != null) return;
+    diagTimer = setTimeout(() => {
+      diagTimer = null;
+      const { nodes, overlaps } = collectLayout();
+      if (overlaps.length) {
+        vscode.postMessage({ type: 'layoutDiagnostic', nodes, overlaps, connections: collectConnections(), force: false });
+      }
+    }, 400);
+  }
+
+  document.addEventListener('keydown', (e) => {
+    if (e.ctrlKey && e.altKey && (e.key === 'd' || e.key === 'D')) {
+      e.preventDefault();
+      manualDiag();
+    }
+  });
+
+  function drawEdges() {
+    if (!treeEdges) return;
+    treeEdges.setAttribute('width', treeCanvas.style.width || '0');
+    treeEdges.setAttribute('height', treeCanvas.style.height || '0');
+    const parts = [];
+    for (const id in nodeEls) {
+      const meta = treeNodes[id];
+      if (!meta || !meta.parentId) continue;
+      const child = nodeEls[id];
+      const parent = nodeEls[meta.parentId];
+      if (!child || !parent) continue;
+      const isAgent = meta.kind === 'agent';
+      const px = parseFloat(parent.style.left);
+      const py = parseFloat(parent.style.top);
+      const pw = parent.offsetWidth;
+      const ph = parent.offsetHeight;
+      const cx = parseFloat(child.style.left);
+      const cy = parseFloat(child.style.top);
+      const cw = child.offsetWidth;
+      const ch = child.offsetHeight;
+      if (isAgent) {
+        // One spline: parent RIGHT edge → agent window LEFT edge; the edge turns
+        // green when the sub-agent completes (red on error).
+        const pr = px + pw;
+        const pyMid = py + ph / 2;
+        const cyMid = cy + ch / 2;
+        const mx = (pr + cx) / 2;
+        const cls = meta.agentStatus === 'done' ? ' edge-done' : meta.agentStatus === 'error' ? ' edge-error' : '';
+        parts.push(
+          '<path data-agent="' + id + '" class="edge-agent' + cls + '" d="M ' + pr + ' ' + pyMid + ' C ' + mx + ' ' + pyMid + ', ' + mx + ' ' + cyMid + ', ' + cx + ' ' + cyMid + '" />',
+        );
+      } else {
+        const childMidX = cx + cw / 2;
+        const parentBottomX = px + pw / 2;
+        const parentBottomY = py + ph;
+        const mx = (parentBottomX + childMidX) / 2;
+        parts.push('<path d="M ' + parentBottomX + ' ' + parentBottomY + ' C ' + mx + ' ' + parentBottomY + ', ' + mx + ' ' + cy + ', ' + childMidX + ' ' + cy + '" />');
+      }
+    }
+    treeEdges.innerHTML = parts.join('');
+  }
+
+  function applyTransform() {
+    treeCanvas.style.transform = 'translate(' + pan.x + 'px, ' + pan.y + 'px) scale(' + zoom + ')';
+  }
+
+  function renderTree(tree) {
+    treeNodes = Object.create(null);
+    for (const n of tree.nodes || []) treeNodes[n.id] = n;
+    treeRootId = tree.rootId ?? null;
+    treeActiveId = tree.activeId ?? null;
+    activePathSet = new Set(pathIdsFromTree(treeNodes, treeActiveId));
+
+    for (const id in treeNodes) {
+      if (!nodeEls[id]) createNodeCard(id, treeNodes[id]);
+      const card = nodeEls[id];
+      const n = treeNodes[id];
+      if (card) {
+        const statusEl = card.querySelector('.node-status');
+        if (statusEl) statusEl.textContent = n.status || '';
+        const usageEl = card.querySelector('.node-usage');
+        if (usageEl) usageEl.textContent = n.usage ? formatUsage(n.usage) : '';
+      }
+    }
+    for (const id in nodeEls) {
+      if (!treeNodes[id]) { nodeEls[id].remove(); delete nodeEls[id]; }
+    }
+
+    for (const id in nodeEls) {
+      const onPath = activePathSet.has(id) || agentExpanded(id);
+      if (onPath) {
+        expandedCard(id, treeNodes[id], pathNodes[id]);
+      } else {
+        collapsedCard(id, treeNodes[id]);
+      }
+    }
+    setActiveLeaf(treeActiveId);
+    if (Object.keys(nodeEls).length === 0) {
+      renderEmptyHint();
+    } else {
+      clearEmptyHint();
+    }
+    relayout();
+    if (follow) keepActiveInView();
+    updateFollowButton();
+    updateBranchBanner();
+  }
+
+  // The active path's items (checkout / session switch / panel reopen). This is
+  // self-sufficient: it derives the active id + path from `path.ids` and only
+  // updates/collapses existing cards, so a checkout never tears the tree down.
+  function renderPath(path) {
+    pathNodes = Object.create(null);
+    for (const n of path.nodes || []) pathNodes[n.id] = n;
+    treeActiveId = path.ids && path.ids.length ? path.ids[path.ids.length - 1] : null;
+    activePathSet = new Set(path.ids || []);
+    for (const id of path.ids || []) {
+      if (!nodeEls[id]) {
+        createNodeCard(id, treeNodes[id] || { title: '', status: 'done' });
+      }
+    }
+    // Only populate nodes that were never rendered — a turn's items are immutable
+    // once its turn ends, so nodes already on the path keep their DOM (this made
+    // checkout of an already-rendered branch near-free instead of re-markdown-ing
+    // every message).
+    for (const id of path.ids || []) {
+      const pnode = pathNodes[id];
+      if (!pnode) continue;
+      const card = nodeEls[id];
+      if (!card._itemsRendered) {
+        renderNodeItems(card.querySelector('.node-items'), card.querySelector('.node-prompt'), pnode.items);
+        card._itemsRendered = true;
+      }
+      if (card._itemScroll) card._itemScroll.lock();
+    }
+    for (const id in nodeEls) {
+      const onPath = activePathSet.has(id) || agentExpanded(id);
+      if (onPath) {
+        expandedCard(id, treeNodes[id] || { title: '', status: 'done', preview: '' }, pathNodes[id]);
+      } else {
+        collapsedCard(id, treeNodes[id] || { title: '', preview: '' });
+      }
+    }
+    setActiveLeaf(treeActiveId);
+    if (Object.keys(nodeEls).length === 0) {
+      renderEmptyHint();
+    } else {
+      clearEmptyHint();
+    }
+    relayout();
+    if (follow) keepActiveInView();
+    updateBranchBanner();
+  }
+
+  let emptyHint = null;
+  function renderEmptyHint() {
+    if (!emptyHint) {
+      emptyHint = el('div', 'empty');
+      emptyHint.style.position = 'absolute';
+      emptyHint.style.inset = '0';
+      emptyHint.style.display = 'flex';
+      emptyHint.style.alignItems = 'center';
+      emptyHint.style.justifyContent = 'center';
+      emptyHint.style.pointerEvents = 'none';
+      emptyHint.textContent = 'Welcome. Ask the agent to read or write files, or run a command.';
+      treeWrap.appendChild(emptyHint);
+    }
+  }
+  function clearEmptyHint() {
+    if (emptyHint) { emptyHint.remove(); emptyHint = null; }
+  }
+
+  function panToNode(id) {
+    const card = nodeEls[id];
+    if (!card) return;
+    const wrap = treeWrap.getBoundingClientRect();
+    const cx = parseFloat(card.style.left) + card.offsetWidth / 2;
+    const cy = parseFloat(card.style.top) + card.offsetHeight / 2;
+    pan.x = wrap.width / 2 - cx * zoom;
+    pan.y = wrap.height / 2 - cy * zoom;
+    applyTransform();
+  }
+
+  function keepActiveInView() {
+    if (follow && treeActiveId) panToNode(treeActiveId);
+  }
+
+  // rAF-throttled so a fast stream can never drive more than one pan/layout per
+  // frame, and suppressed entirely while routing a sub-agent's deltas.
+  let followRaf = null;
+  function followActive() {
+    if (routingSubAgent) return;
+    if (followRaf != null) return;
+    followRaf = requestAnimationFrame(() => {
+      followRaf = null;
+      keepActiveInView();
+      const card = treeActiveId ? nodeEls[treeActiveId] : null;
+      if (card && card._itemScroll) card._itemScroll.scrollToBottom();
+      if (treeActiveId && treeNodes[treeActiveId]?.children?.length) scheduleLayout();
+    });
+  }
+
+  let layoutDebounce = null;
+  function scheduleLayout() {
+    if (layoutDebounce != null) return;
+    layoutDebounce = setTimeout(() => {
+      layoutDebounce = null;
+      relayout();
+    }, 150);
+  }
+
+  function fitToView() {
+    const wrap = treeWrap.getBoundingClientRect();
+    const w = parseFloat(treeCanvas.style.width) || 800;
+    const h = parseFloat(treeCanvas.style.height) || 600;
+    const pad = 48;
+    const scale = Math.min(1.5, Math.max(0.25, Math.min((wrap.width - pad * 2) / w, (wrap.height - pad * 2) / h)) || 1);
+    zoom = scale;
+    pan.x = (wrap.width - w * zoom) / 2;
+    pan.y = (wrap.height - h * zoom) / 2;
+    applyTransform();
+  }
+
+  function updateFollowButton() {
+    if (followBtn) {
+      followBtn.classList.toggle('active', follow);
+      followBtn.title = follow ? 'Following the active node' : 'Follow the active node';
+    }
+  }
+
+  function setFollow(value) {
+    follow = !!value;
+    updateFollowButton();
+    if (follow) keepActiveInView();
+  }
+
+  // ---- Card resize: wireframe preview while dragging; layout on mouse-up ----
+  function clamp(v, lo, hi) {
+    return Math.max(lo, Math.min(hi, v));
+  }
+
+  function startResize(id, card, e) {
+    e.preventDefault();
+    e.stopPropagation();
+    resizing = {
+      id,
+      startX: e.clientX,
+      startY: e.clientY,
+      startW: card.offsetWidth,
+      startH: card.offsetHeight,
+      target: { w: card.offsetWidth, h: card.offsetHeight },
+    };
+    try { e.target.setPointerCapture(e.pointerId); } catch { /* noop */ }
+    resizePreview = el('div', 'resize-preview');
+    resizePreview.appendChild(el('span', 'resize-label', card.offsetWidth + ' × ' + card.offsetHeight));
+    resizePreview.style.left = card.style.left;
+    resizePreview.style.top = card.style.top;
+    resizePreview.style.width = card.offsetWidth + 'px';
+    resizePreview.style.height = card.offsetHeight + 'px';
+    treeCanvas.appendChild(resizePreview);
+  }
+
+  function onResizeMove(e) {
+    if (!resizing) return;
+    // Cursor delta is in screen pixels; the card size is in canvas units, so at
+    // zoom != 1 dividing keeps the edge tracking 1:1 under the cursor.
+    const dw = (e.clientX - resizing.startX) / zoom;
+    const dh = (e.clientY - resizing.startY) / zoom;
+    const w = clamp(resizing.startW + dw, MIN_W, MAX_W);
+    const h = clamp(resizing.startH + dh, MIN_H, MAX_H);
+    resizing.target = { w, h };
+    // Throttle to one paint per frame; only the wireframe moves.
+    if (resizeRaf != null) return;
+    resizeRaf = requestAnimationFrame(() => {
+      resizeRaf = null;
+      if (resizePreview && resizing) {
+        resizePreview.style.width = resizing.target.w + 'px';
+        resizePreview.style.height = resizing.target.h + 'px';
+        const label = resizePreview.querySelector('.resize-label');
+        if (label) label.textContent = resizing.target.w + ' × ' + resizing.target.h;
+      }
+    });
+  }
+
+  function endResize(commit) {
+    if (!resizing) return;
+    const { id, target } = resizing;
+    resizing = null;
+    if (resizePreview) { resizePreview.remove(); resizePreview = null; }
+    if (resizeRaf != null) { cancelAnimationFrame(resizeRaf); resizeRaf = null; }
+    if (!commit || !target) return;
+    const card = nodeEls[id];
+    if (!card) return;
+    card.style.width = target.w + 'px';
+    card.style.maxHeight = target.h + 'px';
+    if (treeNodes[id]) treeNodes[id].size = { w: target.w, h: target.h };
+    // Collision resolution runs once, on mouse-up.
+    relayout();
+    if (card._itemScroll) card._itemScroll.lock();
+    vscode.postMessage({ type: 'setNodeSize', id, w: target.w, h: target.h });
+  }
+
+  treeCanvas.addEventListener('pointerdown', (e) => {
+    const handle = e.target.closest('.node-resize');
+    if (!handle) return;
+    const card = handle.closest('.node');
+    const id = card && card.dataset.id;
+    if (!id) return;
+    startResize(id, card, e);
+  });
+
+  // ---- Pan / zoom ----
+  let dragging = null;
+  treeWrap.addEventListener('pointerdown', (e) => {
+    const isMmb = e.button === 1;
+    if (!isMmb && e.target.closest('.node')) {
+      // Left-click on a card is handled by the checkout click handler; do not pan.
+      return;
+    }
+    if (e.button === 0 || isMmb) {
+      dragging = { startX: e.clientX, startY: e.clientY, px: pan.x, py: pan.y };
+      e.preventDefault();
+      try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* noop */ }
+    }
+  });
+  window.addEventListener('pointermove', (e) => {
+    if (resizing) { onResizeMove(e); return; }
+    if (!dragging) return;
+    pan.x = dragging.px + (e.clientX - dragging.startX);
+    pan.y = dragging.py + (e.clientY - dragging.startY);
+    applyTransform();
+    setFollow(false);
+  });
+  window.addEventListener('pointerup', () => {
+    if (resizing) { endResize(true); return; }
+    dragging = null;
+  });
+  window.addEventListener('pointercancel', () => {
+    if (resizing) { endResize(false); return; }
+    dragging = null;
+  });
+  // Safety: if the pointer capture is released without a clean pointerup (e.g. the
+  // cursor left the webview mid-drag), end the gesture so it never gets stuck.
+  window.addEventListener('lostpointercapture', () => {
+    if (resizing) { endResize(false); return; }
+    dragging = null;
+  });
+  window.addEventListener('auxclick', (e) => {
+    if (e.button === 1) e.preventDefault();
+  });
+
+  // Zoom around a screen-space cursor position.
+  function zoomAt(clientX, clientY, factor) {
+    const rect = treeWrap.getBoundingClientRect();
+    const mx = clientX - rect.left;
+    const my = clientY - rect.top;
+    // Relaxed lower bound so a large tree can be panned as one small overview.
+    const nz = Math.min(1.5, Math.max(0.4, zoom * factor));
+    const cx = (mx - pan.x) / zoom;
+    const cy = (my - pan.y) / zoom;
+    zoom = nz;
+    pan.x = mx - cx * nz;
+    pan.y = my - cy * nz;
+    applyTransform();
+  }
+
+  treeWrap.addEventListener('wheel', (e) => {
+    // Never zoom/scroll while a pan or resize gesture is in progress — an
+    // accidental mouse scroll must not fling the view around.
+    if (dragging || resizing) {
+      return;
+    }
+    // ctrl/cmd + wheel always scales the viewport, even when the pointer is over
+    // a node (so zooming stays possible while hovering content).
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault();
+      zoomAt(e.clientX, e.clientY, e.deltaY < 0 ? 1.1 : 0.9);
+      setFollow(false);
+      return;
+    }
+    // Requirement: wheeling on top of a node scrolls that node's content; the
+    // .node-items / .thinking-body handles it natively.
+    const scrollable = e.target && e.target.closest ? e.target.closest('.node-items, .thinking-body') : null;
+    if (scrollable) {
+      return; // native scroll
+    }
+    e.preventDefault();
+    if (e.shiftKey) {
+      // Shift + wheel pans horizontally (kept as a pan escape hatch).
+      pan.x -= e.deltaY;
+      applyTransform();
+      setFollow(false);
+      return;
+    }
+    zoomAt(e.clientX, e.clientY, e.deltaY < 0 ? 1.1 : 0.9);
+    setFollow(false);
+  }, { passive: false });
+
+  if (fitBtn) fitBtn.addEventListener('click', () => fitToView());
+  if (followBtn) followBtn.addEventListener('click', () => setFollow(!follow));
+
+  // Click a node's title or (collapsed) preview to check it out; clicking inside
+  // an expanded node's transcript never changes the branch.
+  treeCanvas.addEventListener('click', (e) => {
+    if (e.target.closest('button, a, .tool-head, .thinking-head, .thinking-body, .tool-body, .bgnotify-head, .node-usage')) return;
+    const head = e.target.closest('.node-head');
+    const excerpt = e.target.closest('.node-excerpt');
+    const card = head ? head.closest('.node') : excerpt ? excerpt.closest('.node') : null;
+    if (!card) return;
+    const id = card.dataset.id;
+    if (id && id !== treeActiveId) {
+      vscode.postMessage({ type: 'checkout', id });
+    }
+  });
+
+  // Reposition on resize so a long chain stays coherent.
+  if (typeof ResizeObserver !== 'undefined') {
+    new ResizeObserver(() => { relayout(); ensureNodeInView(); }).observe(treeWrap);
+  }
+
+  let nodeInViewRaf = null;
+  function ensureNodeInView() {
+    if (nodeInViewRaf != null) return;
+    nodeInViewRaf = requestAnimationFrame(() => {
+      nodeInViewRaf = null;
+      if (follow) keepActiveInView();
+    });
+  }
+
+  // ---- State ----
   function setBusy(value) {
     busy = value;
-    updateSessionControls();
     modelSelect.disabled = value;
     effortSelect.disabled = value;
     if (value) {
@@ -760,11 +1504,6 @@
       sendBtn.classList.remove('hidden');
       statusDot.className = 'dot idle';
     }
-  }
-
-  function setSessionLocked(value) {
-    sessionLocked = !!value;
-    updateSessionControls();
   }
 
   const MODELS = [
@@ -788,18 +1527,16 @@
     }
   }
 
-  // Hide image thumbnails (history + composer preview) when the active model is
-  // not a vision model. The conversation keeps its image data; it reappears when
-  // a vision model is selected again.
   const VISION_MODELS = ['deepseek-v4-flash-vision-exp', 'deepseek-v4.1-flash-expires-on-0910'];
   function hasVisionModel() {
     return VISION_MODELS.includes(currentModel);
   }
   function updateImageVisibility() {
     const hasVision = hasVisionModel();
-    messagesEl.classList.toggle('hide-images', !hasVision);
+    treeCanvas.classList.toggle('hide-images', !hasVision);
     attachmentsEl.classList.toggle('hide-images', !hasVision);
   }
+
   function showAttachHint(text) {
     attachmentsEl.innerHTML = '';
     attachmentsEl.appendChild(el('div', 'attach-hint', text));
@@ -817,19 +1554,6 @@
     }
   }
 
-  function renderSessions(sessions, activeId) {
-    sessionSelect.innerHTML = '';
-    for (const s of sessions) {
-      const opt = document.createElement('option');
-      opt.value = s.id;
-      opt.textContent = s.title;
-      // Full title on hover; the select clips long titles with no ellipsis.
-      opt.title = s.title;
-      opt.selected = s.id === activeId;
-      sessionSelect.appendChild(opt);
-    }
-  }
-
   function setStatus(text) {
     if (statusText) statusText.textContent = text || '';
   }
@@ -841,7 +1565,6 @@
     if (elCtx) elCtx.title = 'Context: ' + used + ' / ' + total + ' tokens (' + pct.toFixed(1) + '%)';
   }
 
-  // ---- Session-stats chip (consumed tokens + prompt-cache hit rate + wallet) ----
   let statsCacheData = null;
   let statsBalanceData = null;
 
@@ -881,8 +1604,6 @@
 
   function setSessionStats(stats) {
     if (!stats) return;
-    const known = !!stats.cacheKnown;
-    statCacheEl.textContent = 'cache ' + (known ? stats.cacheHitRate.toFixed(0) + '%' : '–');
     statsCacheData = stats;
     renderStatsTitle();
   }
@@ -894,8 +1615,6 @@
       renderStatsTitle();
       return;
     }
-    // Only show non-zero currencies so an empty USD balance does not clutter the
-    // chip with "$0.00". Full wallet detail stays in the title (renderStatsTitle).
     const active = balance.balances.filter((b) => b.totalBalance > 0);
     if (active.length === 0) {
       statBalanceEl.textContent = 'bal 0';
@@ -908,9 +1627,6 @@
   }
 
   // ---- Real-time tokens/sec meter ----
-  // The model streams decoded text, not token boundaries, so we estimate the
-  // token count from the characters themselves. CJK/wide glyphs contribute ~1
-  // token each; continuous Latin/code text approximates ~4 chars per token.
   const TPS_WINDOW_MS = 1500;
   let tpsSamples = [];
   let tpsTimer = null;
@@ -921,17 +1637,17 @@
     for (const ch of text) {
       const code = ch.codePointAt(0);
       if (
-        (code >= 0x4e00 && code <= 0x9fff) || // CJK Unified Ideographs
-        (code >= 0x3400 && code <= 0x4dbf) || // CJK Extension A
-        (code >= 0xf900 && code <= 0xfaff) || // CJK Compatibility Ideographs
-        (code >= 0x3000 && code <= 0x303f) || // CJK Symbols & Punctuation
-        (code >= 0x3040 && code <= 0x30ff) || // Hiragana / Katakana
-        (code >= 0xac00 && code <= 0xd7af) || // Hangul Syllables
-        (code >= 0xff00 && code <= 0xffef) // Fullwidth Forms
+        (code >= 0x4e00 && code <= 0x9fff) ||
+        (code >= 0x3400 && code <= 0x4dbf) ||
+        (code >= 0xf900 && code <= 0xfaff) ||
+        (code >= 0x3000 && code <= 0x303f) ||
+        (code >= 0x3040 && code <= 0x30ff) ||
+        (code >= 0xac00 && code <= 0xd7af) ||
+        (code >= 0xff00 && code <= 0xffef)
       ) {
         tokens += 1;
       } else {
-        tokens += 0.25; // ~4 chars per token
+        tokens += 0.25;
       }
     }
     return tokens;
@@ -985,11 +1701,9 @@
     renderTps();
   }
 
-  // ---- Pending attachments (composer previews) ----
+  // ---- Pending attachments ----
   function addPendingAttachment(dataUrl, name) {
     if (!hasVisionModel()) {
-      // The active model is text-only; an image could not be sent, so do not add
-      // it to the composer (which would leave an invisible, unremovable item).
       showAttachHint('Switch to a vision model (deepseek-v4-flash-vision-exp or deepseek-v4.1-flash-expires-on-0910) to attach an image.');
       return;
     }
@@ -1043,8 +1757,7 @@
   function send() {
     const text = inputEl.value.trim();
     if ((!text && pendingAttachments.length === 0) || busy) return;
-    // Sending a new message returns the conversation to the latest message.
-    messagesScroll.lock();
+    setFollow(true);
     vscode.postMessage({ type: 'userMessage', text, attachments: pendingAttachments });
     pendingAttachments = [];
     renderPendingAttachments();
@@ -1060,20 +1773,27 @@
   window.addEventListener('message', (event) => {
     const msg = event.data;
     switch (msg.type) {
-      case 'history':
-        renderHistory(msg.items);
+      case 'tree':
+        renderTree(msg);
+        break;
+      case 'path':
+        renderPath(msg);
+        break;
+      case 'nodeUpdate':
+        applyNodeUpdate(msg);
+        break;
+      case 'panTo':
+        panToNode(String(msg.id ?? ''));
         break;
       case 'config':
         renderModelSelect(msg.model);
         renderEffortSelect(msg.thinkingEffort);
+        foldToolCalls = msg.foldToolCalls !== false;
+        foldThinking = msg.foldThinking !== false;
         updateImageVisibility();
-        break;
-      case 'sessions':
-        renderSessions(msg.sessions, msg.activeId);
         break;
       case 'state':
         setBusy(msg.busy);
-        setSessionLocked(msg.sessionLocked);
         setStatus(msg.status);
         break;
       case 'background':
@@ -1092,7 +1812,7 @@
         setStatus(msg.text);
         break;
       case 'user':
-        addUser(msg.text, msg.attachments);
+        addUserPrompt(msg.text, msg.attachments);
         break;
       case 'backgroundNotice':
         addBackgroundNotice(msg.item);
@@ -1102,37 +1822,35 @@
         break;
       case 'delta':
         addTpsTokens(msg.text);
-        appendAssistant(msg.text);
+        routeTo(msg.nodeId, () => appendAssistant(msg.text));
         break;
       case 'thinkingDelta':
         addTpsTokens(msg.text);
-        appendThinking(msg.text);
+        routeTo(msg.nodeId, () => appendThinking(msg.text));
         break;
       case 'usage':
-        appendUsage(msg.usage);
+        routeTo(msg.nodeId, () => appendUsage(msg.usage));
         break;
       case 'toolCallDelta':
-        // Tool-call drafting is token generation too, so meter it along with
-        // text/reasoning deltas. Combine the incremental name + args fragments.
         addTpsTokens((msg.name || '') + (msg.args || ''));
-        appendLiveTool(msg.index, msg.id, msg.name, msg.args);
+        routeTo(msg.nodeId, () => appendLiveTool(msg.index, msg.id, msg.name, msg.args));
         break;
       case 'toolStart':
-        // A tool call ends the streaming answer (if any); paint markdown now.
-        finalizeStreamingAnswer();
-        // Finalize the live draft card (grow-in-place), or create one if the
-        // streamed deltas were missed (e.g. a single-chunk tool call).
-        finalizeLiveTool(msg.index, msg.id, msg.name, msg.args);
+        routeTo(msg.nodeId, () => { finalizeStreamingAnswer(); finalizeLiveTool(msg.index, msg.id, msg.name, msg.args); });
         break;
       case 'toolEnd':
-        updateTool(msg.id, msg.content);
+        routeTo(msg.nodeId, () => updateTool(msg.id, msg.content));
+        break;
+      case 'agentStart':
+        onAgentStart(msg);
+        break;
+      case 'agentDone':
+        onAgentDone(msg);
         break;
       case 'done':
-        // The provider sends the final status text right before this event.
         finalizeStreamingAnswer();
         clearLiveTools();
         setBusy(false);
-        showEmptyIfNeeded();
         break;
       case 'interrupted':
         finalizeStreamingAnswer();
@@ -1151,11 +1869,17 @@
         addNotice(msg.kind, msg.text);
         break;
       case 'reset':
-        messagesScroll.lock();
         clearLiveTools();
-        messagesEl.innerHTML = '';
-        showEmptyIfNeeded();
-        updateScrollLockVisibility();
+        for (const id in nodeEls) { nodeEls[id].remove(); }
+        for (const id in nodeEls) delete nodeEls[id];
+        pathNodes = Object.create(null);
+        treeNodes = Object.create(null);
+        treeRootId = null;
+        treeActiveId = null;
+        activePathSet = new Set();
+        messagesEl = null;
+        clearEmptyHint();
+        renderTree({ nodes: [], rootId: null, activeId: null });
         break;
       default:
         break;
@@ -1165,20 +1889,14 @@
   // ---- Input handlers ----
   sendBtn.addEventListener('click', send);
   stopBtn.addEventListener('click', () => {
-    // Immediate feedback: the underlying stream abort lands very quickly, but
-    // reflect the click right away so the user sees Stop was honoured.
     setStatus('Stopping…');
     vscode.postMessage({ type: 'stop' });
   });
   attachBtn.addEventListener('click', () => {
     vscode.postMessage({ type: 'pickImage' });
   });
-  sessionSelect.addEventListener('change', () => {
-    vscode.postMessage({ type: 'switchSession', id: sessionSelect.value });
-  });
   modelSelect.addEventListener('change', () => {
     if (busy) {
-      // reset the control if the provider rejects the change while busy
       renderModelSelect(currentModel);
       return;
     }
@@ -1186,17 +1904,10 @@
   });
   effortSelect.addEventListener('change', () => {
     if (busy) {
-      // reset the control if the provider rejects the change while busy
       renderEffortSelect(currentEffort);
       return;
     }
     vscode.postMessage({ type: 'setThinkingEffort', effort: effortSelect.value });
-  });
-  newSessionBtn.addEventListener('click', () => {
-    vscode.postMessage({ type: 'newSession' });
-  });
-  deleteSessionBtn.addEventListener('click', () => {
-    vscode.postMessage({ type: 'deleteSession', id: sessionSelect.value });
   });
   inputEl.addEventListener('paste', handlePaste);
 
@@ -1209,7 +1920,6 @@
 
   inputEl.addEventListener('input', autoGrow);
 
-  // Open Markdown links in the system browser instead of navigating the webview.
   document.addEventListener('click', (event) => {
     const target = event.target;
     const anchor = target && target.closest ? target.closest('a[href]') : null;
@@ -1229,7 +1939,8 @@
 
   // Initial handshake.
   vscode.postMessage({ type: 'ready' });
-  showEmptyIfNeeded();
+  renderTree({ nodes: [], rootId: null, activeId: null });
   setStatus('Ready');
   updateImageVisibility();
+  updateFollowButton();
 })();
