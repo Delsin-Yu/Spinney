@@ -108,6 +108,7 @@ body {
   padding: 4px 6px;
   font-family: inherit;
   font-size: 12px;
+  text-overflow: ellipsis;
 }
 
 #session-select:focus {
@@ -125,11 +126,19 @@ body {
 }
 
 #composer-controls #attach-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   width: 22px;
   height: 22px;
   font-size: 12px;
   padding: 0;
   flex: 0 0 auto;
+}
+
+.icon-btn svg {
+  display: block;
+  pointer-events: none;
 }
 
 #composer-controls select {
@@ -151,14 +160,17 @@ body {
 }
 
 #composer-controls #model-select {
-  flex: 0 1 auto;
+  /* Take the leftover width so a long model id is not clipped to 200px. */
+  flex: 1 1 auto;
   min-width: 0;
-  max-width: 200px;
+  max-width: none;
+  text-overflow: ellipsis;
 }
 
 #composer-controls #effort-select {
+  /* "high" needs ~60px, not 84px — give the space to the model select. */
   flex: 0 0 auto;
-  width: 84px;
+  width: auto;
 }
 
 #meter-row-readout {
@@ -637,7 +649,7 @@ button.icon-btn {
   color: var(--text-dim);
   font-style: italic;
   text-align: center;
-  margin-top: 32px;
+  margin: auto 0;
 }
 
 /* ---- Background terminals panel ---- */
@@ -885,7 +897,8 @@ button.icon-btn {
 
 #input {
   resize: none;
-  min-height: 88px;
+  /* One line tall when empty; autoGrow() expands it up to 160px while typing. */
+  min-height: 22px;
   background: transparent;
   color: var(--text);
   border: none;
