@@ -1426,6 +1426,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     </div>
     <div id="meter-row-readout" title="Session prompt-cache hit rate + wallet">
       <span id="status-dot" class="dot idle"></span>
+      <span id="status-text"></span>
       <span id="context" title="Context window usage">
         <span id="context-label">ctx 0%</span>
       </span>
