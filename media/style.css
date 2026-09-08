@@ -169,11 +169,26 @@ body {
   flex: 0 0 auto;
 }
 
+/* Live status ("Thinking…", "Interrupted", …). The webview has always set this
+   text; it just had no element to land in. */
+#meter-row-readout #status-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Metrics form a right-aligned group so the status text can own the left side. */
+#meter-row-readout > #context {
+  margin-left: auto;
+}
+
 #meter-row-readout > #context,
 #meter-row-readout > #stat-cache,
 #meter-row-readout > #stat-balance,
 #meter-row-readout > #tps-meter {
-  flex: 1 1 0;
+  flex: 0 0 auto;
   min-width: 0;
   text-align: center;
   white-space: nowrap;
