@@ -225,13 +225,42 @@ button.icon-btn {
   background: #c94f4f;
 }
 
+#messages-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 #messages {
   flex: 1 1 auto;
+  min-height: 0;
   overflow-y: auto;
   padding: 12px;
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+/* Auto-scroll lock light: green = pinned to the newest output, dim = free. */
+#scroll-lock {
+  position: absolute;
+  right: 14px;
+  bottom: 8px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  opacity: 0.3;
+  transition: background-color 120ms ease, opacity 120ms ease, box-shadow 120ms ease;
+  pointer-events: none;
+}
+
+#scroll-lock.locked {
+  background: var(--success);
+  opacity: 1;
+  box-shadow: 0 0 7px var(--success);
 }
 
 .msg {

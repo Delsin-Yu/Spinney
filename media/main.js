@@ -22,6 +22,7 @@
   const bgPanel = document.getElementById('bg-panel');
   const bgList = document.getElementById('bg-list');
   const bgCount = document.getElementById('bg-count');
+  const scrollLockEl = document.getElementById('scroll-lock');
 
   let busy = false;
   let sessionLocked = false;
@@ -42,30 +43,76 @@
    * the bottom). It unlocks when the user scrolls up and re-locks when they
    * scroll back down to the bottom. Appends only auto-scroll while locked, so
    * the user can read older content without being yanked to the newest.
+   *
+   * A scroll event cannot tell a user scroll from our own. A programmatic
+   * `scrollTop = max` still fires one, and by the time it is delivered the
+   * stream may have grown the content again, so `isNearBottom()` is false even
+   * though the user never scrolled. That used to unlock the view mid-stream and
+   * silently stop auto-scrolling. Two guards fix it:
+   *  - `programmaticTop` remembers the bottom we last aimed at, so events that
+   *    land on or below it are recognised as ours and ignored;
+   *  - while the user is actively scrolling (`interacting`) we stop snapping
+   *    and trust the events, so an intentional scroll up still wins.
    */
-  function createScrollController(el) {
+  function createScrollController(el, onChange) {
     const state = { locked: true };
     const NEAR_BOTTOM_PX = 2;
+    let programmaticTop = null;
+    let interacting = false;
+    let interactTimer = null;
 
     function isNearBottom() {
       return el.scrollHeight - el.scrollTop - el.clientHeight <= NEAR_BOTTOM_PX;
     }
 
-    function updateLock() {
-      state.locked = isNearBottom();
+    function setLocked(value) {
+      if (state.locked === value) {
+        return;
+      }
+      state.locked = value;
+      if (onChange) onChange(value);
     }
 
     function scrollToBottom() {
-      if (state.locked) {
-        el.scrollTop = el.scrollHeight;
+      if (!state.locked || interacting) {
+        return;
+      }
+      const max = Math.max(0, el.scrollHeight - el.clientHeight);
+      programmaticTop = max;
+      if (el.scrollTop !== max) {
+        el.scrollTop = max;
       }
     }
 
     function lock() {
-      state.locked = true;
+      setLocked(true);
+      scrollToBottom();
     }
 
-    el.addEventListener('scroll', updateLock);
+    function noteInteraction() {
+      interacting = true;
+      if (interactTimer) clearTimeout(interactTimer);
+      interactTimer = setTimeout(() => {
+        interacting = false;
+      }, 150);
+    }
+
+    el.addEventListener('scroll', () => {
+      const top = el.scrollTop;
+      if (!interacting && state.locked && programmaticTop !== null && top >= programmaticTop) {
+        // Our own scroll (content may have grown since we set it).
+        return;
+      }
+      programmaticTop = top;
+      setLocked(isNearBottom());
+    });
+    // Any of these means the user is driving the scroll, not us.
+    el.addEventListener('wheel', noteInteraction, { passive: true });
+    el.addEventListener('touchmove', noteInteraction, { passive: true });
+    el.addEventListener('pointerdown', noteInteraction, { passive: true });
+    el.addEventListener('keydown', noteInteraction, { passive: true });
+
+    if (onChange) onChange(state.locked);
 
     return {
       get locked() {
@@ -77,7 +124,17 @@
     };
   }
 
-  const messagesScroll = createScrollController(messagesEl);
+  // Green light at the bottom of the scrollbar: lit while auto-scroll is locked
+  // to the newest output, dim when the view is free to stay where the user left it.
+  function renderScrollLock(locked) {
+    if (!scrollLockEl) return;
+    scrollLockEl.classList.toggle('locked', !!locked);
+    scrollLockEl.title = locked
+      ? 'Auto-scroll locked to the newest output'
+      : 'Auto-scroll unlocked — scroll to the bottom to re-lock';
+  }
+
+  const messagesScroll = createScrollController(messagesEl, renderScrollLock);
 
   // Scrolling the message panel (stays pinned to the bottom while locked).
   // Coalesce to one layout per frame — streaming used to force layout on every token.
@@ -87,8 +144,29 @@
     scrollRaf = requestAnimationFrame(() => {
       scrollRaf = null;
       messagesScroll.scrollToBottom();
+      updateScrollLockVisibility();
     });
   }
+
+  // Nothing to scroll (empty or short conversation) — the lock light would just
+  // be a stray dot, so hide it until the transcript overflows.
+  function updateScrollLockVisibility() {
+    if (!scrollLockEl) return;
+    scrollLockEl.classList.toggle(
+      'hidden',
+      messagesEl.scrollHeight - messagesEl.clientHeight <= 1,
+    );
+  }
+
+  // A container resize (sidebar resize, composer growing) moves the bottom
+  // without firing a scroll event, which used to leave a locked view stranded.
+  if (typeof ResizeObserver !== 'undefined') {
+    new ResizeObserver(() => {
+      updateScrollLockVisibility();
+      scrollToBottom();
+    }).observe(messagesEl);
+  }
+  updateScrollLockVisibility();
 
   // ---- Markdown rendering ----
   // The model replies in Markdown. This webview runs in a sandboxed iframe and
@@ -245,6 +323,9 @@
     const last = messagesEl.lastElementChild;
     if (last && last.dataset.kind === 'assistant' && !last.classList.contains('error')) {
       renderAnswer(last, true);
+      // The markdown re-render changes the height (code blocks, lists, images),
+      // so re-pin instead of leaving the tail off-screen.
+      scrollToBottom();
     }
   }
 
@@ -533,6 +614,7 @@
       messagesEl.appendChild(
         el('div', 'empty', 'Welcome. Ask the agent to read or write files, or run a command.'),
       );
+      updateScrollLockVisibility();
       return;
     }
     for (const item of items) {
@@ -1071,6 +1153,7 @@
         clearLiveTools();
         messagesEl.innerHTML = '';
         showEmptyIfNeeded();
+        updateScrollLockVisibility();
         break;
       default:
         break;

@@ -1394,7 +1394,10 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     <button id="new-session-btn" class="icon-btn" title="New session">＋</button>
     <button id="delete-session-btn" class="icon-btn" title="Delete session">🗑</button>
   </div>
-  <div id="messages"></div>
+  <div id="messages-wrap">
+    <div id="messages"></div>
+    <div id="scroll-lock" class="locked" title="Auto-scroll locked to the newest output"></div>
+  </div>
   <div id="bg-panel" class="hidden">
     <div id="bg-head">
       <span class="bg-title">Background</span>
