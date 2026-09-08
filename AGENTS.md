@@ -257,6 +257,17 @@ content. See `parseArgs` in `src/tools/index.ts`.
   to freeze the sidebar after a long session.
 - Tool cards shown in the UI (and persisted `displayItems`) cap args (~8 KiB) and
   result (~32 KiB). Agent `messages` still carry the full tool payload for the model.
+- Auto-scroll is a lock/unlock controller in `media/main.js`
+  (`createScrollController`). It defaults to locked (pinned to the newest output)
+  and unlocks when the user scrolls up. A programmatic `scrollTop = max` fires a
+  scroll event too, and the stream may have grown the content before that event
+  is delivered — so events that land on/below the last programmatic top are
+  ignored (otherwise the view silently unlocked mid-stream and stopped
+  following). While the user is actively scrolling (`wheel` / `touchmove` /
+  `pointerdown` / `keydown`, ~150 ms) snapping pauses so an intentional scroll
+  up wins. A `ResizeObserver` on `#messages` re-pins on container resize.
+  `#scroll-lock` is the green light at the bottom of the scrollbar (lit =
+  locked), hidden while the transcript does not overflow.
 - `[perf]` lines (request JSON size, assistant-round, tool timings, persist, stream
   flush) go to the **Agent Harness** output channel. Open View → Output → "Agent Harness".
 
