@@ -125,6 +125,16 @@ function extractToolArg(tc: InterruptedToolCall): string | null {
   return m && m[1] ? truncateField(m[1]) : null;
 }
 
+/** Tolerant JSON parse for tool-call arguments (used by the sub-agent hook). */
+function parseToolArgs(json: string): Record<string, unknown> {
+  try {
+    const obj = JSON.parse(json || '{}');
+    return obj && typeof obj === 'object' && !Array.isArray(obj) ? (obj as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
 /** Human-readable phrase for a single interrupted tool call, e.g. `write_file` tool call that writes to `path`. */
 function describeToolCall(tc: InterruptedToolCall): string {
   const name = tc.name;
@@ -203,6 +213,85 @@ const READ_IMAGE_TOOL: ToolDefinition = {
         path: { type: 'string', description: 'Path to the image file.' },
       },
       required: ['path'],
+    },
+  },
+};
+
+/**
+ * The main agent can spawn sub-agents. Each spec carries a required `write` flag
+ * (true ⇒ the sub-agent may write files and run commands; false ⇒ read-only),
+ * an `instruction`, and an optional `model`. `mode` is "sync" (block and return
+ * all summaries) or "async" (return immediately, results delivered as notices).
+ */
+const SPAWN_AGENTS_TOOL: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'spawn_agents',
+    description:
+      'Spawn one or more sub-agents as parallel worker branches. Each agent runs its own conversation with a lean prompt and returns a summary. `agents` is an array of { instruction (the task), write (REQUIRED boolean: true allows the sub-agent to write_file / replace_in_file / exec_command; false is read-only: read_file / list_dir / search_files), model (optional; only set a different model when the user explicitly asked you to) }. `mode` is "sync" (default: block until all finish, return every summary) or "async" (return immediately with the agent ids; results are delivered to you as a notice when each finishes).',
+    parameters: {
+      type: 'object',
+      properties: {
+        agents: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              instruction: { type: 'string', description: 'The task for this sub-agent.' },
+              write: { type: 'boolean', description: 'REQUIRED. true = may write files and run commands; false = read-only.' },
+              model: { type: 'string', description: 'Optional different model id. Only set it when the user explicitly asked you to use another model.' },
+            },
+            required: ['instruction', 'write'],
+          },
+        },
+        mode: { type: 'string', enum: ['sync', 'async'], description: 'sync (default) or async.' },
+      },
+      required: ['agents'],
+    },
+  },
+};
+
+/**
+ * The main agent (or a depth-1 sub-agent) can message an already-finished
+ * sub-agent to make it continue: `send_agent_message` appends a follow-up
+ * instruction to that sub-agent's own history and re-runs it. `id` is the agent
+ * node id returned by a previous `spawn_agents`. `write`/`model` optionally
+ * override the run's permission/model (model only for one the user explicitly
+ * asked for). `mode` is "sync" (default: block and return the result) or
+ * "async" (return immediately; the result is delivered as a notice).
+ */
+const SEND_AGENT_MESSAGE_TOOL: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'send_agent_message',
+    description:
+      'Send a follow-up message to a previously spawned (now finished) sub-agent so it resumes and continues its task, then return the result. `id` is the agent node id from a prior spawn_agents result. `message` is the follow-up instruction. `write` (optional) overrides this run\'s write permission (defaults to the sub-agent\'s original). `model` (optional) overrides the model — only set it when the user explicitly asked for a different model. `mode` is "sync" (default: block and return the result) or "async" (return immediately with the id; the result is delivered as a notice).',
+    parameters: {
+      type: 'object',
+      properties: {
+        id: {
+          type: 'string',
+          description: 'The agent node id from a prior spawn_agents result.',
+        },
+        message: {
+          type: 'string',
+          description: 'The follow-up instruction for the sub-agent.',
+        },
+        write: {
+          type: 'boolean',
+          description: 'Optional. Override this run\'s write permission.',
+        },
+        model: {
+          type: 'string',
+          description: "Optional. Override the model. Only set it when the user explicitly asked for a different model.",
+        },
+        mode: {
+          type: 'string',
+          enum: ['sync', 'async'],
+          description: 'sync (default) or async.',
+        },
+      },
+      required: ['id', 'message'],
     },
   },
 };
@@ -332,6 +421,12 @@ export class Agent {
   private pendingImageFiles: Array<{ file_id: string; path: string }> = [];
   private model = '';
   private thinkingEffort: ThinkingEffort = 'none';
+  /** Provider hook that runs sub-agents for the `spawn_agents` tool. */
+  private spawnHandler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null = null;
+  /** Provider hook that resumes a finished sub-agent for the `send_agent_message` tool. */
+  private sendMessageHandler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null = null;
+  /** Whether this agent may spawn sub-agents (a depth-2 sub-agent may not). */
+  private canSpawn = true;
 
   constructor(
     private readonly client: DeepSeekClient,
@@ -354,6 +449,21 @@ export class Agent {
     this.refreshSystemIdentity();
   }
 
+  /** Set a provider hook that runs sub-agents for the `spawn_agents` tool. */
+  setSpawnHandler(handler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null): void {
+    this.spawnHandler = handler;
+  }
+
+  /** Set a provider hook that resumes a finished sub-agent for `send_agent_message`. */
+  setSendMessageHandler(handler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null): void {
+    this.sendMessageHandler = handler;
+  }
+
+  /** Allow/deny this agent from spawning sub-agents (a depth-2 agent may not). */
+  setCanSpawn(v: boolean): void {
+    this.canSpawn = v;
+  }
+
   /**
    * Rewrite the leading system prompt to the current identity (model + effort).
    * The core instructions (CORE_PROMPT) are identical every time, so only the
@@ -372,9 +482,35 @@ export class Agent {
     this.pendingImageFiles = [];
   }
 
-  /** Tool definitions exposed to the model: the registry plus the read_image tool. */
+  /**
+   * Lean system prompt for a sub-agent: a compact worker identity instead of the
+   * full CORE_PROMPT + AGENTS.md (saves tokens), followed by a note that it was
+   * dispatched by the main agent.
+   */
+  static subAgentSystemPrompt(model = '', effort: ThinkingEffort = 'none', depth = 1, write = false): string {
+    const id = identityLines(model, effort);
+    const mode = write
+      ? 'you may read, search, write files, and run commands.'
+      : 'you are read-only: you may read and search files, but may NOT write files or run commands.';
+    return (
+      id.join('\n') +
+      '\n\n你是「子代理」——由主 agent 派遣的一个独立工作单元' +
+      (depth === 2 ? '（子-子代理）' : '') +
+      '。你的目标是把分配给你的任务做完并给出简洁结论；' +
+      mode +
+      '\n- 用中文回答；保持简洁，把结论写清楚。' +
+      '\n- 你只对派发你的 agent 汇报，不要主动越权改别的文件。'
+    );
+  }
+
+  /** Tool definitions exposed to the model: the registry plus read_image and,
+   * for agents that may spawn, spawn_agents + send_agent_message. */
   private getTools(): ToolDefinition[] {
-    return [...this.tools.definitions, READ_IMAGE_TOOL];
+    return [
+      ...this.tools.definitions,
+      READ_IMAGE_TOOL,
+      ...(this.canSpawn ? [SPAWN_AGENTS_TOOL, SEND_AGENT_MESSAGE_TOOL] : []),
+    ];
   }
 
   /**
@@ -416,6 +552,16 @@ export class Agent {
 
   getMessages(): ChatMessage[] {
     return this.messages;
+  }
+
+  /**
+   * Forget a pending interruption notice. The provider calls this when the
+   * active branch changes: the notice only makes sense when the next turn
+   * continues from the turn that was actually interrupted.
+   */
+  resetInterruptState(): void {
+    this.lastTurnInterrupted = false;
+    this.lastInterruptedTools = [];
   }
 
   /** A turn is considered stopped if the stream signal was aborted or Stop was called. */
@@ -665,7 +811,25 @@ export class Agent {
       index,
     });
     const t0 = Date.now();
-    const result = await this.tools.execute(call.function.name, call.function.arguments, signal);
+    let result: string;
+    if (call.function.name === 'spawn_agents') {
+      // Orchestrating sub-agents is the provider's job (node creation, pool,
+      // event routing). Delegate; a fixed string is returned as the tool result.
+      const args = parseToolArgs(call.function.arguments);
+      result = this.spawnHandler
+        ? await this.spawnHandler(args, signal)
+        : 'Error: sub-agents are not available in this session.';
+    } else if (call.function.name === 'send_agent_message') {
+      // Resuming a finished sub-agent is also the provider's job. Delegate; the
+      // result (a resume confirmation or, in sync mode, the follow-up outcome)
+      // is returned as the tool result.
+      const args = parseToolArgs(call.function.arguments);
+      result = this.sendMessageHandler
+        ? await this.sendMessageHandler(args, signal)
+        : 'Error: sub-agent messaging is not available in this session.';
+    } else {
+      result = await this.tools.execute(call.function.name, call.function.arguments, signal);
+    }
     perf(
       `tool ${call.function.name} ${Date.now() - t0}ms args=${call.function.arguments.length} ` +
         `result=${result.length}`,

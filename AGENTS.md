@@ -55,8 +55,8 @@ Launch: F5 (`.vscode/launch.json` → "Run Extension", pre-task `npm: compile`).
 ## Architecture & data flow
 
 ```
-User (sidebar webview)  <--postMessage-->  ChatViewProvider (src/chat)
-                                                    | holds per-session Agent
+User (editor WebviewPanel) <--postMessage--> ChatViewProvider (src/chat)
+                                                    | holds per-session Agent + tree
                                                     v
                                         Agent (src/agent/agent.ts)
                                            | streaming loop
@@ -66,18 +66,18 @@ User (sidebar webview)  <--postMessage-->  ChatViewProvider (src/chat)
                                            v
                                         ToolRegistry (src/tools/index.ts)
                                            |  v
-                                           +  exec_command -> shell detection (src/tools/shell.ts)
++ Sidebar (native TreeView)  SessionsProvider  reads  ChatViewProvider
++                                           +  exec_command -> shell detection (src/tools/shell.ts)
 ```
 
-1. `extension.ts::activate` registers the webview view provider
-   (`agentHarness.chat`) and two commands (`agentHarness.focus`, `agentHarness.clear`).
-2. The webview (`media/main.js`) sends messages (`userMessage`, `stop`,
-   `switchSession`, `setModel`, `clear`, `pickImage`, …). It streams in a
-   sandboxed iframe; it cannot import VS Code's own renderer, so it loads a
-   vendored `markdown-it.min.js`.
-3. `ChatViewProvider.resolveWebviewView` wires the message handler and returns
-   the HTML shell (CSP-safe, `nonce` scripts).
-4. `ChatViewProvider` owns the `Agent` instance and one **session** per
+1. `extension.ts::activate` creates the sidebar `TreeView` (`agentHarness.sessions`)
+   and the commands (`agentHarness.openChat`, `openSession`, `newSession`,
+   `deleteSession`, `clear`, `focus`).
+2. The webview (`media/main.js`) sends messages (`userMessage`, `checkout`,
+   `setModel`, `setThinkingEffort`, `stop`, `clear`, `pickImage`, `setNodeSize`).
+   It streams in a sandboxed iframe and loads a vendored `markdown-it.min.js` plus
+   `media/tree.js` (pure layout).
+3. `ChatViewProvider` owns the `Agent` instance and one **session** per
    conversation. Each session persists its own `messages` (API history) and
    `displayItems` (UI transcript) and is restored from `vscode.Memento`.
 5. `Agent.sendUserMessage` pushes a user message and runs the loop: stream an
@@ -91,8 +91,17 @@ User (sidebar webview)  <--postMessage-->  ChatViewProvider (src/chat)
 ## File map
 
 - `src/extension.ts` — activation; registers the webview provider + commands.
-- `src/chat/ChatViewProvider.ts` — webview provider, session/persistence,
-  config, image attachment, message routing, event→UI mapping, HTML shell.
+- `src/chat/ChatViewProvider.ts` — session/persistence, config, image attachment,
+  message routing, event→UI mapping, HTML shell, and the editor `WebviewPanel`
+  lifecycle (`ensurePanel` / `createPanel` / `postAllState`).
+- `src/chat/ChatPanel.ts` — a thin wrapper around a `WebviewPanel` (the chat
+  surface in the editor area). Single panel in v1; holds a `sessionId` so several
+  panels can live side by side later.
+- `src/chat/SessionsProvider.ts` — the native sidebar `TreeDataProvider` listing
+  session titles; it re-reads items from `ChatViewProvider` on every refresh.
+- `src/chat/tree.ts` — the Chat Tree data model: `TreeNode` / `AgentSession`,
+  path assembly (`pathIds` / `pathMessages`), `attachNode`, `pruneSession`,
+  and the v1→v2 state migration. Pure data layer, no VS Code UI.
 - `src/agent/agent.ts` — the agent loop, the **system prompt** (`CORE_PROMPT`,
   `identityLines`, `buildSystemPrompt`), message sanitizing, interrupt/rollback,
   `AGENTS.md` snapshot (static `agentsMdSnapshot`), model/effort switching.
@@ -111,9 +120,11 @@ User (sidebar webview)  <--postMessage-->  ChatViewProvider (src/chat)
 - `src/tools/shell.ts` — cross-platform shell detection for `exec_command`
   (Git Bash > pwsh > Windows PowerShell 5.1 > cmd.exe) with UTF-8 safeguards.
 - `src/perf.ts` — tiny `[perf]` logger (sink = the Agent Harness output channel).
-- `media/main.js` — webview client (rendering, composer, streaming meter,
-  auto-scroll, live tool drafts).
-- `media/style.css` — chat UI styling.
+- `media/main.js` — webview client (tree rendering, pan/zoom, streaming into the
+  active node, composer, streaming meter, live tool drafts).
+- `media/tree.js` — the Chat Tree layout algorithm (`window.treeLayout`), a pure
+  function with no DOM; `main.js` positions cards with it.
+- `media/style.css` — chat UI styling (incl. tree node cards / toolbar).
 - `media/markdown-it.min.js` — vendored markdown renderer.
 - `build-deploy.ps1` — compile + package + install helper.
 
@@ -130,8 +141,10 @@ User (sidebar webview)  <--postMessage-->  ChatViewProvider (src/chat)
 | `kill_background` | `pid` | Kills a background terminal's process tree. Tool-initiated kills suppress the injected completion notice. |
 | `join_background` | `pid` | Blocks until the background terminal finishes and returns its final exit code + output. Honours Stop. |
 | `read_image` | `path` | Not a registry tool — handled by the Agent. Reads the image, uploads it to the DeepSeek Files API, then injects a `user`-role `file` content block (`{ type: 'file', file_id }`) so the vision model sees it. Returns a short confirmation (path → `file-api-…`, bytes). Only valid on the vision model; unsupported format/too large (>64 MiB) return a friendly error. |
+| `spawn_agents` | `agents`, `mode` | Orchestrated by the provider. Spawns parallel sub-agent branches (`write` REQUIRED, `model?`), `mode: 'sync'` blocks returning summaries, `'async'` returns `{ spawned, async:true, ids }` and delivers one combined notice when the batch settles. Only on agents whose `canSpawn` is true. |
+| `send_agent_message` | `id`, `message`, `write?`, `model?`, `mode` | Orchestrated by the provider. Resumes a finished sub-agent (`id` from a prior `spawn_agents`) with a follow-up. `sync` returns the resumed result, `async` returns `{ resumed, id, async:true }` and delivers the result as a notice. `model` is whitelisted. Only on agents whose `canSpawn` is true. |
 
-> `read_image` is the only tool **not** resolved by `ToolRegistry.execute`; it is intercepted in `Agent.executeToolCall` because a tool message cannot carry an image block, so the image must be delivered as an injected user message. The tools sent to the API are `[...ToolRegistry.definitions, READ_IMAGE_TOOL]` (see `Agent.getTools`).
+> `read_image` is **not** resolved by `ToolRegistry.execute` — it is intercepted in `Agent.executeToolCall` because a tool message cannot carry an image block, so the image must be delivered as an injected user message. Likewise `spawn_agents` and `send_agent_message` are intercepted and delegated to the provider (`setSpawnHandler` / `setSendMessageHandler`); they are only present when `Agent.canSpawn` (a depth-2 sub-agent has neither). The tools sent to the API are `[...ToolRegistry.definitions, READ_IMAGE_TOOL, ...(canSpawn ? [SPAWN_AGENTS_TOOL, SEND_AGENT_MESSAGE_TOOL] : [])]` (see `Agent.getTools`).
 
 Argument parsing is tolerant: strict JSON **or** the verbatim-frame form. The
 frame form lets a tool carry large/multi-line content without JSON escaping:
@@ -206,15 +219,43 @@ content. See `parseArgs` in `src/tools/index.ts`.
   followed by a `user` message is safe on resume.
 
 ### Session persistence & config
-- Storage keys: `agentHarness.state` (sessions incl. `messages` + `displayItems`)
-  and `agentHarness.runtimeConfig` (`model` + `thinkingEffort`).
-- `ChatViewProvider` holds `sessions`/`activeSessionId`; a session is
-  `{ id, title, createdAt, updatedAt, messages, displayItems }`.
-- The active session's `displayItems` is `this.displayItems` (the same array
-  reference is pointed at the session), so in-memory mutations during a turn are
-  persisted. Do **not** reassign it.
+- Storage keys: `agentHarness.state` (v2: `{ version, activeSessionId, sessions }`,
+  each session is a **tree** of `TreeNode`) and `agentHarness.runtimeConfig`
+  (`model` + `thinkingEffort`).
+- A session is `{ id, title, createdAt, updatedAt, nodes: Record<id, TreeNode>,
+  rootId, activeNodeId, orphanItems }`.
+- `this.displayItems` points at the **checked-out node's** `displayItems` during a
+  turn (set in `checkoutNode` / `beginTurn`), so streamed items land in the right
+  node and are persisted with it.
 - Model/effort selections are user-overridable at runtime and persisted;
   settings provide the fallback defaults.
+
+### Chat Tree invariants
+- `TreeNode.messages` (non-empty) always starts with a `user` role message; the
+  system prompt is **never** stored in a node (synthesized per activation).
+- The flat API history is `pathMessages(session, activeNodeId)` = `[system, ...path
+  nodes' messages]`, and it must go through `Agent.sanitizeMessages` (the sanitized
+  copy is **never** written back into the nodes). `prefixLen` is measured on the
+  sanitized path.
+- A turn's message slice is written **once**, in `finishTurn`, as
+  `node.messages = agent.getMessages().slice(turnPrefixLen)`; run `done` /
+  `interrupted` / `error` all end there.
+- Branching: every user message creates a new node under the checked-out node;
+  sending on a node that already has children makes a sibling (a new branch).
+  A branch switch costs only a prefix cache miss — the shared prefix stays cached.
+- Switching to a different branch resets the pending interruption notice
+  (`agent.resetInterruptState()`) unless the new path still ends at the interrupted
+  node; `lastInterruptedNodeId` tracks this.
+- `node.customSize` (optional `{w,h}`) persists a user-resized card; it survives
+  migration via `normalizeTreeSession` and is sent in the `tree` message as `size`.
+- Chat render: the webview lays out the **active path** expanded and all other
+  nodes collapsed; `path` carries per-node items while `tree` carries structure.
+  Checkout re-sends `path` + `panTo` (no `reset`/`tree`) so the tree never tears
+  down, and already-rendered nodes are skipped (`_itemsRendered`) to avoid
+  re-running markdown.
+- Migrating v1 `{messages, displayItems}` splits at each `user` message; items are
+  re-attached by walking both lists (best effort) and the original state is backed
+  up to `agentHarness.state.v1backup`.
 
 ### Background terminals
 - `exec_command` accepts a `timeout_behavior` arg (`stop` default, `move_to_background`,
@@ -248,6 +289,43 @@ content. See `parseArgs` in `src/tools/index.ts`.
   stale entries. The session bar is disabled while `sessionLocked` (busy OR any background job running).
 - `postBackgrounds` is coalesced (~200ms) so a chatty process cannot freeze the webview.
 
+### Sub-agents
+- `spawn_agents({ agents: [{ instruction, write (REQUIRED), model? }], mode })` spawns one or more
+  parallel sub-agents. `write:true` lets a sub-agent write files / run commands; `write:false` is
+  **read-only** (only `read_file` / `list_dir` / `search_files`; the write tools are exposed but
+  **blocked at runtime** by `ToolRegistry.withBlocked`). Depth is hard-capped at 2 — a depth-2
+  sub-agent may not spawn its own sub-agents (`Agent.setCanSpawn(false)` removes `spawn_agents` /
+  `send_agent_message`). `mode:'sync'` blocks and returns `{ results }`; `mode:'async'` returns
+  `{ spawned, async:true, ids }` immediately and the outcome is delivered as **one** injected notice
+  when the batch settles.
+- `send_agent_message({ id, message, write?, model?, mode })` resumes a **finished** sub-agent (the
+  `id` from a prior `spawn_agents`) with a follow-up `message`. `sync` blocks and returns the resumed
+  result; `async` returns immediately and delivers the result as a notice. `model` is validated against
+  the `MODELS` whitelist (unknown → error). A still-running target returns `still running`.
+- A sub-agent is a `kind:'agent'` node — a **display-only sidecar**: its own conversation is a separate
+  history and `pathMessages` (in `tree.ts`) skips it, so it never leaks into the parent's API path. On
+  finish the sub-agent's conversation (minus the synthesized system prompt) is stored in `node.messages`
+  so a follow-up can continue it, even across a restart.
+- Async results for a **sub-agent parent** (a depth-1 sub-agent that spawned depth-2 children in async
+  mode) are routed by `queueSubAgentChildNotice`: if the parent is still running the notice is queued and
+  delivered at its next finish (`flushSubAgentChildNotices`); if it already finished it is auto-resumed
+  with the notice — the mirror of the main agent's async delivery (`subAgentNoticeQueue`).
+- A sub-agent branch is checked-out as **read-only** (composer disabled); only the parent drives it via
+  `spawn_agents` / `send_agent_message`. `onKillAgent` aborts a running sub-agent from its card's ✕.
+- **Stream routing invariant:** the webview streams `nodeId`-less (main-agent) deltas into `messagesEl`,
+  which the provider pins via `mainStreamNodeId()` = `activeTurnNode?.id ?? session.activeNodeId`. That target
+  must **never** be a sub-agent sidecar. `spawnChildren` therefore restores `session.activeNodeId` to
+  `activeTurnNode?.id ?? prevActive` (captured before `attachNode`) instead of `parent.id` — restoring to
+  `parent.id` broke **nested** spawns (where the parent is itself a sub-agent), pinning `messagesEl` to a
+  sub-agent card and letting the main agent's reply leak into that window. `drainSubAgentNotices` also calls
+  `postPath()` before the injected resume turn streams, re-pinning the target. Keep this invariant; the data
+  lives on the parent node regardless (only the live DOM target was wrong).
+- **Layout invariant (`media/tree.js`):** agent windows must be laid out **recursively** — `place(a, ax, ay)`
+  (not just `pos[a] = {x,y}`), with `subWidth(a)` reserving horizontal space and `subHeight(a)` driving the
+  vertical stack. Otherwise an agent node's own children (a depth-2 sub-agent spawned by a depth-1 sub-agent)
+  never get a position, so its card collapses onto the origin and its connector is misplaced. `agentExpanded`
+  walks up the agent ancestors so a depth-2 sub-agent stays open beside its expanded depth-1 parent.
+
 ### Streaming / long-session performance
 - SSE tokens are **not** forwarded 1:1. `ChatViewProvider` coalesces `streamDelta` /
   `reasoningDelta` / `toolCallDelta` (~50ms) and only then `postMessage`s to the webview.
@@ -257,24 +335,22 @@ content. See `parseArgs` in `src/tools/index.ts`.
   to freeze the sidebar after a long session.
 - Tool cards shown in the UI (and persisted `displayItems`) cap args (~8 KiB) and
   result (~32 KiB). Agent `messages` still carry the full tool payload for the model.
-- Auto-scroll is a lock/unlock controller in `media/main.js`
-  (`createScrollController`). It defaults to locked (pinned to the newest output)
-  and unlocks when the user scrolls up. A programmatic `scrollTop = max` fires a
-  scroll event too, and the stream may have grown the content before that event
-  is delivered — so events that land on/below the last programmatic top are
-  ignored (otherwise the view silently unlocked mid-stream and stopped
-  following). While the user is actively scrolling (`wheel` / `touchmove` /
-  `pointerdown` / `keydown`, ~150 ms) snapping pauses so an intentional scroll
-  up wins. A `ResizeObserver` on `#messages` re-pins on container resize.
-  `#scroll-lock` is the green light at the bottom of the scrollbar (lit =
-  locked), hidden while the transcript does not overflow.
+- Transcript scrolling is **per-card**: each node's `.node-items` (and each
+  thinking body) has a `createScrollController` with a green lock dot
+  (`attachLock`). It defaults to locked (pinned to bottom), starts green, and
+  dims when the user scrolls up. During streaming `followActive` calls
+  `scrollToBottom()` which respects the lock (manual scrolling wins); expanding a
+  card calls `lock()` which re-engages it. The tree viewport itself is a pannable
+  canvas (pan/zoom/fit), not a scroll container.
 - `[perf]` lines (request JSON size, assistant-round, tool timings, persist, stream
   flush) go to the **Agent Harness** output channel. Open View → Output → "Agent Harness".
 
 ### Config keys (`agentHarness.*`)
 `apiKey` (or `DEEPSEEK_API_KEY` env), `model`, `baseUrl`, `commandTimeout`
 (seconds, default 120), `maxTurns` (default 20), `contextWindow` (0 = auto),
-`thinkingEffort` (`none|low|medium|high`).
+`thinkingEffort` (`none|low|medium|high`), `foldToolCalls` (default `true`),
+`foldThinking` (default `true`), `maxConcurrentSubagents` (default 15),
+`maxLevel2Subagents` (default 2).
 - Models: `deepseek-chat`, `deepseek-reasoner`, `deepseek-v4-flash`,
   `deepseek-v4-pro`, `deepseek-v4-flash-vision-exp`,
   `deepseek-v4.1-flash-expires-on-0910`.
