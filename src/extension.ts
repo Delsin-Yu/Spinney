@@ -25,5 +25,7 @@ export function activate(context: vscode.ExtensionContext): void {
 }
 
 export function deactivate(): void {
-  // Nothing to clean up.
+  // Kill any background terminals still running so they are not orphaned when
+  // the extension host goes away.
+  chatProvider?.dispose();
 }
