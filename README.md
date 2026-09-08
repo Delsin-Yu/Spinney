@@ -31,7 +31,7 @@ The agent can call these tools:
 Talks to `https://api.deepseek.com/chat/completions` and supports streaming + function calling.
 
 ### 4. Vision (image input)
-Set the model to `deepseek-v4-flash-vision-exp` and attach or paste an image in the chat:
+Set the model to a vision model (`deepseek-v4-flash-vision-exp` or `deepseek-v4.1-flash-expires-on-0910`) and attach or paste an image in the chat:
 - Click the **📎 attach** button to pick an image file, or
 - **Paste** an image (Ctrl/Cmd+V) from your clipboard into the input.
 
@@ -42,6 +42,9 @@ The header shows a live bar + label of **input-token usage vs. the model's conte
 
 ### 6. Multiple persistent sessions
 Create, switch, continue, and delete **multiple agent sessions** from the session bar. Each session keeps its own conversation history and UI transcript. Sessions are persisted to the workspace and restored on reload.
+
+### 7. Workspace instructions (AGENTS.md)
+If the workspace root contains an **`AGENTS.md`** file, its contents are read **once at session start** and appended to the agent's system prompt under a `## Workspace AGENTS.md (project instructions)` heading. The snapshot is fixed for the session — later edits to `AGENTS.md` do **not** propagate to the prompt until a new session is started.
 
 ---
 
@@ -98,7 +101,7 @@ Click **Stop** at any time to interrupt. Click the **clear** (trash) button in t
 - Sessions auto-save (to VS Code workspace storage) and are restored on reload, so you can pick up any conversation later.
 
 ### Sending images (vision)
-1. Set `agentHarness.model` to `deepseek-v4-flash-vision-exp`.
+1. Set `agentHarness.model` to a vision model (`deepseek-v4-flash-vision-exp` or `deepseek-v4.1-flash-expires-on-0910`).
 2. Attach an image with the **📎** button or paste one into the input.
 3. The image is shown as a thumbnail in your message and sent to the model as an `image_url` content part.
 

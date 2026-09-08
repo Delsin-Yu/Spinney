@@ -1,8 +1,9 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { exec } from 'child_process';
 import * as vscode from 'vscode';
 import { AgentTool, ToolDefinition } from '../agent/types';
+import { getShell } from './shell';
+import { BackgroundRegistry, CommandHandle, OUTPUT_CAP, spawnShellCommand } from './background';
 
 /** Resolve the first workspace folder root. */
 export function getWorkspaceRoot(): string {
@@ -27,13 +28,110 @@ function ensureNotAborted(signal?: AbortSignal): void {
   }
 }
 
+// ---- Line-ending helpers ----
+// Text files on Windows often use CRLF. Keep matching and writing endian-agnostic
+// so the model can work in LF (the canonical form returned by read_file) while
+// the file on disk keeps its original style.
+function detectEol(content: string): string {
+  if (content.indexOf('\r\n') !== -1) return '\r\n';
+  if (content.indexOf('\n') !== -1) return '\n';
+  if (content.indexOf('\r') !== -1) return '\r';
+  return '\n';
+}
+
+function toLf(content: string): string {
+  return content.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+}
+
+function applyEol(content: string, eol: string): string {
+  if (eol === '\n') return content;
+  if (eol === '\r') return content.replace(/\n/g, '\r');
+  return content.replace(/\n/g, '\r\n');
+}
+
+function eolLabelOf(content: string): string {
+  const eol = detectEol(content);
+  return eol === '\r\n' ? 'CRLF' : eol === '\r' ? 'CR' : 'LF';
+}
+
+const RAW_TOKEN_RE = /<<<RAW:([A-Za-z0-9_]+)>>>|<<<END_RAW:([A-Za-z0-9_]+)>>>/g;
+
+function truncate(s: string, n = 200): string {
+  return s.length > n ? s.slice(0, n) + '…' : s;
+}
+
+/**
+ * Parse tool-call arguments. Accepts either:
+ *  - strict JSON (the classic OpenAI-compatible contract), or
+ *  - the "verbatim frame" form used to avoid escaping large/multi-line content:
+ *      { "path": "a.ts" }\n<<<RAW:content>>>\n…\n<<<END_RAW:content>>>\n
+ *    A short JSON header holds the small fields; each labeled RAW payload is
+ *    captured verbatim (one framing newline after the open tag is skipped; a
+ *    trailing newline before END_RAW is preserved), then merged into the args.
+ */
+function parseArgs(argsJson: string): Record<string, unknown> {
+  if (argsJson && argsJson.trim()) {
+    try {
+      const parsed = JSON.parse(argsJson);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed as Record<string, unknown>;
+      }
+    } catch {
+      // Not strict JSON; try the frame form below.
+    }
+  }
+
+  const result: Record<string, unknown> = {};
+  RAW_TOKEN_RE.lastIndex = 0;
+  const first = RAW_TOKEN_RE.exec(argsJson);
+  if (!first) {
+    throw new Error(`Could not parse tool arguments as JSON: ${truncate(argsJson)}`);
+  }
+
+  const header = argsJson.slice(0, first.index).trim();
+  if (header) {
+    try {
+      const headerObj = JSON.parse(header) as Record<string, unknown>;
+      if (headerObj && typeof headerObj === 'object' && !Array.isArray(headerObj)) {
+        for (const [key, value] of Object.entries(headerObj)) {
+          result[key] = value;
+        }
+      }
+    } catch {
+      throw new Error(`Tool-arguments JSON header is not valid JSON: ${truncate(header)}`);
+    }
+  }
+
+  const stack: Array<{ label: string; start: number }> = [];
+  RAW_TOKEN_RE.lastIndex = first.index;
+  let match: RegExpExecArray | null;
+  while ((match = RAW_TOKEN_RE.exec(argsJson))) {
+    if (match[1]) {
+      let start = RAW_TOKEN_RE.lastIndex;
+      if (argsJson[start] === '\r' && argsJson[start + 1] === '\n') start += 2;
+      else if (argsJson[start] === '\n') start += 1;
+      stack.push({ label: match[1], start });
+    } else if (match[2]) {
+      const open = stack.pop();
+      if (!open || open.label !== match[2]) {
+        throw new Error(`Mismatched RAW/END_RAW markers in tool arguments (END_RAW:${match[2]}).`);
+      }
+      result[open.label] = argsJson.slice(open.start, match.index);
+    }
+  }
+  if (stack.length > 0) {
+    throw new Error(`Unclosed RAW marker(s): ${stack.map((s) => s.label).join(', ')}.`);
+  }
+  return result;
+}
+
 const readFileTool: AgentTool = {
   definition: {
     type: 'function',
     function: {
       name: 'read_file',
       description:
-        'Read the contents of a text file. Path may be absolute or relative to the workspace root. Optionally read a specific 1-based line range.',
+        'Read the contents of a text file. Path may be absolute or relative to the workspace root. Optionally read a specific 1-based line range. Content is returned with LF line endings (the header reports the on-disk line ending, e.g. CRLF); use read_file output verbatim as replace_in_file oldText.',
       parameters: {
         type: 'object',
         properties: {
@@ -49,16 +147,21 @@ const readFileTool: AgentTool = {
     ensureNotAborted(signal);
     const filePath = resolvePath(String(args.path ?? ''));
     const content = await fs.promises.readFile(filePath, 'utf8');
-    const lines = content.split('\n');
+    // Report the on-disk line ending but always present content in a canonical
+    // LF form so the model sees a stable representation; its future oldText/
+    // newText then lines up regardless of CRLF vs LF.
+    const label = eolLabelOf(content);
+    const normalized = toLf(content);
+    const lines = normalized.split('\n');
     const startLine = typeof args.startLine === 'number' ? args.startLine : 1;
     const endLine = typeof args.endLine === 'number' ? args.endLine : lines.length;
     const slice = lines.slice(Math.max(1, startLine) - 1, Math.min(endLine, lines.length));
     const header = `File: ${filePath}`;
     if (startLine === 1 && endLine >= lines.length) {
-      return `${header} (${lines.length} lines)\n${content}`;
+      return `${header} (${lines.length} lines, ${label})\n${normalized}`;
     }
     const numbered = slice.map((line, i) => `${startLine + i}: ${line}`).join('\n');
-    return `${header} (lines ${startLine}-${Math.min(endLine, lines.length)} of ${lines.length})\n${numbered}`;
+    return `${header} (lines ${startLine}-${Math.min(endLine, lines.length)} of ${lines.length}, ${label})\n${numbered}`;
   },
 };
 
@@ -68,12 +171,13 @@ const writeFileTool: AgentTool = {
     function: {
       name: 'write_file',
       description:
-        'Write content to a file, creating parent directories as needed. Fully overwrites the file. Path may be absolute or relative to the workspace root.',
+        'Write content to a file, creating parent directories as needed. Fully overwrites the file. Path may be absolute or relative to the workspace root. When overwriting an existing file, its line-ending style (CRLF/LF) is preserved. Content may be supplied either as a normal JSON string (escaped) or, for large/multi-line content, as a verbatim frame: set frame:true, put a short JSON header for the path, then frame the content between <<<RAW:content>>> and <<<END_RAW:content>>>.',
       parameters: {
         type: 'object',
         properties: {
           path: { type: 'string', description: 'File path to write.' },
           content: { type: 'string', description: 'Full file content to write.' },
+          frame: { type: 'boolean', description: 'Optional. Set true for large/multi-line content; the harness treats the big fields as a verbatim frame (RAW markers) instead of an escaped JSON string.' },
         },
         required: ['path', 'content'],
       },
@@ -84,8 +188,19 @@ const writeFileTool: AgentTool = {
     const filePath = resolvePath(String(args.path ?? ''));
     const content = String(args.content ?? '');
     await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
-    await fs.promises.writeFile(filePath, content, 'utf8');
-    return `Wrote ${filePath} (${content.length} characters).`;
+    // Preserve the line-ending style of an existing file so rewriting a CRLF
+    // file with LF content does not flip the whole file. New files are written
+    // exactly as supplied.
+    let finalContent = content;
+    let label = eolLabelOf(content);
+    if (fs.existsSync(filePath)) {
+      const existing = await fs.promises.readFile(filePath, 'utf8');
+      label = eolLabelOf(existing);
+      finalContent = applyEol(toLf(content), detectEol(existing));
+    }
+    await fs.promises.writeFile(filePath, finalContent, 'utf8');
+    const lines = toLf(finalContent).split('\n').length;
+    return `Wrote ${filePath} (${lines} lines, ${label}).`;
   },
 };
 
@@ -95,13 +210,14 @@ const replaceInFileTool: AgentTool = {
     function: {
       name: 'replace_in_file',
       description:
-        'Replace an exact substring in a file with new text. The oldText must appear exactly once, otherwise an error is returned. Use for surgical edits.',
+        'Replace an exact substring in a file with new text. The oldText must appear exactly once, otherwise an error is returned. Use for surgical edits. Matching is done in normalized LF, so CRLF vs LF never breaks a match; the file is written back with its original line endings. Old and new text may be normal JSON strings or, for large/multi-line snippets, verbatim frames: set frame:true, put a JSON header for the path, then <<<RAW:oldText>>>...<<<END_RAW:oldText>>> and <<<RAW:newText>>>...<<<END_RAW:newText>>>.',
       parameters: {
         type: 'object',
         properties: {
           path: { type: 'string', description: 'File path to edit.' },
           oldText: { type: 'string', description: 'Exact text to find.' },
           newText: { type: 'string', description: 'Replacement text.' },
+          frame: { type: 'boolean', description: 'Optional. Set true for large/multi-line oldText/newText; the harness treats them as verbatim frames (RAW markers) instead of escaped JSON strings.' },
         },
         required: ['path', 'oldText', 'newText'],
       },
@@ -116,16 +232,25 @@ const replaceInFileTool: AgentTool = {
       throw new Error('oldText must not be empty.');
     }
     const content = await fs.promises.readFile(filePath, 'utf8');
-    const count = content.split(oldText).length - 1;
+    const eol = detectEol(content);
+    // Match and replace in canonical LF, then write back in the original style.
+    const matchContent = toLf(content);
+    const matchOld = toLf(oldText);
+    const matchNew = toLf(newText);
+    const count = matchContent.split(matchOld).length - 1;
     if (count === 0) {
-      throw new Error(`Could not find oldText in ${filePath}.`);
+      throw new Error(
+        `Could not find oldText in ${filePath}. The file uses ${eolLabelOf(content)} line endings; ` +
+        'verify the exact text (including indentation) against read_file output.',
+      );
     }
     if (count > 1) {
       throw new Error(
         `oldText is ambiguous in ${filePath}: found ${count} occurrences. Provide more context.`,
       );
     }
-    await fs.promises.writeFile(filePath, content.replace(oldText, newText), 'utf8');
+    const result = matchContent.replace(matchOld, matchNew);
+    await fs.promises.writeFile(filePath, applyEol(result, eol), 'utf8');
     return `Replaced one occurrence in ${filePath}.`;
   },
 };
@@ -158,94 +283,331 @@ const listDirTool: AgentTool = {
   },
 };
 
-function runCommand(
+/**
+ * Run a command in the foreground and resolve with a human-readable result
+ * (mirroring the original exec_command contract). When `moveOnTimeout` is set
+ * and the command is still running at `timeoutMs`, it is promoted to a
+ * background terminal (registered in `registry`) instead of being killed, and
+ * the resolved message tells the agent the background id to manage it with.
+ */
+function runForeground(
+  handle: CommandHandle,
   command: string,
   cwd: string,
   timeoutMs: number,
-  signal?: AbortSignal,
+  signal: AbortSignal | undefined,
+  moveOnTimeout: boolean,
+  registry: BackgroundRegistry | null,
 ): Promise<string> {
   return new Promise((resolve) => {
-    const child = exec(
-      command,
-      {
-        cwd,
-        timeout: timeoutMs,
-        maxBuffer: 16 * 1024 * 1024,
-        windowsHide: true,
-      },
-      (error, stdout, stderr) => {
-        const out = `${stdout || ''}${stderr || ''}`.trim();
-        if (error) {
-          const code = typeof error.code === 'number' ? error.code : 'unknown';
-          resolve(
-            `[command exited with code ${code}]\n${out}\n${error.message}`.trim(),
-          );
-        } else {
-          resolve(out || '(command completed with no output)');
-        }
-      },
-    );
+    let settled = false;
+    let timer: NodeJS.Timeout | undefined;
+    let abortHandler: (() => void) | undefined;
 
-    if (signal) {
-      if (signal.aborted) {
-        child.kill();
-        resolve('[command was interrupted]');
+    const cleanup = () => {
+      if (timer) clearTimeout(timer);
+      if (abortHandler && signal) signal.removeEventListener('abort', abortHandler);
+    };
+
+    const finish = (
+      reason: 'close' | 'start' | 'timeout' | 'aborted',
+      code?: number | null,
+      message?: string,
+    ) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      const out = handle.getOutput().trim();
+      let msg: string;
+      if (reason === 'aborted') {
+        msg = '[command was interrupted]';
+      } else if (reason === 'start') {
+        msg = `[command failed to start: ${message ?? 'unknown error'}]\n${out}`.trim();
+      } else if (reason === 'timeout') {
+        msg = `[command timed out after ${timeoutMs} ms]\n${out}`.trim();
+      } else if (handle.isTruncated()) {
+        msg = `[command output exceeded ${OUTPUT_CAP} bytes; truncated]\n${out}`.trim();
+      } else if (code !== 0) {
+        msg = `[command exited with code ${code ?? 'unknown'}]\n${out}`.trim();
+      } else {
+        msg = out || '(command completed with no output)';
+      }
+      resolve(msg);
+    };
+
+    handle.child.on('error', (err) => finish('start', null, err.message));
+    handle.child.on('close', (code) => finish('close', code));
+
+    timer = setTimeout(() => {
+      if (settled) return;
+      if (moveOnTimeout && registry) {
+        // Promote the still-running process to a background terminal rather than
+        // killing it. The foreground listeners stay attached but are inert
+        // (settled is true) once the process eventually exits.
+        settled = true;
+        cleanup();
+        const id = registry.register(handle, command, cwd);
+        const soFar = handle.getOutput().trim();
+        const out = soFar ? `\nOutput so far:\n${soFar}` : '';
+        resolve(
+          `[command moved to background: id ${id}]\n` +
+          `Command: ${command}\n` +
+          `Working directory: ${cwd}\n` +
+          `Use check_background_terminal(${id}), join_background(${id}), or kill_background(${id}) to manage it.${out}`,
+        );
         return;
       }
-      signal.addEventListener(
-        'abort',
-        () => {
-          child.kill();
-          resolve('[command was interrupted]');
-        },
-        { once: true },
-      );
+      handle.kill();
+      finish('timeout');
+    }, timeoutMs);
+
+    if (signal) {
+      abortHandler = () => {
+        handle.kill();
+        finish('aborted');
+      };
+      if (signal.aborted) {
+        abortHandler();
+        return;
+      }
+      signal.addEventListener('abort', abortHandler, { once: true });
     }
   });
 }
 
-const execCommandTool: AgentTool = {
-  definition: {
-    type: 'function',
-    function: {
-      name: 'exec_command',
-      description:
-        'Run a shell command in the workspace root and return its combined stdout/stderr. Use for builds, tests, git, npm, etc. Optionally set cwd relative to the workspace root.',
-      parameters: {
-        type: 'object',
-        properties: {
-          command: { type: 'string', description: 'The shell command to run.' },
-          cwd: { type: 'string', description: 'Working directory, relative to workspace root.' },
-          timeout: { type: 'number', description: 'Timeout in seconds (default 120).' },
+function makeExecCommandTool(getRegistry: () => BackgroundRegistry | null): AgentTool {
+  return {
+    definition: {
+      type: 'function',
+      function: {
+        name: 'exec_command',
+        description:
+          'Run a shell command in the workspace root and return its combined stdout/stderr. Use for builds, tests, git, npm, etc. Optionally set cwd relative to the workspace root. Set timeout (seconds, default 120). timeout_behavior controls what happens when a command runs past timeout: "stop" (default) kills it, "move_to_background" promotes the still-running command to a background terminal (returns its id), and "start_in_background" launches it in the background immediately (returns its id and does not wait). Commands run through the detected shell (currently ' +
+          getShell().label +
+          ') and in that shell syntax (bash-style for Git Bash, PowerShell syntax otherwise).',
+        parameters: {
+          type: 'object',
+          properties: {
+            command: { type: 'string', description: 'The shell command to run.' },
+            cwd: { type: 'string', description: 'Working directory, relative to workspace root.' },
+            timeout: { type: 'number', description: 'Timeout in seconds (default 120).' },
+            timeout_behavior: {
+              type: 'string',
+              enum: ['stop', 'move_to_background', 'start_in_background'],
+              description:
+                'What to do on timeout: "stop" (kill, default), "move_to_background", or "start_in_background".',
+            },
+          },
+          required: ['command'],
         },
-        required: ['command'],
       },
     },
-  },
-  async execute(args, signal) {
-    const command = String(args.command ?? '');
-    if (!command) {
-      throw new Error('Command must not be empty.');
-    }
-    const cwd = args.cwd ? resolvePath(String(args.cwd)) : getWorkspaceRoot();
-    const timeoutMs = (typeof args.timeout === 'number' ? args.timeout : 120) * 1000;
-    return runCommand(command, cwd, timeoutMs, signal);
-  },
-};
+    async execute(args, signal) {
+      const command = String(args.command ?? '');
+      if (!command) {
+        throw new Error('Command must not be empty.');
+      }
+      const cwd = args.cwd ? resolvePath(String(args.cwd)) : getWorkspaceRoot();
+      const timeoutSec = typeof args.timeout === 'number' ? args.timeout : 120;
+      const timeoutMs = timeoutSec * 1000;
+      const behavior = String(args.timeout_behavior ?? 'stop');
+      if (behavior !== 'stop' && behavior !== 'move_to_background' && behavior !== 'start_in_background') {
+        throw new Error(
+          `Invalid timeout_behavior "${behavior}". Use "stop", "move_to_background", or "start_in_background".`,
+        );
+      }
+      const registry = getRegistry();
+      if ((behavior === 'move_to_background' || behavior === 'start_in_background') && !registry) {
+        throw new Error('Background terminals are not available in this session.');
+      }
+      const handle = spawnShellCommand(command, cwd, { killOnTruncate: behavior === 'stop' });
+
+      if (behavior === 'start_in_background') {
+        const id = registry!.register(handle, command, cwd);
+        return (
+          `[command started in background: id ${id}]\n` +
+          `Command: ${command}\n` +
+          `Working directory: ${cwd}\n` +
+          `Use check_background_terminal(${id}), join_background(${id}), or kill_background(${id}) to manage it.`
+        );
+      }
+
+      return runForeground(handle, command, cwd, timeoutMs, signal, behavior === 'move_to_background', registry);
+    },
+  };
+}
+
+function makeCheckBackgroundTool(getRegistry: () => BackgroundRegistry | null): AgentTool {
+  return {
+    definition: {
+      type: 'function',
+      function: {
+        name: 'check_background_terminal',
+        description:
+          'Check the status of a background terminal started by exec_command (timeout_behavior = move_to_background / start_in_background). Returns whether it is running or finished, its exit code (when finished), and the output accumulated so far.',
+        parameters: {
+          type: 'object',
+          properties: {
+            pid: { type: 'number', description: 'The background terminal id returned by exec_command.' },
+          },
+          required: ['pid'],
+        },
+      },
+    },
+    async execute(args, signal) {
+      const registry = getRegistry();
+      if (!registry) {
+        return 'Error: background terminals are not available in this session.';
+      }
+      const id = Number(args.pid);
+      if (!Number.isFinite(id)) {
+        return 'Error: check_background_terminal requires a numeric pid.';
+      }
+      const task = registry.get(id);
+      if (!task) {
+        return `Error: no background terminal with id ${id}.`;
+      }
+      const elapsed = Math.round((Date.now() - task.startedAt) / 1000);
+      const out = task.handle.getOutput().trim();
+      const statusLine = task.killed
+        ? `Background terminal ${id} was killed. (command: ${task.command})`
+        : task.status === 'running'
+          ? `Background terminal ${id} is running. (command: ${task.command}, ${elapsed}s elapsed)`
+          : `Background terminal ${id} finished with exit code ${task.exitCode ?? 'unknown'}.`;
+      const outLine = out ? `\nOutput:\n${out}` : '';
+      return `${statusLine}${outLine}`;
+    },
+  };
+}
+
+function makeKillBackgroundTool(getRegistry: () => BackgroundRegistry | null): AgentTool {
+  return {
+    definition: {
+      type: 'function',
+      function: {
+        name: 'kill_background',
+        description:
+          'Kill a background terminal identified by its pid (returned by exec_command). The process tree is torn down. Returns a short confirmation. Use when a long-running command no longer needs to keep running.',
+        parameters: {
+          type: 'object',
+          properties: {
+            pid: { type: 'number', description: 'The background terminal id returned by exec_command.' },
+          },
+          required: ['pid'],
+        },
+      },
+    },
+    async execute(args, signal) {
+      const registry = getRegistry();
+      if (!registry) {
+        return 'Error: background terminals are not available in this session.';
+      }
+      const id = Number(args.pid);
+      if (!Number.isFinite(id)) {
+        return 'Error: kill_background requires a numeric pid.';
+      }
+      const task = registry.get(id);
+      if (!task) {
+        return `Error: no background terminal with id ${id}.`;
+      }
+      if (task.status !== 'running') {
+        return `Background terminal ${id} is not running (exit code ${task.exitCode ?? 'unknown'}).`;
+      }
+      // Tool-initiated kill: the result below already informs the agent, so the
+      // harness must not emit a second (injected) completion notification.
+      registry.kill(id, { notifyAgent: false });
+      return `Killed background terminal ${id} (command: ${task.command}).`;
+    },
+  };
+}
+
+function makeJoinBackgroundTool(getRegistry: () => BackgroundRegistry | null): AgentTool {
+  return {
+    definition: {
+      type: 'function',
+      function: {
+        name: 'join_background',
+        description:
+          'Block until a background terminal (by pid) finishes, then return its final exit code and full accumulated output. Respects Stop. Use to wait for a command you moved to the background and collect its result.',
+        parameters: {
+          type: 'object',
+          properties: {
+            pid: { type: 'number', description: 'The background terminal id returned by exec_command.' },
+          },
+          required: ['pid'],
+        },
+      },
+    },
+    async execute(args, signal) {
+      const registry = getRegistry();
+      if (!registry) {
+        return 'Error: background terminals are not available in this session.';
+      }
+      const id = Number(args.pid);
+      if (!Number.isFinite(id)) {
+        return 'Error: join_background requires a numeric pid.';
+      }
+      const task = registry.get(id);
+      if (!task) {
+        return `Error: no background terminal with id ${id}.`;
+      }
+      // Suppress the separate completion notification: the join result (or an
+      // interruption) tells the agent. On interruption re-enable it so a later
+      // natural finish still notifies.
+      task.notifyAgent = false;
+      try {
+        await registry.waitFor(id, signal);
+      } catch (err) {
+        task.notifyAgent = true;
+        if (signal?.aborted) {
+          return '[command join was interrupted]';
+        }
+        return `Error: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      const done = registry.get(id)!;
+      const out = done.handle.getOutput().trim();
+      const resultLine = done.killed
+        ? `Background terminal ${id} was killed.`
+        : `Background terminal ${id} finished with exit code ${done.exitCode ?? 'unknown'}.`;
+      return `${resultLine}${out ? `\nOutput:\n${out}` : ''}`;
+    },
+  };
+}
 
 export class ToolRegistry {
   private readonly tools = new Map<string, AgentTool>();
+  private backgroundRegistry: BackgroundRegistry | null = null;
 
   constructor() {
+    this.buildTools();
+  }
+
+  /** (Re)build the tool set, wiring the background-aware tools to the active registry. */
+  private buildTools(): void {
+    this.tools.clear();
+    const getRegistry = () => this.backgroundRegistry;
     for (const tool of [
       readFileTool,
       writeFileTool,
       replaceInFileTool,
       listDirTool,
-      execCommandTool,
+      makeExecCommandTool(getRegistry),
+      makeCheckBackgroundTool(getRegistry),
+      makeKillBackgroundTool(getRegistry),
+      makeJoinBackgroundTool(getRegistry),
     ]) {
       this.tools.set(tool.definition.function.name, tool);
     }
+  }
+
+  /**
+   * Point the background-aware tools at a session's registry (one per session).
+   * Called on session activation so exec_command and the background tools read
+   * the active session's registry.
+   */
+  setBackgroundRegistry(registry: BackgroundRegistry | null): void {
+    this.backgroundRegistry = registry;
+    this.buildTools();
   }
 
   get definitions(): ToolDefinition[] {
@@ -263,9 +625,9 @@ export class ToolRegistry {
     }
     let args: Record<string, unknown>;
     try {
-      args = JSON.parse(argsJson || '{}');
-    } catch {
-      return `Error: could not parse tool arguments as JSON: ${argsJson}`;
+      args = parseArgs(argsJson || '{}');
+    } catch (err) {
+      return `Error: could not parse tool arguments: ${err instanceof Error ? err.message : String(err)}`;
     }
     try {
       return await tool.execute(args, signal);
