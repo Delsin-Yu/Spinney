@@ -58,8 +58,20 @@ function truncate(s: string, n = 200): string {
   return s.length > n ? s.slice(0, n) + '…' : s;
 }
 
-/** Directory for oversized tool results (outside the workspace, so no repo pollution). */
-const SPILL_DIR = path.join(os.tmpdir(), 'agent-harness-tool-output');
+/**
+ * Where oversized tool results are spilled. Workspace-local `.agent-harness/`
+ * keeps every agent-produced artifact in one place; it falls back to the system
+ * temp dir when no workspace folder is open. `.agent-harness` is in `SKIP_DIRS`,
+ * so a repo-wide search never returns the agent's own scratch — grep a spilled
+ * file by passing its exact path instead (single-file search still works).
+ */
+function spillDir(): string {
+  try {
+    return path.join(getWorkspaceRoot(), '.agent-harness', 'tool-output');
+  } catch {
+    return path.join(os.tmpdir(), 'agent-harness-tool-output');
+  }
+}
 /** Fallback inline cap when `agentHarness.maxInlineToolOutput` is absent. */
 const DEFAULT_INLINE_LIMIT = 32 * 1024;
 
@@ -78,9 +90,10 @@ function limitInline(text: string, tool: string): string {
     return text;
   }
   try {
-    fs.mkdirSync(SPILL_DIR, { recursive: true });
+    const dir = spillDir();
+    fs.mkdirSync(dir, { recursive: true });
     const file = path.join(
-      SPILL_DIR,
+      dir,
       `${tool}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}.txt`,
     );
     fs.writeFileSync(file, text, 'utf8');
@@ -377,7 +390,7 @@ const MAX_SEARCH_FILE = 1_000_000;
 const MAX_SEARCH_FILES = 4000;
 const MAX_SEARCH_MATCHES = 300;
 const MAX_CONTEXT_LINES = 10;
-const SKIP_DIRS = new Set(['node_modules', '.git', 'out', 'dist', 'build']);
+const SKIP_DIRS = new Set(['node_modules', '.git', 'out', 'dist', 'build', '.agent-harness']);
 
 function globToRegex(glob: string): RegExp {
   const s = glob

@@ -1,6 +1,7 @@
 .vscode/**
 .vscode-test/**
 tools/**
+.agent-harness/**
 src/**
 node_modules/**
 .gitignore

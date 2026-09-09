@@ -25,3 +25,6 @@ Thumbs.db
 
 # Hyper-Vscode supervisor state (daemon token, logs, isolated profiles)
 tools/hyper-vscode/.state/
+
+# Agent scratch space (screenshots, spilled tool output)
+.agent-harness/
