@@ -82,9 +82,19 @@ export interface ControlHost {
   /**
    * Start a session and optionally send a caller-supplied prompt as its first
    * turn. Without `sessionId` a fresh session is created (and titled from the
-   * prompt); with it the caller jumps to that session instead.
+   * prompt); with it the caller jumps to that session instead. `returnTo` arms a
+   * hop: the fresh session's final answer is delivered back to the session that
+   * was active when the hop was queued, as a new branch off `returnNodeId` when
+   * that is given. `nodeId` checks out a node in the target session first.
    */
-  controlStartSession(opts: { sessionId?: string; title?: string; prompt?: string }): Promise<ControlResult>;
+  controlStartSession(opts: {
+    sessionId?: string;
+    nodeId?: string;
+    title?: string;
+    prompt?: string;
+    returnTo?: boolean;
+    returnNodeId?: string;
+  }): Promise<ControlResult>;
   /**
    * Reload this window (`workbench.action.reloadWindow`). The only way to restart
    * an instance that shares the user's profile — the supervisor cannot kill it
@@ -262,8 +272,11 @@ export class ControlServer implements vscode.Disposable {
         const body = await this.readBody(req);
         const result = await this.host.controlStartSession({
           sessionId: typeof body.sessionId === 'string' ? body.sessionId : undefined,
+          nodeId: typeof body.nodeId === 'string' ? body.nodeId : undefined,
           title: typeof body.title === 'string' ? body.title : undefined,
           prompt: typeof body.prompt === 'string' ? body.prompt : undefined,
+          returnTo: body.returnTo === true,
+          returnNodeId: typeof body.returnNodeId === 'string' ? body.returnNodeId : undefined,
         });
         send(result.ok ? (result.queued ? 202 : 200) : 409, result);
         return;

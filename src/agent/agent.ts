@@ -21,28 +21,19 @@ const CORE_PROMPT = [
   '## 语言',
   '- 默认简体中文（zh-Hans），主动用中文答；用户用其他语言也保持中文，除非用户明确要求用别的语言。',
   '- 代码、文件路径、命令输出、标识符保持原样，不翻译。',
-  '- 中文正文要自然、地道，禁止机翻腔／AI 腔：不生造英文直译的别扭说法（如 take effect→「咬人」、land→「落地」、gate→「闸门」），不中英夹杂、不堆术语、不故作高深；拿不准就写大白话。代码／标识符仍保持英文。',
-  '- 默认保持轻松语气；只有安全／医疗／法律／财务、用户明确需求正式、生产事故／正式文档、或会误导时才回到正经回答。',
   '',
   '## 该问就问',
   '- 请求真的含糊（多种理解、缺关键细节、选择会改变结果）时，先问一个短澄清问题，列出最可能的选项，让用户一句话能答；意图清楚就直接做，别瞎猜。',
   '',
   '## 工具',
-  '通过函数调用（tool_calls）调工具，一次一个，等结果再走下一步；不要自己写工具 JSON，直接发调用。',
-  '- read_file(path, startLine?, endLine?) — 读文件，可选行号范围（从 1 开始）。',
-  '- write_file(path, content) — 覆盖写文件（自动建父目录）。',
-  '- replace_in_file(path, oldText, newText) — 精确子串替换；oldText 必须只出现一次。',
-  '- list_dir(path) — 列目录。',
-  '- exec_command(command, cwd?, timeout?, timeout_behavior?) — 在工作区根目录跑 shell 命令；timeout_behavior 取 "stop"（默认，超时即杀掉）/ "move_to_background"（超时转为后台并返回 id）/ "start_in_background"（立刻后台运行并返回 id）。',
-  '- check_background_terminal(pid) — 查询后台命令是否还在跑、退出码与已累积输出。',
-  '- kill_background(pid) — 杀掉某个后台命令（可随时调）。',
-  '- join_background(pid) — 阻塞等待某个后台命令结束并取回完整输出（会响应 Stop）。',
-  '- read_image(path) — 读磁盘里的图片给视觉模型看（仅 deepseek-v4-flash-vision-exp / deepseek-v4.1-flash-expires-on-0910 支持；图片会被上传到 Files API 并以 file_id 引用）。',
-  '',
-  '## 后台终端',
-  '- 用 exec_command 的 timeout_behavior=start_in_background / move_to_background 会把耗时命令转为后台终端，并返回一个 id（这是给 agent 用的代号，不是真实 OS pid）。',
-  '- 用 check_background_terminal / kill_background / join_background 管理某个 id；join 会阻塞到命令结束，适合“等后台构建跑完再取结果”。',
-  '- 后台命令自然结束或被用户杀掉时，harness 会在合适的时机（当前回合结束后）把通知注入给你。',
+  '基础工具（schema 里已列，直接调用）：read_file / write_file / replace_in_file / list_dir / search_files / exec_command / list_advanced_tool',
+  '折叠工具（schema 里不展开，但可直接调用；参数不确定先 list_advanced_tool("<topic>") 取接口；更详细的说明见工作区 AGENTS.md 指向的文档）：',
+  '- background-terminal — check_background_terminal / kill_background / join_background：管理 exec_command 后台模式起的长期任务',
+  '- sub-agents — spawn_agents / send_agent_message：并行派子代理、恢复它们继续干',
+  '- transcripts — search_transcripts：检索历史会话和子代理的完整记录',
+  '- vision — read_image：让视觉模型看磁盘上的图片',
+  '- file-verbatim-frame — frame:true + RAW 标记：写大段多行内容免转义（write_file / replace_in_file 的参数）',
+  '- session-hop — hop_session / list_nodes：把任务交给新会话并在跑完后跳回；列出当前会话的对话树',
   '',
   '## 调用规范',
   '- 参数给完整合法 JSON；编辑文件前先读，用 read_file 输出原样作 oldText。',
@@ -50,21 +41,8 @@ const CORE_PROMPT = [
   '- 有依赖的步骤等上一步结果，别并行瞎发；任务做完直接回一句话，不再调工具。',
   '',
   '## 写内容不转义',
-  '- 大段/多行内容用 verbatim frame，免得转义换行、引号、反斜杠。',
-  '- write_file：JSON 头（path）放前，内容包在标记里：',
-  '  { "path": "src/a.ts" }',
-  '  <<<RAW:content>>>',
-  '  ...原样文本（任意字符、任意换行）...',
-  '  <<<END_RAW:content>>>',
-  '- replace_in_file：',
-  '  { "path": "src/a.ts" }',
-  '  <<<RAW:oldText>>>',
-  '  ...要匹配的原文...',
-  '  <<<END_RAW:oldText>>>',
-  '  <<<RAW:newText>>>',
-  '  ...替换文本...',
-  '  <<<END_RAW:newText>>>',
-  '- JSON 头里设 frame:true 走 verbatim；字段名必须完全匹配（content/oldText/newText），大字符串才用 frame。',
+  '- 大段/多行内容用 verbatim frame 免转义：JSON 头（path 等）放前，内容包在 `<<<RAW:字段名>>>`…`<<<END_RAW:字段名>>>` 里，JSON 头里设 frame:true；字段名必须精确匹配（content/oldText/newText）。',
+  '- 细节和完整示例见折叠工具 `file-verbatim-frame`（list_advanced_tool("file-verbatim-frame")）。',
   '',
   '## 风格',
   '- 在用户工作区干活，路径可绝对或相对根；回复简洁，解释放回复不放文件。',
@@ -356,6 +334,54 @@ const SEND_AGENT_MESSAGE_TOOL: ToolDefinition = {
   },
 };
 
+/**
+ * Hand a self-contained task to a **fresh session** and get its answer back.
+ * Orchestrated by the provider: the hop is queued (the current turn has to end
+ * first), a new session runs `prompt` as its first message, and when that turn
+ * finishes the harness switches back here and delivers the new session's final
+ * answer as a user message. Only the main agent sees this tool.
+ */
+const HOP_SESSION_TOOL: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'hop_session',
+    description:
+      'Hand a self-contained task to a **fresh conversation** and get its final answer back. The hop is queued and returns immediately — your current turn ends. A new session is created, `prompt` runs there as its first message, and when that turn finishes the harness switches back to this session and delivers the new session\'s final answer to you as a user message (you resume in a new turn). Use it for a long, self-contained job that benefits from a clean context, or to try something in a fresh session without polluting this conversation. The new session cannot see this conversation, so `prompt` must be self-contained. `returnNodeId` (see `list_nodes`) makes the answer come back as a **new branch** off that node instead of continuing the checked-out node — use it to keep the result out of the current line of conversation. One hop at a time; do not use it for work you can finish here.',
+    parameters: {
+      type: 'object',
+      properties: {
+        prompt: {
+          type: 'string',
+          description: 'The full, self-contained task for the new session (it cannot see this conversation).',
+        },
+        title: { type: 'string', description: 'Optional short title for the new session.' },
+        returnNodeId: {
+          type: 'string',
+          description:
+            'Optional node id in THIS session to branch from when the answer comes back (see list_nodes). Omit to continue the checked-out node.',
+        },
+      },
+      required: ['prompt'],
+    },
+  },
+};
+
+/**
+ * Read-only view of the active session's chat tree, so the agent can name a
+ * node (e.g. as `hop_session`\'s `returnNodeId`) instead of guessing. Node ids
+ * are otherwise invisible to the model: they live in the persisted tree, not in
+ * the prompt.
+ */
+const LIST_NODES_TOOL: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'list_nodes',
+    description:
+      'List the chat tree of the active session: one line per node with its id, status, parent and title, plus which node is currently checked out. Use it to pick a `returnNodeId` for hop_session, or to understand how the conversation branched.',
+    parameters: { type: 'object', properties: {}, required: [] },
+  },
+};
+
 /** The identity lines shared by the leading system prompt. */
 function identityLines(model: string, effort: ThinkingEffort): string[] {
   const lines: string[] = [
@@ -488,10 +514,16 @@ export class Agent {
   private spawnHandler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null = null;
   /** Provider hook that resumes a finished sub-agent for the `send_agent_message` tool. */
   private sendMessageHandler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null = null;
+  /** Provider hook that hands a task to a fresh session for the `hop_session` tool. */
+  private hopHandler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null = null;
+  /** Provider hook that renders the active session's tree for `list_nodes`. */
+  private listNodesHandler: (() => Promise<string>) | null = null;
   /** Whether `spawn_readonly_agents` is exposed (read-only agents only). */
   private canSpawnReadOnly = false;
   /** Whether this agent may spawn sub-agents (a depth-2 sub-agent may not). */
   private canSpawn = true;
+  /** Whether `hop_session` is exposed (main agent only). */
+  private canHop = false;
   /**
    * Images the provider rejected as unsupported (by `file_id` / `image_url`).
    * They are hidden from every request body rather than deleted from the stored
@@ -530,6 +562,21 @@ export class Agent {
   /** Set a provider hook that resumes a finished sub-agent for `send_agent_message`. */
   setSendMessageHandler(handler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null): void {
     this.sendMessageHandler = handler;
+  }
+
+  /** Set a provider hook that hands a task to a fresh session for `hop_session`. */
+  setHopHandler(handler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null): void {
+    this.hopHandler = handler;
+  }
+
+  /** Set a provider hook that renders the active session's tree for `list_nodes`. */
+  setListNodeHandler(handler: (() => Promise<string>) | null): void {
+    this.listNodesHandler = handler;
+  }
+
+  /** Allow/deny this agent from hopping to a fresh session (main agent only). */
+  setCanHop(v: boolean): void {
+    this.canHop = v;
   }
 
   /** Allow/deny this agent from spawning sub-agents (a depth-2 agent may not). */
@@ -585,22 +632,21 @@ export class Agent {
       '\n- 你只对派发你的 agent 汇报，不要主动越权改别的文件。' +
       (depth < 2 && !write
         ? '\n- 如果任务可以拆成若干**互不依赖**、各自需要大量阅读的部分（例如逐个文件/逐个模块审查），' +
-          '用 spawn_readonly_agents 并行派只读子代理，再汇总它们的结论；' +
+          '用 spawn_readonly_agents（它的 schema 已折叠，参数不确定先 list_advanced_tool("sub-agents")）' +
+          '并行派只读子代理，再汇总它们的结论；' +
           '单点查询、几个文件就能答完的任务不要派。'
         : '')
     );
   }
 
-  /** Tool definitions exposed to the model: the registry plus read_image and,
-   * for agents that may spawn, spawn_agents + send_agent_message; a read-only
-   * agent that may fan out gets spawn_readonly_agents instead. */
+  /**
+   * Tool definitions exposed to the model. Advanced tools (read_image, spawn_*,
+   * send_*, hop_session, list_nodes) and the folded registry tools are no longer
+   * advertised: the model reads their interface via `list_advanced_tool` and can
+   * still call them (execution is unchanged).
+   */
   private getTools(): ToolDefinition[] {
-    return [
-      ...this.tools.definitions,
-      READ_IMAGE_TOOL,
-      ...(this.canSpawn ? [SPAWN_AGENTS_TOOL, SEND_AGENT_MESSAGE_TOOL] : []),
-      ...(this.canSpawnReadOnly ? [SPAWN_READONLY_AGENTS_TOOL, SEND_READONLY_AGENT_MESSAGE_TOOL] : []),
-    ];
+    return [...this.tools.definitions];
   }
 
   /**
@@ -973,6 +1019,22 @@ export class Agent {
         : this.sendMessageHandler
           ? await this.sendMessageHandler(args, signal)
           : 'Error: sub-agent messaging is not available in this session.';
+    } else if (call.function.name === 'hop_session') {
+      // Handing the task to a fresh session is the provider's job (it owns the
+      // session list and the hop-back). Delegate; a fixed string is returned as
+      // the tool result.
+      const args = parseToolArgs(call.function.arguments);
+      result = !this.canHop
+        ? 'Error: only the main agent may hop to another session.'
+        : this.hopHandler
+          ? await this.hopHandler(args, signal)
+          : 'Error: session hopping is not available in this session.';
+    } else if (call.function.name === 'list_nodes') {
+      result = !this.canHop
+        ? 'Error: only the main agent may list the session tree.'
+        : this.listNodesHandler
+          ? await this.listNodesHandler()
+          : 'Error: the session tree is not available in this session.';
     } else {
       result = await this.tools.execute(call.function.name, call.function.arguments, signal);
     }

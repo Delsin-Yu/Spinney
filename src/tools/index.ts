@@ -6,6 +6,7 @@ import { AgentTool, ToolDefinition } from '../agent/types';
 import { listTranscriptSessions, searchTranscripts, TranscriptKind } from '../chat/transcript';
 import { getShell } from './shell';
 import { BackgroundRegistry, CommandHandle, OUTPUT_CAP, spawnShellCommand } from './background';
+import { ADVANCED_TOOL_NAMES, makeListAdvancedTool } from './advancedDocs';
 
 /** Resolve the first workspace folder root. */
 export function getWorkspaceRoot(): string {
@@ -964,8 +965,18 @@ export class ToolRegistry {
       makeCheckBackgroundTool(getRegistry),
       makeKillBackgroundTool(getRegistry),
       makeJoinBackgroundTool(getRegistry),
+      makeListAdvancedTool(),
     ]) {
       this.tools.set(tool.definition.function.name, tool);
+    }
+    // Gradual reveal: the advanced tools stay registered (a call still executes)
+    // but are not advertised in the tool list — the model reads the topic doc via
+    // `list_advanced_tool` first. `buildTools` never clears `hidden`, so a
+    // re-build (setBackgroundRegistry / setTranscriptRoots) keeps them folded.
+    for (const name of ADVANCED_TOOL_NAMES) {
+      if (this.tools.has(name)) {
+        this.hidden.add(name);
+      }
     }
   }
 

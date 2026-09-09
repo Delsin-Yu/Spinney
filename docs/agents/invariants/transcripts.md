@@ -1,0 +1,43 @@
+## Transcripts & `search_transcripts`
+- **Layout:** `<root>/<sessionId>/<nodeId>.jsonl`, one file per main-agent turn
+  (`kind:'session'`) and per sub-agent run (`kind:'subagent'`). Node ids are
+  unique per session, so both kinds coexist in one folder. `<root>` is
+  `<agentHarness.subAgentTranscriptDir>` (workspace-relative) or, by default,
+  `<globalStorage>/transcripts/` — i.e. **outside** the workspace, which is why
+  `search_transcripts` exists (`search_files` cannot walk there).
+- **Why main-agent turns are dumped:** session history lives only in the Memento
+  (`agentHarness.state`, a sqlite blob) and is clipped to 64 KiB per message on
+  persist, so no tool can grep it. `ChatViewProvider.finishTurn` calls
+  `dumpSessionTranscript(node, session, status)` → `writeSessionTranscript`, which
+  mirrors the node's stored messages (so a turn a later injected notice turn
+  reuses is rewritten, exactly like the node). Gated by
+  `agentHarness.saveSessionTranscripts` (default true); skipped for `kind:'agent'`
+  nodes and empty turns; a failure is logged and never breaks the turn.
+- **One-time backfill:** sessions whose turns finished *before* the dumps
+  existed have no JSONL, so `search_transcripts` cannot see them (their only
+  copy is the Memento). `ChatViewProvider.scheduleTranscriptBackfill` runs once
+  per install (marker `agentHarness.transcriptBackfill` in the Memento, 1.5 s
+  after activation, yielding every 25 nodes): it walks every restored tree and
+  dumps each node with no file on disk — **an existing dump is never
+  overwritten**. Reconstructed dumps carry `backfilled:true` in their meta (and
+  `backfilled=true` in the rendered line); their `startedAt`/`endedAt` are both
+  the node's `createdAt` (a tree node keeps no end time) and a historical
+  sub-agent's meta has an empty `systemPrompt` (it is not stored on the node).
+  The marker is only written after a completed pass, so an interrupted pass
+  resumes next activation; turning `saveSessionTranscripts` off skips it and
+  leaves the marker unset (enabling it later backfills).
+- **A session transcript deliberately omits the system prompt** (it is identical
+  boilerplate including AGENTS.md and would match every file). Sub-agent dumps
+  keep it, and `renderTranscriptLine` never renders it, so a search can never be
+  drowned by it. Meta fields: `nodeId`, `sessionId`, `sessionTitle`, `parentId`,
+  `pathIds`, `title`, `model`, `status`, `prompt`, `summary`, `stats`.
+- **Search:** `searchTranscripts` renders each line (`[role] text → tool(args)`,
+  meta as `[meta] key=value …`) and greps the rendered text, so JSON escaping
+  never hides a hit; `kind` filtering reads the meta line's `kind` (missing ⇒
+  `subagent`, the legacy format). Hits carry absolute paths and real line numbers
+  (1:1 with the file), so `read_file` follows up directly.
+- **Roots are resolved at call time** via `ToolRegistry.setTranscriptRoots(() =>
+  [provider.transcriptRoot()])` — a settings change needs no tool rebuild, and
+  `subset()` sub-agents inherit the parent registry's resolver.
+- **Read-only sub-agents get `search_transcripts` too** (it is a pure read tool).
+

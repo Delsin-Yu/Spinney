@@ -9,3 +9,4 @@ tsconfig.json
 **/*.map
 **/*.ts
 build-deploy.ps1
+docs/**
