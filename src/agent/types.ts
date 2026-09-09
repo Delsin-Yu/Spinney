@@ -63,6 +63,61 @@ export function detectImageMime(bytes: Uint8Array): string | null {
   return null;
 }
 
+/** CRC32 table for PNG chunk validation (computed once). */
+const CRC_TABLE: readonly number[] = (() => {
+  const table: number[] = [];
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    table[n] = c >>> 0;
+  }
+  return table;
+})();
+
+function crc32(bytes: Uint8Array): number {
+  let c = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+function readU32BE(bytes: Uint8Array, off: number): number {
+  return ((bytes[off] << 24) | (bytes[off + 1] << 16) | (bytes[off + 2] << 8) | bytes[off + 3]) >>> 0;
+}
+
+/** Walk a PNG's chunks and verify every CRC and the IEND terminator. */
+function pngIntegrityError(bytes: Uint8Array): string | null {
+  let off = 8;
+  while (off + 8 <= bytes.length) {
+    const len = readU32BE(bytes, off);
+    const type = String.fromCharCode(bytes[off + 4], bytes[off + 5], bytes[off + 6], bytes[off + 7]);
+    if (off + 12 + len > bytes.length) {
+      return `truncated PNG (${type} chunk overruns the file)`;
+    }
+    const dataEnd = off + 8 + len;
+    if (readU32BE(bytes, dataEnd) !== crc32(bytes.subarray(off + 4, dataEnd))) {
+      return `corrupt PNG (bad CRC in the ${type} chunk)`;
+    }
+    off = dataEnd + 4;
+    if (type === 'IEND') {
+      return null;
+    }
+  }
+  return 'corrupt PNG (missing IEND chunk)';
+}
+
+/**
+ * A structural integrity check on top of the magic-byte detection. Returns a
+ * human-readable reason when the bytes are a truncated/corrupt image that
+ * `detectImageMime` alone would accept (e.g. a PNG with a bad chunk CRC), or
+ * null when the image is well-formed. DeepSeek rejects such files with a 400.
+ */
+export function imageIntegrityError(bytes: Uint8Array): string | null {
+  if (detectImageMime(bytes) === 'image/png') {
+    return pngIntegrityError(bytes);
+  }
+  return null;
+}
+
 export interface ChatMessage {
   role: Role;
   content: string | ContentPart[] | null;

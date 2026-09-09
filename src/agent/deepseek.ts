@@ -1,5 +1,5 @@
 import * as path from 'path';
-import { ChatMessage, StreamChunk, ThinkingEffort, ToolDefinition, UploadedFile, detectImageMime } from './types';
+import { ChatMessage, StreamChunk, ThinkingEffort, ToolDefinition, UploadedFile, detectImageMime, imageIntegrityError } from './types';
 import { perf } from '../perf';
 
 export interface DeepSeekOptions {
@@ -125,6 +125,10 @@ export class DeepSeekClient {
     const mime = detectImageMime(bytes);
     if (!mime) {
       throw new DeepSeekError('Unsupported image format. Supported formats: JPEG, PNG, GIF, WebP.');
+    }
+    const integrity = imageIntegrityError(bytes);
+    if (integrity) {
+      throw new DeepSeekError(`Invalid image: ${integrity}.`);
     }
 
     const url = `${this.options.baseUrl.replace(/\/$/, '')}/files`;
