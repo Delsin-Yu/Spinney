@@ -184,6 +184,24 @@ function matchDiscovery(record, claimed) {
   );
 }
 
+/**
+ * The harness endpoint a record points at dies with its extension host (window
+ * reload, extension-host restart, crash), which leaves a live window behind a
+ * *new* discovery file and port. Probe the cached endpoint and re-discover when
+ * it no longer answers, so `reboot` never drives a closed port.
+ */
+async function resolveHarness(record, timeoutMs = 5000) {
+  if (record.harness) {
+    try {
+      const health = await harnessFetch(record.harness, '/health', { timeoutMs });
+      if (health.status === 200 && health.json?.ok) return record.harness;
+    } catch {
+      /* stale endpoint: fall through to re-discovery */
+    }
+  }
+  return matchDiscovery(record) ?? record.harness;
+}
+
 async function harnessFetch(rec, path, { method = 'GET', body, timeoutMs = 15000 } = {}) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), timeoutMs);
@@ -402,6 +420,24 @@ async function serve(argv) {
     }
   };
 
+  /**
+   * Point a record at its *live* harness endpoint and persist the correction.
+   * Without this a record keeps aiming at the port of an extension host that has
+   * since been replaced, and every later `/wait-for-finish` fails with
+   * "fetch failed". Returns the live endpoint (or null when there is none).
+   */
+  async function refreshRecord(record, timeoutMs = 5000) {
+    const rec = await resolveHarness(record, timeoutMs);
+    if (rec && rec !== record.harness) {
+      const was = record.harness?.port;
+      record.harness = rec;
+      record.alive = true;
+      saveInstances();
+      log(`${record.id} harness re-discovered on port ${rec.port} (was ${was ?? 'none'})`);
+    }
+    return rec;
+  }
+
   // Re-adopt instances recorded by a previous daemon run (a daemon restart used
   // to orphan them: the records only lived in memory). Newest first, and a
   // discovery file may be claimed by only one record.
@@ -448,7 +484,7 @@ async function serve(argv) {
       job.steps.push({ at: Date.now(), step });
       log(`${record.id} ${step}`);
     };
-    const rec0 = record.harness ?? matchDiscovery(record);
+    const rec0 = await refreshRecord(record);
     if (!rec0) throw new Error('no harness endpoint discovered for this instance (is agentHarness.httpApi.enabled on?)');
     mark('wait-for-finish');
     const waited = await harnessFetch(rec0, '/wait-for-finish', {
@@ -549,6 +585,13 @@ async function serve(argv) {
           return send(200, { ok: true, pid: process.pid, port: actualPort, instances: instances.size, jobs: jobs.size });
         }
         if (req.method === 'GET' && parts[0] === 'instances' && parts.length === 1) {
+          // Re-point stale records before reporting: an extension-host restart
+          // moves the control plane to a new port, and reporting the dead one as
+          // "alive" hides a perfectly live window (this is how a reboot job ends
+          // up failing at its first step with "fetch failed").
+          for (const record of instances.values()) {
+            record.harnessLive = !!(await refreshRecord(record, 1500));
+          }
           return send(200, { ok: true, instances: [...instances.values()] });
         }
         if (req.method === 'POST' && parts[0] === 'instances' && parts.length === 1) {
@@ -591,7 +634,7 @@ async function serve(argv) {
                   'Use `hvsc reboot` (control plane /reload-window), or forget it without --kill.',
               });
             }
-            const rec = record.harness ?? matchDiscovery(record);
+            const rec = await resolveHarness(record);
             if (rec) {
               rmSync(rec.file, { force: true });
               killWindow(rec.pid);
@@ -685,9 +728,10 @@ async function main() {
   if (cmd === 'status' || cmd === 'instances') {
     const { json } = await daemonFetch(rec, '/instances');
     for (const i of json?.instances ?? []) {
+      const stale = i.alive === false || i.harnessLive === false;
       console.log(
         `${i.id}  ${i.workspace}  ${i.isolated ? 'isolated' : 'passthrough'}  ` +
-          `harness=${i.harness ? `:${i.harness.port}` : 'not-found'}  ${i.alive === false ? 'STALE' : 'alive'}`,
+          `harness=${i.harness ? `:${i.harness.port}` : 'not-found'}  ${stale ? 'STALE' : 'alive'}`,
       );
     }
     if (!(json?.instances ?? []).length) console.log('(no instances)');

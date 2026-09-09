@@ -41,7 +41,8 @@
   mode) are routed by `queueSubAgentChildNotice`: if the parent is still running the notice is queued and
   delivered at its next finish (`flushSubAgentChildNotices`); if it already finished it is auto-resumed
   with the notice — the mirror of the main agent's async delivery (`subAgentNoticeQueue`).
-- A sub-agent branch is checked-out as **read-only** (composer disabled); only the parent drives it via
+- A sub-agent branch is checked-out as **read-only** and the composer pane is **hidden** while such a node
+  is focused (`setComposerVisible(false)` in `setActiveLeaf`); only the parent drives it via
   `spawn_agents` / `send_agent_message`. `onKillAgent` aborts a running sub-agent from its card's ✕.
 - **Stream routing invariant:** the webview streams `nodeId`-less (main-agent) deltas into `messagesEl`,
   which the provider pins via `mainStreamNodeId()` = `activeTurnNode?.id ?? session.activeNodeId`. That target
@@ -51,9 +52,11 @@
   sub-agent card and letting the main agent's reply leak into that window. `drainSubAgentNotices` also calls
   `postPath()` before the injected resume turn streams, re-pinning the target. Keep this invariant; the data
   lives on the parent node regardless (only the live DOM target was wrong).
-- **Layout invariant (`media/tree.js`):** agent windows must be laid out **recursively** — `place(a, ax, ay)`
-  (not just `pos[a] = {x,y}`), with `subWidth(a)` reserving horizontal space and `subHeight(a)` driving the
-  vertical stack. Otherwise an agent node's own children (a depth-2 sub-agent spawned by a depth-1 sub-agent)
-  never get a position, so its card collapses onto the origin and its connector is misplaced. `agentExpanded`
+- **Layout invariant (`media/tree.js`):** agent windows must be laid out **recursively** — `layoutSub(a)`
+  (not just `pos[a] = {x,y}`), so an agent node's own children (a depth-2 sub-agent spawned by a depth-1
+  sub-agent) get their own positions and connectors. Otherwise its card collapses onto the origin and its
+  connector is misplaced. The turn spine and the sidecar reservation are owned by the vendored engine: each
+  node's box is inflated by its sidecar block (`agentGap + blockW` wide, `max(cardH, blockH)` tall), so no
+  other card can overlap a window or sit between a parent card and its own sub-agents. `agentExpanded`
   walks up the agent ancestors so a depth-2 sub-agent stays open beside its expanded depth-1 parent.
 

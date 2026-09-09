@@ -23,11 +23,15 @@
   const bgList = document.getElementById('bg-list');
   const bgCount = document.getElementById('bg-count');
   const branchBanner = document.getElementById('branch-banner');
+  const composerEl = document.getElementById('composer');
 
   let busy = false;
   let pendingAttachments = [];
   let currentModel = 'deepseek-chat';
   let currentEffort = 'none';
+  // Session currently rendered, mirrored into vscode.setState so a reloaded
+  // window restores this tab bound to the same conversation.
+  let persistedSessionId = '';
 
   const NODE_W = 320;
   const H_GAP = 48;
@@ -37,7 +41,7 @@
   // checked-out node's items container — every append / stream lands there.
   let messagesEl = null;
   const nodeEls = Object.create(null);   // id -> card element
-  let treeNodes = Object.create(null);   // id -> { id, parentId, children, title, status, preview, usage }
+  let treeNodes = Object.create(null);   // id -> { id, parentId, children, title, status, preview }
   let treeRootId = null;
   let treeActiveId = null;
   let activePathSet = new Set();
@@ -56,7 +60,9 @@
   // Drag-to-resize a card: bounds for the custom size + a live wireframe preview.
   const MIN_W = 320;
   const MAX_W = 1600;
-  const MIN_H = 180;
+  // Cards host the composer dock at their bottom, so a very short card would
+  // clip the input — keep the resizable minimum above it.
+  const MIN_H = 260;
   const MAX_H = 1200;
   let resizing = null;       // { id, startX, startY, startW, startH, target }
   let resizePreview = null;  // wireframe element
@@ -94,60 +100,73 @@
     return escapeHtml(text);
   }
 
-  // ---- Scroll controller (kept only for the collapsible Thinking body) ----
-  function createScrollController(container, onChange) {
-    const state = { locked: true };
-    const NEAR_BOTTOM_PX = 2;
-    let programmaticTop = null;
-    let interacting = false;
-    let interactTimer = null;
-
-    function isNearBottom() {
-      return container.scrollHeight - container.scrollTop - container.clientHeight <= NEAR_BOTTOM_PX;
-    }
+  // ---- Manual scroll lock (the green light) ----
+  // The light is the only follow control. While it is on the container is pinned
+  // to its newest content and its scrollbar is disabled (`scroll-locked` hides
+  // the bar and blocks manual scrolling); clicking the light turns follow off and
+  // hands scrolling back to the user. There is deliberately no auto re-engage on
+  // scroll — the state changes only when the light is clicked.
+  // `locked` is the initial state: a live turn starts pinned, a finished node
+  // starts free so its transcript can be scrolled immediately.
+  function createScrollController(container, onChange, locked) {
+    const state = { locked: locked !== false };
 
     function setLocked(value) {
       if (state.locked === value) return;
       state.locked = value;
+      container.classList.toggle('scroll-locked', value);
       if (onChange) onChange(value);
+      if (value) scrollToBottom();
     }
 
     function scrollToBottom() {
-      if (!state.locked || interacting) return;
+      if (!state.locked) return;
       const max = Math.max(0, container.scrollHeight - container.clientHeight);
-      programmaticTop = max;
       if (container.scrollTop !== max) {
         container.scrollTop = max;
       }
     }
 
-    container.addEventListener('scroll', () => {
-      const top = container.scrollTop;
-      if (!interacting && state.locked && programmaticTop !== null && top >= programmaticTop) {
-        return;
-      }
-      programmaticTop = top;
-      setLocked(isNearBottom());
-    });
-    container.addEventListener('wheel', () => { interacting = true; clearTimeout(interactTimer); interactTimer = setTimeout(() => { interacting = false; }, 150); }, { passive: true });
-    container.addEventListener('touchmove', () => { interacting = true; clearTimeout(interactTimer); interactTimer = setTimeout(() => { interacting = false; }, 150); }, { passive: true });
+    container.classList.toggle('scroll-locked', state.locked);
 
     return {
       get locked() { return state.locked; },
       scrollToBottom,
-      lock() { setLocked(true); scrollToBottom(); },
+      lock() { setLocked(true); },
+      unlock() { setLocked(false); },
+      toggle() { setLocked(!state.locked); },
     };
   }
 
-  // A green lock dot lives on the host of a scrollable container; it lights while
-  // the container is auto-scrolled to the bottom and dims once the user scrolls up.
-  // The lock is on by default, so the dot starts green.
-  function attachLock(container, host) {
-    const dot = el('div', 'scroll-lock-dot');
+  const LOCK_TITLE_ON = 'Auto-scroll on — click to release';
+  const LOCK_TITLE_OFF = 'Auto-scroll off — click to follow again';
+
+  // A green lock dot lives on the host of a scrollable container, in the strip
+  // reserved below it (the container keeps a bottom margin so the dot sits just
+  // under the scrollbar). Live turns start locked (following); finished nodes
+  // start unlocked. Click to toggle manual follow.
+  function attachLock(container, host, locked) {
+    const dot = el('div', 'scroll-lock-dot' + (locked === false ? '' : ' locked'));
+    const ctrl = createScrollController(container, (isLocked) => {
+      dot.classList.toggle('locked', isLocked);
+      dot.title = isLocked ? LOCK_TITLE_ON : LOCK_TITLE_OFF;
+    }, locked);
+    dot.title = ctrl.locked ? LOCK_TITLE_ON : LOCK_TITLE_OFF;
+    dot.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      ctrl.toggle();
+    });
     host.appendChild(dot);
-    const ctrl = createScrollController(container, (locked) => dot.classList.toggle('locked', locked));
-    dot.classList.add('locked');
     return ctrl;
+  }
+
+  /** Lock / unlock every scroll area of a card (its transcript + thinking blocks). */
+  function setCardScrollLock(card, locked) {
+    if (!card) return;
+    if (card._itemScroll) (locked ? card._itemScroll.lock() : card._itemScroll.unlock());
+    for (const body of card.querySelectorAll('.thinking-body')) {
+      if (body._scroll) (locked ? body._scroll.lock() : body._scroll.unlock());
+    }
   }
 
   // ---- Message rendering into a container (defaults to the active node) ----
@@ -192,8 +211,6 @@
     const chev = el('span', 'chev', '▶');
     head.appendChild(chev);
     head.appendChild(el('span', 'thinking-label', 'Thinking'));
-    // A green light that glows while there's (visible) reasoning content.
-    head.appendChild(el('span', 'thinking-light'));
     box.appendChild(head);
     const body = el('div', 'thinking-body hidden');
     if (thinking) body.textContent = thinking;
@@ -205,7 +222,6 @@
       box.classList.toggle('open', !body.classList.contains('hidden'));
       if (body._scroll && !body.classList.contains('hidden')) body._scroll.scrollToBottom();
     });
-    if (thinking) box.classList.add('has-content');
     if (!foldThinking) {
       body.classList.remove('hidden');
       chev.classList.add('open');
@@ -316,8 +332,6 @@
     }
     const body = box.querySelector('.thinking-body');
     thinkingTextNode(body).appendData(text);
-    // The reasoning feed is live, so light the indicator.
-    if (box) box.classList.add('has-content');
     // Folded-by-default means we don't force it open while streaming.
     if (!foldThinking) {
       body.classList.remove('hidden');
@@ -760,17 +774,14 @@
     body.appendChild(excerpt);
     card.appendChild(body);
 
-    const usage = el('div', 'node-usage');
-    usage.textContent = meta.usage ? formatUsage(meta.usage) : '';
-    card.appendChild(usage);
-
     // Drag handle to resize the card (bottom-right).
     const handle = el('div', 'node-resize');
     handle.title = 'Drag to resize';
     card.appendChild(handle);
 
-    // Internal transcript scroll + green lock dot.
-    card._itemScroll = attachLock(items, body);
+    // Internal transcript scroll + green lock dot. A live turn follows its own
+    // output (locked); a finished node starts unlocked so it scrolls freely.
+    card._itemScroll = attachLock(items, body, meta.status === 'running');
 
     nodeEls[id] = card;
     treeCanvas.appendChild(card);
@@ -790,12 +801,25 @@
     if (source && !card._itemsRendered) {
       renderNodeItems(itemsEl, promptElCard, source);
       card._itemsRendered = true;
+      // Thinking blocks only exist once the items are rendered, so apply the
+      // finished-node default here (once, so a manual lock is not clobbered by
+      // later re-renders).
+      if (meta.status !== 'running') {
+        setCardScrollLock(card, false);
+        card._needsBottomScroll = true;
+      }
     }
     promptElCard.classList.remove('hidden');
     itemsEl.classList.remove('hidden');
     excerptEl.classList.add('hidden');
-    // Unfolding scrolls the transcript to the bottom (locked).
-    if (card._itemScroll) card._itemScroll.lock();
+    if (card._itemScroll && card._itemScroll.locked) {
+      // Following a live turn: pin to the newest content.
+      card._itemScroll.scrollToBottom();
+    } else if (card._needsBottomScroll) {
+      // Unlocked (finished) card: open at the newest content, then scroll freely.
+      itemsEl.scrollTop = itemsEl.scrollHeight;
+    }
+    card._needsBottomScroll = false;
   }
 
   function collapsedCard(id, meta) {
@@ -814,10 +838,19 @@
     const card = id ? nodeEls[id] : null;
     messagesEl = card ? card.querySelector('.node-items') : null;
     promptEl = card ? card.querySelector('.node-prompt') : null;
-    if (card && card._itemScroll) card._itemScroll.lock();
+    // The send pane lives at the bottom of the checked-out node's card, and only
+    // there: a sub-agent branch is read-only (driven by the main agent through
+    // spawn_agents / send_agent_message), and a session with no active node has
+    // no card to inline it in — in both cases the pane is hidden entirely.
+    const node = id ? treeNodes[id] : null;
+    const hostCard = card && !(node && node.kind === 'agent') ? card : null;
+    // Un-hide before mounting so autoGrow() measures a rendered input.
+    setComposerVisible(!!hostCard);
+    mountComposer(hostCard);
+    if (card && card._itemScroll) card._itemScroll.scrollToBottom();
   }
 
-  // Patch a single card's status/usage (turn finished) without re-rendering the tree.
+  // Patch a single card's status (turn finished) without re-rendering the tree.
   function applyNodeUpdate(msg) {
     const card = nodeEls[msg.id];
     if (card) {
@@ -826,12 +859,9 @@
         statusEl.textContent = msg.status;
         statusEl.dataset.status = msg.status;
       }
-      const usageEl = card.querySelector('.node-usage');
-      if (usageEl && msg.usage) usageEl.textContent = formatUsage(msg.usage);
     }
     if (treeNodes[msg.id]) {
       if (msg.status) treeNodes[msg.id].status = msg.status;
-      if (msg.usage) treeNodes[msg.id].usage = msg.usage;
       if (msg.title) treeNodes[msg.id].title = msg.title;
     }
   }
@@ -929,6 +959,7 @@
     card.classList.add('agent');
     card.classList.add('expanded');
     card.querySelector('.node-items').classList.remove('hidden');
+    setCardScrollLock(card, true);
     const head = card.querySelector('.node-head');
     let badge = card.querySelector('.node-agent-badge');
     if (!badge) {
@@ -966,14 +997,25 @@
       }
       const kill = card.querySelector('.node-kill');
       if (kill) kill.remove();
+      // Its response finished: release the follow light so it can be read.
+      setCardScrollLock(card, false);
       card.classList.toggle('agent-done', msg.status === 'done');
       card.classList.toggle('agent-error', msg.status === 'error');
       if (treeNodes[msg.id]) {
         treeNodes[msg.id].agentStatus = msg.status;
         treeNodes[msg.id].agentSummary = msg.summary || '';
       }
-      const usageEl = card.querySelector('.node-usage');
-      if (usageEl && msg.summary) usageEl.textContent = msg.summary.slice(0, 120);
+      if (msg.summary) {
+        // Sub-agent cards get a one-line result footer (the card footer no
+        // longer carries token/cache counts — the transcript's usage line does).
+        let summaryEl = card.querySelector('.node-summary');
+        if (!summaryEl) {
+          summaryEl = el('div', 'node-summary');
+          // Keep the footer above the composer when this card hosts it.
+          card.insertBefore(summaryEl, composerEl.parentElement === card ? composerEl : null);
+        }
+        summaryEl.textContent = msg.summary.slice(0, 120);
+      }
     }
     const edge = treeEdges.querySelector('[data-agent="' + msg.id + '"]');
     if (edge) {
@@ -984,6 +1026,23 @@
   }
 
   function relayout() {
+    // No-node mode: the placeholder card is the entire tree.
+    if (composerCard) {
+      composerCard.style.left = '0px';
+      composerCard.style.top = '0px';
+      treeCanvas.style.width = composerCard.offsetWidth + 'px';
+      treeCanvas.style.height = composerCard.offsetHeight + 'px';
+      if (centerComposerCard) {
+        centerComposerCard = false;
+        zoom = 1;
+        const wrap = treeWrap.getBoundingClientRect();
+        pan.x = (wrap.width - composerCard.offsetWidth) / 2;
+        pan.y = (wrap.height - composerCard.offsetHeight) / 2;
+        applyTransform();
+      }
+      drawEdges();
+      return;
+    }
     const heights = {};
     const widths = {};
     for (const id in nodeEls) {
@@ -1139,8 +1198,6 @@
       if (card) {
         const statusEl = card.querySelector('.node-status');
         if (statusEl) statusEl.textContent = n.status || '';
-        const usageEl = card.querySelector('.node-usage');
-        if (usageEl) usageEl.textContent = n.usage ? formatUsage(n.usage) : '';
       }
     }
     for (const id in nodeEls) {
@@ -1157,9 +1214,9 @@
     }
     setActiveLeaf(treeActiveId);
     if (Object.keys(nodeEls).length === 0) {
-      renderEmptyHint();
+      showComposerCard();
     } else {
-      clearEmptyHint();
+      hideComposerCard();
     }
     relayout();
     if (follow) keepActiveInView();
@@ -1191,8 +1248,14 @@
       if (!card._itemsRendered) {
         renderNodeItems(card.querySelector('.node-items'), card.querySelector('.node-prompt'), pnode.items);
         card._itemsRendered = true;
+        // Same finished-node default as in expandedCard: the thinking blocks only
+        // exist now, and this path skips expandedCard's render branch.
+        if ((treeNodes[id] || {}).status !== 'running') {
+          setCardScrollLock(card, false);
+          card._needsBottomScroll = true;
+        }
       }
-      if (card._itemScroll) card._itemScroll.lock();
+      if (card._itemScroll) card._itemScroll.scrollToBottom();
     }
     for (const id in nodeEls) {
       const onPath = activePathSet.has(id) || agentExpanded(id);
@@ -1204,31 +1267,41 @@
     }
     setActiveLeaf(treeActiveId);
     if (Object.keys(nodeEls).length === 0) {
-      renderEmptyHint();
+      showComposerCard();
     } else {
-      clearEmptyHint();
+      hideComposerCard();
     }
     relayout();
     if (follow) keepActiveInView();
     updateBranchBanner();
   }
 
-  let emptyHint = null;
-  function renderEmptyHint() {
-    if (!emptyHint) {
-      emptyHint = el('div', 'empty');
-      emptyHint.style.position = 'absolute';
-      emptyHint.style.inset = '0';
-      emptyHint.style.display = 'flex';
-      emptyHint.style.alignItems = 'center';
-      emptyHint.style.justifyContent = 'center';
-      emptyHint.style.pointerEvents = 'none';
-      emptyHint.textContent = 'Welcome. Ask the agent to read or write files, or run a command.';
-      treeWrap.appendChild(emptyHint);
+  // ---- No-node mode: a bare node card that holds only the input ----
+  // With no node yet there is nothing to host the send pane, so a placeholder
+  // card (head + input, no prompt/transcript) is the only card in the tree
+  // canvas — it pans and zooms with the view like any node. It is dropped as
+  // soon as the first node exists.
+  let composerCard = null;
+  let centerComposerCard = false;   // centre the view on it once, on creation
+
+  function showComposerCard() {
+    if (!composerCard) {
+      composerCard = el('div', 'node expanded active composer-node');
+      const head = el('div', 'node-head');
+      head.appendChild(el('span', 'node-title', 'New session'));
+      head.addEventListener('click', () => inputEl.focus());
+      composerCard.appendChild(head);
+      treeCanvas.appendChild(composerCard);
+      centerComposerCard = true;
     }
+    setComposerVisible(true);   // before mounting: autoGrow() needs a rendered input
+    mountComposer(composerCard);
   }
-  function clearEmptyHint() {
-    if (emptyHint) { emptyHint.remove(); emptyHint = null; }
+
+  function hideComposerCard() {
+    if (!composerCard) return;
+    composerCard.remove();
+    composerCard = null;
   }
 
   function panToNode(id) {
@@ -1259,6 +1332,13 @@
       if (card && card._itemScroll) card._itemScroll.scrollToBottom();
       if (treeActiveId && treeNodes[treeActiveId]?.children?.length) scheduleLayout();
     });
+  }
+
+  // Follow a live turn without guessing from scroll position: a card's green
+  // light is engaged when its response starts and released when it finishes, so
+  // the user can read the finished result without touching the light.
+  function setActiveScrollLock(locked) {
+    setCardScrollLock(treeActiveId ? nodeEls[treeActiveId] : null, locked);
   }
 
   let layoutDebounce = null;
@@ -1355,9 +1435,11 @@
     card.style.width = target.w + 'px';
     card.style.maxHeight = target.h + 'px';
     if (treeNodes[id]) treeNodes[id].size = { w: target.w, h: target.h };
+    // The pane scales with its host card's width.
+    if (composerHost === card) syncComposerScale();
     // Collision resolution runs once, on mouse-up.
     relayout();
-    if (card._itemScroll) card._itemScroll.lock();
+    if (card._itemScroll) card._itemScroll.scrollToBottom();
     vscode.postMessage({ type: 'setNodeSize', id, w: target.w, h: target.h });
   }
 
@@ -1440,8 +1522,9 @@
       return;
     }
     // Requirement: wheeling on top of a node scrolls that node's content; the
-    // .node-items / .thinking-body handles it natively.
-    const scrollable = e.target && e.target.closest ? e.target.closest('.node-items, .thinking-body') : null;
+    // .node-items / .thinking-body handles it natively. The composer is excluded
+    // too — it lives inside a card now and owns its own wheel.
+    const scrollable = e.target && e.target.closest ? e.target.closest('.node-items, .thinking-body, #composer') : null;
     if (scrollable) {
       return; // native scroll
     }
@@ -1463,7 +1546,7 @@
   // Click a node's title or (collapsed) preview to check it out; clicking inside
   // an expanded node's transcript never changes the branch.
   treeCanvas.addEventListener('click', (e) => {
-    if (e.target.closest('button, a, .tool-head, .thinking-head, .thinking-body, .tool-body, .bgnotify-head, .node-usage')) return;
+    if (e.target.closest('button, a, .tool-head, .thinking-head, .thinking-body, .tool-body, .bgnotify-head, .node-summary')) return;
     const head = e.target.closest('.node-head');
     const excerpt = e.target.closest('.node-excerpt');
     const card = head ? head.closest('.node') : excerpt ? excerpt.closest('.node') : null;
@@ -1494,6 +1577,8 @@
     modelSelect.disabled = value;
     effortSelect.disabled = value;
     if (value) {
+      // A response is starting: re-engage the follow light for the live turn.
+      setActiveScrollLock(true);
       startTps();
       stopBtn.classList.remove('hidden');
       sendBtn.classList.add('hidden');
@@ -1767,7 +1852,18 @@
 
   function autoGrow() {
     inputEl.style.height = 'auto';
-    inputEl.style.height = Math.min(inputEl.scrollHeight, 160) + 'px';
+    inputEl.style.height = Math.min(inputEl.scrollHeight, Math.round(160 * composerScale)) + 'px';
+  }
+
+  /**
+   * Remember which session this webview shows. VS Code persists the state set
+   * here across window reloads and hands it to the host's webview panel
+   * serializer, so the restored chat tab is bound to the same conversation.
+   */
+  function rememberSession(sessionId) {
+    if (!sessionId || sessionId === persistedSessionId) return;
+    persistedSessionId = sessionId;
+    vscode.setState({ ...(vscode.getState() || {}), sessionId });
   }
 
   window.addEventListener('message', (event) => {
@@ -1795,6 +1891,7 @@
       case 'state':
         setBusy(msg.busy);
         setStatus(msg.status);
+        rememberSession(msg.sessionId);
         break;
       case 'background':
         renderBackgrounds(msg.tasks);
@@ -1851,12 +1948,14 @@
         finalizeStreamingAnswer();
         clearLiveTools();
         setBusy(false);
+        setActiveScrollLock(false);
         break;
       case 'interrupted':
         finalizeStreamingAnswer();
         clearLiveTools();
         setBusy(false);
         setStatus('Interrupted');
+        setActiveScrollLock(false);
         break;
       case 'error':
         finalizeStreamingAnswer();
@@ -1864,6 +1963,7 @@
         addAssistant('⚠️ ' + msg.message, true);
         setBusy(false);
         setStatus('Error');
+        setActiveScrollLock(false);
         break;
       case 'notice':
         addNotice(msg.kind, msg.text);
@@ -1878,13 +1978,75 @@
         treeActiveId = null;
         activePathSet = new Set();
         messagesEl = null;
-        clearEmptyHint();
         renderTree({ nodes: [], rootId: null, activeId: null });
         break;
       default:
         break;
     }
   });
+
+  // ---- Composer dock ----
+  // The send pane is the active node's input dock: it is moved into the active
+  // node's card, at its bottom, so it pans/zooms with the tree and is visibly
+  // attached to the node it sends into. It is NEVER docked anywhere else — when
+  // there is no host card (empty session uses the placeholder card, a focused
+  // sub-agent branch is read-only) the pane is hidden / kept out of the DOM.
+  // `--cs` scales every control and font in the pane and follows the host card's
+  // width, so dragging the card's resize handle scales the pane with the card.
+  const COMPOSER_BASE_W = 560;          // .node.expanded's default width
+  const MIN_COMPOSER_SCALE = 0.8;
+  const MAX_COMPOSER_SCALE = 1.6;
+
+  let composerScale = 1;
+  // `undefined` until the first mount, so the initial call always applies.
+  let composerHost;                     // the card the pane is currently mounted in
+
+  function composerScaleFor(width) {
+    return Math.max(MIN_COMPOSER_SCALE, Math.min(MAX_COMPOSER_SCALE, width / COMPOSER_BASE_W));
+  }
+
+  /** Re-derive `--cs` from the host card's width (or the panel when there is none). */
+  function syncComposerScale() {
+    const width = composerHost ? composerHost.offsetWidth : window.innerWidth;
+    composerScale = composerScaleFor(width);
+    composerEl.style.setProperty('--cs', String(composerScale));
+    autoGrow();
+  }
+
+  /**
+   * Inline the pane at the bottom of `card`, or take it out of the DOM entirely
+   * when there is no host card (there is no floating/docked fallback).
+   */
+  function mountComposer(card) {
+    if (composerHost === card) {
+      syncComposerScale();
+      return;
+    }
+    // Relocating a focused subtree drops focus; put it back on the input.
+    const hadFocus = composerEl.contains(document.activeElement);
+    composerHost = card;
+    if (card) {
+      card.appendChild(composerEl);   // last child = the card's bottom
+    } else {
+      composerEl.remove();
+    }
+    syncComposerScale();
+    if (hadFocus && card) inputEl.focus();
+  }
+
+  /**
+   * Hide/show the whole send pane. A sub-agent branch is read-only, so it must
+   * not offer an input at all — the pane is removed from view (not merely
+   * disabled) while such a node is checked out.
+   */
+  function setComposerVisible(visible) {
+    composerEl.classList.toggle('hidden', !visible);
+    if (!visible && composerEl.contains(document.activeElement)) inputEl.blur();
+  }
+
+  // The panel is the reference width when the pane has no host card, so
+  // re-derive the scale when the panel is resized.
+  window.addEventListener('resize', syncComposerScale);
 
   // ---- Input handlers ----
   sendBtn.addEventListener('click', send);

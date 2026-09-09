@@ -20,7 +20,7 @@ Open the **Agent Harness** icon in the Activity Bar, pick a session (or `Open Ch
 - **Pan** (drag / MMB), **zoom** (`ctrl+wheel`, 0.4–1.5), **fit**, and **follow** the active node.
 - **Drag a card's corner** to resize it (persisted per node); a wireframe previews the target and the tree re-resolves on mouse-up.
 - Tool calls & thinking are **folded by default** (with a one-line brief), configurable via `agentHarness.foldToolCalls` / `agentHarness.foldThinking`.
-- Streams tokens live into the active block; auto-scroll is a per-card green lock.
+- Streams tokens live into the active block; a per-card green light pins the scroll to the newest content while a turn runs, releases itself when the turn finishes, and can also be toggled by hand.
 - The sidebar lists your **sessions** (titles + node count + busy state).
 
 ### 2. File & command tools
@@ -46,7 +46,9 @@ Set the model to a vision model (`deepseek-v4-flash-vision-exp` or `deepseek-v4.
 Images are uploaded to the DeepSeek Files API and referenced by `file_id` (allowed in `user` messages only). Attachments are hidden on text-only models.
 
 ### 5. Context + wallet + speed readout
-The composer's floating island shows a compact status row: live **status** text, then a right-aligned group `ctx % · bal ¥ · tok/s`. `ctx` is the active branch's `usage.prompt_tokens` vs. the context window (auto-detected per model; override with `agentHarness.contextWindow`). Per-turn cache hit/miss is shown on each node card's footer.
+The send pane's status row shows a compact readout: live **status** text, then a right-aligned group `ctx % · bal ¥ · tok/s`. `ctx` is the active branch's `usage.prompt_tokens` vs. the context window (auto-detected per model; override with `agentHarness.contextWindow`). Per-turn token totals and cache hit/miss are shown once, in the usage line under the latest assistant reply (there is no per-node footer copy).
+
+The send pane is the active node's **input dock**: it sits at the bottom of the checked-out node's card, so it pans/zooms with the tree and it is always obvious which node a message goes to — check out another node and the pane moves to its card. Its contents scale with the card: resizing the card with its bottom-right handle grows/shrinks the pane's controls and fonts too (0.8×–1.6×, and the tree zoom scales it further). With an empty session (no node yet) the pane is hosted by a bare **New session** card — a normal node card with just the input, no prompt/transcript — which pans and zooms with the view like any other node.
 
 ### 6. Persistent sessions + branches
 Multiple **sessions** are listed in the **Activity Bar sidebar** (title, node count, busy). Each session is a tree of turns with persistent branch history; everything is stored in workspace storage and restored on reload. Delete/clear a session from the sidebar (right-click → Delete).

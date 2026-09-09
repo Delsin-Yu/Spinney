@@ -14,7 +14,8 @@
   ],
   "activationEvents": [
     "onView:agentHarness.sessions",
-    "onCommand:agentHarness.openChat"
+    "onCommand:agentHarness.openChat",
+    "onWebviewPanel:agentHarness.chatTree"
   ],
   "main": "./out/extension.js",
   "contributes": {

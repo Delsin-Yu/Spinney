@@ -1,0 +1,5 @@
+# Vendored, hash-pinned third-party files must stay byte-exact: no EOL
+# normalisation on add or checkout. Their sha256 is recorded in
+# media/vendor/non-layered-tidy-tree-layout/PROVENANCE.md, so a fresh clone has
+# to reproduce the published bytes exactly (see docs/agents/invariants/vendored-deps.md).
+media/vendor/** -text

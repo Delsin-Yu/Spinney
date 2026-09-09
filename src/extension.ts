@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { CHAT_VIEW_TYPE } from './chat/ChatPanel';
 import { ChatViewProvider } from './chat/ChatViewProvider';
 import { SessionsProvider } from './chat/SessionsProvider';
 import { ControlServer } from './http/controlServer';
@@ -18,6 +19,19 @@ function toSessionId(arg: unknown): string {
 
 export function activate(context: vscode.ExtensionContext): void {
   chatProvider = new ChatViewProvider(context.extensionUri, context.workspaceState, context.globalStorageUri);
+
+  // Window recovery: VS Code re-creates the webview panels it serialized at
+  // shutdown and hands each one back through this serializer. Registering it
+  // during activation is what makes the chat tab survive a window reload (the
+  // viewType must also be listed in package.json as `onWebviewPanel:<viewType>`).
+  context.subscriptions.push(
+    vscode.window.registerWebviewPanelSerializer(CHAT_VIEW_TYPE, {
+      deserializeWebviewPanel: (panel, state) => {
+        chatProvider?.restorePanel(panel, state);
+        return Promise.resolve();
+      },
+    }),
+  );
 
   // Optional local control plane (off by default) for the external supervisor.
   const controlServer = new ControlServer(
