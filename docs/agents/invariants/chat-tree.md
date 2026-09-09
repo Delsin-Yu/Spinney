@@ -1,4 +1,10 @@
 ## Chat Tree invariants
+- Session titles are derived, never authoritative: `AgentSession.title` is shown in
+  the sidebar / tab title only, and the automatic namer (`sessionTitles.ts`) may
+  rewrite it after a turn. `titleLocked` (set by a manual rename or the
+  `rename_session` tool) freezes it, and a rename must never touch `updatedAt`
+  (the sidebar sorts by it). Renaming does not change history, branching or the
+  prompt in any way.
 - `TreeNode.messages` (non-empty) always starts with a `user` role message; the
   system prompt is **never** stored in a node (synthesized per activation).
 - The flat API history is `pathMessages(session, activeNodeId)` = `[system, ...path
@@ -27,6 +33,19 @@
 - Switching to a different branch resets the pending interruption notice
   (`agent.resetInterruptState()`) unless the new path still ends at the interrupted
   node; `lastInterruptedNodeId` tracks this.
+- **Deleting a branch** (`branchIds` / `detachBranch` in `tree.ts`) removes a node
+  *and its whole subtree* — sub-agent sidecars included — from `session.nodes`,
+  unlinks it from the parent's `children`, and moves `activeNodeId` to the parent
+  when the checkout was inside the removed subtree (to `null` when the root went,
+  which leaves a valid empty session: `rootId`/`activeNodeId` null, `orphanItems`
+  kept). It is pure data — `ChatViewProvider.deleteBranch` owns the rest: the
+  matching transcript dumps (see transcripts.md), `lastInterruptedNodeId`,
+  `subAgentChildNotices`, `checkoutNode` (agent history + `displayItems`), and the
+  `tree`/`path` repaint. It is always gated by a modal confirmation
+  (`deleteBranchInteractive`) and refuses while a turn or a sub-agent *inside the
+  branch* is running (a live turn must never lose its node). `session.updatedAt`
+  is bumped, so the sidebar reorders — a deletion is a content change, unlike a
+  rename.
 - `node.customSize` (optional `{w,h}`) persists a user-resized card; it survives
   migration via `normalizeTreeSession` and is sent in the `tree` message as `size`.
 - Chat render: the webview lays out the **active path** expanded and all other

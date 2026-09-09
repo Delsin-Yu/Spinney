@@ -13,14 +13,22 @@
   session titles; it re-reads items from `ChatViewProvider` on every refresh.
 - `src/chat/tree.ts` — the Chat Tree data model: `TreeNode` / `AgentSession`,
   path assembly (`pathIds` / `pathMessages`), `attachNode`, `pruneSession`,
-  and the v1→v2 state migration. Pure data layer, no VS Code UI.
+  branch removal (`branchIds` / `detachBranch`), and the v1→v2 state migration.
+  Pure data layer, no VS Code UI.
+- `src/chat/sessionTitles.ts` — automatic session titles: the gates
+  (`shouldAutoTitle`: locked / cooldown / growth), the conversation digest, the
+  naming prompts (single + batched), `sanitizeTitle` / `parseBatchTitles`, and the
+  zero-cost `heuristicTitle` fallback. Pure prompt/data helpers — no VS Code APIs,
+  so it is smoke-testable outside the Extension Host.
 - `src/chat/transcript.ts` — transcript dumps (JSONL, one API message per line,
   meta + tool stats on line 1), one file per main-agent turn (`writeSessionTranscript`)
   and per sub-agent run (`writeSubAgentTranscript`); plus the read side —
   `renderTranscriptLine` (one line → searchable `[role] text → tool(args)`),
   `searchTranscripts`, `listTranscriptSessions`. Also `summarizeTranscript`
-  (tool-call / denied-call stats), `sumUsage`, `removeTranscriptDir`. Pure fs, no
-  VS Code UI (so it is smoke-testable outside the Extension Host).
+  (tool-call / denied-call stats), `sumUsage`, and the removal helpers
+  (`removeTranscriptDir` for a session, `removeTranscripts` / `removeTranscriptFile`
+  for the dumps of deleted nodes). Pure fs, no VS Code UI (so it is smoke-testable
+  outside the Extension Host).
 - `src/http/controlServer.ts` — the opt-in local HTTP control plane
   (`/health`, `/state`, `/wait-for-finish`, `/navigate`, `/continue`,
   `/reload-window`); token + discovery file, loopback only. See "External control
@@ -41,7 +49,7 @@
   helpers, argument parsing (strict JSON **or** verbatim frame), `exec_command`
   runner (foreground + background behaviors), and the three background tools.
 - `src/tools/advancedDocs.ts` — the folded ("advanced") tool docs: `ADVANCED_TOPIC_DOCS`
-  (6 topics), `ADVANCED_TOOL_NAMES` (the registry tools kept registered but hidden from
+  (7 topics), `ADVANCED_TOOL_NAMES` (the registry tools kept registered but hidden from
   the tool list) and the `list_advanced_tool` definition + executor the model uses to pull
   an interface on demand.
 - `src/tools/background.ts` — `BackgroundRegistry` + `BackgroundTask`,
@@ -55,7 +63,8 @@
   `perf()` takes a string **or a thunk**; a thunk is only evaluated when a sink is
   installed, so an expensive line (JSON sizes, byte counts) costs nothing when off.
 - `media/main.js` — webview client (tree rendering, pan/zoom, streaming into the
-  active node, composer, streaming meter, live tool drafts). The composer is the
+  active node, composer, streaming meter, live tool drafts, drag-to-resize cards).
+  The composer is the
   active node's input dock: `setActiveLeaf` moves `#composer` into the
   checked-out card's bottom. It has no other home — with an empty session the
   placeholder card hosts it, and with a focused sub-agent branch (or no active

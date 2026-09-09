@@ -71,10 +71,26 @@ export interface TreeNode {
   agentTranscript?: string;
 }
 
+/**
+ * Where a session's title came from: 'provisional' = derived from the first
+ * message, 'auto' = written by the automatic namer, 'manual' = an explicit
+ * rename (sidebar command or the `rename_session` tool). Absent on sessions
+ * stored before automatic naming existed — treated as provisional.
+ */
+export type TitleSource = 'provisional' | 'auto' | 'manual';
+
 /** A persisted conversation: a tree of turns plus the checked-out node. */
 export interface AgentSession {
   id: string;
   title: string;
+  /** Origin of `title` (see `TitleSource`); absent ⇒ 'provisional'. */
+  titleSource?: TitleSource;
+  /** A manual rename locked the title: the automatic namer must never touch it. */
+  titleLocked?: boolean;
+  /** When the automatic namer last wrote the title (cooldown gate). */
+  titleAutoAt?: number;
+  /** Turn count when the automatic namer last ran (growth gate). */
+  titleAutoNodes?: number;
   createdAt: number;
   updatedAt: number;
   nodes: Record<string, TreeNode>;
@@ -251,6 +267,65 @@ export function leafOf(session: AgentSession, fromId: string | null): string | n
 }
 
 /**
+ * A branch: `nodeId` plus every descendant (sub-agent sidecars included),
+ * depth-first. An unknown id yields `[]`; the walk is cycle-safe.
+ */
+export function branchIds(session: AgentSession, nodeId: string): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const stack = [nodeId];
+  while (stack.length > 0) {
+    const id = stack.pop()!;
+    const node = session.nodes[id];
+    if (!node || seen.has(id)) {
+      continue;
+    }
+    seen.add(id);
+    out.push(id);
+    for (const child of node.children) {
+      stack.push(child);
+    }
+  }
+  return out;
+}
+
+/**
+ * Detach a branch (the node and its whole subtree) from the session: the nodes
+ * are dropped, the parent's `children` is unlinked, and the checked-out node
+ * falls back to the parent when it was inside the removed subtree — or to
+ * `null` when the root itself was removed (the tree is then empty, exactly like
+ * a fresh session). Returns the removed node ids so the caller can drop the
+ * matching transcript dumps on disk. Pure data: the caller still owns the agent
+ * history and the repaint.
+ */
+export function detachBranch(session: AgentSession, nodeId: string): string[] {
+  const ids = branchIds(session, nodeId);
+  if (ids.length === 0) {
+    return ids;
+  }
+  const removed = new Set(ids);
+  const parentId = session.nodes[nodeId].parentId;
+  for (const id of ids) {
+    delete session.nodes[id];
+  }
+  const parent = parentId ? session.nodes[parentId] : undefined;
+  if (parent) {
+    parent.children = parent.children.filter((childId) => !removed.has(childId));
+  }
+  if (session.rootId && removed.has(session.rootId)) {
+    // The deleted branch was the whole tree (the root has no parent).
+    session.rootId = null;
+  }
+  if (session.activeNodeId && removed.has(session.activeNodeId)) {
+    // Standing on a node we just removed: the next prompt branches from the
+    // parent again (or the session is empty).
+    session.activeNodeId = parent ? parent.id : null;
+  }
+  session.updatedAt = Date.now();
+  return ids;
+}
+
+/**
  * Heal a session loaded from storage: drop the system prompt out of node
  * messages, downgrade a turn that was still running when the extension host went
  * away, drop empty placeholder nodes, unlink dangling children, and re-pick the
@@ -338,6 +413,13 @@ function normalizeTreeSession(raw: AgentSession): AgentSession {
   const session: AgentSession = {
     id: raw.id || newId(),
     title: raw.title || 'New session',
+    titleSource:
+      raw.titleSource === 'auto' || raw.titleSource === 'manual' || raw.titleSource === 'provisional'
+        ? raw.titleSource
+        : undefined,
+    titleLocked: raw.titleLocked === true ? true : undefined,
+    titleAutoAt: typeof raw.titleAutoAt === 'number' ? raw.titleAutoAt : undefined,
+    titleAutoNodes: typeof raw.titleAutoNodes === 'number' ? raw.titleAutoNodes : undefined,
     createdAt: raw.createdAt || Date.now(),
     updatedAt: raw.updatedAt || Date.now(),
     nodes: {},

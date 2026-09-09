@@ -36,6 +36,14 @@
   never hides a hit; `kind` filtering reads the meta line's `kind` (missing ⇒
   `subagent`, the legacy format). Hits carry absolute paths and real line numbers
   (1:1 with the file), so `read_file` follows up directly.
+- **Deleting a branch deletes its dumps** so the on-disk record never outlives the
+  history that produced it: `removeTranscripts(dir, nodeIds)` removes
+  `<dir>/<nodeId>.jsonl` per id (ids are validated against `^[A-Za-z0-9_-]+$`, so
+  a corrupt/hostile id cannot escape the folder) and `removeTranscriptFile(path)`
+  removes one recorded absolute path (a sub-agent's `agentTranscript` may point at
+  a transcript root the `subAgentTranscriptDir` setting has since changed). Both
+  are best-effort and return whether a file was actually removed; the backfill
+  never re-creates a dump for a node that is no longer in the tree.
 - **Roots are resolved at call time** via `ToolRegistry.setTranscriptRoots(() =>
   [provider.transcriptRoot()])` — a settings change needs no tool rebuild, and
   `subset()` sub-agents inherit the parent registry's resolver.

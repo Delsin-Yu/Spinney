@@ -1,10 +1,15 @@
 ## Session persistence & config
 - Storage keys: `agentHarness.state` (v2: `{ version, activeSessionId, sessions }`,
   each session is a **tree** of `TreeNode`), `agentHarness.runtimeConfig`
-  (`model` + `thinkingEffort`) and `agentHarness.transcriptBackfill` (the
-  one-time historical-dump marker).
+  (`model` + `thinkingEffort`), `agentHarness.transcriptBackfill` (the
+  one-time historical-dump marker) and `agentHarness.sessionTitleBackfill` (the
+  one-time historical-title marker; left unset when a pass is interrupted or the
+  model is unavailable, so it resumes on the next activation).
 - A session is `{ id, title, createdAt, updatedAt, nodes: Record<id, TreeNode>,
-  rootId, activeNodeId, orphanItems }`.
+  rootId, activeNodeId, orphanItems }` plus the title bookkeeping
+  (`titleSource: 'provisional'|'auto'|'manual'`, `titleLocked`, `titleAutoAt`,
+  `titleAutoNodes` — see `sessionTitles.ts`). A rename never touches `updatedAt`,
+  so it cannot reorder the sidebar.
 - `this.displayItems` points at the **checked-out node's** `displayItems` during a
   turn (set in `checkoutNode` / `beginTurn`), so streamed items land in the right
   node and are persisted with it.

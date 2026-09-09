@@ -34,6 +34,7 @@ const CORE_PROMPT = [
   '- vision — read_image：让视觉模型看磁盘上的图片',
   '- file-verbatim-frame — frame:true + RAW 标记：写大段多行内容免转义（write_file / replace_in_file 的参数）',
   '- session-hop — hop_session / list_nodes：把任务交给新会话并在跑完后跳回；列出当前会话的对话树',
+  '- session-title — rename_session：给会话改名（会话标题默认由 harness 自动命名，显式改名会锁定它）',
   '',
   '## 调用规范',
   '- 参数给完整合法 JSON；编辑文件前先读，用 read_file 输出原样作 oldText。',
@@ -382,6 +383,34 @@ const LIST_NODES_TOOL: ToolDefinition = {
   },
 };
 
+/**
+ * Rename a session. The harness names sessions automatically (from the
+ * conversation); a rename here is explicit, so it locks the title and the
+ * automatic namer stops touching it.
+ */
+const RENAME_SESSION_TOOL: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'rename_session',
+    description:
+      'Rename a session (the whole conversation, not a node). Use it when the title no longer describes the work. The harness also names sessions automatically from the conversation; an explicit rename locks the title, so automatic naming never overwrites it again. `sessionId` defaults to the active session (other session ids are not discoverable, so normally omit it). Returns the new title.',
+    parameters: {
+      type: 'object',
+      properties: {
+        title: {
+          type: 'string',
+          description: 'The new session title: short (≤ 20 chars), one line, no trailing punctuation.',
+        },
+        sessionId: {
+          type: 'string',
+          description: 'Optional session id; defaults to the active session.',
+        },
+      },
+      required: ['title'],
+    },
+  },
+};
+
 /** The identity lines shared by the leading system prompt. */
 function identityLines(model: string, effort: ThinkingEffort): string[] {
   const lines: string[] = [
@@ -518,6 +547,9 @@ export class Agent {
   private hopHandler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null = null;
   /** Provider hook that renders the active session's tree for `list_nodes`. */
   private listNodesHandler: (() => Promise<string>) | null = null;
+  /** Provider hook that renames a session for the `rename_session` tool. */
+  private renameSessionHandler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null =
+    null;
   /** Whether `spawn_readonly_agents` is exposed (read-only agents only). */
   private canSpawnReadOnly = false;
   /** Whether this agent may spawn sub-agents (a depth-2 sub-agent may not). */
@@ -572,6 +604,13 @@ export class Agent {
   /** Set a provider hook that renders the active session's tree for `list_nodes`. */
   setListNodeHandler(handler: (() => Promise<string>) | null): void {
     this.listNodesHandler = handler;
+  }
+
+  /** Set a provider hook that renames a session for `rename_session`. */
+  setRenameSessionHandler(
+    handler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null,
+  ): void {
+    this.renameSessionHandler = handler;
   }
 
   /** Allow/deny this agent from hopping to a fresh session (main agent only). */
@@ -1035,6 +1074,15 @@ export class Agent {
         : this.listNodesHandler
           ? await this.listNodesHandler()
           : 'Error: the session tree is not available in this session.';
+    } else if (call.function.name === 'rename_session') {
+      // Renaming a session is the provider's job (it owns the session list and
+      // the title bookkeeping). Delegate; the new title is returned.
+      const args = parseToolArgs(call.function.arguments);
+      result = !this.canHop
+        ? 'Error: only the main agent may rename a session.'
+        : this.renameSessionHandler
+          ? await this.renameSessionHandler(args, signal)
+          : 'Error: session renaming is not available in this session.';
     } else {
       result = await this.tools.execute(call.function.name, call.function.arguments, signal);
     }

@@ -62,6 +62,12 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }),
     vscode.commands.registerCommand('agentHarness.newSession', () => chatProvider?.newSession()),
+    vscode.commands.registerCommand('agentHarness.renameSession', (arg) => {
+      void chatProvider?.renameSessionInteractive(arg);
+    }),
+    vscode.commands.registerCommand('agentHarness.autoRenameSession', (arg) => {
+      void chatProvider?.autoRenameSession(arg);
+    }),
     vscode.commands.registerCommand('agentHarness.deleteSession', async (arg) => {
       const explicit = toSessionId(arg);
       const id = explicit || chatProvider?.currentSessionId || '';
@@ -81,6 +87,11 @@ export function activate(context: vscode.ExtensionContext): void {
         }
       }
       chatProvider?.deleteSession(id);
+    }),
+    vscode.commands.registerCommand('agentHarness.deleteBranch', () => {
+      // Deletes the branch rooted at the checked-out turn; the provider asks for
+      // a modal confirmation before anything is removed.
+      void chatProvider?.deleteCheckedOutBranchInteractive();
     }),
     vscode.commands.registerCommand('agentHarness.clear', () => chatProvider?.clear()),
   );

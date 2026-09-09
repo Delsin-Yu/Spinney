@@ -7,6 +7,10 @@
 `saveSessionTranscripts` (default `true` — dump each main-agent turn; the
 one-time historical backfill is keyed by the Memento marker
 `agentHarness.transcriptBackfill`),
+`autoSessionTitles` (default `true` — name a session from its conversation after
+the first turn and refresh it when the conversation grows; a manual rename locks
+the title; the one-time historical backfill is keyed by the Memento marker
+`agentHarness.sessionTitleBackfill`),
 `subAgentTranscriptDir` (default `""` = global storage; else workspace-relative;
 now the root for **both** transcript kinds),
 `maxInlineToolOutput` (bytes, default `32768`; `0` = always inline — above it a

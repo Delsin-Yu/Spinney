@@ -760,6 +760,16 @@
     status.dataset.role = 'status';
     head.appendChild(title);
     head.appendChild(status);
+    // Delete-branch button: hover-revealed (see .node-del), so a destructive
+    // action is not one stray click away. The host asks for a modal confirmation
+    // before it removes anything (history + transcript dumps).
+    const del = el('button', 'node-del', '🗑');
+    del.title = 'Delete this branch — this turn and everything below it';
+    del.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      vscode.postMessage({ type: 'deleteBranch', id });
+    });
+    head.appendChild(del);
     card.appendChild(head);
 
     // Pinned user prompt (sticky at the top of an expanded card).
@@ -969,7 +979,9 @@
     let info = card.querySelector('.node-agent-info');
     if (!info) {
       info = el('span', 'node-agent-info', '');
-      head.appendChild(info);
+      // Keep the delete button at the far right of the head.
+      const del = head.querySelector('.node-del');
+      if (del) head.insertBefore(info, del); else head.appendChild(info);
     }
     info.textContent = `d${msg.depth || 1} · ${msg.model || ''}${msg.write ? ' · write' : ' · ro'}`;
     if (!card.querySelector('.node-kill')) {
@@ -979,7 +991,8 @@
         ev.stopPropagation();
         vscode.postMessage({ type: 'killAgent', id: msg.id });
       });
-      head.appendChild(kill);
+      const del = head.querySelector('.node-del');
+      if (del) head.insertBefore(kill, del); else head.appendChild(kill);
     }
     relayout();
   }

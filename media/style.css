@@ -1406,6 +1406,27 @@ button.icon-btn {
 }
 .node-kill:hover { background: var(--error-bg); color: #fff; }
 
+/* Delete-branch button (every card): revealed on hover/focus only, so a
+   destructive action is never one stray click away — the host still confirms
+   it in a modal dialog. */
+.node-del {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--text-dim);
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+.node:hover .node-del,
+.node-del:focus-visible { opacity: 1; }
+.node-del:hover { background: var(--error-bg); border-color: var(--error-bg); color: #fff; }
+
 /* Agent connector edge: dim while running, green on done, red on error. */
 .edge-agent { stroke: var(--text-dim); opacity: 0.6; }
 .edge-agent.edge-done { stroke: var(--success); opacity: 1; }
