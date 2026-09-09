@@ -12,6 +12,33 @@ only for the part you are touching.
 
 ---
 
+## Standard closing procedure (build, install, reload) — MANDATORY
+
+**This is the standard procedure of this workspace.** A change that ships code
+(anything under `src/`, `media/`, `package.json`) is *not finished* until it is
+installed and the user has been told to reload:
+
+1. `npm run compile` must be clean. `build-deploy.ps1` runs it — fix errors
+   first, never package a broken build.
+2. Run `powershell -File build-deploy.ps1` as the last step: it compiles,
+   packages the `.vsix`, and `code --install-extension --force`s it. Use
+   `-NoInstall` only when the user explicitly asked for build-only.
+3. **Tell the user to run "Developer: Reload Window"** (`Ctrl+Shift+P` →
+   "Developer: Reload Window"). The extension host keeps running the *old* code
+   until then, so without the reload the change is invisible. Never claim a code
+   change is live before that reload, and never leave step 3 implicit.
+
+Notes:
+
+- A reload restarts the extension host; chat sessions persist in
+  `agentHarness.state`, so the conversation survives it.
+- Edits to *this file* also only reach the agent prompt at session start — ask
+  the user to reload if the new instructions should apply immediately.
+- Docs-only edits (README / `AGENTS.md`) do not need `build-deploy` unless
+  the packaged `.vsix` itself should be refreshed.
+
+---
+
 ## What this is
 
 A minimal VS Code extension that puts an **agentic coding assistant** in the
@@ -47,7 +74,9 @@ powershell -File build-deploy.ps1 -NoInstall # compile + package only
 ```
 
 `build-deploy.ps1` compiles, packages, and `code --install-extension`s the
-newest `.vsix`. Use it for quick iteration, then reload the window.
+newest `.vsix`. Use it for quick iteration, then reload the window. This is the
+**mandatory last step** of any code change — see "Standard closing procedure"
+above.
 
 Launch: F5 (`.vscode/launch.json` → "Run Extension", pre-task `npm: compile`).
 `-allow-missing-repository` is required because the repo has no git remote.
@@ -102,12 +131,17 @@ User (editor WebviewPanel) <--postMessage--> ChatViewProvider (src/chat)
 - `src/chat/tree.ts` — the Chat Tree data model: `TreeNode` / `AgentSession`,
   path assembly (`pathIds` / `pathMessages`), `attachNode`, `pruneSession`,
   and the v1→v2 state migration. Pure data layer, no VS Code UI.
+- `src/chat/transcript.ts` — sub-agent transcript dumps: `writeSubAgentTranscript`
+  (JSONL, one API message per line, meta + tool stats on line 1),
+  `summarizeTranscript` (tool-call / denied-call stats), `sumUsage`,
+  `removeTranscriptDir`. Pure fs, no VS Code UI.
 - `src/agent/agent.ts` — the agent loop, the **system prompt** (`CORE_PROMPT`,
   `identityLines`, `buildSystemPrompt`), message sanitizing, interrupt/rollback,
   `AGENTS.md` snapshot (static `agentsMdSnapshot`), model/effort switching.
 - `src/agent/deepseek.ts` — `DeepSeekClient` (stream SSE over `fetch`,
   `DeepSeekError`), builds `stream: true`, `stream_options.include_usage`,
-  `reasoning_effort`.
+  `reasoning_effort`. The read loop flushes the `TextDecoder` and parses a final
+  `data:` line that arrived without a trailing newline.
 - `src/agent/types.ts` — shared types (`Role`, `ThinkingEffort`, `ContentPart`,
   `ChatMessage`, `ToolCall`, `ToolDefinition`, `Usage`, `StreamChunk`,
   `AgentEvent`, `AgentTool`).
@@ -119,7 +153,11 @@ User (editor WebviewPanel) <--postMessage--> ChatViewProvider (src/chat)
   per-session lifecycle.
 - `src/tools/shell.ts` — cross-platform shell detection for `exec_command`
   (Git Bash > pwsh > Windows PowerShell 5.1 > cmd.exe) with UTF-8 safeguards.
+  The WSL launcher (`System32\bash.exe` / `WindowsApps`) is **not** accepted as
+  Git Bash (different filesystem, no `zh_CN.UTF-8`, Windows cwd).
 - `src/perf.ts` — tiny `[perf]` logger (sink = the Agent Harness output channel).
+  `perf()` takes a string **or a thunk**; a thunk is only evaluated when a sink is
+  installed, so an expensive line (JSON sizes, byte counts) costs nothing when off.
 - `media/main.js` — webview client (tree rendering, pan/zoom, streaming into the
   active node, composer, streaming meter, live tool drafts).
 - `media/tree.js` — the Chat Tree layout algorithm (`window.treeLayout`), a pure
@@ -132,19 +170,34 @@ User (editor WebviewPanel) <--postMessage--> ChatViewProvider (src/chat)
 
 | Tool | Args | Behavior |
 | --- | --- | --- |
-| `read_file` | `path`, `startLine?`, `endLine?` | Returns `File: <path> (N lines, <EOL>)` header + LF-normalized content (line-numbered if a range is given). Always LF content, but reports on-disk EOL. |
+| `read_file` | `path`, `startLine?`, `endLine?` | Returns `File: <path> (N lines, <EOL>)` header + LF-normalized content (line-numbered if a range is given). Always LF content, but reports on-disk EOL. `N` follows the `wc -l` convention (a trailing newline does **not** add a line); `read_file(path, 1, 1)` is the cheap way to get just the count. |
 | `write_file` | `path`, `content`, `frame?` | Overwrites; creates parent dirs. Preserves the existing file's line-ending style (converts content to it). New files written as supplied. |
-| `replace_in_file` | `path`, `oldText`, `newText`, `frame?` | Exact-substring replace. `oldText` must occur **exactly once** (else error). Matches/writes in normalized LF; preserves on-disk EOL. |
-| `list_dir` | `path?` | Sorted entries; directories suffixed with `/`. |
+| `replace_in_file` | `path`, `oldText`, `newText`, `frame?` | Exact-substring replace. `oldText` must occur **exactly once** (else error). Matches/writes in normalized LF; preserves on-disk EOL. The replacement is inserted **verbatim** (function-form replace), so `String.replace` dollar-patterns in `newText` stay literal. |
+| `list_dir` | `path?`, `glob?`, `recursive?` | Sorted entries; directories suffixed with `/`. `glob` filters against the path relative to the listed dir (`*.ts` = top level, `**/*.ts` = any depth); `recursive` walks subdirs (heavy dirs skipped) and prints relative paths. Capped at 2000 entries with an explicit note. |
+| `search_files` | `pattern`, `path?`, `glob?`, `caseSensitive?`, `maxResults?`, `context?` | Regex search returning `file:line: text` (paths **workspace-relative**). `path` may be a **file or a directory**. `maxResults` default 200 / hard cap 300; `context` (0–10) adds surrounding lines with `-` separators (`src/a.ts-11- text`). Hit lines are trimmed + clipped to 160 chars. Heavy dirs skipped; files >1 MB skipped. A capped/short-circuited search appends an explicit `…[search stopped early: …]` note — never silently truncated. |
+
+> **Oversized results spill to a temp file.** Every tool whose output is unbounded
+> (`search_files`, `list_dir`, `exec_command`, `check_background_terminal`,
+> `join_background`) runs its result through `limitInline()`: above
+> `agentHarness.maxInlineToolOutput`
+> (default 32768 bytes, `0` = always inline) the full text is written to
+> `%TEMP%/agent-harness-tool-output/<tool>-<id>.txt` and only the absolute path,
+> byte/line count and an 8-line preview are returned — so a `context`-heavy search
+> on a big file or a chatty command cannot flood the context. The spilled file is a
+> normal file:
+> `read_file` can page it and `search_files` can grep it. A write failure falls
+> back to inlining, so a result is never lost.
 | `exec_command` | `command`, `cwd?`, `timeout?`, `timeout_behavior?` | Runs through the detected shell (`getShell()`), returns combined stdout+stderr trimmed. Errors/timeouts/aborts are prefixed with a `[...]` note. `timeout_behavior` = `stop` (default, kill on timeout) / `move_to_background` (promote a still-running command to a background terminal and return its id) / `start_in_background` (launch immediately, return id, don't wait). |
 | `check_background_terminal` | `pid` | Status of a background terminal (running / finished, exit code, output so far). |
 | `kill_background` | `pid` | Kills a background terminal's process tree. Tool-initiated kills suppress the injected completion notice. |
 | `join_background` | `pid` | Blocks until the background terminal finishes and returns its final exit code + output. Honours Stop. |
 | `read_image` | `path` | Not a registry tool — handled by the Agent. Reads the image, uploads it to the DeepSeek Files API, then injects a `user`-role `file` content block (`{ type: 'file', file_id }`) so the vision model sees it. Returns a short confirmation (path → `file-api-…`, bytes). Only valid on the vision model; unsupported format/too large (>64 MiB) return a friendly error. |
-| `spawn_agents` | `agents`, `mode` | Orchestrated by the provider. Spawns parallel sub-agent branches (`write` REQUIRED, `model?`), `mode: 'sync'` blocks returning summaries, `'async'` returns `{ spawned, async:true, ids }` and delivers one combined notice when the batch settles. Only on agents whose `canSpawn` is true. |
-| `send_agent_message` | `id`, `message`, `write?`, `model?`, `mode` | Orchestrated by the provider. Resumes a finished sub-agent (`id` from a prior `spawn_agents`) with a follow-up. `sync` returns the resumed result, `async` returns `{ resumed, id, async:true }` and delivers the result as a notice. `model` is whitelisted. Only on agents whose `canSpawn` is true. |
+| `spawn_agents` | `agents`, `mode` | Orchestrated by the provider. Spawns parallel sub-agent branches (`write` REQUIRED, `model?`), `mode: 'sync'` blocks returning summaries + each agent's `stats` + `transcript` path, `'async'` returns `{ spawned, async:true, ids, transcriptDir }` and delivers one combined notice when the batch settles. Only on agents whose `canSpawn` is true (`depth < 2 && write`) — a read-only sub-agent never sees it. |
+| `spawn_readonly_agents` | `agents`, `mode` | Read-only fan-out variant: the agent specs have **no `write` field**, so a child can never be writable. Exposed only when `canSpawnReadOnly` (`depth < 2 && !write`), i.e. to a read-only depth-1 sub-agent. Same result shape as `spawn_agents`. |
+| `send_agent_message` | `id`, `message`, `write?`, `model?`, `mode` | Orchestrated by the provider. Resumes a finished sub-agent (`id` from a prior `spawn_agents`) with a follow-up. `sync` returns the resumed result + `stats` + `transcript`, `async` returns `{ resumed, id, async:true }` and delivers the result as a notice. `model` is whitelisted. Only on agents whose `canSpawn` is true (`depth < 2 && write`). The `write?` override is honoured **only for the main agent**; a sub-agent caller goes through `handleSubAgentSendMessage`, which requires the target to be its own direct child and caps `write` at `caller.write && target.write` (no promotion). |
+| `send_readonly_agent_message` | `id`, `message`, `model?`, `mode` | Read-only resume variant: **no `write` override exists** (and a smuggled key is pinned to `false`). Exposed only when `canSpawnReadOnly` (`depth < 2 && !write`), i.e. to a read-only depth-1 sub-agent. Same result shape as `send_agent_message`. |
 
-> `read_image` is **not** resolved by `ToolRegistry.execute` — it is intercepted in `Agent.executeToolCall` because a tool message cannot carry an image block, so the image must be delivered as an injected user message. Likewise `spawn_agents` and `send_agent_message` are intercepted and delegated to the provider (`setSpawnHandler` / `setSendMessageHandler`); they are only present when `Agent.canSpawn` (a depth-2 sub-agent has neither). The tools sent to the API are `[...ToolRegistry.definitions, READ_IMAGE_TOOL, ...(canSpawn ? [SPAWN_AGENTS_TOOL, SEND_AGENT_MESSAGE_TOOL] : [])]` (see `Agent.getTools`).
+> `read_image` is **not** resolved by `ToolRegistry.execute` — it is intercepted in `Agent.executeToolCall` because a tool message cannot carry an image block, so the image must be delivered as an injected user message. Likewise `spawn_agents` / `spawn_readonly_agents` / `send_agent_message` / `send_readonly_agent_message` are intercepted and delegated to the provider (`setSpawnHandler` / `setSendMessageHandler`); a read-only depth-1 sub-agent gets only the `*_readonly_*` pair, a depth-2 sub-agent gets none of them, and an intercepted call when the matching `canSpawn*` flag is false returns an explicit error. The tools sent to the API are `[...ToolRegistry.definitions, READ_IMAGE_TOOL, ...(canSpawn ? [SPAWN_AGENTS_TOOL, SEND_AGENT_MESSAGE_TOOL] : []), ...(canSpawnReadOnly ? [SPAWN_READONLY_AGENTS_TOOL, SEND_READONLY_AGENT_MESSAGE_TOOL] : [])]` (see `Agent.getTools`).
 
 Argument parsing is tolerant: strict JSON **or** the verbatim-frame form. The
 frame form lets a tool carry large/multi-line content without JSON escaping:
@@ -229,20 +282,37 @@ content. See `parseArgs` in `src/tools/index.ts`.
   node and are persisted with it.
 - Model/effort selections are user-overridable at runtime and persisted;
   settings provide the fallback defaults.
+- `persist()` writes a **clipped copy** of each node's messages
+  (`clipMessageForStorage`, 64 KiB per message content): the in-memory history
+  keeps the full payload, but one huge tool result cannot make every persist write
+  tens of MiB into the memento.
 
 ### Chat Tree invariants
 - `TreeNode.messages` (non-empty) always starts with a `user` role message; the
   system prompt is **never** stored in a node (synthesized per activation).
 - The flat API history is `pathMessages(session, activeNodeId)` = `[system, ...path
   nodes' messages]`, and it must go through `Agent.sanitizeMessages` (the sanitized
-  copy is **never** written back into the nodes). `prefixLen` is measured on the
+  copy is **never** written back into the nodes — `pathMessages` returns the nodes'
+  own message objects by reference, so `sanitizeMessages` must not mutate them: the
+  reasoning→content healing builds a `{ ...msg }` copy). `prefixLen` is measured on the
   sanitized path.
 - A turn's message slice is written **once**, in `finishTurn`, as
   `node.messages = agent.getMessages().slice(turnPrefixLen)`; run `done` /
-  `interrupted` / `error` all end there.
+  `interrupted` / `error` all end there. `turnPrefixLen` is therefore always an
+  index into **`agent.getMessages()`** (which includes the leading system message):
+  `beginTurn` uses `agent.getMessages().length` after `setMessages(buildPath(...))`,
+  and the injected async-notice turn in `drainSubAgentNotices` does the same (it
+  pins the history to the parent node with `buildPath` first). A queued notice whose
+  node is **not** in the active session is dropped, so a batch finishing after a
+  session switch never injects a turn into another session's agent. Using a node's own
+  `messages.length` as the basis re-includes ancestor history in that node.
 - Branching: every user message creates a new node under the checked-out node;
   sending on a node that already has children makes a sibling (a new branch).
   A branch switch costs only a prefix cache miss — the shared prefix stays cached.
+- `attachNode` repairs a missing parent by attaching the node to the **root**
+  instead of leaving it unreachable (an orphan would still become the checkout
+  point and silently blank the history); `leafOf` skips `kind:'agent'` children,
+  so a restored checkout point can never land on a sub-agent sidecar.
 - Switching to a different branch resets the pending interruption notice
   (`agent.resetInterruptState()`) unless the new path still ends at the interrupted
   node; `lastInterruptedNodeId` tracks this.
@@ -278,8 +348,11 @@ content. See `parseArgs` in `src/tools/index.ts`.
   provider drops a stale queued notice for such a task at delivery time (`taskAlreadyHandled`), so the
   tool result is the only signal the agent sees — no duplicate injected notice.
 - `spawnShellCommand`/`killChildProcess` (in `src/tools/background.ts`) handle the process-tree kill
-  (Windows `taskkill /T /F`, otherwise `SIGTERM`) and keep draining output past `OUTPUT_CAP` so a
-  background command cannot block or balloon memory.
+  (Windows `taskkill /T /F`, otherwise a POSIX process group — the child is spawned
+  `detached` so `process.kill(-pid, 'SIGTERM')` tears down the whole tree) and keep
+  draining output past `OUTPUT_CAP` so a
+  background command cannot block or balloon memory. Output is decoded with a per-stream
+  `StringDecoder`, so a multi-byte character split across pipe chunks is not turned into U+FFFD.
 - On session delete or extension deactivate, `killAll()` tears down every running background job so
   nothing is orphaned. `clear()`/`new`/`switch`/`delete` are blocked while a background job runs.
 - The webview renders a "Background" panel (`#bg-panel`) listing **still-running** tasks (with a
@@ -292,12 +365,24 @@ content. See `parseArgs` in `src/tools/index.ts`.
 ### Sub-agents
 - `spawn_agents({ agents: [{ instruction, write (REQUIRED), model? }], mode })` spawns one or more
   parallel sub-agents. `write:true` lets a sub-agent write files / run commands; `write:false` is
-  **read-only** (only `read_file` / `list_dir` / `search_files`; the write tools are exposed but
-  **blocked at runtime** by `ToolRegistry.withBlocked`). Depth is hard-capped at 2 — a depth-2
-  sub-agent may not spawn its own sub-agents (`Agent.setCanSpawn(false)` removes `spawn_agents` /
-  `send_agent_message`). `mode:'sync'` blocks and returns `{ results }`; `mode:'async'` returns
+  **read-only** (only `read_file` / `list_dir` / `search_files`; the write tools are hidden from the
+  model's tool list via `ToolRegistry.withHidden` yet stay registered and **blocked at runtime** by
+  `ToolRegistry.withBlocked`, so a hallucinated call still gets a clear denial). Depth is hard-capped at 2 — a depth-2
+  sub-agent may not spawn at all. A read-only depth-1 sub-agent gets `spawn_readonly_agents` instead of
+  `spawn_agents` (`canSpawn = depth < 2 && write`, `canSpawnReadOnly = depth < 2 && !write`): its agent
+  specs have no `write` field, `Agent.executeToolCall` rewrites every spec to `write:false` (so a
+  smuggled `write` key cannot escalate), and `spawnChildren` clamps a read-only parent's child to
+  `write:false` anyway. It resumes its own children with `send_readonly_agent_message` (again no
+  `write` override; `handleSubAgentSendMessage` also enforces "target must be a direct child" and
+  caps `write` at `caller.write && target.write`). Its system prompt
+  (`Agent.subAgentSystemPrompt`) nudges it to fan out when a task splits into
+  independent, reading-heavy parts — without the nudge, read-only sub-agents never
+  volunteer to decompose. `mode:'sync'` blocks and returns `{ results }`;
+  `mode:'async'` returns
   `{ spawned, async:true, ids }` immediately and the outcome is delivered as **one** injected notice
-  when the batch settles.
+  when the batch settles. An async **resume** whose owner is a sub-agent is routed through
+  `queueSubAgentChildNotice` (queued for that sub-agent's next finish, or auto-resumed) instead of the
+  main agent's notice queue.
 - `send_agent_message({ id, message, write?, model?, mode })` resumes a **finished** sub-agent (the
   `id` from a prior `spawn_agents`) with a follow-up `message`. `sync` blocks and returns the resumed
   result; `async` returns immediately and delivers the result as a notice. `model` is validated against
@@ -306,6 +391,19 @@ content. See `parseArgs` in `src/tools/index.ts`.
   history and `pathMessages` (in `tree.ts`) skips it, so it never leaks into the parent's API path. On
   finish the sub-agent's conversation (minus the synthesized system prompt) is stored in `node.messages`
   so a follow-up can continue it, even across a restart.
+- **Transcript dumps (`node.agentTranscript`):** because the caller can only ever see the sub-agent's
+  summary, `runSubAgent`'s `finish` also writes the whole conversation to disk as **JSONL**
+  (`src/chat/transcript.ts`) and returns the absolute path: `spawn_agents` sync results carry
+  `stats` (tool-call / denied-call counts) plus `transcript` per agent, `send_agent_message` sync
+  results carry them too, and the async notices append
+  `· transcript: <path>` to each line. Line 1 is a `meta` record (ids, spec, status, summary, system
+  prompt, `stats.toolCalls` / `stats.deniedToolCalls` / `stats.usage`); every following line is one API
+  message (`{type:'message', index, ...}`), so `read_file` can page it and `search_files` can grep it.
+  A resume **overwrites** the same `<nodeId>.jsonl` with the extended conversation. The folder is
+  `<agentHarness.subAgentTranscriptDir>/<sessionId>/` (workspace-relative) or, by default,
+  `<globalStorage>/transcripts/<sessionId>/`; `agentHarness.saveSubAgentTranscripts` (default true) can
+  turn it off. A write failure is logged to the output channel and never breaks the run. The folder is
+  deleted with its session (`deleteSession`) or when the conversation is cleared (`clear`).
 - Async results for a **sub-agent parent** (a depth-1 sub-agent that spawned depth-2 children in async
   mode) are routed by `queueSubAgentChildNotice`: if the parent is still running the notice is queued and
   delivered at its next finish (`flushSubAgentChildNotices`); if it already finished it is auto-resumed
@@ -350,7 +448,11 @@ content. See `parseArgs` in `src/tools/index.ts`.
 (seconds, default 120), `maxTurns` (default 20), `contextWindow` (0 = auto),
 `thinkingEffort` (`none|low|medium|high`), `foldToolCalls` (default `true`),
 `foldThinking` (default `true`), `maxConcurrentSubagents` (default 15),
-`maxLevel2Subagents` (default 2).
+`maxLevel2Subagents` (default 2), `saveSubAgentTranscripts` (default `true`),
+`subAgentTranscriptDir` (default `""` = global storage; else workspace-relative),
+`maxInlineToolOutput` (bytes, default `32768`; `0` = always inline — above it a
+tool result spills to a temp file). `SubAgentPool` clamps `maxConcurrentSubagents`
+to **≥ 1** (a non-positive limit would otherwise deadlock every sub-agent).
 - Models: `deepseek-chat`, `deepseek-reasoner`, `deepseek-v4-flash`,
   `deepseek-v4-pro`, `deepseek-v4-flash-vision-exp`,
   `deepseek-v4.1-flash-expires-on-0910`.
