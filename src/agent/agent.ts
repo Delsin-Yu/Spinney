@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { DeepSeekClient } from './deepseek';
+import { DeepSeekClient, DeepSeekError } from './deepseek';
 import { ToolRegistry, resolvePath } from '../tools';
 import {
   AgentEvent,
@@ -904,7 +904,7 @@ export class Agent {
    * incremental SSE chunks. Emits streamDelta / reasoningDelta / toolCallDelta
    * events for live rendering.
    */
-  private async requestAssistantMessage(signal: AbortSignal): Promise<{ message: ChatMessage; indices: number[]; usage?: Usage }> {
+  private async requestAssistantMessage(signal: AbortSignal, imageRetry = 0): Promise<{ message: ChatMessage; indices: number[]; usage?: Usage }> {
     const toolCallMap = new Map<number, { id: string; name: string; arguments: string }>();
     let content = '';
     let reasoning = '';
@@ -990,6 +990,13 @@ export class Agent {
           .map((tc) => ({ name: tc.name, arguments: tc.arguments }));
         throw new InterruptedError(content, reasoning, partialTools);
       }
+      // A provider-side image rejection (e.g. a malformed file that passed local
+      // magic-byte detection) would otherwise 400 every subsequent turn. Drop
+      // the offending image from the history and retry the request.
+      if (imageRetry < 8 && this.dropRejectedImage(err)) {
+        this.onEvent({ type: 'status', text: 'The provider rejected an image; removed it and retrying…' });
+        return this.requestAssistantMessage(signal, imageRetry + 1);
+      }
       throw err;
     }
 
@@ -1021,5 +1028,41 @@ export class Agent {
       indices,
       usage,
     };
+  }
+
+  /**
+   * Detect a provider "unsupported image" 400 and remove the offending image
+   * block(s) from the live history so a retry can succeed. DeepSeek names the
+   * offending message (`.messages[<n>].image[...]`); every image part in that
+   * message is replaced with a text placeholder. Returns true if anything was
+   * removed.
+   */
+  private dropRejectedImage(err: unknown): boolean {
+    if (!(err instanceof DeepSeekError) || err.status !== 400) {
+      return false;
+    }
+    if (!/unsupported image/i.test(err.message)) {
+      return false;
+    }
+    const match = /messages\[(\d+)\]/.exec(err.message);
+    const named = match ? this.messages[Number(match[1])] : undefined;
+    const targets: ChatMessage[] = named ? [named] : this.messages;
+    let removed = 0;
+    for (const message of targets) {
+      if (message.role !== 'user' || !Array.isArray(message.content)) {
+        continue;
+      }
+      if (!message.content.some((p) => p.type === 'image_url' || p.type === 'file')) {
+        continue;
+      }
+      message.content = message.content.map((part): ContentPart => {
+        if (part.type === 'image_url' || part.type === 'file') {
+          removed++;
+          return { type: 'text', text: '[image removed: the provider rejected it as unsupported]' };
+        }
+        return part;
+      });
+    }
+    return removed > 0;
   }
 }
