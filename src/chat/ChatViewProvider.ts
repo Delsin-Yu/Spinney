@@ -2217,9 +2217,9 @@ export class ChatViewProvider implements ControlHost {
   }
 
   private createPanel(sessionId: string): ChatPanel {
-    const created = new ChatPanel({
+    let created!: ChatPanel;
+    created = ChatPanel.create({
       sessionId,
-      viewType: 'agentHarness.chatTree',
       title: this.panelTitle(sessionId),
       extensionUri: this.extensionUri,
       getHtml: (webview) => this.getHtml(webview),
@@ -2232,6 +2232,53 @@ export class ChatViewProvider implements ControlHost {
       },
     });
     return created;
+  }
+
+  /**
+   * Window recovery: VS Code recreated this webview panel from the editor state
+   * it serialized at shutdown (`registerWebviewPanelSerializer`, wired in
+   * extension.ts). Adopt the panel, bind it to the session it was showing and
+   * repaint it. Without this the chat tab silently disappears on every reload.
+   */
+  restorePanel(panel: vscode.WebviewPanel, state: unknown): void {
+    if (this.disposed || this.panel) {
+      // Shutting down, or a chat tab is already bound (never expected with a
+      // single panel): drop the extra one so the user does not get two tabs.
+      panel.dispose();
+      return;
+    }
+    // The session to show is the one the webview remembered via setState before
+    // the reload; fall back to the persisted active session when it is missing
+    // (older build) or no longer exists (deleted meanwhile).
+    const remembered = (state as { sessionId?: unknown } | undefined)?.sessionId;
+    const rememberedSession =
+      typeof remembered === 'string' ? this.sessions.find((s) => s.id === remembered) : undefined;
+    const session = rememberedSession ?? this.getActiveSession();
+    if (!session) {
+      panel.dispose();
+      return;
+    }
+    if (session.id !== this.activeSessionId) {
+      // Show the panel's session as the active one so tree, agent history and
+      // composer all agree with what is on screen.
+      this.activateSession(session);
+    }
+    let restored!: ChatPanel;
+    restored = ChatPanel.revive({
+      sessionId: session.id,
+      panel,
+      getHtml: (webview) => this.getHtml(webview),
+      onMessage: (message) => this.handlePanelMessage(message),
+      onDispose: () => {
+        if (this.panel === restored) {
+          this.panel = null;
+        }
+      },
+    });
+    this.panel = restored;
+    restored.setTitle(this.panelTitle(session.id));
+    this.output.appendLine(`[panel] restored chat tab for session ${session.id}`);
+    // The webview posts 'ready' once its script loads; that repaints it.
   }
 
   /**
@@ -2528,7 +2575,15 @@ export class ChatViewProvider implements ControlHost {
     const reg = this.sessionRegistries.get(this.activeSessionId);
     const runningBg = reg ? reg.runningCount() > 0 : false;
     const sessionLocked = this.busy || runningBg;
-    this.post({ type: 'state', busy: this.busy, status: this.lastStatus, sessionLocked });
+    // `sessionId` lets the webview remember which session it shows (vscode.setState),
+    // so a reloaded window can restore the tab bound to the same conversation.
+    this.post({
+      type: 'state',
+      busy: this.busy,
+      status: this.lastStatus,
+      sessionLocked,
+      sessionId: this.activeSessionId,
+    });
   }
 
   // ---- Background terminal management ----
@@ -2801,7 +2856,10 @@ export class ChatViewProvider implements ControlHost {
       reg.killAll();
     }
     this.cleanupSubAgents();
-    this.panel?.dispose();
+    // Deliberately NOT disposing the webview panel: disposing closes the editor
+    // tab, and the tab must outlive the extension host so VS Code can hand it
+    // back through the webview panel serializer on the next activation
+    // (restorePanel). VS Code tears the webview down with the extension host.
     this.panel = null;
     this.output.dispose();
   }
@@ -3058,6 +3116,9 @@ export class ChatViewProvider implements ControlHost {
     const scriptUri = withV(String(webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'main.js'))));
     const markdownItUri = withV(String(webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'markdown-it.min.js'))));
     const treeUri = withV(String(webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'tree.js'))));
+    // Vendored, pinned tree-layout engine (non-layered-tidy-tree-layout@2.0.2, MIT).
+    // Not an npm dependency — see media/vendor/non-layered-tidy-tree-layout/PROVENANCE.md.
+    const layoutEngineUri = withV(String(webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'vendor', 'non-layered-tidy-tree-layout', 'dist', 'non-layered-tidy-tree-layout.js'))));
     const styleUri = withV(String(webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'style.css'))));
     const nonce = this.getNonce();
 
@@ -3125,6 +3186,7 @@ export class ChatViewProvider implements ControlHost {
     </div>
   </div>
   <script nonce="${nonce}" src="${markdownItUri}"></script>
+  <script nonce="${nonce}" src="${layoutEngineUri}"></script>
   <script nonce="${nonce}" src="${treeUri}"></script>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>

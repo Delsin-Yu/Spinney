@@ -3,10 +3,12 @@
 - `src/extension.ts` — activation; registers the webview provider + commands.
 - `src/chat/ChatViewProvider.ts` — session/persistence, config, image attachment,
   message routing, event→UI mapping, HTML shell, and the editor `WebviewPanel`
-  lifecycle (`ensurePanel` / `createPanel` / `postAllState`).
+  lifecycle (`ensurePanel` / `createPanel` / `restorePanel` / `postAllState`).
 - `src/chat/ChatPanel.ts` — a thin wrapper around a `WebviewPanel` (the chat
   surface in the editor area). Single panel in v1; holds a `sessionId` so several
-  panels can live side by side later.
+  panels can live side by side later. `ChatPanel.create` makes a new panel,
+  `ChatPanel.revive` adopts one VS Code restored from serialization (window
+  reload) — both share the same HTML/event wiring.
 - `src/chat/SessionsProvider.ts` — the native sidebar `TreeDataProvider` listing
   session titles; it re-reads items from `ChatViewProvider` on every refresh.
 - `src/chat/tree.ts` — the Chat Tree data model: `TreeNode` / `AgentSession`,
@@ -53,10 +55,25 @@
   `perf()` takes a string **or a thunk**; a thunk is only evaluated when a sink is
   installed, so an expensive line (JSON sizes, byte counts) costs nothing when off.
 - `media/main.js` — webview client (tree rendering, pan/zoom, streaming into the
-  active node, composer, streaming meter, live tool drafts).
+  active node, composer, streaming meter, live tool drafts). The composer is the
+  active node's input dock: `setActiveLeaf` moves `#composer` into the
+  checked-out card's bottom. It has no other home — with an empty session the
+  placeholder card hosts it, and with a focused sub-agent branch (or no active
+  node) the pane is **hidden entirely** (`setComposerVisible(false)`); there is
+  no floating/docked fallback. `--cs` follows the host card's width.
 - `media/tree.js` — the Chat Tree layout algorithm (`window.treeLayout`), a pure
-  function with no DOM; `main.js` positions cards with it.
-- `media/style.css` — chat UI styling (incl. tree node cards / toolbar).
+  function with no DOM; `main.js` positions cards with it. The tidy-tree geometry
+  is delegated to the vendored, pinned engine (below); this file only maps our two
+  child kinds onto it (turn = below, agent = right) and reserves each node's
+  sidecar block inside the node's engine box.
+- `media/vendor/non-layered-tidy-tree-layout/` — **vendored, pinned** tree layout
+  engine (`@2.0.2`, MIT): `dist/` (the file the webview loads), `src/` (readable
+  source for offline re-audit), `LICENSE`, `PROVENANCE.md` (hashes + audit record).
+  Not an npm dependency; never update it in place — see
+  `docs/agents/invariants/vendored-deps.md`.
+- `media/style.css` — chat UI styling (incl. tree node cards / toolbar). Every
+  size inside `#composer` is `calc(<design px> * var(--cs))` so the input dock's
+  controls and fonts scale with its host card.
 - `media/markdown-it.min.js` — vendored markdown renderer.
 - `build-deploy.ps1` — compile + package + install helper.
 

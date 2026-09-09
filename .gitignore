@@ -4,6 +4,10 @@ node_modules/
 # Build output
 out/
 dist/
+# ...except the vendored, hash-pinned engine's published dist: that is source for
+# this repo, not build output (docs/agents/invariants/vendored-deps.md).
+!media/vendor/*/dist/
+!media/vendor/*/dist/**
 
 # Packaged VS Code extension
 *.vsix

@@ -51,6 +51,7 @@ Notes:
 - 行尾：read_file 返回 LF，write_file/replace_in_file 保留磁盘 EOL；多数 src/*.ts 是 CRLF，src/tools/shell.ts、.gitignore、src/http/controlServer.ts 是 LF。
 - 每个带 tool_calls 的 assistant 消息后面必须紧跟对应 tool 响应，否则 400；恢复会话走 Agent.sanitizeMessages。
 - AGENTS.md 快照只在会话开始时读一次，之后编辑不影响当前会话。
+- vendored 布局引擎 `media/vendor/non-layered-tidy-tree-layout/` 固定 @2.0.2：不得编辑、升级或写进 package.json（见 docs/agents/invariants/vendored-deps.md）。
 - system prompt 不存进节点，每次激活重新合成；节点历史以 user 消息开头。
 - 会话同一时刻只驱动一个；有后台终端在跑时该会话锁定（不能切换/删除/清空）。
 - 改完代码必须 `npm run compile` + `build-deploy.ps1`，并让用户 reload 窗口。
@@ -77,6 +78,7 @@ Notes:
 | docs/agents/invariants/streaming-perf.md | 动流式渲染 |
 | docs/agents/invariants/config-keys.md | 加配置项 |
 | docs/agents/invariants/vision-images.md | 动图片 |
+| docs/agents/invariants/vendored-deps.md | 动布局引擎 / vendored 依赖 |
 | docs/agents/invariants/agent-authoring.md | 改 agent 提示词 |
 | docs/agents/where-to-change.md | 不知道改哪儿 |
 | docs/agents/computer-use.md | 需要驱动桌面 GUI |

@@ -60,6 +60,8 @@ body {
 
 .dot.busy {
   background: var(--warn);
+  /* Same glow treatment as the green scroll-lock light. */
+  box-shadow: 0 0 7px var(--warn);
   animation: pulse 1s ease-in-out infinite;
 }
 
@@ -120,21 +122,56 @@ body {
   opacity: 0.5;
 }
 
+/* ---- Composer (the active node's input dock) ----
+   `main.js` moves #composer into the active node's card, at its bottom, so the
+   pane pans/zooms with the tree and is visibly attached to the node it sends
+   into. It has no other home: with an empty session the placeholder card
+   (`.composer-node`) hosts it, and with a focused sub-agent branch (or no active
+   node at all) the pane is hidden. `--cs` scales the whole pane (controls and
+   fonts). It follows the host card's width, so dragging the card's resize handle
+   scales the pane with the card. */
+#composer {
+  --cs: 1;
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: calc(6px * var(--cs));
+  width: 100%;
+  padding: calc(8px * var(--cs)) calc(10px * var(--cs));
+  border-top: 1px solid var(--border);
+  background: var(--bg2);
+  /* The canvas disables selection for panning; the input needs it back. */
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* Leave the card's bottom-right resize handle clear. */
+#composer #meter-row-readout {
+  padding-right: calc(16px * var(--cs));
+}
+
 #composer-controls {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: calc(8px * var(--cs));
 }
 
 #composer-controls #attach-btn {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
-  font-size: 12px;
+  width: calc(22px * var(--cs));
+  height: calc(22px * var(--cs));
+  font-size: calc(12px * var(--cs));
   padding: 0;
   flex: 0 0 auto;
+}
+
+/* The icon is an inline <svg width="14" height="14">: override both attributes
+   so it scales with the island too. */
+#composer-controls #attach-btn svg {
+  width: calc(14px * var(--cs));
+  height: calc(14px * var(--cs));
 }
 
 .icon-btn svg {
@@ -146,10 +183,10 @@ body {
   background: var(--bg3);
   color: var(--text);
   border: 1px solid var(--border);
-  border-radius: 6px;
-  padding: 2px 6px;
+  border-radius: calc(6px * var(--cs));
+  padding: calc(2px * var(--cs)) calc(6px * var(--cs));
   font-family: inherit;
-  font-size: 11px;
+  font-size: calc(11px * var(--cs));
 }
 
 #composer-controls select:focus {
@@ -177,10 +214,12 @@ body {
 #meter-row-readout {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: calc(4px * var(--cs));
+  /* Leave the bottom-right corner free for the resize handle. */
+  padding-right: calc(14px * var(--cs));
   min-width: 0;
   font-family: "Consolas", "Courier New", monospace;
-  font-size: 10px;
+  font-size: calc(10px * var(--cs));
   line-height: 1;
   color: var(--text-dim);
   user-select: none;
@@ -191,17 +230,14 @@ body {
   flex: 0 0 auto;
 }
 
-/* Live status ("Thinking…", "Interrupted", …). The webview has always set this
-   text; it just had no element to land in. */
-#meter-row-readout #status-text {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+/* The status light is a `.dot` (9px); inside the island it scales with it. */
+#composer .dot {
+  width: calc(9px * var(--cs));
+  height: calc(9px * var(--cs));
 }
 
-/* Status text owns the left; the metrics are one right-aligned tight group. */
+/* Live status ("Thinking…", "Interrupted", …). Owns the left; the metrics are
+   one right-aligned tight group. */
 #meter-row-readout #status-text {
   flex: 1 1 auto;
   min-width: 0;
@@ -215,7 +251,7 @@ body {
   margin-left: auto;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: calc(6px * var(--cs));
   min-width: 0;
 }
 
@@ -228,7 +264,7 @@ body {
   text-align: center;
   white-space: nowrap;
   font-family: "Consolas", "Courier New", monospace;
-  font-size: 10px;
+  font-size: calc(10px * var(--cs));
   color: var(--text-dim);
 }
 
@@ -471,26 +507,6 @@ button.icon-btn {
   letter-spacing: 0.02em;
 }
 
-/* Green "thinking light": a small glow like the scroll lock, lit while the block
-   has reasoning content or is expanded. */
-.thinking-light {
-  margin-left: auto;
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--text-dim);
-  opacity: 0.3;
-  flex: 0 0 auto;
-  transition: background-color 120ms ease, opacity 120ms ease, box-shadow 120ms ease;
-}
-
-.thinking.open .thinking-light,
-.thinking.has-content .thinking-light {
-  background: var(--success);
-  opacity: 1;
-  box-shadow: 0 0 7px var(--success);
-}
-
 .thinking-body {
   padding: 0 8px 8px;
   border-top: 1px solid var(--border);
@@ -501,6 +517,9 @@ button.icon-btn {
   line-height: 1.4;
   max-height: 240px;
   overflow: auto;
+  /* Room below the scrollbar for the scroll-lock light, so it sits clear of the
+     block's bottom edge (see .scroll-lock-dot). */
+  margin-bottom: 20px;
 }
 
 .thinking-body.hidden {
@@ -655,13 +674,6 @@ button.icon-btn {
   overflow: auto;
 }
 
-.empty {
-  color: var(--text-dim);
-  font-style: italic;
-  text-align: center;
-  margin: auto 0;
-}
-
 /* ---- Background terminals panel ---- */
 #bg-panel {
   position: absolute;
@@ -807,29 +819,11 @@ button.icon-btn {
   background: var(--error-bg);
 }
 
-#composer {
-  position: absolute;
-  bottom: 14px;
-  left: 50%;
-  transform: translateX(-50%);
-  z-index: 20;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  /* A compact, floating island over the tree (no opaque docked bar behind it). */
-  width: min(720px, calc(100% - 28px));
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  background: var(--bg3);
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
-}
-
 #tps-meter {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 4px;
+  gap: calc(4px * var(--cs));
 }
 
 #tps-meter.active {
@@ -846,7 +840,7 @@ button.icon-btn {
 }
 
 #tps-value {
-  min-width: 24px;
+  min-width: calc(24px * var(--cs));
   text-align: right;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
@@ -859,7 +853,7 @@ button.icon-btn {
 #composer-row {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: calc(6px * var(--cs));
 }
 
 #composer:focus-within {
@@ -869,20 +863,20 @@ button.icon-btn {
 #attachments {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
+  gap: calc(6px * var(--cs));
 }
 
 .attach-hint {
-  font-size: 12px;
+  font-size: calc(12px * var(--cs));
   color: var(--warn);
-  padding: 4px 0;
+  padding: calc(4px * var(--cs)) 0;
 }
 
 .pending-att {
   position: relative;
-  width: 52px;
-  height: 52px;
-  border-radius: 6px;
+  width: calc(52px * var(--cs));
+  height: calc(52px * var(--cs));
+  border-radius: calc(6px * var(--cs));
   overflow: hidden;
   border: 1px solid var(--border);
   background: var(--bg3);
@@ -898,12 +892,12 @@ button.icon-btn {
   position: absolute;
   top: 0;
   right: 0;
-  width: 18px;
-  height: 18px;
+  width: calc(18px * var(--cs));
+  height: calc(18px * var(--cs));
   padding: 0;
-  line-height: 14px;
-  font-size: 12px;
-  border-radius: 0 0 0 6px;
+  line-height: calc(14px * var(--cs));
+  font-size: calc(12px * var(--cs));
+  border-radius: 0 0 0 calc(6px * var(--cs));
   background: rgba(0, 0, 0, 0.65);
   color: #fff;
   border: none;
@@ -912,8 +906,9 @@ button.icon-btn {
 
 #input {
   resize: none;
-  /* At least three text lines tall; autoGrow() expands it up to 160px while typing. */
-  min-height: 56px;
+  /* At least three text lines tall; autoGrow() expands it up to 160px (× --cs)
+     while typing. */
+  min-height: calc(56px * var(--cs));
   background: transparent;
   color: var(--text);
   border: none;
@@ -921,7 +916,7 @@ button.icon-btn {
   -webkit-appearance: none;
   appearance: none;
   font-family: inherit;
-  font-size: 13px;
+  font-size: calc(12px * var(--cs));
   line-height: 1.4;
 }
 
@@ -936,14 +931,14 @@ button.icon-btn {
 #actions {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: calc(6px * var(--cs));
   margin-left: auto;
 }
 
 #actions button {
-  min-width: 44px;
-  padding: 4px 10px;
-  font-size: 11px;
+  min-width: calc(44px * var(--cs));
+  padding: calc(4px * var(--cs)) calc(10px * var(--cs));
+  font-size: calc(11px * var(--cs));
 }
 
 .msg-imgs {
@@ -1031,7 +1026,7 @@ button.icon-btn {
 .node-items,
 .node-prompt,
 .node-excerpt,
-.node-usage,
+.node-summary,
 .tool-args,
 .tool-result,
 .tool-brief,
@@ -1063,19 +1058,13 @@ button.icon-btn {
   opacity: 0.5;
 }
 
-#tree-canvas .empty {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%);
-  white-space: nowrap;
-}
-
 .node {
   position: absolute;
   width: 320px;
-  /* A long transcript no longer grows the card forever; the items scroll. */
-  max-height: 480px;
+  /* A long transcript no longer grows the card forever; the items scroll.
+     600px = the old 480px transcript height + ~120px for the composer dock that
+     now lives at the bottom of the active card. */
+  max-height: 600px;
   background: var(--assistant-bg);
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -1092,7 +1081,7 @@ button.icon-btn {
 .node.expanded {
   /* An expanded node opens as a wider window (content scrolls inside). */
   width: 560px;
-  max-height: 480px;
+  max-height: 600px;
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
   z-index: 2;
 }
@@ -1101,6 +1090,13 @@ button.icon-btn {
   outline: 2px solid var(--accent);
   outline-offset: -2px;
   z-index: 3;
+}
+
+/* No-node mode: the bare "New session" card that hosts the input (see main.js).
+   It lives in the tree canvas, so it pans/zooms with the view like any node; no
+   height cap, so the pane can never clip its own Send button. */
+.node.composer-node {
+  max-height: none;
 }
 
 .node-head {
@@ -1154,6 +1150,8 @@ button.icon-btn {
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
+  /* Room below the scrollbar for the scroll-lock light (see .thinking-body). */
+  margin-bottom: 20px;
 }
 
 .node-items .msg {
@@ -1184,7 +1182,10 @@ button.icon-btn {
   display: none;
 }
 
-.node-usage {
+/* Sub-agent cards only: one-line result footer. The per-node token/cache counts
+   that used to live here are gone — the transcript's own usage line under the
+   latest assistant reply already carries them. */
+.node-summary {
   flex: 0 0 auto;
   padding: 4px 10px;
   border-top: 1px solid var(--border);
@@ -1232,18 +1233,27 @@ button.icon-btn {
   font-size: 12px;
 }
 
+/* Manual scroll-lock light: sits in the strip the scroll container reserves
+   below itself (`margin-bottom`), docked in the bottom-right corner of the
+   transcript area. On by default; click it to release the auto-scroll and hand
+   scrolling back to the user. */
 .scroll-lock-dot {
   position: absolute;
-  right: 8px;
-  bottom: 6px;
+  right: 10px;
+  bottom: 8px;
   width: 8px;
   height: 8px;
   border-radius: 50%;
   background: var(--text-dim);
-  opacity: 0.3;
-  pointer-events: none;
+  opacity: 0.35;
+  cursor: pointer;
+  pointer-events: auto;
   transition: background-color 120ms ease, opacity 120ms ease, box-shadow 120ms ease;
-  z-index: 3;
+  z-index: 4;
+}
+
+.scroll-lock-dot:hover {
+  opacity: 0.8;
 }
 
 .scroll-lock-dot.locked {
@@ -1252,9 +1262,28 @@ button.icon-btn {
   box-shadow: 0 0 7px var(--success);
 }
 
-.thinking .scroll-lock-dot {
-  right: 10px;
-  bottom: 8px;
+/* The light only makes sense while its scroll area is visible. */
+.thinking:not(.open) .scroll-lock-dot,
+.node:not(.expanded) .scroll-lock-dot {
+  display: none;
+}
+
+/* While follow is on the scrollbar is disabled: manual scrolling is blocked and
+   the bar is hidden (the gutter is kept so content doesn't reflow). */
+.scroll-locked {
+  overflow: hidden !important;
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.scroll-locked::-webkit-scrollbar {
+  width: 0 !important;
+  height: 0 !important;
+}
+
+.node-items,
+.thinking-body {
+  scrollbar-gutter: stable;
 }
 
 .tool-brief {
@@ -1313,12 +1342,12 @@ button.icon-btn {
    next reply creates a new branch rather than continuing a leaf. */
 #branch-banner {
   flex: 0 0 auto;
-  font-size: 11px;
+  font-size: calc(11px * var(--cs));
   color: var(--accent);
   background: var(--bg2);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 4px 8px;
+  border-radius: calc(8px * var(--cs));
+  padding: calc(4px * var(--cs)) calc(8px * var(--cs));
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1328,8 +1357,22 @@ button.icon-btn {
   display: none;
 }
 
-/* Sub-agent branch card chrome. */
-.node.agent { border-color: var(--accent-dim); background: var(--bg3); }
+/* Sub-agent branch card chrome. Sub-agent windows are grey-tinted so they read as
+   a different class of card from the main agent's cards — including the answer
+   bubbles, tool bubbles, code blocks, thinking blocks and toolbars inside them,
+   which is why the surface variables are re-declared in this scope. `color-mix`
+   keeps it theme-correct: light grey in light themes, a lighter grey than the main
+   cards in dark themes. Higher % = lighter in dark themes / darker in light themes;
+   tune to taste. */
+.node.agent {
+  --assistant-bg: color-mix(in srgb, var(--text) 14%, var(--bg)); /* answer bubbles */
+  --tool-bg:      color-mix(in srgb, var(--text) 8%,  var(--bg)); /* tool bubbles / output */
+  --bg2:          color-mix(in srgb, var(--text) 12%, var(--bg)); /* pinned prompt, toolbars */
+  --bg3:          color-mix(in srgb, var(--text) 26%, var(--bg)); /* code, thinking, controls */
+  border-color: var(--accent-dim);
+  background: #2d2d30; /* fallback for engines without color-mix */
+  background: color-mix(in srgb, var(--text) 20%, var(--bg));
+}
 .node-agent-badge {
   flex: 0 0 auto;
   font-size: 9px;
