@@ -16,6 +16,7 @@ import {
   attachNode,
   createNode,
   migrateState,
+  messageText,
   newId,
   nodeUsage,
   pathIds,
@@ -27,7 +28,7 @@ import { BackgroundRegistry, BackgroundTask } from '../tools/background';
 import { ChatPanel } from './ChatPanel';
 import { SessionTreeItem } from './SessionsProvider';
 import { SubAgentPool } from './SubAgentPool';
-import { removeTranscriptDir, sumUsage, summarizeTranscript, writeSubAgentTranscript } from './transcript';
+import { removeTranscriptDir, sumUsage, summarizeTranscript, writeSessionTranscript, writeSubAgentTranscript } from './transcript';
 import { ControlHost, ControlResult, ControlState, WaitForFinishOptions } from '../http/controlServer';
 import { perf, setPerfSink } from '../perf';
 
@@ -44,6 +45,9 @@ const DEFAULT_CONTEXT_WINDOW = 1_000_000;
 /** Models the harness recognizes (sub-agent model overrides are validated against this). */
 const MODELS: ReadonlySet<string> = new Set(Object.keys(CONTEXT_WINDOWS));
 const STORAGE_KEY = 'agentHarness.state';
+/** One-shot marker for the historical-transcript backfill (see `backfillTranscripts`). */
+const TRANSCRIPT_BACKFILL_KEY = 'agentHarness.transcriptBackfill';
+const TRANSCRIPT_BACKFILL_VERSION = 'v1';
 /** One-shot copy of the pre-tree (v1) state, written before the first migration. */
 const STORAGE_BACKUP_KEY = 'agentHarness.state.v1backup';
 const CONFIG_KEY = 'agentHarness.runtimeConfig';
@@ -223,6 +227,7 @@ export class ChatViewProvider implements ControlHost {
     if (active) {
       this.activateSession(active);
     }
+    this.scheduleTranscriptBackfill();
   }
 
   private getConfig(): {
@@ -236,6 +241,7 @@ export class ChatViewProvider implements ControlHost {
     maxConcurrentSubagents: number;
     maxLevel2Subagents: number;
     saveSubAgentTranscripts: boolean;
+    saveSessionTranscripts: boolean;
     subAgentTranscriptDir: string;
   } {
     const cfg = vscode.workspace.getConfiguration('agentHarness');
@@ -249,8 +255,9 @@ export class ChatViewProvider implements ControlHost {
     const maxConcurrentSubagents = cfg.get<number>('maxConcurrentSubagents') ?? 15;
     const maxLevel2Subagents = cfg.get<number>('maxLevel2Subagents') ?? 2;
     const saveSubAgentTranscripts = cfg.get<boolean>('saveSubAgentTranscripts') ?? true;
+    const saveSessionTranscripts = cfg.get<boolean>('saveSessionTranscripts') ?? true;
     const subAgentTranscriptDir = (cfg.get<string>('subAgentTranscriptDir') ?? '').trim();
-    return { apiKey, model, baseUrl, maxTurns, thinkingEffort, foldToolCalls, foldThinking, maxConcurrentSubagents, maxLevel2Subagents, saveSubAgentTranscripts, subAgentTranscriptDir };
+    return { apiKey, model, baseUrl, maxTurns, thinkingEffort, foldToolCalls, foldThinking, maxConcurrentSubagents, maxLevel2Subagents, saveSubAgentTranscripts, saveSessionTranscripts, subAgentTranscriptDir };
   }
 
   /**
@@ -283,6 +290,9 @@ export class ChatViewProvider implements ControlHost {
     this.contextWindow = this.getContextWindow(this.model);
     this.client = new DeepSeekClient({ apiKey, baseUrl, model: this.model });
     this.tools = new ToolRegistry();
+    // `search_transcripts` reads the harness's own transcript dumps; the roots
+    // depend on config + global storage, so hand it a live resolver.
+    this.tools.setTranscriptRoots(() => [this.transcriptRoot()]);
     this.agent = new Agent(this.client, this.tools, (event) => this.handleAgentEvent(event), maxTurns);
     this.agent.setModel(this.model);
     this.agent.setThinkingEffort(this.thinkingEffort);
@@ -736,7 +746,7 @@ export class ChatViewProvider implements ControlHost {
 
   /** Tools a sub-agent may use, by `write` flag. */
   private subAgentTools(write: boolean): ToolRegistry {
-    const read = ['read_file', 'list_dir', 'search_files'];
+    const read = ['read_file', 'list_dir', 'search_files', 'search_transcripts'];
     const writeTools = ['write_file', 'replace_in_file', 'exec_command'];
     if (write) {
       return this.tools.subset([...read, ...writeTools]);
@@ -748,28 +758,180 @@ export class ChatViewProvider implements ControlHost {
   }
 
   /**
-   * Folder that holds a session's sub-agent transcript dumps. Defaults to the
-   * extension's global storage (never the user's repo); `agentHarness.subAgentTranscriptDir`
-   * redirects it to a workspace-relative path.
+   * Root folder holding every session's transcript dumps (`<root>/<sessionId>/`).
+   * Defaults to the extension's global storage (never the user's repo);
+   * `agentHarness.subAgentTranscriptDir` redirects it to a workspace-relative path.
    */
-  private transcriptDir(sessionId: string): string {
+  private transcriptRoot(): string {
     const configured = this.getConfig().subAgentTranscriptDir;
     if (configured) {
       try {
-        return path.join(resolvePath(configured), sessionId);
+        return resolvePath(configured);
       } catch {
         // No workspace folder open — fall through to global storage.
       }
     }
     if (this.globalStorage) {
-      return path.join(this.globalStorage.fsPath, 'transcripts', sessionId);
+      return path.join(this.globalStorage.fsPath, 'transcripts');
     }
-    return path.join(os.tmpdir(), 'agent-harness-transcripts', sessionId);
+    return path.join(os.tmpdir(), 'agent-harness-transcripts');
+  }
+
+  /** One session's transcript folder (main-agent turns + sub-agent runs). */
+  private transcriptDir(sessionId: string): string {
+    return path.join(this.transcriptRoot(), sessionId);
   }
 
   /** " · transcript: <path>" suffix for a sub-agent completion note ('' when off). */
   private transcriptNote(node: TreeNode): string {
     return node.agentTranscript ? ` · transcript: ${node.agentTranscript}` : '';
+  }
+
+  /**
+   * Dump a finished main-agent turn to `<transcriptDir>/<nodeId>.jsonl`. Session
+   * history otherwise lives only in the Memento (a sqlite blob no tool can
+   * grep), so this is what makes `search_transcripts` able to recall a previous
+   * conversation. Mirrors the node: a turn that a later injected notice turn
+   * reuses is rewritten. Never throws into the agent loop.
+   */
+  private dumpSessionTranscript(node: TreeNode, session: AgentSession, status: TurnStatus): void {
+    if (!this.getConfig().saveSessionTranscripts || node.kind === 'agent') {
+      return;
+    }
+    const messages = node.messages;
+    if (messages.length === 0) {
+      return;
+    }
+    const first = messages[0];
+    const prompt = first.role === 'user' ? messageText(first.content) : node.title;
+    try {
+      const ref = writeSessionTranscript({
+        dir: this.transcriptDir(session.id),
+        nodeId: node.id,
+        sessionId: session.id,
+        sessionTitle: session.title,
+        parentId: node.parentId,
+        pathIds: pathIds(session, node.id),
+        title: node.title,
+        model: this.model,
+        status,
+        prompt,
+        summary: this.nodePreview(node),
+        startedAt: node.createdAt,
+        endedAt: Date.now(),
+        messages,
+        usage: nodeUsage(node),
+      });
+      this.output.appendLine(`[transcript] session ${ref.file} lines=${ref.lines} bytes=${ref.bytes}`);
+    } catch (err) {
+      this.output.appendLine(`[transcript] session write failed for ${node.id}: ${String(err)}`);
+    }
+  }
+
+  /**
+   * One-time backfill: sessions whose turns finished before the transcript
+   * dumps existed have no JSONL on disk, so `search_transcripts` cannot see
+   * them. Walk the restored trees once and dump every node that has no file yet
+   * — an existing dump is never overwritten. Deferred off activation (the UI is
+   * already up) and remembered in the Memento, so it costs one pass per install.
+   */
+  private scheduleTranscriptBackfill(): void {
+    if (this.storage.get<string>(TRANSCRIPT_BACKFILL_KEY) === TRANSCRIPT_BACKFILL_VERSION) {
+      return;
+    }
+    // Not marked when the setting is off, so enabling it later still backfills.
+    if (!this.getConfig().saveSessionTranscripts) {
+      return;
+    }
+    setTimeout(() => void this.backfillTranscripts(), 1500);
+  }
+
+  private async backfillTranscripts(): Promise<void> {
+    const t0 = Date.now();
+    let written = 0;
+    let skipped = 0;
+    let bytes = 0;
+    let visited = 0;
+    for (const session of [...this.sessions]) {
+      const dir = this.transcriptDir(session.id);
+      for (const node of Object.values(session.nodes)) {
+        if (this.disposed) {
+          // Marker left unset: the next activation resumes (files already
+          // written are skipped, so an interrupted pass just fills the gaps).
+          return;
+        }
+        if (node.messages.length === 0) {
+          continue;
+        }
+        if (fs.existsSync(path.join(dir, `${node.id}.jsonl`))) {
+          skipped++;
+          continue;
+        }
+        try {
+          bytes += this.writeBackfillDump(session, node, dir);
+          written++;
+        } catch (err) {
+          this.output.appendLine(`[transcript] backfill failed for ${session.id}/${node.id}: ${String(err)}`);
+        }
+        // Yield periodically so a huge history cannot stall the extension host.
+        if (++visited % 25 === 0) {
+          await new Promise((resolve) => setImmediate(resolve));
+        }
+      }
+    }
+    await this.storage.update(TRANSCRIPT_BACKFILL_KEY, TRANSCRIPT_BACKFILL_VERSION);
+    this.output.appendLine(
+      `[transcript] backfill: ${written} written, ${skipped} already on disk, ${(bytes / 1024).toFixed(1)} KB, ${
+        Date.now() - t0
+      }ms`,
+    );
+  }
+
+  /** Reconstruct one historical node's dump (main-agent turn or sub-agent run). */
+  private writeBackfillDump(session: AgentSession, node: TreeNode, dir: string): number {
+    const first = node.messages[0];
+    const prompt = first && first.role === 'user' ? messageText(first.content) : node.title;
+    if (node.kind === 'agent') {
+      return writeSubAgentTranscript({
+        dir,
+        nodeId: node.id,
+        sessionId: session.id,
+        depth: node.agentDepth ?? 1,
+        write: !!node.agentWrite,
+        model: node.agentModel || this.model,
+        status: node.agentStatus ?? node.status,
+        resumed: false,
+        instruction: node.title,
+        summary: node.agentSummary ?? this.nodePreview(node),
+        // Both timestamps are the node's creation time (only that survives in
+        // the tree); `backfilled: true` marks the dump as reconstructed.
+        startedAt: node.createdAt,
+        endedAt: node.createdAt,
+        // A sub-agent's synthesized prompt is not stored on its node.
+        systemPrompt: '',
+        messages: node.messages,
+        usage: nodeUsage(node),
+        backfilled: true,
+      }).bytes;
+    }
+    return writeSessionTranscript({
+      dir,
+      nodeId: node.id,
+      sessionId: session.id,
+      sessionTitle: session.title,
+      parentId: node.parentId,
+      pathIds: pathIds(session, node.id),
+      title: node.title,
+      model: this.model,
+      status: node.status,
+      prompt,
+      summary: this.nodePreview(node),
+      startedAt: node.createdAt,
+      endedAt: node.createdAt,
+      messages: node.messages,
+      usage: nodeUsage(node),
+      backfilled: true,
+    }).bytes;
   }
 
   /**
@@ -1500,6 +1662,8 @@ export class ChatViewProvider implements ControlHost {
       node.messages = this.agent.getMessages().slice(this.turnPrefixLen);
       node.status = status;
       session.updatedAt = Date.now();
+      // Mirror the finished turn to disk so it stays searchable later.
+      this.dumpSessionTranscript(node, session, status);
     }
     this.persist();
     if (node && session?.nodes[node.id]) {
@@ -1601,7 +1765,7 @@ export class ChatViewProvider implements ControlHost {
     }
     // Drop any queued completion notice still waiting for that session.
     this.backgroundNotifQueue = this.backgroundNotifQueue.filter((q) => q.sessionId !== id);
-    // Drop the session's sub-agent transcript dumps too.
+    // Drop the session's transcript dumps too (turns + sub-agent runs).
     removeTranscriptDir(this.transcriptDir(id));
     this.sessions.splice(idx, 1);
     if (this.sessions.length === 0) {
@@ -1651,7 +1815,7 @@ export class ChatViewProvider implements ControlHost {
     );
     this.subAgentNoticeQueue.length = 0;
     this.subAgentChildNotices.clear();
-    // The cleared conversation's sub-agent transcript dumps are stale now.
+    // The cleared conversation's transcript dumps are stale now.
     removeTranscriptDir(this.transcriptDir(this.activeSessionId));
     if (this.backgroundDrainTimer != null) {
       clearTimeout(this.backgroundDrainTimer);
@@ -1782,51 +1946,6 @@ export class ChatViewProvider implements ControlHost {
   }
 
   /**
-   * Ask VS Code to reload this window. Replies 202 immediately and reloads a
-   * moment later (after the pending persist lands), because the reload kills
-   * this process — the caller can only observe it as a *new* instance.
-   */
-  controlReloadWindow(): ControlResult {
-    if (this.busy || this.agent.running) {
-      return { ok: false, error: 'the agent is busy; wait for it to finish first', busy: true };
-    }
-    if (this.runningSubAgents.size > 0 || this.activeSessionHasRunningBackground()) {
-      return { ok: false, error: 'sub-agents or background terminals are still running', busy: true };
-    }
-    void this.lastPersist.finally(() => {
-      setTimeout(() => {
-        void vscode.commands.executeCommand('workbench.action.reloadWindow');
-      }, 400);
-    });
-    return { ok: true };
-  }
-
-  // ---- Panel lifecycle ----
-
-  private panelTitle(sessionId: string): string {
-    const session = this.sessions.find((s) => s.id === sessionId);
-    return `Agent Chat Tree — ${session ? session.title : 'Session'}`;
-  }
-
-  private createPanel(sessionId: string): ChatPanel {
-    const created = new ChatPanel({
-      sessionId,
-      viewType: 'agentHarness.chatTree',
-      title: this.panelTitle(sessionId),
-      extensionUri: this.extensionUri,
-      getHtml: (webview) => this.getHtml(webview),
-      onMessage: (message) => this.handlePanelMessage(message),
-      onDispose: () => {
-        // The webview is gone; state stays in this provider so it can be reopened.
-        if (this.panel === created) {
-          this.panel = null;
-        }
-      },
-    });
-    return created;
-  }
-
-  /**
    * Create a fresh session (or jump to an existing one) and optionally send a
    * caller-supplied prompt as its first turn. The harness drives one session at
    * a time, so this refuses while the active session is busy.
@@ -1871,6 +1990,51 @@ export class ChatViewProvider implements ControlHost {
     // was supplied, so a caller-supplied title wins and a bare prompt titles it.
     await this.onUserMessage(prompt);
     return { ok: true, sessionId: session.id, nodeId: session.activeNodeId, prompted: true };
+  }
+
+  /**
+   * Ask VS Code to reload this window. Replies 202 immediately and reloads a
+   * moment later (after the pending persist lands), because the reload kills
+   * this process — the caller can only observe it as a *new* instance.
+   */
+  controlReloadWindow(): ControlResult {
+    if (this.busy || this.agent.running) {
+      return { ok: false, error: 'the agent is busy; wait for it to finish first', busy: true };
+    }
+    if (this.runningSubAgents.size > 0 || this.activeSessionHasRunningBackground()) {
+      return { ok: false, error: 'sub-agents or background terminals are still running', busy: true };
+    }
+    void this.lastPersist.finally(() => {
+      setTimeout(() => {
+        void vscode.commands.executeCommand('workbench.action.reloadWindow');
+      }, 400);
+    });
+    return { ok: true };
+  }
+
+  // ---- Panel lifecycle ----
+
+  private panelTitle(sessionId: string): string {
+    const session = this.sessions.find((s) => s.id === sessionId);
+    return `Agent Chat Tree — ${session ? session.title : 'Session'}`;
+  }
+
+  private createPanel(sessionId: string): ChatPanel {
+    const created = new ChatPanel({
+      sessionId,
+      viewType: 'agentHarness.chatTree',
+      title: this.panelTitle(sessionId),
+      extensionUri: this.extensionUri,
+      getHtml: (webview) => this.getHtml(webview),
+      onMessage: (message) => this.handlePanelMessage(message),
+      onDispose: () => {
+        // The webview is gone; state stays in this provider so it can be reopened.
+        if (this.panel === created) {
+          this.panel = null;
+        }
+      },
+    });
+    return created;
   }
 
   /**

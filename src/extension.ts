@@ -55,10 +55,10 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
       // Invoked from the palette (no explicit session id): deleting is
-      // irreversible (conversation + sub-agent transcripts), so confirm first.
+      // irreversible (conversation + transcript dumps), so confirm first.
       if (!explicit) {
         const pick = await vscode.window.showWarningMessage(
-          'Delete the current Agent Harness session? Its conversation and sub-agent transcripts are removed.',
+          'Delete the current Agent Harness session? Its conversation and transcript dumps are removed.',
           { modal: true },
           'Delete',
         );

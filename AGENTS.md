@@ -205,10 +205,13 @@ User (editor WebviewPanel) <--postMessage--> ChatViewProvider (src/chat)
 - `src/chat/tree.ts` — the Chat Tree data model: `TreeNode` / `AgentSession`,
   path assembly (`pathIds` / `pathMessages`), `attachNode`, `pruneSession`,
   and the v1→v2 state migration. Pure data layer, no VS Code UI.
-- `src/chat/transcript.ts` — sub-agent transcript dumps: `writeSubAgentTranscript`
-  (JSONL, one API message per line, meta + tool stats on line 1),
-  `summarizeTranscript` (tool-call / denied-call stats), `sumUsage`,
-  `removeTranscriptDir`. Pure fs, no VS Code UI.
+- `src/chat/transcript.ts` — transcript dumps (JSONL, one API message per line,
+  meta + tool stats on line 1), one file per main-agent turn (`writeSessionTranscript`)
+  and per sub-agent run (`writeSubAgentTranscript`); plus the read side —
+  `renderTranscriptLine` (one line → searchable `[role] text → tool(args)`),
+  `searchTranscripts`, `listTranscriptSessions`. Also `summarizeTranscript`
+  (tool-call / denied-call stats), `sumUsage`, `removeTranscriptDir`. Pure fs, no
+  VS Code UI (so it is smoke-testable outside the Extension Host).
 - `src/http/controlServer.ts` — the opt-in local HTTP control plane
   (`/health`, `/state`, `/wait-for-finish`, `/navigate`, `/continue`,
   `/reload-window`); token + discovery file, loopback only. See "External control
@@ -254,11 +257,13 @@ User (editor WebviewPanel) <--postMessage--> ChatViewProvider (src/chat)
 | `write_file` | `path`, `content`, `frame?` | Overwrites; creates parent dirs. Preserves the existing file's line-ending style (converts content to it). New files written as supplied. |
 | `replace_in_file` | `path`, `oldText`, `newText`, `frame?` | Exact-substring replace. `oldText` must occur **exactly once** (else error). Matches/writes in normalized LF; preserves on-disk EOL. The replacement is inserted **verbatim** (function-form replace), so `String.replace` dollar-patterns in `newText` stay literal. |
 | `list_dir` | `path?`, `glob?`, `recursive?` | Sorted entries; directories suffixed with `/`. `glob` filters against the path relative to the listed dir (`*.ts` = top level, `**/*.ts` = any depth); `recursive` walks subdirs (heavy dirs skipped) and prints relative paths. Capped at 2000 entries with an explicit note. |
+| `search_transcripts` | `query?`, `sessionId?`, `kind?`, `caseSensitive?`, `maxResults?`, `context?` | Regex search over the harness's own transcript dumps — the **only** way to recall a previous session (history otherwise lives in the Memento, which no tool can grep). Files are `<root>/<sessionId>/<nodeId>.jsonl` (usually **outside** the workspace, in global storage, so `search_files` cannot reach them). Each hit is `file:line: text` with the **absolute** path, so `read_file` with those line numbers pages the full record; `context` (0–10) uses `-` separators. `query` omitted ⇒ index of sessions (id, files, size, last write, kind mix, titles), or of one session's files with `sessionId`. `kind` = `session` (main-agent turns) / `subagent`. Default 50 hits / hard cap 300; files >8 MB skipped; capped runs say so. |
 | `search_files` | `pattern`, `path?`, `glob?`, `caseSensitive?`, `maxResults?`, `context?` | Regex search returning `file:line: text` (paths **workspace-relative**). `path` may be a **file or a directory**. `maxResults` default 200 / hard cap 300; `context` (0–10) adds surrounding lines with `-` separators (`src/a.ts-11- text`). Hit lines are trimmed + clipped to 160 chars. Heavy dirs skipped; files >1 MB skipped. A capped/short-circuited search appends an explicit `…[search stopped early: …]` note — never silently truncated. |
 
 > **Oversized results spill to a file.** Every tool whose output is unbounded
-> (`search_files`, `list_dir`, `exec_command`, `check_background_terminal`,
-> `join_background`) runs its result through `limitInline()`: above
+> (`search_files`, `search_transcripts`, `list_dir`, `exec_command`,
+> `check_background_terminal`, `join_background`) runs its result through
+> `limitInline()`: above
 > `agentHarness.maxInlineToolOutput`
 > (default 32768 bytes, `0` = always inline) the full text is written to
 > `.agent-harness/tool-output/<tool>-<id>.txt` (workspace-relative; the system
@@ -355,8 +360,9 @@ content. See `parseArgs` in `src/tools/index.ts`.
 
 ### Session persistence & config
 - Storage keys: `agentHarness.state` (v2: `{ version, activeSessionId, sessions }`,
-  each session is a **tree** of `TreeNode`) and `agentHarness.runtimeConfig`
-  (`model` + `thinkingEffort`).
+  each session is a **tree** of `TreeNode`), `agentHarness.runtimeConfig`
+  (`model` + `thinkingEffort`) and `agentHarness.transcriptBackfill` (the
+  one-time historical-dump marker).
 - A session is `{ id, title, createdAt, updatedAt, nodes: Record<id, TreeNode>,
   rootId, activeNodeId, orphanItems }`.
 - `this.displayItems` points at the **checked-out node's** `displayItems` during a
@@ -444,10 +450,53 @@ content. See `parseArgs` in `src/tools/index.ts`.
   stale entries. The session bar is disabled while `sessionLocked` (busy OR any background job running).
 - `postBackgrounds` is coalesced (~200ms) so a chatty process cannot freeze the webview.
 
+### Transcripts & `search_transcripts`
+- **Layout:** `<root>/<sessionId>/<nodeId>.jsonl`, one file per main-agent turn
+  (`kind:'session'`) and per sub-agent run (`kind:'subagent'`). Node ids are
+  unique per session, so both kinds coexist in one folder. `<root>` is
+  `<agentHarness.subAgentTranscriptDir>` (workspace-relative) or, by default,
+  `<globalStorage>/transcripts/` — i.e. **outside** the workspace, which is why
+  `search_transcripts` exists (`search_files` cannot walk there).
+- **Why main-agent turns are dumped:** session history lives only in the Memento
+  (`agentHarness.state`, a sqlite blob) and is clipped to 64 KiB per message on
+  persist, so no tool can grep it. `ChatViewProvider.finishTurn` calls
+  `dumpSessionTranscript(node, session, status)` → `writeSessionTranscript`, which
+  mirrors the node's stored messages (so a turn a later injected notice turn
+  reuses is rewritten, exactly like the node). Gated by
+  `agentHarness.saveSessionTranscripts` (default true); skipped for `kind:'agent'`
+  nodes and empty turns; a failure is logged and never breaks the turn.
+- **One-time backfill:** sessions whose turns finished *before* the dumps
+  existed have no JSONL, so `search_transcripts` cannot see them (their only
+  copy is the Memento). `ChatViewProvider.scheduleTranscriptBackfill` runs once
+  per install (marker `agentHarness.transcriptBackfill` in the Memento, 1.5 s
+  after activation, yielding every 25 nodes): it walks every restored tree and
+  dumps each node with no file on disk — **an existing dump is never
+  overwritten**. Reconstructed dumps carry `backfilled:true` in their meta (and
+  `backfilled=true` in the rendered line); their `startedAt`/`endedAt` are both
+  the node's `createdAt` (a tree node keeps no end time) and a historical
+  sub-agent's meta has an empty `systemPrompt` (it is not stored on the node).
+  The marker is only written after a completed pass, so an interrupted pass
+  resumes next activation; turning `saveSessionTranscripts` off skips it and
+  leaves the marker unset (enabling it later backfills).
+- **A session transcript deliberately omits the system prompt** (it is identical
+  boilerplate including AGENTS.md and would match every file). Sub-agent dumps
+  keep it, and `renderTranscriptLine` never renders it, so a search can never be
+  drowned by it. Meta fields: `nodeId`, `sessionId`, `sessionTitle`, `parentId`,
+  `pathIds`, `title`, `model`, `status`, `prompt`, `summary`, `stats`.
+- **Search:** `searchTranscripts` renders each line (`[role] text → tool(args)`,
+  meta as `[meta] key=value …`) and greps the rendered text, so JSON escaping
+  never hides a hit; `kind` filtering reads the meta line's `kind` (missing ⇒
+  `subagent`, the legacy format). Hits carry absolute paths and real line numbers
+  (1:1 with the file), so `read_file` follows up directly.
+- **Roots are resolved at call time** via `ToolRegistry.setTranscriptRoots(() =>
+  [provider.transcriptRoot()])` — a settings change needs no tool rebuild, and
+  `subset()` sub-agents inherit the parent registry's resolver.
+- **Read-only sub-agents get `search_transcripts` too** (it is a pure read tool).
+
 ### Sub-agents
 - `spawn_agents({ agents: [{ instruction, write (REQUIRED), model? }], mode })` spawns one or more
   parallel sub-agents. `write:true` lets a sub-agent write files / run commands; `write:false` is
-  **read-only** (only `read_file` / `list_dir` / `search_files`; the write tools are hidden from the
+  **read-only** (only `read_file` / `list_dir` / `search_files` / `search_transcripts`; the write tools are hidden from the
   model's tool list via `ToolRegistry.withHidden` yet stay registered and **blocked at runtime** by
   `ToolRegistry.withBlocked`, so a hallucinated call still gets a clear denial). Depth is hard-capped at 2 — a depth-2
   sub-agent may not spawn at all. A read-only depth-1 sub-agent gets `spawn_readonly_agents` instead of
@@ -475,17 +524,14 @@ content. See `parseArgs` in `src/tools/index.ts`.
   so a follow-up can continue it, even across a restart.
 - **Transcript dumps (`node.agentTranscript`):** because the caller can only ever see the sub-agent's
   summary, `runSubAgent`'s `finish` also writes the whole conversation to disk as **JSONL**
-  (`src/chat/transcript.ts`) and returns the absolute path: `spawn_agents` sync results carry
-  `stats` (tool-call / denied-call counts) plus `transcript` per agent, `send_agent_message` sync
-  results carry them too, and the async notices append
+  (`src/chat/transcript.ts`, `kind: 'subagent'`) and returns the absolute path: `spawn_agents` sync
+  results carry `stats` (tool-call / denied-call counts) plus `transcript` per agent,
+  `send_agent_message` sync results carry them too, and the async notices append
   `· transcript: <path>` to each line. Line 1 is a `meta` record (ids, spec, status, summary, system
   prompt, `stats.toolCalls` / `stats.deniedToolCalls` / `stats.usage`); every following line is one API
-  message (`{type:'message', index, ...}`), so `read_file` can page it and `search_files` can grep it.
-  A resume **overwrites** the same `<nodeId>.jsonl` with the extended conversation. The folder is
-  `<agentHarness.subAgentTranscriptDir>/<sessionId>/` (workspace-relative) or, by default,
-  `<globalStorage>/transcripts/<sessionId>/`; `agentHarness.saveSubAgentTranscripts` (default true) can
-  turn it off. A write failure is logged to the output channel and never breaks the run. The folder is
-  deleted with its session (`deleteSession`) or when the conversation is cleared (`clear`).
+  message (`{type:'message', index, ...}`), so `read_file` can page it and `search_transcripts` can
+  grep it. A resume **overwrites** the same `<nodeId>.jsonl` with the extended conversation. Folder,
+  config and the shared search surface are described in "Transcripts" above.
 - Async results for a **sub-agent parent** (a depth-1 sub-agent that spawned depth-2 children in async
   mode) are routed by `queueSubAgentChildNotice`: if the parent is still running the notice is queued and
   delivered at its next finish (`flushSubAgentChildNotices`); if it already finished it is auto-resumed
@@ -531,7 +577,11 @@ content. See `parseArgs` in `src/tools/index.ts`.
 `thinkingEffort` (`none|low|medium|high`), `foldToolCalls` (default `true`),
 `foldThinking` (default `true`), `maxConcurrentSubagents` (default 15),
 `maxLevel2Subagents` (default 2), `saveSubAgentTranscripts` (default `true`),
-`subAgentTranscriptDir` (default `""` = global storage; else workspace-relative),
+`saveSessionTranscripts` (default `true` — dump each main-agent turn; the
+one-time historical backfill is keyed by the Memento marker
+`agentHarness.transcriptBackfill`),
+`subAgentTranscriptDir` (default `""` = global storage; else workspace-relative;
+now the root for **both** transcript kinds),
 `maxInlineToolOutput` (bytes, default `32768`; `0` = always inline — above it a
 tool result spills to a temp file). `SubAgentPool` clamps `maxConcurrentSubagents`
 to **≥ 1** (a non-positive limit would otherwise deadlock every sub-agent).
