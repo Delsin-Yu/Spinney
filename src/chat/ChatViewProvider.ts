@@ -166,6 +166,8 @@ export class ChatViewProvider implements ControlHost {
   private disposed = false;
   /** Aborts an in-flight image upload (attachment path) when the user stops. */
   private uploadController: AbortController | null = null;
+  /** A queued `POST /session/start` waiting for the current turn to end. */
+  private pendingSessionStart: { title?: string; prompt?: string } | null = null;
   private lastStatus = '';
   /** Cache-busting suffix for media URLs; changes per extension session. */
   private readonly mediaVersion: string;
@@ -1509,6 +1511,26 @@ export class ChatViewProvider implements ControlHost {
         usage: nodeUsage(node),
       });
     }
+    // A queued `POST /session/start` (the agent handing a task to a fresh
+    // session) runs once this turn is fully closed out.
+    this.runPendingSessionStart();
+  }
+
+  /** Run a queued session start as soon as the agent is really idle. */
+  private runPendingSessionStart(): void {
+    const pending = this.pendingSessionStart;
+    if (!pending) {
+      return;
+    }
+    if (this.disposed || this.busy || this.agent.running) {
+      setTimeout(() => this.runPendingSessionStart(), 50);
+      return;
+    }
+    this.pendingSessionStart = null;
+    void this.controlStartSession(pending).then(
+      (r) => this.outputLog(`[http] queued session/start -> ${JSON.stringify(r)}`),
+      (err) => this.outputLog(`[http] queued session/start failed: ${err instanceof Error ? err.message : String(err)}`),
+    );
   }
 
   // ---- Public command entry points ----
@@ -1802,6 +1824,53 @@ export class ChatViewProvider implements ControlHost {
       },
     });
     return created;
+  }
+
+  /**
+   * Create a fresh session (or jump to an existing one) and optionally send a
+   * caller-supplied prompt as its first turn. The harness drives one session at
+   * a time, so this refuses while the active session is busy.
+   */
+  async controlStartSession(opts: { sessionId?: string; title?: string; prompt?: string }): Promise<ControlResult> {
+    if (this.busy || this.agent.running || this.activeSessionHasRunningBackground()) {
+      // The agent calling this is *by definition* mid-turn. Queue a fresh
+      // session + prompt so the handoff runs the moment this turn ends.
+      if (!opts.sessionId && (opts.prompt ?? '').trim()) {
+        if (this.pendingSessionStart) {
+          return { ok: false, error: 'a session start is already queued', busy: true };
+        }
+        this.pendingSessionStart = { title: opts.title, prompt: opts.prompt };
+        this.outputLog(`[http] session/start queued (${(opts.prompt ?? '').slice(0, 60)})`);
+        return { ok: true, queued: true };
+      }
+      return { ok: false, error: 'the agent is busy; wait for it to finish first', busy: true };
+    }
+    let session: AgentSession | undefined;
+    if (opts.sessionId) {
+      session = this.sessions.find((s) => s.id === opts.sessionId);
+      if (!session) {
+        return { ok: false, error: `no such session: ${opts.sessionId}` };
+      }
+      if (session.id !== this.activeSessionId) {
+        this.activateSession(session);
+      }
+    } else {
+      session = this.createSessionInMemory();
+      if (opts.title?.trim()) {
+        session.title = opts.title.trim().slice(0, 80);
+      }
+      this.activateSession(session);
+      this.persist();
+    }
+    this.ensurePanel(session.id);
+    const prompt = (opts.prompt ?? '').trim();
+    if (!prompt) {
+      return { ok: true, sessionId: session.id, nodeId: session.activeNodeId, prompted: false };
+    }
+    // onUserMessage names a fresh session from its first message when no title
+    // was supplied, so a caller-supplied title wins and a bare prompt titles it.
+    await this.onUserMessage(prompt);
+    return { ok: true, sessionId: session.id, nodeId: session.activeNodeId, prompted: true };
   }
 
   /**
