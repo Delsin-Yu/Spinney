@@ -28,6 +28,7 @@ import { ChatPanel } from './ChatPanel';
 import { SessionTreeItem } from './SessionsProvider';
 import { SubAgentPool } from './SubAgentPool';
 import { removeTranscriptDir, sumUsage, summarizeTranscript, writeSubAgentTranscript } from './transcript';
+import { ControlHost, ControlResult, ControlState, WaitForFinishOptions } from '../http/controlServer';
 import { perf, setPerfSink } from '../perf';
 
 /** Known context-window sizes (in tokens) per model, for the usage indicator. */
@@ -135,7 +136,7 @@ function dataUrlBytes(dataUrl: string): Buffer {
   return Buffer.from(base64, 'base64');
 }
 
-export class ChatViewProvider {
+export class ChatViewProvider implements ControlHost {
   /** The chat is rendered in an editor panel (P1). A single panel for now; the
    * multi-panel mouth is a list of ChatPanel keyed by sessionId. */
   private panel: ChatPanel | null = null;
@@ -145,6 +146,10 @@ export class ChatViewProvider {
   private agent!: Agent;
   private client!: DeepSeekClient;
   private tools!: ToolRegistry;
+  /** Last `storage.update` write; the control plane awaits it before a reboot. */
+  private lastPersist: Promise<void> = Promise.resolve();
+  /** While `Date.now() < controlHoldUntil` an external controller is rebooting. */
+  private controlHoldUntil = 0;
   private displayItems: DisplayItem[] = [];
   /** The turn node currently being produced (null while the agent is idle). */
   private activeTurnNode: TreeNode | null = null;
@@ -472,6 +477,12 @@ export class ChatViewProvider {
     const extra =
       `sessions=${this.sessions.length} nodes=${nodeCount} items=${this.displayItems.length} msgs=${msgCount}`;
     const pending = this.storage.update(STORAGE_KEY, payload);
+    // The control plane awaits this before handing over to a reboot, so a kill
+    // right after a turn cannot lose the last write.
+    this.lastPersist = Promise.resolve(pending).then(
+      () => undefined,
+      () => undefined,
+    );
     perf(() => `persist-queued ${Date.now() - t0}ms ${extra}`);
     void pending.then(
       () => perf(() => `persist-done ${Date.now() - t0}ms ${extra}`),
@@ -1632,6 +1643,142 @@ export class ChatViewProvider {
     this.persist();
   }
 
+  // ---- External control plane (src/http/controlServer.ts) ----
+
+  /** Append a line to the Agent Harness output channel (used by the control plane). */
+  outputLog(line: string): void {
+    this.output.appendLine(line);
+  }
+
+  controlState(): ControlState {
+    const session = this.getActiveSession();
+    return {
+      busy: this.busy || this.agent.running,
+      sessionId: session?.id ?? null,
+      activeNodeId: session?.activeNodeId ?? null,
+      runningSubAgents: this.runningSubAgents.size,
+      runningBackgrounds: this.activeSessionHasRunningBackground(),
+      sessions: this.sessions.map((s) => ({
+        id: s.id,
+        title: s.title,
+        nodes: Object.keys(s.nodes).length,
+        active: s.id === this.activeSessionId,
+      })),
+    };
+  }
+
+  /**
+   * Block until the agent is idle. `scope:'all'` also waits for sub-agents and
+   * background terminals. The last `persist()` write is awaited before returning
+   * so the caller may kill the process immediately after. Never interrupts a
+   * turn unless `interrupt` is set.
+   */
+  async controlWaitForFinish(opts: WaitForFinishOptions): Promise<ControlResult> {
+    const scope = opts.scope === 'all' ? 'all' : 'turn';
+    const timeoutMs = Number.isFinite(opts.timeoutMs) ? Math.max(0, Math.min(opts.timeoutMs ?? 0, 600000)) : 30000;
+    const idle = (): boolean => {
+      if (this.busy || this.agent.running) {
+        return false;
+      }
+      if (scope === 'all' && (this.runningSubAgents.size > 0 || this.activeSessionHasRunningBackground())) {
+        return false;
+      }
+      return true;
+    };
+    if (opts.interrupt && !idle()) {
+      this.onStop();
+    }
+    const deadline = Date.now() + timeoutMs;
+    while (!idle()) {
+      if (Date.now() >= deadline) {
+        const state = this.controlState();
+        return {
+          ok: false,
+          idle: false,
+          error: 'timeout',
+          busy: state.busy,
+          runningSubAgents: state.runningSubAgents,
+          runningBackgrounds: state.runningBackgrounds,
+          sessionId: state.sessionId,
+          nodeId: state.activeNodeId,
+        };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+    await this.lastPersist;
+    const holdMs = Number.isFinite(opts.holdMs) ? Math.max(0, Math.min(opts.holdMs ?? 0, 600000)) : 0;
+    if (holdMs > 0) {
+      this.controlHoldUntil = Date.now() + holdMs;
+    }
+    const state = this.controlState();
+    return { ok: true, idle: true, busy: false, sessionId: state.sessionId, nodeId: state.activeNodeId };
+  }
+
+  /** Check out a node (switching session first when needed) and show the panel. */
+  async controlNavigate(opts: { sessionId?: string; nodeId: string }): Promise<ControlResult> {
+    const session = opts.sessionId ? this.sessions.find((s) => s.id === opts.sessionId) : this.getActiveSession();
+    if (!session) {
+      return { ok: false, error: `no such session: ${opts.sessionId ?? '(active)'}` };
+    }
+    if (session.id !== this.activeSessionId) {
+      this.openSession(session.id);
+    }
+    if (!session.nodes[opts.nodeId]) {
+      return { ok: false, error: `no such node: ${opts.nodeId}` };
+    }
+    this.handleCheckout(opts.nodeId);
+    this.ensurePanel(session.id);
+    return { ok: true, sessionId: session.id, nodeId: opts.nodeId };
+  }
+
+  /** Send a caller-supplied message that continues from `nodeId` (a new child turn). */
+  async controlContinueFrom(opts: { sessionId?: string; nodeId?: string; message: string }): Promise<ControlResult> {
+    const message = (opts.message ?? '').trim();
+    if (!message) {
+      return { ok: false, error: 'message is required' };
+    }
+    if (this.busy || this.agent.running) {
+      return { ok: false, error: 'the agent is busy; wait for it to finish first' };
+    }
+    const session = opts.sessionId ? this.sessions.find((s) => s.id === opts.sessionId) : this.getActiveSession();
+    if (!session) {
+      return { ok: false, error: `no such session: ${opts.sessionId ?? '(active)'}` };
+    }
+    if (session.id !== this.activeSessionId) {
+      this.openSession(session.id);
+    }
+    const nodeId = opts.nodeId ?? session.activeNodeId ?? session.rootId;
+    if (nodeId) {
+      if (!session.nodes[nodeId]) {
+        return { ok: false, error: `no such node: ${nodeId}` };
+      }
+      this.handleCheckout(nodeId);
+    }
+    this.ensurePanel(session.id);
+    await this.onUserMessage(message);
+    return { ok: true, sessionId: session.id, nodeId: session.activeNodeId };
+  }
+
+  /**
+   * Ask VS Code to reload this window. Replies 202 immediately and reloads a
+   * moment later (after the pending persist lands), because the reload kills
+   * this process — the caller can only observe it as a *new* instance.
+   */
+  controlReloadWindow(): ControlResult {
+    if (this.busy || this.agent.running) {
+      return { ok: false, error: 'the agent is busy; wait for it to finish first', busy: true };
+    }
+    if (this.runningSubAgents.size > 0 || this.activeSessionHasRunningBackground()) {
+      return { ok: false, error: 'sub-agents or background terminals are still running', busy: true };
+    }
+    void this.lastPersist.finally(() => {
+      setTimeout(() => {
+        void vscode.commands.executeCommand('workbench.action.reloadWindow');
+      }, 400);
+    });
+    return { ok: true };
+  }
+
   // ---- Panel lifecycle ----
 
   private panelTitle(sessionId: string): string {
@@ -1756,6 +1903,10 @@ export class ChatViewProvider {
 
   private async onUserMessage(text: string, attachments: UserAttachment[] = []): Promise<void> {
     if (this.busy) {
+      return;
+    }
+    if (Date.now() < this.controlHoldUntil) {
+      this.postNotice('warning', 'An external controller is rebooting the window; please wait a moment.');
       return;
     }
     const userText = text.trim();

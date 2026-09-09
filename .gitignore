@@ -22,3 +22,6 @@ yarn-error.log*
 # OS
 .DS_Store
 Thumbs.db
+
+# Hyper-Vscode supervisor state (daemon token, logs, isolated profiles)
+tools/hyper-vscode/.state/

@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { ChatViewProvider } from './chat/ChatViewProvider';
 import { SessionsProvider } from './chat/SessionsProvider';
+import { ControlServer } from './http/controlServer';
 
 let chatProvider: ChatViewProvider | undefined;
 
@@ -18,6 +19,14 @@ function toSessionId(arg: unknown): string {
 export function activate(context: vscode.ExtensionContext): void {
   chatProvider = new ChatViewProvider(context.extensionUri, context.workspaceState, context.globalStorageUri);
 
+  // Optional local control plane (off by default) for the external supervisor.
+  const controlServer = new ControlServer(
+    chatProvider,
+    context.globalStorageUri,
+    (line) => chatProvider?.outputLog(line),
+  );
+  void controlServer.start();
+
   // Sidebar lists sessions; it asks the provider for items on every refresh so it
   // never caches session state itself.
   const sessionsProvider = new SessionsProvider(() => chatProvider?.getSessionTreeItems() ?? []);
@@ -29,6 +38,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   context.subscriptions.push(
     sessionsTree,
+    controlServer,
     vscode.commands.registerCommand('agentHarness.openChat', () => chatProvider?.openChat()),
     vscode.commands.registerCommand('agentHarness.focus', () => chatProvider?.openChat()),
     vscode.commands.registerCommand('agentHarness.openSession', (arg) => {
