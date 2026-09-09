@@ -234,17 +234,19 @@ User (editor WebviewPanel) <--postMessage--> ChatViewProvider (src/chat)
 | `list_dir` | `path?`, `glob?`, `recursive?` | Sorted entries; directories suffixed with `/`. `glob` filters against the path relative to the listed dir (`*.ts` = top level, `**/*.ts` = any depth); `recursive` walks subdirs (heavy dirs skipped) and prints relative paths. Capped at 2000 entries with an explicit note. |
 | `search_files` | `pattern`, `path?`, `glob?`, `caseSensitive?`, `maxResults?`, `context?` | Regex search returning `file:line: text` (paths **workspace-relative**). `path` may be a **file or a directory**. `maxResults` default 200 / hard cap 300; `context` (0–10) adds surrounding lines with `-` separators (`src/a.ts-11- text`). Hit lines are trimmed + clipped to 160 chars. Heavy dirs skipped; files >1 MB skipped. A capped/short-circuited search appends an explicit `…[search stopped early: …]` note — never silently truncated. |
 
-> **Oversized results spill to a temp file.** Every tool whose output is unbounded
+> **Oversized results spill to a file.** Every tool whose output is unbounded
 > (`search_files`, `list_dir`, `exec_command`, `check_background_terminal`,
 > `join_background`) runs its result through `limitInline()`: above
 > `agentHarness.maxInlineToolOutput`
 > (default 32768 bytes, `0` = always inline) the full text is written to
-> `%TEMP%/agent-harness-tool-output/<tool>-<id>.txt` and only the absolute path,
+> `.agent-harness/tool-output/<tool>-<id>.txt` (workspace-relative; the system
+> temp dir when no folder is open) and only the absolute path,
 > byte/line count and an 8-line preview are returned — so a `context`-heavy search
 > on a big file or a chatty command cannot flood the context. The spilled file is a
 > normal file:
-> `read_file` can page it and `search_files` can grep it. A write failure falls
-> back to inlining, so a result is never lost.
+> `read_file` can page it, and `search_files` can grep it **by its exact path**
+> (`.agent-harness` is in `SKIP_DIRS`, so repo-wide walks skip it). A write failure
+> falls back to inlining, so a result is never lost.
 | `exec_command` | `command`, `cwd?`, `timeout?`, `timeout_behavior?` | Runs through the detected shell (`getShell()`), returns combined stdout+stderr trimmed. Errors/timeouts/aborts are prefixed with a `[...]` note. `timeout_behavior` = `stop` (default, kill on timeout) / `move_to_background` (promote a still-running command to a background terminal and return its id) / `start_in_background` (launch immediately, return id, don't wait). |
 | `check_background_terminal` | `pid` | Status of a background terminal (running / finished, exit code, output so far). |
 | `kill_background` | `pid` | Kills a background terminal's process tree. Tool-initiated kills suppress the injected completion notice. |
@@ -616,6 +618,10 @@ repo — it lives with the user's Cursor skills:
 - Full docs: `C:\Users\DE-YU\.cursor\skills\computer-use\SKILL.md` (usage) and
   `reference.md` (complete CLI surface + response shapes). Read them before a
   non-trivial session.
+- **Artifacts go to the workspace scratch space** (never `C:\Temp`): pass
+  `--path .agent-harness/screenshots` so every capture lands in the same
+  gitignored folder as the rest of the agent's scratch (see "Agent scratch space"
+  below).
 
 Every invocation runs **one action** and prints one JSON object on stdout
 (`ok`, `command`, plus payload fields). Exit codes: `0` ok, `1` bad arguments,
@@ -635,9 +641,9 @@ exists; the desktop is the last resort, not the first.
    `uia set-value --hwnd <hwnd> --ref eN --value "…"`, `uia invoke`, `uia toggle`,
    `uia select`; fall back to `mouse click --hwnd <hwnd> --ref eN --focus`.
 4. Verify with a fresh `window snapshot` — refs change after the UI updates.
-5. Screenshots: `screenshot --path <dir> --hwnd <hwnd> --focus` (or `--ref eN
-   --pad 12` for a POI crop), then `read_image <png>` to actually look at it.
-   Prefer a crop over a full-screen shot.
+5. Screenshots: `screenshot --path .agent-harness/screenshots --hwnd <hwnd> --focus`
+   (or `--ref eN --pad 12` for a POI crop), then `read_image <png>` to actually
+   look at it. Prefer a crop over a full-screen shot.
 
 **Safety / shared desktop (the user is often active):**
 
@@ -666,7 +672,7 @@ computer-use uia invoke --hwnd 0x00040C1A --ref e15
 computer-use mouse click --hwnd 0x00040C1A --ref e12 --focus
 computer-use mouse click --hwnd 0x00040C1A --coord window --x 40 --y 45 --focus
 computer-use key tap --hwnd 0x00040C1A --key a
-computer-use screenshot --path C:\Temp\agent\ --hwnd 0x00040C1A --focus
+computer-use screenshot --path .agent-harness/screenshots --hwnd 0x00040C1A --focus
 computer-use uia from-point --x 640 --y 360
 ```
 
@@ -674,6 +680,21 @@ computer-use uia from-point --x 640 --y 360
 `--coord window` = offsets from the outer window rect, `--coord client` = client
 area. One **logical** step per decision; when the user may be active, chain
 focus + act + verify in a single command so intermediate state cannot drift.
+
+### Agent scratch space
+
+All agent-produced artifacts live in the workspace-local, gitignored
+`.agent-harness/` (excluded from the `.vsix` too) and are safe to delete:
+
+| Path | Contents |
+| --- | --- |
+| `.agent-harness/screenshots/` | `computer-use screenshot` output (pass `--path`) |
+| `.agent-harness/tool-output/` | oversized `search_files`/`list_dir`/`exec_command`/background results (`limitInline`) |
+
+`.agent-harness` is in the tools' `SKIP_DIRS`, so `list_dir`/`search_files` walks
+skip it — grep a spilled file by its **exact path** instead. Never write scratch
+files to `C:\Temp` or the repo root; if a new kind of artifact appears, give it a
+subfolder here.
 
 ## Testing convention
 
