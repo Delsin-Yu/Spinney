@@ -16,7 +16,7 @@ function toSessionId(arg: unknown): string {
 }
 
 export function activate(context: vscode.ExtensionContext): void {
-  chatProvider = new ChatViewProvider(context.extensionUri, context.workspaceState);
+  chatProvider = new ChatViewProvider(context.extensionUri, context.workspaceState, context.globalStorageUri);
 
   // Sidebar lists sessions; it asks the provider for items on every refresh so it
   // never caches session state itself.
@@ -38,11 +38,25 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }),
     vscode.commands.registerCommand('agentHarness.newSession', () => chatProvider?.newSession()),
-    vscode.commands.registerCommand('agentHarness.deleteSession', (arg) => {
-      const id = toSessionId(arg) || chatProvider?.currentSessionId || '';
-      if (id) {
-        chatProvider?.deleteSession(id);
+    vscode.commands.registerCommand('agentHarness.deleteSession', async (arg) => {
+      const explicit = toSessionId(arg);
+      const id = explicit || chatProvider?.currentSessionId || '';
+      if (!id) {
+        return;
       }
+      // Invoked from the palette (no explicit session id): deleting is
+      // irreversible (conversation + sub-agent transcripts), so confirm first.
+      if (!explicit) {
+        const pick = await vscode.window.showWarningMessage(
+          'Delete the current Agent Harness session? Its conversation and sub-agent transcripts are removed.',
+          { modal: true },
+          'Delete',
+        );
+        if (pick !== 'Delete') {
+          return;
+        }
+      }
+      chatProvider?.deleteSession(id);
     }),
     vscode.commands.registerCommand('agentHarness.clear', () => chatProvider?.clear()),
   );

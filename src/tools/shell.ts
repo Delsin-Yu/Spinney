@@ -109,9 +109,13 @@ const PWSH_UTF8_PREFIX =
   '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; $OutputEncoding=[System.Text.Encoding]::UTF8; ';
 
 function detectShell(): ShellInfo {
-  // 1) Git Bash (prefer the known install), then any bash on PATH.
+  // 1) Git Bash (prefer the known install), then any bash on PATH — but NOT the
+  //    WSL launcher (System32\bash.exe / WindowsApps): it is a different
+  //    filesystem, does not ship zh_CN.UTF-8, and would receive a Windows cwd.
   const gitBash = firstExisting(gitBashCandidates());
-  const bash = gitBash || onPath('bash');
+  const pathBash = onPath('bash');
+  const isWslLauncher = !!pathBash && /[\\/](System32|WindowsApps)[\\/]bash\.exe$/i.test(pathBash);
+  const bash = gitBash || (pathBash && !isWslLauncher ? pathBash : null);
   if (bash && exists(bash)) {
     const isWin = process.platform === 'win32';
     return {

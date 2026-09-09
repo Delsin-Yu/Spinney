@@ -13,8 +13,13 @@ export function setPerfSink(fn: PerfSink | null): void {
   sink = fn;
 }
 
-export function perf(line: string): void {
-  sink?.(`[perf] ${line}`);
+export function perf(line: string | (() => string)): void {
+  // A thunk is only evaluated when a sink is installed, so an expensive line
+  // (JSON sizes, byte counts) costs nothing when perf logging is off.
+  if (!sink) {
+    return;
+  }
+  sink(`[perf] ${typeof line === 'function' ? line() : line}`);
 }
 
 export function nowMs(): number {

@@ -7,8 +7,12 @@
 export class SubAgentPool {
   private running = 0;
   private readonly queue: Array<() => void> = [];
+  /** Always ≥ 1: a non-positive limit would make every task wait forever. */
+  readonly maxConcurrent: number;
 
-  constructor(public readonly maxConcurrent: number) {}
+  constructor(maxConcurrent: number) {
+    this.maxConcurrent = Number.isFinite(maxConcurrent) ? Math.max(1, Math.floor(maxConcurrent)) : 1;
+  }
 
   get runningCount(): number {
     return this.running;
