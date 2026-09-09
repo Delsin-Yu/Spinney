@@ -427,6 +427,14 @@ export class Agent {
   private sendMessageHandler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null = null;
   /** Whether this agent may spawn sub-agents (a depth-2 sub-agent may not). */
   private canSpawn = true;
+  /**
+   * Images the provider rejected as unsupported (by `file_id` / `image_url`).
+   * They are hidden from every request body rather than deleted from the stored
+   * history, mirroring how a non-vision model hides images. Ids are unique per
+   * upload, so keeping them across session switches is harmless and avoids
+   * re-triggering the same 400 on every turn.
+   */
+  private rejectedImageIds = new Set<string>();
 
   constructor(
     private readonly client: DeepSeekClient,
@@ -514,15 +522,32 @@ export class Agent {
   }
 
   /**
+   * The id a content part references an image by (`file_id` for a Files API
+   * upload, the url otherwise), or null for a non-image part. Used to hide an
+   * image without touching the stored history.
+   */
+  private imagePartId(part: ContentPart): string | null {
+    if (part.type === 'file') {
+      return part.file_id;
+    }
+    if (part.type === 'image_url') {
+      return part.image_url.url;
+    }
+    return null;
+  }
+
+  /**
    * The message history as it should be sent to the API for the current model.
    * Image content blocks (`image_url` / `file`) are only valid on the vision
    * model; when a text-only model is active we send a copy in which each image
-   * block is replaced by a short placeholder so the request does not 400. The
-   * stored history is never modified, so switching back to the vision model
-   * restores the original image blocks.
+   * block is replaced by a short placeholder so the request does not 400.
+   * Images the provider itself rejected are replaced the same way, for every
+   * model. The stored history is never modified, so switching models restores
+   * the original image blocks (a provider-rejected one stays hidden).
    */
   private messagesForCurrentModel(): ChatMessage[] {
-    if (isVisionModel(this.model)) {
+    const vision = isVisionModel(this.model);
+    if (vision && this.rejectedImageIds.size === 0) {
       return this.messages;
     }
     return this.messages.map((m) => {
@@ -533,15 +558,23 @@ export class Agent {
       if (!parts.some((p) => p.type === 'image_url' || p.type === 'file')) {
         return m;
       }
-      return {
-        ...m,
-        content: parts.map((p): ContentPart => {
-          if (p.type === 'image_url' || p.type === 'file') {
-            return { type: 'text', text: '[image hidden: the current model does not support images]' };
-          }
+      let changed = false;
+      const content = parts.map((p): ContentPart => {
+        const id = this.imagePartId(p);
+        if (id === null) {
           return p;
-        }),
-      };
+        }
+        if (!vision) {
+          changed = true;
+          return { type: 'text', text: '[image hidden: the current model does not support images]' };
+        }
+        if (this.rejectedImageIds.has(id)) {
+          changed = true;
+          return { type: 'text', text: '[image removed: the provider rejected it as unsupported]' };
+        }
+        return p;
+      });
+      return changed ? { ...m, content } : m;
     });
   }
 
@@ -990,11 +1023,12 @@ export class Agent {
           .map((tc) => ({ name: tc.name, arguments: tc.arguments }));
         throw new InterruptedError(content, reasoning, partialTools);
       }
-      // A provider-side image rejection (e.g. a malformed file that passed local
-      // magic-byte detection) would otherwise 400 every subsequent turn. Drop
-      // the offending image from the history and retry the request.
-      if (imageRetry < 8 && this.dropRejectedImage(err)) {
-        this.onEvent({ type: 'status', text: 'The provider rejected an image; removed it and retrying…' });
+      // A provider-side image rejection (e.g. a malformed file that passed the
+      // local integrity check) would otherwise 400 every subsequent turn. Hide
+      // the offending image from the request body (the stored history keeps it)
+      // and retry.
+      if (imageRetry < 8 && this.markRejectedImages(err)) {
+        this.onEvent({ type: 'status', text: 'The provider rejected an image; hiding it and retrying…' });
         return this.requestAssistantMessage(signal, imageRetry + 1);
       }
       throw err;
@@ -1031,13 +1065,14 @@ export class Agent {
   }
 
   /**
-   * Detect a provider "unsupported image" 400 and remove the offending image
-   * block(s) from the live history so a retry can succeed. DeepSeek names the
-   * offending message (`.messages[<n>].image[...]`); every image part in that
-   * message is replaced with a text placeholder. Returns true if anything was
-   * removed.
+   * Detect a provider "unsupported image" 400 and record the offending
+   * image(s) so `messagesForCurrentModel` hides them on every later request.
+   * DeepSeek names the offending message (`.messages[<n>].image[...]`); when it
+   * does, only that message's images are recorded, otherwise every image in the
+   * history. The stored history is left untouched. Returns true when a new
+   * image was recorded, i.e. when a retry can make progress.
    */
-  private dropRejectedImage(err: unknown): boolean {
+  private markRejectedImages(err: unknown): boolean {
     if (!(err instanceof DeepSeekError) || err.status !== 400) {
       return false;
     }
@@ -1047,22 +1082,19 @@ export class Agent {
     const match = /messages\[(\d+)\]/.exec(err.message);
     const named = match ? this.messages[Number(match[1])] : undefined;
     const targets: ChatMessage[] = named ? [named] : this.messages;
-    let removed = 0;
+    let added = 0;
     for (const message of targets) {
       if (message.role !== 'user' || !Array.isArray(message.content)) {
         continue;
       }
-      if (!message.content.some((p) => p.type === 'image_url' || p.type === 'file')) {
-        continue;
-      }
-      message.content = message.content.map((part): ContentPart => {
-        if (part.type === 'image_url' || part.type === 'file') {
-          removed++;
-          return { type: 'text', text: '[image removed: the provider rejected it as unsupported]' };
+      for (const part of message.content) {
+        const id = this.imagePartId(part);
+        if (id !== null && !this.rejectedImageIds.has(id)) {
+          this.rejectedImageIds.add(id);
+          added++;
         }
-        return part;
-      });
+      }
     }
-    return removed > 0;
+    return added > 0;
   }
 }
