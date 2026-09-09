@@ -110,7 +110,29 @@ Control plane routes (all require `Authorization: Bearer <token>`):
 | `POST /wait-for-finish` | block until idle (`scope:'all'` also waits for sub-agents / background jobs), then flush the last persist. `interrupt:true` is the escape hatch |
 | `POST /navigate` | check out a node (and open the panel) |
 | `POST /continue` | send a caller-supplied user message that continues from a node |
+| `POST /session/start` | create a session (`{title?, prompt?}`) or jump to one (`{sessionId, prompt?}`) and send `prompt` as its first turn; refuses while busy |
 | `POST /reload-window` | 202, then `workbench.action.reloadWindow` (refuses while busy) |
+
+**Session jump** (`POST /session/start`): the agent can hand a task to a *fresh*
+conversation instead of growing the current one — e.g.
+`curl -X POST -H "Authorization: Bearer <token>" -d '{"title":"Audit deps","prompt":"…"}'
+http://127.0.0.1:<port>/session/start`. Without `sessionId` a new session is
+created, activated and (if no `title`) named from the prompt; with `sessionId` the
+caller jumps to that session and optionally sends `prompt` there. It returns
+`{ok, sessionId, nodeId, prompted}`.
+
+The harness drives **one session at a time**, so the busy case matters:
+
+- Caller is idle → the session is created/switched and the prompt runs now (200).
+- Caller is busy (the agent calling it is, by definition, mid-turn) and supplies a
+  `prompt` → the request is **queued** (202 `{ok, queued:true}`) and runs the
+  moment the current turn finishes (`finishTurn` → `runPendingSessionStart`). Only
+  one start may be queued at a time.
+- Busy without a `prompt`, or with a `sessionId` → 409; call
+  `POST /wait-for-finish` first.
+
+This is how an agent hands a follow-up task to a new conversation and then keeps
+its own turn short.
 
 `hvsc` commands: `serve` / `start` / `status` / `rm` / `reboot` / `jobs`. The
 reboot flow is `wait-for-finish` → `reload-window` (shared profile) or kill +

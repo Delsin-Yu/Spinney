@@ -11,7 +11,9 @@
  *                              is flushed) — the caller then kills the process
  *   4. `POST /navigate`        check out a node (and open the panel)
  *   5. `POST /continue`        send a user message that continues from a node
- *   6. `POST /reload-window`   ask VS Code to reload this window (202; the reply
+ *   6. `POST /session/start`   create (or jump to) a session and optionally send
+ *                              a caller-supplied prompt as its first turn
+ *   7. `POST /reload-window`   ask VS Code to reload this window (202; the reply
  *                              is observed as a *new* instance on the other side)
  *
  * Bound to 127.0.0.1 and gated by a bearer token generated per process; the
@@ -55,6 +57,10 @@ export interface ControlResult {
   busy?: boolean;
   runningSubAgents?: number;
   runningBackgrounds?: boolean;
+  /** `POST /session/start`: whether the caller's prompt was sent as a turn. */
+  prompted?: boolean;
+  /** `POST /session/start`: the start was queued to run when the turn ends. */
+  queued?: boolean;
 }
 
 export interface WaitForFinishOptions {
@@ -73,6 +79,12 @@ export interface ControlHost {
   controlWaitForFinish(opts: WaitForFinishOptions): Promise<ControlResult>;
   controlNavigate(opts: { sessionId?: string; nodeId: string }): Promise<ControlResult>;
   controlContinueFrom(opts: { sessionId?: string; nodeId?: string; message: string }): Promise<ControlResult>;
+  /**
+   * Start a session and optionally send a caller-supplied prompt as its first
+   * turn. Without `sessionId` a fresh session is created (and titled from the
+   * prompt); with it the caller jumps to that session instead.
+   */
+  controlStartSession(opts: { sessionId?: string; title?: string; prompt?: string }): Promise<ControlResult>;
   /**
    * Reload this window (`workbench.action.reloadWindow`). The only way to restart
    * an instance that shares the user's profile — the supervisor cannot kill it
@@ -244,6 +256,16 @@ export class ControlServer implements vscode.Disposable {
           message: body.message,
         });
         send(result.ok ? 200 : 409, result);
+        return;
+      }
+      if (route === 'POST /session/start') {
+        const body = await this.readBody(req);
+        const result = await this.host.controlStartSession({
+          sessionId: typeof body.sessionId === 'string' ? body.sessionId : undefined,
+          title: typeof body.title === 'string' ? body.title : undefined,
+          prompt: typeof body.prompt === 'string' ? body.prompt : undefined,
+        });
+        send(result.ok ? (result.queued ? 202 : 200) : 409, result);
         return;
       }
       if (route === 'POST /reload-window') {
