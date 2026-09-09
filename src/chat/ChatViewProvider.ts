@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { Agent } from '../agent/agent';
@@ -21,11 +22,12 @@ import {
   pathMessages,
   titleFromPrompt,
 } from './tree';
-import { getWorkspaceRoot, ToolRegistry } from '../tools';
+import { getWorkspaceRoot, resolvePath, ToolRegistry } from '../tools';
 import { BackgroundRegistry, BackgroundTask } from '../tools/background';
 import { ChatPanel } from './ChatPanel';
 import { SessionTreeItem } from './SessionsProvider';
 import { SubAgentPool } from './SubAgentPool';
+import { removeTranscriptDir, sumUsage, summarizeTranscript, writeSubAgentTranscript } from './transcript';
 import { perf, setPerfSink } from '../perf';
 
 /** Known context-window sizes (in tokens) per model, for the usage indicator. */
@@ -70,10 +72,33 @@ function clipDisplayItem(item: DisplayItem): DisplayItem {
   return item;
 }
 
+/**
+ * Cap a single message's content in the *persisted* copy. The in-memory history
+ * keeps the full payload; only what goes into `vscode.Memento` is bounded, so one
+ * huge tool result cannot make every `persist()` write tens of MiB.
+ */
+const STORAGE_MESSAGE_CAP = 64 * 1024;
+
+function clipMessageForStorage(msg: ChatMessage): ChatMessage {
+  if (typeof msg.content === 'string' && msg.content.length > STORAGE_MESSAGE_CAP) {
+    return { ...msg, content: clipForUi(msg.content, STORAGE_MESSAGE_CAP) };
+  }
+  return msg;
+}
+
 /** Locally persists the active model + thinking-effort selection. */
 interface RuntimeConfig {
   model: string;
   thinkingEffort: ThinkingEffort;
+}
+
+/** One sub-agent run: its dispatch spec plus the tree node that owns it. */
+interface SubAgentJob {
+  spec: { instruction: string; write: boolean; model?: string };
+  node: TreeNode;
+  resume?: boolean;
+  /** Session the node belongs to (for the transcript folder; falls back to active). */
+  sessionId?: string;
 }
 
 /** A background terminal summarized for the webview UI. */
@@ -172,6 +197,7 @@ export class ChatViewProvider {
   constructor(
     private readonly extensionUri: vscode.Uri,
     private readonly storage: vscode.Memento,
+    private readonly globalStorage?: vscode.Uri,
   ) {
     this.mediaVersion = Date.now().toString(36);
     this.output = vscode.window.createOutputChannel('Agent Harness');
@@ -202,6 +228,8 @@ export class ChatViewProvider {
     foldThinking: boolean;
     maxConcurrentSubagents: number;
     maxLevel2Subagents: number;
+    saveSubAgentTranscripts: boolean;
+    subAgentTranscriptDir: string;
   } {
     const cfg = vscode.workspace.getConfiguration('agentHarness');
     const apiKey = (cfg.get<string>('apiKey') ?? '').trim() || (process.env.DEEPSEEK_API_KEY ?? '').trim();
@@ -213,7 +241,9 @@ export class ChatViewProvider {
     const foldThinking = cfg.get<boolean>('foldThinking') ?? true;
     const maxConcurrentSubagents = cfg.get<number>('maxConcurrentSubagents') ?? 15;
     const maxLevel2Subagents = cfg.get<number>('maxLevel2Subagents') ?? 2;
-    return { apiKey, model, baseUrl, maxTurns, thinkingEffort, foldToolCalls, foldThinking, maxConcurrentSubagents, maxLevel2Subagents };
+    const saveSubAgentTranscripts = cfg.get<boolean>('saveSubAgentTranscripts') ?? true;
+    const subAgentTranscriptDir = (cfg.get<string>('subAgentTranscriptDir') ?? '').trim();
+    return { apiKey, model, baseUrl, maxTurns, thinkingEffort, foldToolCalls, foldThinking, maxConcurrentSubagents, maxLevel2Subagents, saveSubAgentTranscripts, subAgentTranscriptDir };
   }
 
   /**
@@ -408,7 +438,8 @@ export class ChatViewProvider {
     }
     const nodes = this.sessions.reduce((n, s) => n + Object.keys(s.nodes).length, 0);
     perf(
-      `load-sessions ${Date.now() - t0}ms sessions=${this.sessions.length} nodes=${nodes}` +
+      () =>
+        `load-sessions ${Date.now() - t0}ms sessions=${this.sessions.length} nodes=${nodes}` +
         (migrated ? ' migrated=v1' : ''),
     );
     // Persist the (possibly migrated/healed) state so a resumed session is always valid.
@@ -426,7 +457,11 @@ export class ChatViewProvider {
         nodes: Object.fromEntries(
           Object.entries(s.nodes).map(([id, node]): [string, TreeNode] => [
             id,
-            { ...node, displayItems: node.displayItems.map(clipDisplayItem) },
+            {
+              ...node,
+              displayItems: node.displayItems.map(clipDisplayItem),
+              messages: node.messages.map(clipMessageForStorage),
+            },
           ]),
         ),
       })),
@@ -437,11 +472,11 @@ export class ChatViewProvider {
     const extra =
       `sessions=${this.sessions.length} nodes=${nodeCount} items=${this.displayItems.length} msgs=${msgCount}`;
     const pending = this.storage.update(STORAGE_KEY, payload);
-    perf(`persist-queued ${Date.now() - t0}ms ${extra}`);
+    perf(() => `persist-queued ${Date.now() - t0}ms ${extra}`);
     void pending.then(
-      () => perf(`persist-done ${Date.now() - t0}ms ${extra}`),
+      () => perf(() => `persist-done ${Date.now() - t0}ms ${extra}`),
       (err: unknown) =>
-        perf(`persist-fail ${Date.now() - t0}ms ${extra} ${err instanceof Error ? err.message : String(err)}`),
+        perf(() => `persist-fail ${Date.now() - t0}ms ${extra} ${err instanceof Error ? err.message : String(err)}`),
     );
   }
 
@@ -693,10 +728,82 @@ export class ChatViewProvider {
     if (write) {
       return this.tools.subset([...read, ...writeTools]);
     }
-    // Read-only sub-agents get the read tools working, and the write tools are
-    // exposed with their definitions (so the model can propose them) but their
-    // execution is denied at the runtime layer — defense-in-depth.
-    return this.tools.subset([...read, ...writeTools]).withBlocked(writeTools);
+    // Read-only sub-agents: the write tools stay registered with a rejecting
+    // executor (defense-in-depth) but are hidden from the model's tool list, so
+    // it does not spend a round proposing a tool it can never use.
+    return this.tools.subset([...read, ...writeTools]).withBlocked(writeTools).withHidden(writeTools);
+  }
+
+  /**
+   * Folder that holds a session's sub-agent transcript dumps. Defaults to the
+   * extension's global storage (never the user's repo); `agentHarness.subAgentTranscriptDir`
+   * redirects it to a workspace-relative path.
+   */
+  private transcriptDir(sessionId: string): string {
+    const configured = this.getConfig().subAgentTranscriptDir;
+    if (configured) {
+      try {
+        return path.join(resolvePath(configured), sessionId);
+      } catch {
+        // No workspace folder open — fall through to global storage.
+      }
+    }
+    if (this.globalStorage) {
+      return path.join(this.globalStorage.fsPath, 'transcripts', sessionId);
+    }
+    return path.join(os.tmpdir(), 'agent-harness-transcripts', sessionId);
+  }
+
+  /** " · transcript: <path>" suffix for a sub-agent completion note ('' when off). */
+  private transcriptNote(node: TreeNode): string {
+    return node.agentTranscript ? ` · transcript: ${node.agentTranscript}` : '';
+  }
+
+  /**
+   * Dump a finished sub-agent's whole conversation (system prompt + every API
+   * message, tool calls and results included) to `<transcriptDir>/<nodeId>.jsonl`.
+   * Never throws into the agent loop: a failure just leaves the node without a
+   * transcript path.
+   */
+  private writeSubAgentTranscript(
+    job: SubAgentJob,
+    subAgent: Agent,
+    status: string,
+    summary: string,
+    startedAt: number,
+  ): string | undefined {
+    if (!this.getConfig().saveSubAgentTranscripts) {
+      return undefined;
+    }
+    const all = subAgent.getMessages();
+    const first = all[0];
+    const systemPrompt =
+      first && first.role === 'system' && typeof first.content === 'string' ? first.content : '';
+    const sessionId = job.sessionId ?? this.getActiveSession()?.id ?? 'unknown';
+    try {
+      const ref = writeSubAgentTranscript({
+        dir: this.transcriptDir(sessionId),
+        nodeId: job.node.id,
+        sessionId,
+        depth: job.node.agentDepth ?? 1,
+        write: job.spec.write,
+        model: job.spec.model || this.model,
+        status,
+        resumed: !!job.resume,
+        instruction: job.spec.instruction,
+        summary,
+        startedAt,
+        endedAt: Date.now(),
+        systemPrompt,
+        messages: all.filter((m) => m.role !== 'system'),
+        usage: sumUsage(job.node.displayItems.map((item) => item.usage)),
+      });
+      this.output.appendLine(`[transcript] ${ref.file} lines=${ref.lines} bytes=${ref.bytes}`);
+      return ref.file;
+    } catch (err) {
+      this.output.appendLine(`[transcript] write failed for ${job.node.id}: ${String(err)}`);
+      return undefined;
+    }
   }
 
   /** The main agent spawned sub-agents: delegates to the shared orchestrator. */
@@ -716,8 +823,8 @@ export class ChatViewProvider {
     return this.spawnChildren(parent, args, signal);
   }
 
-  /** The main agent (or a depth-1 sub-agent) resumed a finished sub-agent via
-   * `send_agent_message`. Validates the id / mode / model, then runs it. */
+  /** The main agent resumed a finished sub-agent via `send_agent_message`
+   * (trusted: it may raise or lower the target's `write`). */
   private handleSendAgentMessage(args: Record<string, unknown>, signal: AbortSignal): Promise<string> {
     const session = this.getActiveSession();
     if (!session) {
@@ -728,54 +835,108 @@ export class ChatViewProvider {
     if (!node || node.kind !== 'agent') {
       return Promise.resolve(`Error: no sub-agent with id "${id}".`);
     }
-    const message = String(args.message ?? '');
-    if (!message) {
-      return Promise.resolve('Error: send_agent_message requires a "message".');
-    }
-    const mode = String(args.mode ?? 'sync');
-    if (mode !== 'sync' && mode !== 'async') {
-      return Promise.resolve(`Error: invalid mode "${mode}". Use "sync" or "async".`);
-    }
-    if (this.runningSubAgents.has(id)) {
-      return Promise.resolve(
-        'Error: that sub-agent is still running. Wait for it to finish (or kill it) before sending a follow-up.',
-      );
-    }
     let write = node.agentWrite ?? false;
     if (typeof args.write === 'boolean') {
       write = args.write;
     }
-    let model = node.agentModel ?? this.model;
-    if (typeof args.model === 'string' && args.model) {
-      if (!MODELS.has(args.model)) {
-        return Promise.resolve(`Error: unknown model "${args.model}".`);
-      }
-      model = args.model;
+    const override = this.parseModelOverride(args.model);
+    if (override.error) {
+      return Promise.resolve(override.error);
     }
+    return this.resumeSubAgent(session, node, String(args.message ?? ''), String(args.mode ?? 'sync'), write, override.model, signal);
+  }
+
+  /**
+   * A depth-1 sub-agent resumed one of its own finished sub-agents
+   * (`send_agent_message` for a writable worker, `send_readonly_agent_message`
+   * for a read-only one). Least privilege: the target must be a **direct child**
+   * of the caller, and the resumed run's `write` is the AND of the caller's and
+   * the target's — a sub-agent can never raise a child's permission.
+   */
+  private handleSubAgentSendMessage(parent: TreeNode, args: Record<string, unknown>, signal: AbortSignal): Promise<string> {
+    const session = this.getActiveSession();
+    const id = String(args.id ?? '');
+    const node = session?.nodes[id];
+    if (!session || !node || node.kind !== 'agent') {
+      return Promise.resolve(`Error: no sub-agent with id "${id}".`);
+    }
+    if (node.parentId !== parent.id) {
+      return Promise.resolve('Error: you may only message a sub-agent that you spawned yourself.');
+    }
+    const override = this.parseModelOverride(args.model);
+    if (override.error) {
+      return Promise.resolve(override.error);
+    }
+    const write = parent.agentWrite === true && node.agentWrite === true;
+    return this.resumeSubAgent(session, node, String(args.message ?? ''), String(args.mode ?? 'sync'), write, override.model, signal);
+  }
+
+  /** Validate an optional `model` override; returns `{ model }` or `{ error }`. */
+  private parseModelOverride(value: unknown): { model?: string; error?: string } {
+    if (typeof value !== 'string' || !value) {
+      return {};
+    }
+    if (!MODELS.has(value)) {
+      return { error: `Error: unknown model "${value}".` };
+    }
+    return { model: value };
+  }
+
+  /** Shared resume path for `send_agent_message` / `send_readonly_agent_message`. */
+  private resumeSubAgent(
+    session: AgentSession,
+    node: TreeNode,
+    message: string,
+    mode: string,
+    write: boolean,
+    model: string | undefined,
+    signal: AbortSignal,
+  ): Promise<string> {
+    if (!message) {
+      return Promise.resolve('Error: a follow-up "message" is required.');
+    }
+    if (mode !== 'sync' && mode !== 'async') {
+      return Promise.resolve(`Error: invalid mode "${mode}". Use "sync" or "async".`);
+    }
+    if (this.runningSubAgents.has(node.id)) {
+      return Promise.resolve(
+        'Error: that sub-agent is still running. Wait for it to finish (or kill it) before sending a follow-up.',
+      );
+    }
+    const effectiveModel = model ?? node.agentModel ?? this.model;
     node.agentWrite = write;
-    node.agentModel = model;
-    const job = {
+    node.agentModel = effectiveModel;
+    const job: SubAgentJob = {
       node,
-      spec: { instruction: message, write, model: model !== this.model ? model : undefined },
+      spec: { instruction: message, write, model: effectiveModel !== this.model ? effectiveModel : undefined },
       resume: true,
+      sessionId: session.id,
     };
     if (mode === 'async') {
       void this.runSubAgent(job, signal).then((r) => this.deliverResumeAsync(node, r), () => {});
       return Promise.resolve(JSON.stringify({ resumed: true, id: node.id, async: true }));
     }
     return this.runSubAgent(job, signal).then((r) =>
-      JSON.stringify({ resumed: true, id: node.id, ok: r.ok, summary: r.summary, model: r.model }),
+      JSON.stringify({
+        resumed: true,
+        id: node.id,
+        ok: r.ok,
+        summary: r.summary,
+        model: r.model,
+        transcript: node.agentTranscript,
+        stats: summarizeTranscript(node.messages),
+      }),
     );
   }
 
-  /** Async `send_agent_message`: deliver the resumed sub-agent's outcome to the
-   * main agent (a card in the turn node that owns the sub-agent + one notice). */
+  /** Async resume: deliver the resumed sub-agent's outcome to whoever owns it —
+   * the main agent (a card + one notice) or a sub-agent parent (queued/auto-resumed). */
   private deliverResumeAsync(node: TreeNode, result: { ok: boolean; summary: string; model?: string }): void {
     const parent = this.getActiveSession()?.nodes[node.parentId ?? ''] ?? null;
     if (!parent) {
       return;
     }
-    const cardText = `子代理 #${node.id.slice(-6)} ${result.ok ? '完成' : '失败'}: ${result.summary || '(no summary)'}`;
+    const cardText = `子代理 #${node.id.slice(-6)} ${result.ok ? '完成' : '失败'}: ${result.summary || '(no summary)'}${this.transcriptNote(node)}`;
     parent.displayItems.push({
       kind: 'background',
       id: `sub-msg-${node.id}`,
@@ -787,8 +948,15 @@ export class ChatViewProvider {
       type: 'backgroundNotice',
       item: { id: `sub-msg-${node.id}`, name: '子代理完成', doneText: '子代理完成', content: cardText },
     });
-    this.subAgentNoticeQueue.push({ nodeId: parent.id, summary: cardText, status: 'done', count: 1 });
-    this.scheduleSubAgentDrain();
+    if (parent.kind === 'agent') {
+      // The owner is a sub-agent: hand it the result the same way an async child
+      // batch is handed over (queued for its next finish, or auto-resumed), so the
+      // notice is never injected as a main-agent turn bound to a sub-agent node.
+      this.queueSubAgentChildNotice(parent, [{ ok: result.ok, summary: result.summary, node }]);
+    } else {
+      this.subAgentNoticeQueue.push({ nodeId: parent.id, summary: cardText, status: 'done', count: 1 });
+      this.scheduleSubAgentDrain();
+    }
     this.persist();
   }
 
@@ -815,6 +983,9 @@ export class ChatViewProvider {
       return `Error: invalid mode "${mode}". Use "sync" or "async".`;
     }
     const childDepth = (parent.agentDepth ?? 0) + 1;
+    // Defense-in-depth: a read-only sub-agent must never create a writable child,
+    // even if a spawn call somehow reaches the provider.
+    const parentReadOnly = parent.kind === 'agent' && parent.agentWrite === false;
     if (childDepth > 2) {
       return 'Error: a sub-sub-sub-agent is not allowed (max sub-agent depth is 2).';
     }
@@ -829,11 +1000,11 @@ export class ChatViewProvider {
     }
 
     // Build a node + spec per task.
-    const jobs: Array<{ spec: { instruction: string; write: boolean; model?: string }; node: TreeNode }> = [];
+    const jobs: SubAgentJob[] = [];
     for (const raw of rawAgents) {
       const spec = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
       const instruction = String(spec.instruction ?? '');
-      const write = spec.write === true;
+      const write = parentReadOnly ? false : spec.write === true;
       const model = typeof spec.model === 'string' ? spec.model : undefined;
       if (!instruction) {
         return 'Error: each agent spec requires an "instruction".';
@@ -850,7 +1021,7 @@ export class ChatViewProvider {
       node.children = [];
       node.displayItems.push({ kind: 'user', text: instruction });
       attachNode(session, node);
-      jobs.push({ spec: { instruction, write, model }, node });
+      jobs.push({ spec: { instruction, write, model }, node, sessionId: session.id });
     }
     // Restore the checked-out node BEFORE repainting the tree: attachNode moved it
     // to the last agent child, and postTree derives activeId from it. The active
@@ -878,14 +1049,26 @@ export class ChatViewProvider {
         );
         this.onAsyncBatchDone(mainParent, parent, list.map((l) => ({ ...l.result, node: l.job.node })));
       });
-      return JSON.stringify({ spawned: jobs.length, async: true, ids: jobs.map((j) => j.node.id) });
+      return JSON.stringify({
+        spawned: jobs.length,
+        async: true,
+        ids: jobs.map((j) => j.node.id),
+        transcriptDir: this.transcriptDir(session.id),
+      });
     }
 
     const runAll = async () => {
       const results = await Promise.all(
         jobs.map((job) => (childDepth === 1 && this.subAgentPool ? this.subAgentPool.withSlot(() => this.runSubAgent(job, signal)) : this.runSubAgent(job, signal))),
       );
-      return { results: results.map((r, i) => ({ agentNodeId: jobs[i].node.id, ...r })) };
+      return {
+        results: results.map((r, i) => ({
+          agentNodeId: jobs[i].node.id,
+          transcript: jobs[i].node.agentTranscript,
+          stats: summarizeTranscript(jobs[i].node.messages),
+          ...r,
+        })),
+      };
     };
     return JSON.stringify(await runAll());
   }
@@ -893,7 +1076,7 @@ export class ChatViewProvider {
   /** Run one sub-agent to completion and resolve its result. When `resume` is set,
    * the sub-agent's stored conversation is prepended so a follow-up continues it. */
   private runSubAgent(
-    job: { spec: { instruction: string; write: boolean; model?: string }; node: TreeNode; resume?: boolean },
+    job: SubAgentJob,
     signal: AbortSignal,
   ): Promise<{ ok: boolean; summary: string; model?: string }> {
     return new Promise((resolve) => {
@@ -901,6 +1084,7 @@ export class ChatViewProvider {
       const onAbort = () => abort.abort();
       signal.addEventListener('abort', onAbort, { once: true });
 
+      const startedAt = Date.now();
       const subTools = this.subAgentTools(job.spec.write);
       let finished = false;
       let subAgent: Agent | null = null;
@@ -917,6 +1101,9 @@ export class ChatViewProvider {
         // continue it, even across an extension-host restart.
         if (subAgent) {
           job.node.messages = subAgent.getMessages().filter((m) => m.role !== 'system');
+          // …and dump the same conversation to disk (JSONL) so the *caller* can
+          // read the full tool-call history it cannot see in the summary.
+          job.node.agentTranscript = this.writeSubAgentTranscript(job, subAgent, status, summary, startedAt);
         }
         this.post({ type: 'agentDone', id: job.node.id, status, summary });
         this.persist();
@@ -929,10 +1116,24 @@ export class ChatViewProvider {
       subAgent = sub;
       sub.setModel(job.spec.model || this.model);
       sub.setThinkingEffort(this.thinkingEffort);
-      // A depth-2 sub-agent may not spawn its own sub-agents.
+      // Depth is hard-capped at 2, so only a depth-1 sub-agent may fan out. A
+      // writable one gets `spawn_agents` (children may write); a read-only one
+      // gets `spawn_readonly_agents` instead, whose args cannot express
+      // `write:true` — so it keeps read-only parallelism without an escalation
+      // path. `setCanSpawn*` hides the tools from the model's list;
+      // `Agent.executeToolCall` returns a clear error if they are called anyway.
       const depth = job.node.agentDepth ?? 1;
-      sub.setCanSpawn(depth < 2);
-      sub.setSpawnHandler((args2, sig2) => this.handleSubAgentSpawn(job.node, args2, sig2));
+      const canSpawn = depth < 2 && job.spec.write;
+      const canSpawnReadOnly = depth < 2 && !job.spec.write;
+      sub.setCanSpawn(canSpawn);
+      sub.setCanSpawnReadOnly(canSpawnReadOnly);
+      if (canSpawn || canSpawnReadOnly) {
+        sub.setSpawnHandler((args2, sig2) => this.handleSubAgentSpawn(job.node, args2, sig2));
+        // Resume of its own children. The provider's sub-agent path enforces
+        // least privilege: target must be a direct child, and its write
+        // permission is capped by the caller's.
+        sub.setSendMessageHandler((args2, sig2) => this.handleSubAgentSendMessage(job.node, args2, sig2));
+      }
       const effectiveModel = job.spec.model || this.model;
       const system = Agent.subAgentSystemPrompt(effectiveModel, this.thinkingEffort, depth, job.spec.write);
       // Lean system prompt (not the full CORE_PROMPT/AGENTS.md) + dispatched note.
@@ -964,7 +1165,7 @@ export class ChatViewProvider {
    */
   private queueSubAgentChildNotice(parent: TreeNode, results: Array<{ ok: boolean; summary: string; node: TreeNode }>): void {
     const lines = results.map(
-      (r) => `子代理 #${r.node.id.slice(-6)} ${r.ok ? '完成' : '失败'}: ${r.summary || '(no summary)'}`,
+      (r) => `子代理 #${r.node.id.slice(-6)} ${r.ok ? '完成' : '失败'}: ${r.summary || '(no summary)'}${this.transcriptNote(r.node)}`,
     );
     const notice = `[子代理批次] ${results.length} 个子代理完成\n${lines.join('\n')}`;
     if (this.runningSubAgents.has(parent.id)) {
@@ -977,7 +1178,7 @@ export class ChatViewProvider {
     // Parent already finished: resume it so it can react to its children.
     const abort = new AbortController();
     void this.runSubAgent(
-      { node: parent, spec: { instruction: notice, write: parent.agentWrite ?? false, model: undefined }, resume: true },
+      { node: parent, spec: { instruction: notice, write: parent.agentWrite ?? false, model: undefined }, resume: true, sessionId: this.getActiveSession()?.id },
       abort.signal,
     );
   }
@@ -998,7 +1199,7 @@ export class ChatViewProvider {
     }
     const abort = new AbortController();
     void this.runSubAgent(
-      { node, spec: { instruction: notice.message, write: node.agentWrite ?? false, model: undefined }, resume: true },
+      { node, spec: { instruction: notice.message, write: node.agentWrite ?? false, model: undefined }, resume: true, sessionId: this.getActiveSession()?.id },
       abort.signal,
     );
   }
@@ -1157,7 +1358,7 @@ export class ChatViewProvider {
       this.queueSubAgentChildNotice(parent, results);
       return;
     }
-    const lines = results.map((r) => `子代理 #${r.node.id.slice(-6)} ${r.ok ? '完成' : '失败'}: ${r.summary || '(no summary)'}`);
+    const lines = results.map((r) => `子代理 #${r.node.id.slice(-6)} ${r.ok ? '完成' : '失败'}: ${r.summary || '(no summary)'}${this.transcriptNote(r.node)}`);
     const cardText = lines.join('\n');
     const doneText = `${results.length} 个子代理完成`;
     // 1. A dedicated card at the end of the main node (visual separation).
@@ -1193,19 +1394,32 @@ export class ChatViewProvider {
       setTimeout(() => this.drainSubAgentNotices(), 0);
       return;
     }
-    const notices = this.subAgentNoticeQueue.splice(0);
+    const session = this.getActiveSession();
+    // Drop notices whose node belongs to a session that is no longer active: the
+    // sub-agent's card is already in that session's tree, and injecting the turn
+    // into whatever session is now active would pollute its history (the parent
+    // node would not even resolve there).
+    const notices = this.subAgentNoticeQueue.splice(0).filter((n) => session?.nodes[n.nodeId] !== undefined);
     if (notices.length === 0) {
       return;
     }
     // Bind this injected turn to the parent node: it bypasses beginTurn, so
     // activeTurnNode is null — but the reply (and any further spawn) must belong
     // to that node. Set the context so events route there and spawn works.
-    const session = this.getActiveSession();
     const parentId = notices[0].nodeId;
-    const parent = session?.nodes[parentId];
+    const parent = session!.nodes[parentId];
+    // Continue from the parent node's path: an injected turn bypasses beginTurn,
+    // so pin the agent's history to this node explicitly (the user may have
+    // checked out another branch while the async batch was running).
+    if (parent && session) {
+      this.agent.setMessages(this.buildPath(session, parent.id));
+    }
     this.activeTurnNode = parent ?? null;
     this.displayItems = parent ? parent.displayItems : this.displayItems;
-    this.turnPrefixLen = parent ? parent.messages.length : this.turnPrefixLen;
+    // The slice basis must match `finishTurn`'s array — `agent.getMessages()`,
+    // which includes the leading system message. Using `parent.messages.length`
+    // (the node's own messages only) re-included ancestor history in the node.
+    this.turnPrefixLen = this.agent.getMessages().length;
     this.lastStatus = '子代理完成';
     this.setBusy(true);
     this.post({ type: 'status', text: this.lastStatus });
@@ -1354,6 +1568,8 @@ export class ChatViewProvider {
     }
     // Drop any queued completion notice still waiting for that session.
     this.backgroundNotifQueue = this.backgroundNotifQueue.filter((q) => q.sessionId !== id);
+    // Drop the session's sub-agent transcript dumps too.
+    removeTranscriptDir(this.transcriptDir(id));
     this.sessions.splice(idx, 1);
     if (this.sessions.length === 0) {
       this.createSessionInMemory();
@@ -1402,6 +1618,8 @@ export class ChatViewProvider {
     );
     this.subAgentNoticeQueue.length = 0;
     this.subAgentChildNotices.clear();
+    // The cleared conversation's sub-agent transcript dumps are stale now.
+    removeTranscriptDir(this.transcriptDir(this.activeSessionId));
     if (this.backgroundDrainTimer != null) {
       clearTimeout(this.backgroundDrainTimer);
       this.backgroundDrainTimer = null;
@@ -1782,7 +2000,7 @@ export class ChatViewProvider {
       : [];
     this.post({ type: 'background', tasks });
     this.postState();
-    perf(`backgrounds ${Date.now() - t0}ms tasks=${tasks.length}`);
+    perf(() => `backgrounds ${Date.now() - t0}ms tasks=${tasks.length}`);
   }
 
   /** Mark a task's completion notice as delivered so it leaves the pending panel. */
@@ -2229,7 +2447,8 @@ export class ChatViewProvider {
     }
     if (now - this.streamFlushWindow >= 2000) {
       perf(
-        `stream-flush n=${this.streamFlushCount} bytes=${this.streamFlushBytes} ` +
+        () =>
+          `stream-flush n=${this.streamFlushCount} bytes=${this.streamFlushBytes} ` +
           `window=${now - this.streamFlushWindow}ms items=${this.displayItems.length}`,
       );
       this.streamFlushCount = 0;

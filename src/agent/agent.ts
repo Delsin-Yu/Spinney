@@ -228,7 +228,7 @@ const SPAWN_AGENTS_TOOL: ToolDefinition = {
   function: {
     name: 'spawn_agents',
     description:
-      'Spawn one or more sub-agents as parallel worker branches. Each agent runs its own conversation with a lean prompt and returns a summary. `agents` is an array of { instruction (the task), write (REQUIRED boolean: true allows the sub-agent to write_file / replace_in_file / exec_command; false is read-only: read_file / list_dir / search_files), model (optional; only set a different model when the user explicitly asked you to) }. `mode` is "sync" (default: block until all finish, return every summary) or "async" (return immediately with the agent ids; results are delivered to you as a notice when each finishes).',
+      'Spawn one or more sub-agents as parallel worker branches. Each agent runs its own conversation with a lean prompt and returns a summary. `agents` is an array of { instruction (the task), write (REQUIRED boolean: true allows the sub-agent to write_file / replace_in_file / exec_command; false is read-only: read_file / list_dir / search_files), model (optional; only set a different model when the user explicitly asked you to) }. `mode` is "sync" (default: block until all finish, return every summary) or "async" (return immediately with the agent ids; results are delivered to you as a notice when each finishes). Every finished sub-agent also gets `stats` (its `toolCalls` / `deniedToolCalls` counts and token usage) and `transcript`: the absolute path of a JSONL dump of its full conversation (line 1 = meta, then one API message per line — read it with read_file when the summary is not enough, e.g. to audit exactly which tools it called).',
     parameters: {
       type: 'object',
       properties: {
@@ -252,6 +252,66 @@ const SPAWN_AGENTS_TOOL: ToolDefinition = {
 };
 
 /**
+ * Read-only sub-agents may not call `spawn_agents` (a child could be created with
+ * `write:true`, bypassing their own restriction), so they get this variant
+ * instead: same orchestration, but the `write` flag does not exist — every child
+ * is read-only by construction. `Agent.executeToolCall` additionally forces
+ * `write:false` on each spec, so stuffing a `write` key into the arguments cannot
+ * escalate either.
+ */
+const SPAWN_READONLY_AGENTS_TOOL: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'spawn_readonly_agents',
+    description:
+      'Spawn one or more **read-only** sub-agents as parallel worker branches (they can read_file / list_dir / search_files but cannot write files or run commands). `agents` is an array of { instruction (the task), model (optional; only set a different model when the user explicitly asked you to) }. `mode` is "sync" (default: block until all finish, return every summary) or "async" (return immediately with the agent ids; results are delivered to you as a notice when each finishes). Every finished sub-agent also gets `stats` (its `toolCalls` / `deniedToolCalls` counts and token usage) and `transcript`: the absolute path of a JSONL dump of its full conversation.',
+    parameters: {
+      type: 'object',
+      properties: {
+        agents: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: {
+              instruction: { type: 'string', description: 'The task for this sub-agent.' },
+              model: { type: 'string', description: 'Optional different model id. Only set it when the user explicitly asked you to use another model.' },
+            },
+            required: ['instruction'],
+          },
+        },
+        mode: { type: 'string', enum: ['sync', 'async'], description: 'sync (default) or async.' },
+      },
+      required: ['agents'],
+    },
+  },
+};
+
+/**
+ * Read-only variant of `send_agent_message` (exposed to a read-only depth-1
+ * sub-agent instead of it): resumes one of its own finished read-only children.
+ * There is no `write` override, and `Agent.executeToolCall` pins `write:false`
+ * anyway, so a read-only parent cannot escalate a child.
+ */
+const SEND_READONLY_AGENT_MESSAGE_TOOL: ToolDefinition = {
+  type: 'function',
+  function: {
+    name: 'send_readonly_agent_message',
+    description:
+      'Send a follow-up message to a previously spawned (now finished) read-only sub-agent so it resumes and continues its task, then return the result. `id` is the agent node id from a prior spawn_readonly_agents result; only a sub-agent **you** spawned can be messaged. There is no `write` override — the resumed run stays read-only. `model` (optional) overrides the model. `mode` is "sync" (default: block and return the result) or "async" (return immediately with the id; the result is delivered as a notice). The result carries `stats` and `transcript`: the path of that sub-agent\'s JSONL conversation dump, rewritten with the follow-up included.',
+    parameters: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'The agent node id from a prior spawn_readonly_agents result.' },
+        message: { type: 'string', description: 'The follow-up instruction for this sub-agent.' },
+        model: { type: 'string', description: 'Optional different model id. Only set it when the user explicitly asked you to use another model.' },
+        mode: { type: 'string', enum: ['sync', 'async'], description: 'sync (default) or async.' },
+      },
+      required: ['id', 'message'],
+    },
+  },
+};
+
+/**
  * The main agent (or a depth-1 sub-agent) can message an already-finished
  * sub-agent to make it continue: `send_agent_message` appends a follow-up
  * instruction to that sub-agent's own history and re-runs it. `id` is the agent
@@ -265,7 +325,7 @@ const SEND_AGENT_MESSAGE_TOOL: ToolDefinition = {
   function: {
     name: 'send_agent_message',
     description:
-      'Send a follow-up message to a previously spawned (now finished) sub-agent so it resumes and continues its task, then return the result. `id` is the agent node id from a prior spawn_agents result. `message` is the follow-up instruction. `write` (optional) overrides this run\'s write permission (defaults to the sub-agent\'s original). `model` (optional) overrides the model — only set it when the user explicitly asked for a different model. `mode` is "sync" (default: block and return the result) or "async" (return immediately with the id; the result is delivered as a notice).',
+      'Send a follow-up message to a previously spawned (now finished) sub-agent so it resumes and continues its task, then return the result. `id` is the agent node id from a prior spawn_agents result. `message` is the follow-up instruction. `write` (optional) overrides this run\'s write permission (defaults to the sub-agent\'s original). `model` (optional) overrides the model — only set it when the user explicitly asked for a different model. `mode` is "sync" (default: block and return the result) or "async" (return immediately with the id; the result is delivered as a notice). The result carries `stats` (updated `toolCalls` / `deniedToolCalls` counts) and `transcript`: the path of that sub-agent\'s JSONL conversation dump, rewritten with the follow-up included.',
     parameters: {
       type: 'object',
       properties: {
@@ -371,17 +431,20 @@ export class Agent {
       // Heal an assistant message that the API would reject: it must carry
       // content or tool_calls. If it has neither, mirror any reasoning into
       // content; if it has nothing at all (no content, no tool_calls, no
-      // reasoning), drop it entirely.
+      // reasoning), drop it entirely. The healed message is a **copy** — the
+      // caller's objects are the persisted nodes' own messages (buildPath passes
+      // `pathMessages(...)` by reference), and this function must never write
+      // back into them.
+      let out = msg;
       if (msg.role === 'assistant' && !msg.content && (!msg.tool_calls || msg.tool_calls.length === 0)) {
         if (msg.reasoning_content) {
-          msg.content = msg.reasoning_content;
-          msg.reasoning_content = undefined;
+          out = { ...msg, content: msg.reasoning_content, reasoning_content: undefined };
         } else {
           continue;
         }
       }
 
-      result.push(msg);
+      result.push(out);
 
       if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
         const ids = new Set(msg.tool_calls.map((tc) => tc.id));
@@ -425,6 +488,8 @@ export class Agent {
   private spawnHandler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null = null;
   /** Provider hook that resumes a finished sub-agent for the `send_agent_message` tool. */
   private sendMessageHandler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null = null;
+  /** Whether `spawn_readonly_agents` is exposed (read-only agents only). */
+  private canSpawnReadOnly = false;
   /** Whether this agent may spawn sub-agents (a depth-2 sub-agent may not). */
   private canSpawn = true;
   /**
@@ -473,6 +538,16 @@ export class Agent {
   }
 
   /**
+   * Allow this agent to fan out **read-only** children via
+   * `spawn_readonly_agents`. A read-only agent gets this instead of
+   * `spawn_agents`, which would let it create a `write:true` child and bypass
+   * its own restriction. A depth-2 agent may not (depth is hard-capped at 2).
+   */
+  setCanSpawnReadOnly(v: boolean): void {
+    this.canSpawnReadOnly = v;
+  }
+
+  /**
    * Rewrite the leading system prompt to the current identity (model + effort).
    * The core instructions (CORE_PROMPT) are identical every time, so only the
    * identity line is updated; the rest of the conversation history is preserved.
@@ -507,17 +582,24 @@ export class Agent {
       '。你的目标是把分配给你的任务做完并给出简洁结论；' +
       mode +
       '\n- 用中文回答；保持简洁，把结论写清楚。' +
-      '\n- 你只对派发你的 agent 汇报，不要主动越权改别的文件。'
+      '\n- 你只对派发你的 agent 汇报，不要主动越权改别的文件。' +
+      (depth < 2 && !write
+        ? '\n- 如果任务可以拆成若干**互不依赖**、各自需要大量阅读的部分（例如逐个文件/逐个模块审查），' +
+          '用 spawn_readonly_agents 并行派只读子代理，再汇总它们的结论；' +
+          '单点查询、几个文件就能答完的任务不要派。'
+        : '')
     );
   }
 
   /** Tool definitions exposed to the model: the registry plus read_image and,
-   * for agents that may spawn, spawn_agents + send_agent_message. */
+   * for agents that may spawn, spawn_agents + send_agent_message; a read-only
+   * agent that may fan out gets spawn_readonly_agents instead. */
   private getTools(): ToolDefinition[] {
     return [
       ...this.tools.definitions,
       READ_IMAGE_TOOL,
       ...(this.canSpawn ? [SPAWN_AGENTS_TOOL, SEND_AGENT_MESSAGE_TOOL] : []),
+      ...(this.canSpawnReadOnly ? [SPAWN_READONLY_AGENTS_TOOL, SEND_READONLY_AGENT_MESSAGE_TOOL] : []),
     ];
   }
 
@@ -661,7 +743,8 @@ export class Agent {
         const reqStart = Date.now();
         const { message: assistant, indices, usage } = await this.requestAssistantMessage(signal);
         perf(
-          `assistant-round ${Date.now() - reqStart}ms msgs=${this.messages.length} ` +
+          () =>
+            `assistant-round ${Date.now() - reqStart}ms msgs=${this.messages.length} ` +
             `tools=${assistant.tool_calls?.length ?? 0} ` +
             `chars=${typeof assistant.content === 'string' ? assistant.content.length : 0}`,
         );
@@ -849,22 +932,53 @@ export class Agent {
       // Orchestrating sub-agents is the provider's job (node creation, pool,
       // event routing). Delegate; a fixed string is returned as the tool result.
       const args = parseToolArgs(call.function.arguments);
-      result = this.spawnHandler
-        ? await this.spawnHandler(args, signal)
-        : 'Error: sub-agents are not available in this session.';
+      result = !this.canSpawn
+        ? 'Error: this agent may not spawn sub-agents (not permitted for a read-only agent, or at this depth).'
+        : this.spawnHandler
+          ? await this.spawnHandler(args, signal)
+          : 'Error: sub-agents are not available in this session.';
+    } else if (call.function.name === 'spawn_readonly_agents') {
+      // The read-only fan-out variant. Rewrite every spec with `write:false` so a
+      // `write` key smuggled into the arguments cannot escalate a child.
+      const args = parseToolArgs(call.function.arguments);
+      const specs = Array.isArray(args.agents) ? (args.agents as unknown[]) : [];
+      const readOnlyArgs: Record<string, unknown> = {
+        ...args,
+        agents: specs.map((entry) => {
+          const spec = (entry && typeof entry === 'object' ? entry : {}) as Record<string, unknown>;
+          return { instruction: spec.instruction, model: spec.model, write: false };
+        }),
+      };
+      result = !this.canSpawnReadOnly
+        ? 'Error: this agent may not spawn sub-agents (not permitted for a read-only agent, or at this depth).'
+        : this.spawnHandler
+          ? await this.spawnHandler(readOnlyArgs, signal)
+          : 'Error: sub-agents are not available in this session.';
+    } else if (call.function.name === 'send_readonly_agent_message') {
+      // Read-only resume variant: no write override can be expressed, and any
+      // smuggled `write` key is pinned to false before delegating.
+      const args = parseToolArgs(call.function.arguments);
+      result = !this.canSpawnReadOnly
+        ? 'Error: this agent may not message sub-agents (not permitted for a read-only agent, or at this depth).'
+        : this.sendMessageHandler
+          ? await this.sendMessageHandler({ ...args, write: false }, signal)
+          : 'Error: sub-agent messaging is not available in this session.';
     } else if (call.function.name === 'send_agent_message') {
       // Resuming a finished sub-agent is also the provider's job. Delegate; the
       // result (a resume confirmation or, in sync mode, the follow-up outcome)
       // is returned as the tool result.
       const args = parseToolArgs(call.function.arguments);
-      result = this.sendMessageHandler
-        ? await this.sendMessageHandler(args, signal)
-        : 'Error: sub-agent messaging is not available in this session.';
+      result = !this.canSpawn
+        ? 'Error: this agent may not message sub-agents (not permitted for a read-only agent, or at this depth).'
+        : this.sendMessageHandler
+          ? await this.sendMessageHandler(args, signal)
+          : 'Error: sub-agent messaging is not available in this session.';
     } else {
       result = await this.tools.execute(call.function.name, call.function.arguments, signal);
     }
     perf(
-      `tool ${call.function.name} ${Date.now() - t0}ms args=${call.function.arguments.length} ` +
+      () =>
+        `tool ${call.function.name} ${Date.now() - t0}ms args=${call.function.arguments.length} ` +
         `result=${result.length}`,
     );
     this.onEvent({ type: 'toolEnd', id: call.id, name: call.function.name, content: result });

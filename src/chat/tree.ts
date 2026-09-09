@@ -67,6 +67,8 @@ export interface TreeNode {
   agentSummary?: string;
   agentModel?: string;
   agentWrite?: boolean;
+  /** Absolute path of this sub-agent's JSONL transcript dump (when enabled). */
+  agentTranscript?: string;
 }
 
 /** A persisted conversation: a tree of turns plus the checked-out node. */
@@ -172,9 +174,17 @@ export function attachNode(session: AgentSession, node: TreeNode): void {
       }
     }
   } else {
+    // The parent is gone (corrupted or legacy state). Keep the node reachable by
+    // attaching it to the root instead of leaving it orphaned: an unreachable
+    // node would still become the checkout point and silently blank the history.
     node.parentId = null;
     if (!session.rootId) {
       session.rootId = node.id;
+    } else {
+      const root = session.nodes[session.rootId];
+      if (root && root.id !== node.id && !root.children.includes(node.id)) {
+        root.children.push(node.id);
+      }
     }
   }
   session.activeNodeId = node.id;
@@ -223,13 +233,15 @@ export function nodeUsage(node: TreeNode): Usage | undefined {
   return undefined;
 }
 
-/** Follow the newest child chain from `fromId` down to a leaf. */
+/** Follow the newest child chain from `fromId` down to a leaf. Sub-agent
+ * (`kind === 'agent'`) sidecars are skipped: they are display-only and must
+ * never become the checked-out node (their history is not in the API path). */
 export function leafOf(session: AgentSession, fromId: string | null): string | null {
   const seen = new Set<string>();
   let cur = fromId;
   while (cur && session.nodes[cur] && !seen.has(cur)) {
     seen.add(cur);
-    const kids = session.nodes[cur].children;
+    const kids = session.nodes[cur].children.filter((id) => session.nodes[id]?.kind !== 'agent');
     if (kids.length === 0) {
       return cur;
     }
@@ -353,6 +365,7 @@ function normalizeTreeSession(raw: AgentSession): AgentSession {
     n.agentSummary = typeof node.agentSummary === 'string' ? node.agentSummary : undefined;
     n.agentModel = typeof node.agentModel === 'string' ? node.agentModel : undefined;
     n.agentWrite = typeof node.agentWrite === 'boolean' ? node.agentWrite : undefined;
+    n.agentTranscript = typeof node.agentTranscript === 'string' ? node.agentTranscript : undefined;
     session.nodes[id] = n;
   }
   pruneSession(session);
