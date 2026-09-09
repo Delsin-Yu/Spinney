@@ -1,4 +1,5 @@
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { AgentTool, ToolDefinition } from '../agent/types';
@@ -55,6 +56,45 @@ const RAW_TOKEN_RE = /<<<RAW:([A-Za-z0-9_]+)>>>|<<<END_RAW:([A-Za-z0-9_]+)>>>/g;
 
 function truncate(s: string, n = 200): string {
   return s.length > n ? s.slice(0, n) + '…' : s;
+}
+
+/** Directory for oversized tool results (outside the workspace, so no repo pollution). */
+const SPILL_DIR = path.join(os.tmpdir(), 'agent-harness-tool-output');
+/** Fallback inline cap when `agentHarness.maxInlineToolOutput` is absent. */
+const DEFAULT_INLINE_LIMIT = 32 * 1024;
+
+/**
+ * Keep a tool result inline when it is small; otherwise write it to a temp file
+ * and return a short pointer (path + size + a preview) so a huge result cannot
+ * flood the model's context. On any failure the original text is returned, so a
+ * result is never lost.
+ */
+function limitInline(text: string, tool: string): string {
+  const configured = vscode.workspace
+    .getConfiguration('agentHarness')
+    .get<number>('maxInlineToolOutput');
+  const limit = typeof configured === 'number' && configured >= 0 ? configured : DEFAULT_INLINE_LIMIT;
+  if (!limit || Buffer.byteLength(text, 'utf8') <= limit) {
+    return text;
+  }
+  try {
+    fs.mkdirSync(SPILL_DIR, { recursive: true });
+    const file = path.join(
+      SPILL_DIR,
+      `${tool}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}.txt`,
+    );
+    fs.writeFileSync(file, text, 'utf8');
+    const bytes = Buffer.byteLength(text, 'utf8');
+    const lines = text.split('\n');
+    const preview = lines.slice(0, 8).join('\n');
+    return (
+      `[${tool}: result is ${bytes} bytes / ${lines.length} lines — too large to inline.\n` +
+      `Full result written to: ${file}\n` +
+      `Read it with read_file (line ranges) or grep it with search_files. First lines:]\n${preview}\n…`
+    );
+  } catch {
+    return text;
+  }
 }
 
 /**
@@ -128,7 +168,7 @@ const readFileTool: AgentTool = {
     function: {
       name: 'read_file',
       description:
-        'Read the contents of a text file. Path may be absolute or relative to the workspace root. Optionally read a specific 1-based line range. Content is returned with LF line endings (the header reports the on-disk line ending, e.g. CRLF); use read_file output verbatim as replace_in_file oldText.',
+        'Read the contents of a text file. Path may be absolute or relative to the workspace root. Optionally read a specific 1-based line range. Content is returned with LF line endings. The header reports the total line count (wc -l convention: a trailing newline does not add a line) and the on-disk line ending (e.g. CRLF); read a one-line range (startLine 1, endLine 1) when you only need the count. Use read_file output verbatim as replace_in_file oldText.',
       parameters: {
         type: 'object',
         properties: {
@@ -150,15 +190,19 @@ const readFileTool: AgentTool = {
     const label = eolLabelOf(content);
     const normalized = toLf(content);
     const lines = normalized.split('\n');
+    // `split` yields a trailing empty element for a newline-terminated file; the
+    // real line count (what `wc -l` reports) excludes it, so the header must too.
+    const lineCount = normalized === '' ? 0 : normalized.endsWith('\n') ? lines.length - 1 : lines.length;
     const startLine = typeof args.startLine === 'number' ? args.startLine : 1;
-    const endLine = typeof args.endLine === 'number' ? args.endLine : lines.length;
-    const slice = lines.slice(Math.max(1, startLine) - 1, Math.min(endLine, lines.length));
+    const endLine = typeof args.endLine === 'number' ? args.endLine : lineCount;
+    const last = Math.min(endLine, lineCount);
+    const slice = lines.slice(Math.max(1, startLine) - 1, Math.max(0, last));
     const header = `File: ${filePath}`;
-    if (startLine === 1 && endLine >= lines.length) {
-      return `${header} (${lines.length} lines, ${label})\n${normalized}`;
+    if (startLine === 1 && endLine >= lineCount) {
+      return `${header} (${lineCount} lines, ${label})\n${normalized}`;
     }
     const numbered = slice.map((line, i) => `${startLine + i}: ${line}`).join('\n');
-    return `${header} (lines ${startLine}-${Math.min(endLine, lines.length)} of ${lines.length}, ${label})\n${numbered}`;
+    return `${header} (lines ${startLine}-${last} of ${lineCount}, ${label})\n${numbered}`;
   },
 };
 
@@ -246,11 +290,17 @@ const replaceInFileTool: AgentTool = {
         `oldText is ambiguous in ${filePath}: found ${count} occurrences. Provide more context.`,
       );
     }
-    const result = matchContent.replace(matchOld, matchNew);
+    // A *string* replacement would interpret dollar-ampersand, dollar-backtick,
+    // dollar-quote and double-dollar patterns (String.replace semantics), silently
+    // mangling the file; the function form inserts newText verbatim.
+    const result = matchContent.replace(matchOld, () => matchNew);
     await fs.promises.writeFile(filePath, applyEol(result, eol), 'utf8');
     return `Replaced one occurrence in ${filePath}.`;
   },
 };
+
+/** Cap a recursive listing so one call cannot dump an unbounded tree. */
+const MAX_LIST_ENTRIES = 2000;
 
 const listDirTool: AgentTool = {
   definition: {
@@ -258,11 +308,13 @@ const listDirTool: AgentTool = {
     function: {
       name: 'list_dir',
       description:
-        'List the entries of a directory. Path may be absolute or relative to the workspace root. Directories are suffixed with "/".',
+        'List the entries of a directory. Path may be absolute or relative to the workspace root. Directories are suffixed with "/". An optional glob filters entries against their path relative to the listed directory (e.g. "*.ts" for top-level, "**/*.ts" for any depth); recursive:true walks subdirectories (heavy dirs node_modules/.git/out/dist/build are skipped) and prints each entry\'s relative path.',
       parameters: {
         type: 'object',
         properties: {
           path: { type: 'string', description: 'Directory path.' },
+          glob: { type: 'string', description: 'Optional glob filter, e.g. "*.ts" or "**/*.ts".' },
+          recursive: { type: 'boolean', description: 'Walk subdirectories (default false).' },
         },
         required: ['path'],
       },
@@ -271,12 +323,52 @@ const listDirTool: AgentTool = {
   async execute(args, signal) {
     ensureNotAborted(signal);
     const dirPath = resolvePath(String(args.path ?? '.'));
-    const entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
-    const names = entries
-      .map((e) => (e.isDirectory() ? `${e.name}/` : e.name))
-      .sort()
-      .join('\n');
-    return `Directory: ${dirPath}\n${names || '(empty)'}`;
+    const glob = args.glob ? globToRegex(String(args.glob)) : null;
+    const recursive = args.recursive === true;
+    const out: string[] = [];
+    let capped = false;
+
+    const walk = async (dir: string, rel: string): Promise<void> => {
+      ensureNotAborted(signal);
+      if (out.length >= MAX_LIST_ENTRIES) {
+        capped = true;
+        return;
+      }
+      let entries;
+      try {
+        entries = await fs.promises.readdir(dir, { withFileTypes: true });
+      } catch {
+        return;
+      }
+      for (const entry of entries) {
+        if (out.length >= MAX_LIST_ENTRIES) {
+          capped = true;
+          return;
+        }
+        const relPath = rel ? `${rel}/${entry.name}` : entry.name;
+        if (entry.isDirectory()) {
+          if (recursive && !SKIP_DIRS.has(entry.name)) {
+            if (!glob || glob.test(relPath)) {
+              out.push(`${relPath}/`);
+            }
+            await walk(path.join(dir, entry.name), relPath);
+            continue;
+          }
+          if (!glob || glob.test(relPath)) {
+            out.push(`${relPath}/`);
+          }
+          continue;
+        }
+        if (!glob || glob.test(relPath)) {
+          out.push(relPath);
+        }
+      }
+    };
+
+    await walk(dirPath, '');
+    const names = out.sort().join('\n');
+    const suffix = capped ? `\n…[listing stopped at ${MAX_LIST_ENTRIES} entries; narrow it with a glob.]` : '';
+    return limitInline(`Directory: ${dirPath}${recursive ? ' (recursive)' : ''}\n${names || '(empty)'}${suffix}`, 'list_dir');
   },
 };
 
@@ -284,6 +376,7 @@ const listDirTool: AgentTool = {
 const MAX_SEARCH_FILE = 1_000_000;
 const MAX_SEARCH_FILES = 4000;
 const MAX_SEARCH_MATCHES = 300;
+const MAX_CONTEXT_LINES = 10;
 const SKIP_DIRS = new Set(['node_modules', '.git', 'out', 'dist', 'build']);
 
 function globToRegex(glob: string): RegExp {
@@ -298,13 +391,28 @@ function globToRegex(glob: string): RegExp {
   return new RegExp('^' + s + '$');
 }
 
+/** Trailing note appended to a search result that stopped before scanning everything. */
+function searchCapNote(capped: boolean, maxResults: number, skippedLarge: number): string {
+  const notes: string[] = [];
+  if (capped) {
+    notes.push(
+      `reached the ${maxResults}-match cap (hard cap ${MAX_SEARCH_MATCHES}) — results may be incomplete; ` +
+        'narrow the pattern, add a glob, or raise maxResults',
+    );
+  }
+  if (skippedLarge > 0) {
+    notes.push(`skipped ${skippedLarge} file(s) larger than ${MAX_SEARCH_FILE} bytes`);
+  }
+  return notes.length ? `\n…[search stopped early: ${notes.join('; ')}.]` : '';
+}
+
 const searchFilesTool: AgentTool = {
   definition: {
     type: 'function',
     function: {
       name: 'search_files',
       description:
-        'Search files in the workspace for a regex pattern and return matching "file:line: text" lines. Path may be absolute or relative to the workspace root (default = root). An optional glob (e.g. "**/*.ts") filters the files; caseSensitive defaults to false; maxResults caps the matches (default 200, hard cap 300). Heavy dirs (node_modules/.git/out...) are skipped automatically.',
+        'Search files in the workspace for a regex pattern and return matching "file:line: text" lines (paths are relative to the workspace root). `path` may be a file or a directory (default = workspace root). An optional glob (e.g. "**/*.ts") filters which files are searched; caseSensitive defaults to false; maxResults caps the matches (default 200, hard cap 300); context adds up to 10 surrounding lines per match (context lines use "-" separators, e.g. "src/a.ts-11- text"). Heavy dirs (node_modules/.git/out...) are skipped automatically. When the search stops before scanning everything (match cap / oversized files) the result ends with an explicit note — never treat a capped result as complete.',
       parameters: {
         type: 'object',
         properties: {
@@ -313,6 +421,7 @@ const searchFilesTool: AgentTool = {
           glob: { type: 'string', description: 'Optional glob filter, e.g. "**/*.ts".' },
           caseSensitive: { type: 'boolean', description: 'Default false.' },
           maxResults: { type: 'number', description: 'Default 200 (capped at 300).' },
+          context: { type: 'number', description: 'Lines of context around each match (0-10, default 0).' },
         },
         required: ['pattern'],
       },
@@ -334,12 +443,77 @@ const searchFilesTool: AgentTool = {
     const glob = args.glob ? globToRegex(String(args.glob)) : null;
     const maxResults =
       typeof args.maxResults === 'number' ? Math.min(Math.max(1, args.maxResults), MAX_SEARCH_MATCHES) : 200;
-    const results: string[] = [];
-    let files = 0;
+    const context =
+      typeof args.context === 'number' ? Math.min(Math.max(0, Math.floor(args.context)), MAX_CONTEXT_LINES) : 0;
+    let wsRoot: string | null = null;
+    try {
+      wsRoot = getWorkspaceRoot();
+    } catch {
+      // No workspace folder: results fall back to absolute paths.
+    }
 
-    async function walk(dir: string, rel: string): Promise<void> {
+    /** Path shown in a hit: workspace-relative when inside it, else absolute. */
+    const display = (full: string): string => {
+      if (wsRoot) {
+        const rel = path.relative(wsRoot, full).split(path.sep).join('/');
+        if (rel && !rel.startsWith('..')) {
+          return rel;
+        }
+      }
+      return full.split(path.sep).join('/');
+    };
+
+    const results: string[] = [];
+    let matches = 0;
+    let files = 0;
+    let skippedLarge = 0;
+    let capped = false;
+
+    /** Append every hit in one file's text (plus optional context lines). */
+    const searchText = (text: string, label: string): void => {
+      const lines = text.split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        if (!re.test(lines[i])) {
+          continue;
+        }
+        if (matches >= maxResults) {
+          capped = true;
+          return;
+        }
+        matches++;
+        if (context > 0) {
+          const from = Math.max(0, i - context);
+          const to = Math.min(lines.length - 1, i + context);
+          for (let j = from; j <= to; j++) {
+            const sep = j === i ? ':' : '-';
+            results.push(`${label}${sep}${j + 1}${sep} ${lines[j].trim().slice(0, 160)}`);
+          }
+        } else {
+          results.push(`${label}:${i + 1}: ${lines[i].trim().slice(0, 160)}`);
+        }
+      }
+    };
+
+    let rootStat;
+    try {
+      rootStat = await fs.promises.stat(root);
+    } catch {
+      return `Error: no such file or directory: ${root}`;
+    }
+    // `path` may name a single file (the parameter says so) — search just it.
+    if (rootStat.isFile()) {
+      searchText(await fs.promises.readFile(root, 'utf8'), display(root));
+      return results.length
+        ? limitInline(results.join('\n') + searchCapNote(capped, maxResults, 0), 'search_files')
+        : '(no matches)';
+    }
+
+    const walk = async (dir: string, rel: string): Promise<void> => {
       if (signal?.aborted) throw new Error('Operation aborted.');
-      if (files > MAX_SEARCH_FILES || results.length >= maxResults) return;
+      if (matches >= maxResults || files >= MAX_SEARCH_FILES) {
+        capped = true;
+        return;
+      }
       let entries;
       try {
         entries = await fs.promises.readdir(dir, { withFileTypes: true });
@@ -348,35 +522,42 @@ const searchFilesTool: AgentTool = {
       }
       for (const entry of entries) {
         if (signal?.aborted) throw new Error('Operation aborted.');
-        if (SKIP_DIRS.has(entry.name)) continue;
-        const full = path.join(dir, entry.name);
-        const relPath = rel ? path.join(rel, entry.name).split(path.sep).join('/') : entry.name;
         if (entry.isDirectory()) {
-          await walk(full, relPath);
+          if (SKIP_DIRS.has(entry.name)) {
+            continue;
+          }
+          await walk(path.join(dir, entry.name), rel ? `${rel}/${entry.name}` : entry.name);
           continue;
         }
-        if (glob && !glob.test(relPath)) continue;
+        const relPath = rel ? `${rel}/${entry.name}` : entry.name;
+        if (glob && !glob.test(relPath)) {
+          continue;
+        }
         files++;
+        const full = path.join(dir, entry.name);
         let text: string;
         try {
           const stat = await fs.promises.stat(full);
-          if (stat.size > MAX_SEARCH_FILE) continue;
+          if (stat.size > MAX_SEARCH_FILE) {
+            skippedLarge++;
+            continue;
+          }
           text = await fs.promises.readFile(full, 'utf8');
         } catch {
           continue;
         }
-        const lines = text.split('\n');
-        for (let i = 0; i < lines.length; i++) {
-          if (results.length >= maxResults) break;
-          if (re.test(lines[i])) {
-            results.push(`${relPath}:${i + 1}: ${lines[i].trim().slice(0, 160)}`);
-          }
+        searchText(text, display(full));
+        if (matches >= maxResults) {
+          capped = true;
+          return;
         }
       }
-    }
+    };
 
     await walk(root, '');
-    return results.length ? results.join('\n') : '(no matches)';
+    return results.length
+      ? limitInline(results.join('\n') + searchCapNote(capped, maxResults, skippedLarge), 'search_files')
+      : '(no matches)';
   },
 };
 
@@ -526,7 +707,10 @@ function makeExecCommandTool(getRegistry: () => BackgroundRegistry | null): Agen
         );
       }
 
-      return runForeground(handle, command, cwd, timeoutMs, signal, behavior === 'move_to_background', registry);
+      return limitInline(
+        await runForeground(handle, command, cwd, timeoutMs, signal, behavior === 'move_to_background', registry),
+        'exec_command',
+      );
     },
   };
 }
@@ -569,7 +753,7 @@ function makeCheckBackgroundTool(getRegistry: () => BackgroundRegistry | null): 
           ? `Background terminal ${id} is running. (command: ${task.command}, ${elapsed}s elapsed)`
           : `Background terminal ${id} finished with exit code ${task.exitCode ?? 'unknown'}.`;
       const outLine = out ? `\nOutput:\n${out}` : '';
-      return `${statusLine}${outLine}`;
+      return limitInline(`${statusLine}${outLine}`, 'check_background_terminal');
     },
   };
 }
@@ -661,13 +845,15 @@ function makeJoinBackgroundTool(getRegistry: () => BackgroundRegistry | null): A
       const resultLine = done.killed
         ? `Background terminal ${id} was killed.`
         : `Background terminal ${id} finished with exit code ${done.exitCode ?? 'unknown'}.`;
-      return `${resultLine}${out ? `\nOutput:\n${out}` : ''}`;
+      return limitInline(`${resultLine}${out ? `\nOutput:\n${out}` : ''}`, 'join_background');
     },
   };
 }
 
 export class ToolRegistry {
   private readonly tools = new Map<string, AgentTool>();
+  /** Tools kept registered (so a call still hits their guard) but not advertised. */
+  private hidden = new Set<string>();
   private backgroundRegistry: BackgroundRegistry | null = null;
 
   constructor() {
@@ -715,6 +901,7 @@ export class ToolRegistry {
     }
     // Background-aware sub-agents share the same session registry as the parent.
     sub.backgroundRegistry = this.backgroundRegistry;
+    sub.hidden = new Set(this.hidden);
     return sub;
   }
 
@@ -732,6 +919,20 @@ export class ToolRegistry {
           definition: tool.definition,
           execute: async () => `Error: "${name}" is not permitted for this read-only sub-agent.`,
         });
+      }
+    }
+    return this;
+  }
+
+  /**
+   * Hide the named tools from `definitions` (the model never sees them in the
+   * tool list) while keeping them registered, so a hallucinated call still hits
+   * the runtime guard instead of silently becoming "unknown tool".
+   */
+  withHidden(names: string[]): ToolRegistry {
+    for (const name of names) {
+      if (this.tools.has(name)) {
+        this.hidden.add(name);
       }
     }
     return this;
@@ -755,11 +956,13 @@ export class ToolRegistry {
   }
 
   get definitions(): ToolDefinition[] {
-    return [...this.tools.values()].map((t) => t.definition);
+    return [...this.tools.entries()]
+      .filter(([name]) => !this.hidden.has(name))
+      .map(([, t]) => t.definition);
   }
 
   get names(): string[] {
-    return [...this.tools.keys()];
+    return [...this.tools.keys()].filter((name) => !this.hidden.has(name));
   }
 
   async execute(name: string, argsJson: string, signal?: AbortSignal): Promise<string> {
