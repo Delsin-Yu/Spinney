@@ -197,7 +197,7 @@ export class DeepSeekClient {
     try {
       const serStart = Date.now();
       const payload = JSON.stringify(body);
-      perf(`request-json ${Date.now() - serStart}ms bytes=${payload.length} msgs=${messages.length}`);
+      perf(() => `request-json ${Date.now() - serStart}ms bytes=${payload.length} msgs=${messages.length}`);
       const fetchStart = Date.now();
       response = await fetch(url, {
         method: 'POST',
@@ -208,7 +208,7 @@ export class DeepSeekClient {
         body: payload,
         signal,
       });
-      perf(`request-headers ${Date.now() - fetchStart}ms status=${response.status}`);
+      perf(() => `request-headers ${Date.now() - fetchStart}ms status=${response.status}`);
     } catch (err) {
       if (signal?.aborted) {
         throw new DeepSeekError('Request aborted.');
@@ -261,6 +261,21 @@ export class DeepSeekClient {
         if (data === '[DONE]') {
           return;
         }
+        try {
+          yield JSON.parse(data) as StreamChunk;
+        } catch {
+          // Ignore malformed JSON from the stream.
+        }
+      }
+    }
+
+    // The stream ended without a trailing newline: flush the decoder's pending
+    // bytes and parse whatever is left, so a final `data:` event is not dropped.
+    buffer += decoder.decode();
+    const tail = buffer.trim();
+    if (tail.startsWith('data:')) {
+      const data = tail.slice(5).trim();
+      if (data && data !== '[DONE]') {
         try {
           yield JSON.parse(data) as StreamChunk;
         } catch {

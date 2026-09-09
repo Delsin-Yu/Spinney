@@ -51,7 +51,9 @@ export class SessionsProvider implements vscode.TreeDataProvider<vscode.TreeItem
       const item = new vscode.TreeItem(it.title, vscode.TreeItemCollapsibleState.None);
       item.id = it.id;
       item.description = `${it.nodeCount} node${it.nodeCount === 1 ? '' : 's'} · ${relTime(it.updatedAt)}`;
-      item.iconPath = new vscode.ThemeIcon(it.active ? 'comment-discussion' : it.busy ? 'sync~spin' : 'comment');
+      // Busy wins over active: the running session is always the active one, so
+      // checking `active` first hid the spinner exactly when it mattered.
+      item.iconPath = new vscode.ThemeIcon(it.busy ? 'sync~spin' : it.active ? 'comment-discussion' : 'comment');
       item.command = { command: 'agentHarness.openSession', title: 'Open Session', arguments: [it.id] };
       item.contextValue = 'session';
       return item;

@@ -13,6 +13,8 @@ export class ChatPanel {
   sessionId: string;
 
   private readonly webview: vscode.Webview;
+  /** Set by `dispose()`: a disposed webview rejects every postMessage. */
+  private disposed = false;
 
   constructor(opts: {
     sessionId: string;
@@ -52,13 +54,18 @@ export class ChatPanel {
   }
 
   post(message: unknown): void {
-    if (!this.panel) {
+    // `panel` is readonly and never null; the real hazard is posting after the
+    // panel was disposed (the webview is gone and postMessage rejects).
+    if (this.disposed) {
       return;
     }
-    void this.webview.postMessage(message);
+    void this.webview.postMessage(message).then(undefined, () => {
+      /* the webview was torn down mid-flight; nothing to do */
+    });
   }
 
   dispose(): void {
+    this.disposed = true;
     this.panel.dispose();
   }
 }

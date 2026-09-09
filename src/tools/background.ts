@@ -1,4 +1,5 @@
 import { spawn, exec, type ChildProcess } from 'child_process';
+import { StringDecoder } from 'string_decoder';
 import { getShell } from './shell';
 
 /** Cap for captured command output. Large output is truncated (not kept in memory). */
@@ -36,7 +37,14 @@ function killChildProcess(child: ChildProcess): void {
       child.kill();
     }
   } else {
-    child.kill('SIGTERM');
+    // POSIX: the child is spawned as its own process-group leader (see
+    // spawnShellCommand), so a negative pid signals the whole group — the same
+    // "tear down the tree" semantics as taskkill /T on Windows.
+    try {
+      process.kill(-child.pid, 'SIGTERM');
+    } catch {
+      child.kill('SIGTERM');
+    }
   }
 }
 
@@ -56,6 +64,9 @@ export function spawnShellCommand(command: string, cwd: string, opts: { killOnTr
     cwd,
     env: shell.env,
     windowsHide: true,
+    // POSIX: lead a new process group so killChildProcess can signal the whole
+    // tree (`process.kill(-pid)`). Windows uses taskkill /T instead.
+    detached: process.platform !== 'win32',
   });
 
   let stdout = '';
@@ -63,6 +74,11 @@ export function spawnShellCommand(command: string, cwd: string, opts: { killOnTr
   let total = 0;
   let truncated = false;
   const kill = () => killChildProcess(child);
+  // Decode incrementally: a 'data' chunk boundary is a pipe-read boundary, not a
+  // UTF-8 character boundary, so `chunk.toString('utf8')` would turn a split
+  // multi-byte character into U+FFFD. StringDecoder carries the partial bytes over.
+  const stdoutDecoder = new StringDecoder('utf8');
+  const stderrDecoder = new StringDecoder('utf8');
 
   const onData = (d: Buffer, isErr: boolean) => {
     total += d.length;
@@ -78,12 +94,19 @@ export function spawnShellCommand(command: string, cwd: string, opts: { killOnTr
       }
       return;
     }
-    const s = d.toString('utf8');
+    const s = (isErr ? stderrDecoder : stdoutDecoder).write(d);
     if (isErr) stderr += s;
     else stdout += s;
   };
   child.stdout?.on('data', (d: Buffer) => onData(d, false));
   child.stderr?.on('data', (d: Buffer) => onData(d, true));
+  // Flush any bytes still buffered by the decoders when the streams end.
+  child.stdout?.on('end', () => {
+    stdout += stdoutDecoder.end();
+  });
+  child.stderr?.on('end', () => {
+    stderr += stderrDecoder.end();
+  });
 
   return {
     child,
