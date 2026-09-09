@@ -37,6 +37,10 @@ export interface ControlSessionInfo {
   title: string;
   nodes: number;
   active: boolean;
+  /** Origin of the title ('provisional' | 'auto' | 'manual'); absent ⇒ provisional. */
+  titleSource?: string;
+  /** A manual rename locked the title, so automatic naming leaves it alone. */
+  titleLocked?: boolean;
 }
 
 export interface ControlState {

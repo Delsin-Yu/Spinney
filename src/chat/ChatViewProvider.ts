@@ -10,11 +10,14 @@ import {
   DisplayItem,
   StoredState,
   STORED_STATE_VERSION,
+  TitleSource,
   TreeNode,
   TurnStatus,
   UserAttachment,
   attachNode,
+  branchIds,
   createNode,
+  detachBranch,
   migrateState,
   messageText,
   newId,
@@ -23,12 +26,33 @@ import {
   pathMessages,
   titleFromPrompt,
 } from './tree';
+import {
+  TITLE_BATCH_MAX_TOKENS,
+  TITLE_BATCH_SIZE,
+  TITLE_MAX_TOKENS,
+  buildBatchTitleMessages,
+  buildTitleDigest,
+  buildTitleMessages,
+  heuristicTitle,
+  parseBatchTitles,
+  sanitizeTitle,
+  shouldAutoTitle,
+  turnCount,
+} from './sessionTitles';
 import { getWorkspaceRoot, resolvePath, ToolRegistry } from '../tools';
 import { BackgroundRegistry, BackgroundTask } from '../tools/background';
 import { ChatPanel } from './ChatPanel';
 import { SessionTreeItem } from './SessionsProvider';
 import { SubAgentPool } from './SubAgentPool';
-import { removeTranscriptDir, sumUsage, summarizeTranscript, writeSessionTranscript, writeSubAgentTranscript } from './transcript';
+import {
+  removeTranscriptDir,
+  removeTranscriptFile,
+  removeTranscripts,
+  sumUsage,
+  summarizeTranscript,
+  writeSessionTranscript,
+  writeSubAgentTranscript,
+} from './transcript';
 import { ControlHost, ControlResult, ControlState, WaitForFinishOptions } from '../http/controlServer';
 import { perf, setPerfSink } from '../perf';
 
@@ -48,6 +72,13 @@ const STORAGE_KEY = 'agentHarness.state';
 /** One-shot marker for the historical-transcript backfill (see `backfillTranscripts`). */
 const TRANSCRIPT_BACKFILL_KEY = 'agentHarness.transcriptBackfill';
 const TRANSCRIPT_BACKFILL_VERSION = 'v1';
+/** One-shot marker for the historical session-title backfill (see `backfillSessionTitles`). */
+const TITLE_BACKFILL_KEY = 'agentHarness.sessionTitleBackfill';
+const TITLE_BACKFILL_VERSION = 'v1';
+/** How long one title completion may take before falling back to the heuristic. */
+const TITLE_REQUEST_TIMEOUT_MS = 25_000;
+/** Give up a backfill pass after this long; the marker stays unset so it resumes. */
+const TITLE_BACKFILL_DEADLINE_MS = 10 * 60 * 1000;
 /** One-shot copy of the pre-tree (v1) state, written before the first migration. */
 const STORAGE_BACKUP_KEY = 'agentHarness.state.v1backup';
 const CONFIG_KEY = 'agentHarness.runtimeConfig';
@@ -235,6 +266,11 @@ export class ChatViewProvider implements ControlHost {
   /** Async depth-2 results queued for a still-running sub-agent parent, resumed on its finish. */
   private subAgentChildNotices = new Map<string, Array<{ message: string }>>();
   private lastSubAgentDrain: ReturnType<typeof setTimeout> | null = null;
+  /** The one in-flight automatic-title request (a session switch does not cancel it). */
+  private titleJob: { sessionId: string; controller: AbortController } | null = null;
+  /** Sessions waiting for an automatic-title pass, drained one at a time. */
+  private titlePending = new Set<string>();
+  private titleDrainTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -259,6 +295,7 @@ export class ChatViewProvider implements ControlHost {
       this.activateSession(active);
     }
     this.scheduleTranscriptBackfill();
+    this.scheduleTitleBackfill();
   }
 
   private getConfig(): {
@@ -274,6 +311,7 @@ export class ChatViewProvider implements ControlHost {
     saveSubAgentTranscripts: boolean;
     saveSessionTranscripts: boolean;
     subAgentTranscriptDir: string;
+    autoSessionTitles: boolean;
   } {
     const cfg = vscode.workspace.getConfiguration('agentHarness');
     const apiKey = (cfg.get<string>('apiKey') ?? '').trim() || (process.env.DEEPSEEK_API_KEY ?? '').trim();
@@ -288,7 +326,8 @@ export class ChatViewProvider implements ControlHost {
     const saveSubAgentTranscripts = cfg.get<boolean>('saveSubAgentTranscripts') ?? true;
     const saveSessionTranscripts = cfg.get<boolean>('saveSessionTranscripts') ?? true;
     const subAgentTranscriptDir = (cfg.get<string>('subAgentTranscriptDir') ?? '').trim();
-    return { apiKey, model, baseUrl, maxTurns, thinkingEffort, foldToolCalls, foldThinking, maxConcurrentSubagents, maxLevel2Subagents, saveSubAgentTranscripts, saveSessionTranscripts, subAgentTranscriptDir };
+    const autoSessionTitles = cfg.get<boolean>('autoSessionTitles') ?? true;
+    return { apiKey, model, baseUrl, maxTurns, thinkingEffort, foldToolCalls, foldThinking, maxConcurrentSubagents, maxLevel2Subagents, saveSubAgentTranscripts, saveSessionTranscripts, subAgentTranscriptDir, autoSessionTitles };
   }
 
   /**
@@ -336,6 +375,9 @@ export class ChatViewProvider implements ControlHost {
     this.agent.setCanHop(true);
     this.agent.setHopHandler((args) => Promise.resolve(this.handleHopSession(args)));
     this.agent.setListNodeHandler(() => Promise.resolve(this.handleListNodes()));
+    // And it can rename the session (an explicit rename locks the title, so the
+    // automatic namer leaves it alone).
+    this.agent.setRenameSessionHandler((args) => Promise.resolve(this.handleRenameSession(args)));
   }
 
   private getContextWindow(model: string): number {
@@ -776,6 +818,348 @@ export class ChatViewProvider implements ControlHost {
     }
     node.customSize = { w, h };
     this.persist();
+  }
+
+  // ---- Session titles (automatic + explicit) ----
+
+  /**
+   * Apply a title to a session and propagate it everywhere it is shown (sidebar
+   * list + editor tab title). `manual` locks the title so the automatic namer
+   * never overwrites it; `auto` records the growth/cooldown bookkeeping. The
+   * session's `updatedAt` is deliberately untouched: renaming must not reorder
+   * the sidebar (which sorts by it).
+   */
+  private applySessionTitle(session: AgentSession, title: string, source: TitleSource): void {
+    const clean = sanitizeTitle(title, '');
+    if (!clean) {
+      return;
+    }
+    const changed = clean !== session.title || source !== session.titleSource;
+    session.title = clean;
+    session.titleSource = source;
+    if (source === 'manual') {
+      session.titleLocked = true;
+      delete session.titleAutoAt;
+      delete session.titleAutoNodes;
+    } else if (source === 'auto') {
+      session.titleAutoAt = Date.now();
+      session.titleAutoNodes = turnCount(session);
+    }
+    this.persist();
+    if (!changed) {
+      return; // bookkeeping only (same title, refreshed cooldown)
+    }
+    this.onStateChanged?.();
+    if (this.panel && this.panel.sessionId === session.id) {
+      this.panel.setTitle(this.panelTitle(session.id));
+    }
+  }
+
+  /**
+   * Set a session title explicitly (sidebar command or the `rename_session`
+   * tool) and lock it against the automatic namer.
+   */
+  renameSession(sessionId: string, title: string): { ok: boolean; error?: string; title?: string } {
+    const session = this.sessions.find((s) => s.id === sessionId);
+    if (!session) {
+      return { ok: false, error: `no such session: ${sessionId}` };
+    }
+    const clean = sanitizeTitle(title, '');
+    if (!clean) {
+      return { ok: false, error: 'the title is empty' };
+    }
+    this.applySessionTitle(session, clean, 'manual');
+    this.outputLog(`[title] ${session.id} -> "${clean}" (manual, locked)`);
+    return { ok: true, title: clean };
+  }
+
+  /** `rename_session` tool: an explicit, locking rename (main agent only). */
+  private handleRenameSession(args: Record<string, unknown>): string {
+    const title = typeof args.title === 'string' ? args.title.trim() : '';
+    if (!title) {
+      return 'Error: "title" is required.';
+    }
+    const wanted = typeof args.sessionId === 'string' ? args.sessionId.trim() : '';
+    const session = wanted ? this.sessions.find((s) => s.id === wanted) : this.getActiveSession();
+    if (!session) {
+      return `Error: no such session: ${wanted || '(active)'}.`;
+    }
+    const result = this.renameSession(session.id, title);
+    if (!result.ok) {
+      return `Error: ${result.error}`;
+    }
+    return `Renamed session ${session.id} to "${result.title}". Automatic naming is now locked for it.`;
+  }
+
+  /** Sidebar command: ask for a title and lock it. */
+  async renameSessionInteractive(arg: unknown): Promise<void> {
+    const session = this.sessionFromArg(arg);
+    if (!session) {
+      return;
+    }
+    const title = await vscode.window.showInputBox({
+      prompt: 'Session title — renaming locks it, so automatic naming will not overwrite it.',
+      value: session.title,
+      placeHolder: 'Short, one line',
+      validateInput: (value) => (value.trim() ? undefined : 'A title is required.'),
+    });
+    if (title === undefined) {
+      return; // cancelled
+    }
+    this.renameSession(session.id, title);
+  }
+
+  /** Sidebar command: drop the manual lock and regenerate the title now. */
+  async autoRenameSession(arg: unknown): Promise<void> {
+    const session = this.sessionFromArg(arg);
+    if (!session) {
+      return;
+    }
+    if (!buildTitleDigest(session)) {
+      void vscode.window.showInformationMessage(
+        'This session has no conversation yet — there is nothing to name from.',
+      );
+      return;
+    }
+    session.titleLocked = false;
+    delete session.titleAutoAt;
+    delete session.titleAutoNodes;
+    this.persist();
+    this.outputLog(`[title] ${session.id} unlocked; regenerating`);
+    await this.generateSessionTitle(session, 'requested');
+  }
+
+  /** Resolve a command argument (session id string or tree item) to a session. */
+  private sessionFromArg(arg: unknown): AgentSession | undefined {
+    const id =
+      typeof arg === 'string'
+        ? arg
+        : arg && typeof arg === 'object' && 'id' in arg
+          ? String((arg as { id?: unknown }).id ?? '')
+          : '';
+    return id ? this.sessions.find((s) => s.id === id) : this.getActiveSession();
+  }
+
+  /** Queue a session for an automatic (re)title, if the gates allow it. */
+  private requestAutoTitle(session: AgentSession): void {
+    if (!this.getConfig().autoSessionTitles) {
+      return;
+    }
+    if (!shouldAutoTitle(session)) {
+      return;
+    }
+    this.titlePending.add(session.id);
+    this.scheduleTitleDrain();
+  }
+
+  /** Coalesce title work so a burst of finished turns issues at most one pass. */
+  private scheduleTitleDrain(): void {
+    if (this.titleDrainTimer != null) {
+      return;
+    }
+    this.titleDrainTimer = setTimeout(() => {
+      this.titleDrainTimer = null;
+      void this.drainTitles();
+    }, 1200);
+  }
+
+  /**
+   * Run the queued title jobs one at a time. A title request is a small
+   * independent completion, so it does not need the agent to be idle — only
+   * serialized against another title request.
+   */
+  private async drainTitles(): Promise<void> {
+    if (this.disposed) {
+      return;
+    }
+    if (this.titleJob) {
+      this.scheduleTitleDrain();
+      return;
+    }
+    const id = [...this.titlePending][0];
+    if (id === undefined) {
+      return;
+    }
+    this.titlePending.delete(id);
+    const session = this.sessions.find((s) => s.id === id);
+    if (session) {
+      await this.generateSessionTitle(session, 'auto');
+    }
+    if (this.titlePending.size > 0) {
+      this.scheduleTitleDrain();
+    }
+  }
+
+  /**
+   * Generate a title for one session with a single non-streaming completion and
+   * apply it. Never throws: no API key, a timeout or an API error falls back to
+   * the heuristic (first-prompt) title. A manual rename that lands while the
+   * request is in flight wins.
+   */
+  private async generateSessionTitle(session: AgentSession, reason: string): Promise<void> {
+    if (this.titleJob) {
+      // One title request at a time; retry once the current one lands.
+      this.titlePending.add(session.id);
+      this.scheduleTitleDrain();
+      return;
+    }
+    const digest = buildTitleDigest(session);
+    if (!digest) {
+      return;
+    }
+    const controller = new AbortController();
+    this.titleJob = { sessionId: session.id, controller };
+    const timer = setTimeout(() => controller.abort(), TITLE_REQUEST_TIMEOUT_MS);
+    const t0 = Date.now();
+    let title = '';
+    let how = 'model';
+    try {
+      const { text, usage } = await this.client.complete({
+        messages: buildTitleMessages(digest, session.title),
+        model: this.model,
+        maxTokens: TITLE_MAX_TOKENS,
+        temperature: 0.3,
+        signal: controller.signal,
+      });
+      title = sanitizeTitle(text, '');
+      if (usage) {
+        this.outputLog(`[title] ${session.id} model=${this.model} tokens=${usage.total_tokens}`);
+      }
+    } catch (err) {
+      how = 'heuristic';
+      this.outputLog(`[title] ${session.id} model call failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      clearTimeout(timer);
+      this.titleJob = null;
+    }
+    if (this.disposed || !this.sessions.includes(session) || session.titleLocked) {
+      return;
+    }
+    if (!title) {
+      title = heuristicTitle(session);
+      how = 'heuristic';
+    }
+    this.applySessionTitle(session, title, 'auto');
+    this.outputLog(`[title] ${session.id} -> "${session.title}" (${how}, ${reason}, ${Date.now() - t0}ms)`);
+  }
+
+  private scheduleTitleBackfill(): void {
+    if (this.storage.get<string>(TITLE_BACKFILL_KEY) === TITLE_BACKFILL_VERSION) {
+      return;
+    }
+    // Not marked when the setting is off, so enabling it later still backfills.
+    if (!this.getConfig().autoSessionTitles) {
+      return;
+    }
+    setTimeout(() => void this.backfillSessionTitles(), 3000);
+  }
+
+  /**
+   * Name the sessions that predate automatic naming (and any session whose title
+   * is still provisional), once. Batched so a long history costs a handful of
+   * requests instead of one per session; a line the model failed to answer falls
+   * back to the heuristic title. The marker is only written when the pass
+   * completes, so an interrupted one resumes on the next activation.
+   */
+  private async backfillSessionTitles(): Promise<void> {
+    const t0 = Date.now();
+    const deadline = t0 + TITLE_BACKFILL_DEADLINE_MS;
+    const done = new Set<string>();
+    let renamed = 0;
+    let visited = 0;
+    while (!this.disposed && Date.now() < deadline) {
+      const eligible = this.sessions.filter(
+        (s) => !done.has(s.id) && shouldAutoTitle(s) && !!buildTitleDigest(s),
+      );
+      if (eligible.length === 0) {
+        break;
+      }
+      const batch = eligible.slice(0, TITLE_BATCH_SIZE);
+      for (const session of batch) {
+        done.add(session.id);
+      }
+      // Only serialize against another title request: a small non-streaming
+      // completion is safe while a turn streams.
+      while (!this.disposed && this.titleJob) {
+        if (Date.now() >= deadline) {
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      if (this.disposed || Date.now() >= deadline) {
+        break;
+      }
+      visited += batch.length;
+      const result = await this.generateTitleBatch(batch);
+      if (!result.ok) {
+        // The model is unavailable (no key / API error). Leave the marker unset
+        // so the pass retries once a key is configured, instead of stamping the
+        // sessions with the titles they already had.
+        this.outputLog(`[title] backfill paused: model unavailable (${visited} visited)`);
+        return;
+      }
+      renamed += result.renamed;
+    }
+    if (this.disposed || Date.now() >= deadline) {
+      this.outputLog(`[title] backfill paused (${visited} visited, ${Date.now() - t0}ms)`);
+      return; // marker unset ⇒ resumes next activation
+    }
+    await this.storage.update(TITLE_BACKFILL_KEY, TITLE_BACKFILL_VERSION);
+    this.outputLog(`[title] backfill: ${renamed}/${visited} renamed in ${Date.now() - t0}ms`);
+  }
+
+  /** One batched backfill request; reports whether the model answered. */
+  private async generateTitleBatch(sessions: AgentSession[]): Promise<{ renamed: number; ok: boolean }> {
+    const entries = sessions.map((s) => ({
+      id: s.id,
+      currentTitle: s.title,
+      digest: buildTitleDigest(s),
+    }));
+    const controller = new AbortController();
+    this.titleJob = { sessionId: sessions[0].id, controller };
+    const timer = setTimeout(() => controller.abort(), TITLE_REQUEST_TIMEOUT_MS);
+    let titles: Array<string | null> = entries.map(() => null);
+    let ok = true;
+    try {
+      const { text, usage } = await this.client.complete({
+        messages: buildBatchTitleMessages(entries),
+        model: this.model,
+        maxTokens: TITLE_BATCH_MAX_TOKENS,
+        temperature: 0.3,
+        signal: controller.signal,
+      });
+      titles = parseBatchTitles(text, entries.length);
+      if (usage) {
+        this.outputLog(`[title] batch of ${entries.length} tokens=${usage.total_tokens}`);
+      }
+    } catch (err) {
+      ok = false;
+      this.outputLog(`[title] batch failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      clearTimeout(timer);
+      this.titleJob = null;
+    }
+    if (!ok) {
+      return { renamed: 0, ok: false };
+    }
+    let renamed = 0;
+    for (let i = 0; i < sessions.length; i++) {
+      if (this.disposed) {
+        break;
+      }
+      const session = sessions[i];
+      if (!this.sessions.includes(session) || session.titleLocked) {
+        continue;
+      }
+      const before = session.title;
+      // A line the model omitted falls back to the heuristic (first prompt).
+      this.applySessionTitle(session, titles[i] ?? heuristicTitle(session), 'auto');
+      if (session.title !== before) {
+        renamed++;
+      }
+    }
+    this.outputLog(`[title] backfill batch: ${renamed}/${sessions.length} renamed`);
+    return { renamed, ok: true };
   }
 
   // ---- Sub-agents ----
@@ -1700,6 +2084,11 @@ export class ChatViewProvider implements ControlHost {
       session.updatedAt = Date.now();
       // Mirror the finished turn to disk so it stays searchable later.
       this.dumpSessionTranscript(node, session, status);
+      // A finished turn is the moment to (re)name the session. An interrupted
+      // turn has no reliable content yet, so it is skipped.
+      if (status !== 'interrupted') {
+        this.requestAutoTitle(session);
+      }
     }
     this.persist();
     if (node && session?.nodes[node.id]) {
@@ -1970,6 +2359,14 @@ export class ChatViewProvider implements ControlHost {
       session.activeNodeId = null;
       session.orphanItems.length = 0;
       session.updatedAt = Date.now();
+      // ...and its automatic title: the next turn names the fresh conversation.
+      delete session.titleAutoAt;
+      delete session.titleAutoNodes;
+      if (!session.titleLocked) {
+        session.title = 'New session';
+        session.titleSource = 'provisional';
+        this.onStateChanged?.();
+      }
       this.displayItems = session.orphanItems;
     }
     this.setBusy(false);
@@ -1997,6 +2394,144 @@ export class ChatViewProvider implements ControlHost {
     this.persist();
   }
 
+  // ---- Branch deletion ----
+
+  /**
+   * Ask for a branch deletion (webview card button / palette command). Deleting
+   * a branch is irreversible — it drops the subtree from the session history AND
+   * the matching transcript dumps on disk — so it always goes through a modal
+   * confirmation, never a single click. Returns true when something was removed.
+   */
+  async deleteBranchInteractive(nodeId: string): Promise<boolean> {
+    const session = this.getActiveSession();
+    const node = session?.nodes[nodeId];
+    if (!session || !node) {
+      return false;
+    }
+    const blocked = this.branchDeletionBlocked(session, nodeId);
+    if (blocked) {
+      this.postNotice('warning', blocked);
+      return false;
+    }
+    const ids = branchIds(session, nodeId);
+    const turns = ids.filter((id) => session.nodes[id]?.kind !== 'agent').length;
+    const agents = ids.length - turns;
+    const detail = [
+      `History: ${turns} turn(s)${agents > 0 ? ` and ${agents} sub-agent card(s)` : ''} are removed from this conversation.`,
+      'Transcripts: their JSONL dumps are deleted from disk, so search_transcripts will no longer find them.',
+      'The checked-out node moves to the parent of the deleted branch.',
+      'This cannot be undone.',
+    ].join('\n');
+    const pick = await vscode.window.showWarningMessage(
+      `Delete this branch — "${node.title || 'untitled'}" and everything below it?`,
+      { modal: true, detail },
+      'Delete Branch',
+    );
+    if (pick !== 'Delete Branch') {
+      return false;
+    }
+    return this.deleteBranch(nodeId);
+  }
+
+  /** Palette command: delete the branch rooted at the checked-out node. */
+  async deleteCheckedOutBranchInteractive(): Promise<boolean> {
+    const session = this.getActiveSession();
+    const nodeId = session?.activeNodeId;
+    if (!session || !nodeId) {
+      void vscode.window.showInformationMessage('There is no checked-out turn to delete.');
+      return false;
+    }
+    return this.deleteBranchInteractive(nodeId);
+  }
+
+  /**
+   * Why this branch cannot be deleted right now ('' when it can). A turn (main
+   * or sub-agent) that is still running must never lose the node it is writing
+   * into.
+   */
+  private branchDeletionBlocked(session: AgentSession, nodeId: string): string {
+    if (this.busy || this.agent.running) {
+      return 'Cannot delete a branch while the agent is running. Wait for the turn to finish.';
+    }
+    if (branchIds(session, nodeId).some((id) => this.runningSubAgents.has(id))) {
+      return 'Cannot delete a branch that contains a running sub-agent. Kill it first.';
+    }
+    return '';
+  }
+
+  /**
+   * Apply a confirmed branch deletion to the active session: drop the subtree
+   * from the tree, delete the matching transcript dumps (a node's dump is
+   * `<transcriptDir>/<nodeId>.jsonl` for both main turns and sub-agent runs, plus
+   * any absolute path a sub-agent recorded under a different transcript root),
+   * move the checkout off the removed subtree, and repaint. Returns false when
+   * the node is unknown, belongs to another session, or a turn started while the
+   * confirmation dialog was open.
+   */
+  deleteBranch(nodeId: string): boolean {
+    const session = this.getActiveSession();
+    if (!session || !session.nodes[nodeId]) {
+      return false;
+    }
+    // Re-checked here too: an async sub-agent batch can inject a turn while the
+    // modal dialog is open, and that turn's node must not be deleted under it.
+    const blocked = this.branchDeletionBlocked(session, nodeId);
+    if (blocked) {
+      this.postNotice('warning', blocked);
+      return false;
+    }
+    const ids = branchIds(session, nodeId);
+    // Collect the recorded paths before the nodes are gone.
+    const recorded = ids
+      .map((id) => session.nodes[id].agentTranscript)
+      .filter((file): file is string => !!file);
+    detachBranch(session, nodeId);
+    const dir = this.transcriptDir(session.id);
+    let dropped = removeTranscripts(dir, ids);
+    for (const file of recorded) {
+      if (removeTranscriptFile(file)) {
+        dropped++;
+      }
+    }
+    if (this.lastInterruptedNodeId && ids.includes(this.lastInterruptedNodeId)) {
+      // The turn whose interruption notice was pending no longer exists.
+      this.lastInterruptedNodeId = null;
+    }
+    if (Object.keys(session.nodes).length === 0) {
+      // The whole tree went (the deleted branch was the root): mirror `clear()`
+      // so the next turn names the now-empty conversation again.
+      delete session.titleAutoAt;
+      delete session.titleAutoNodes;
+      if (!session.titleLocked) {
+        session.title = 'New session';
+        session.titleSource = 'provisional';
+      }
+      this.panel?.setTitle(this.panelTitle(session.id));
+    }
+    // Depth-2 results queued for a removed (finished) sub-agent can never be
+    // delivered; a queued main-agent notice for a removed node is dropped by
+    // drainSubAgentNotices itself (it filters on the node still existing).
+    for (const id of ids) {
+      this.subAgentChildNotices.delete(id);
+    }
+    this.checkoutNode(session, session.activeNodeId);
+    this.currentPromptTokens = this.getLatestPromptTokens();
+    this.postTree();
+    this.postPath();
+    if (session.activeNodeId) {
+      this.post({ type: 'panTo', id: session.activeNodeId });
+    }
+    this.postContext();
+    this.postSessionStats();
+    this.persist();
+    // The sidebar row shows the node count + "time ago", both of which moved.
+    this.onStateChanged?.();
+    this.outputLog(
+      `[branch] deleted ${ids.length} node(s) at ${nodeId} in ${session.id}; ${dropped} transcript dump(s) removed`,
+    );
+    return true;
+  }
+
   // ---- External control plane (src/http/controlServer.ts) ----
 
   /** Append a line to the Agent Harness output channel (used by the control plane). */
@@ -2017,6 +2552,8 @@ export class ChatViewProvider implements ControlHost {
         title: s.title,
         nodes: Object.keys(s.nodes).length,
         active: s.id === this.activeSessionId,
+        titleSource: s.titleSource,
+        titleLocked: s.titleLocked === true ? true : undefined,
       })),
     };
   }
@@ -2167,7 +2704,9 @@ export class ChatViewProvider implements ControlHost {
     } else {
       session = this.createSessionInMemory();
       if (opts.title?.trim()) {
-        session.title = opts.title.trim().slice(0, 80);
+        // A caller-supplied title is explicit: lock it so automatic naming
+        // never overwrites what the dispatcher asked for.
+        this.applySessionTitle(session, opts.title.trim(), 'manual');
       }
       this.activateSession(session);
       this.persist();
@@ -2339,6 +2878,9 @@ export class ChatViewProvider implements ControlHost {
       case 'killAgent':
         this.onKillAgent(String(message.id ?? ''));
         return;
+      case 'deleteBranch':
+        void this.deleteBranchInteractive(String(message.id ?? ''));
+        return;
       case 'layoutDiagnostic':
         this.logLayoutDiagnostic(message.nodes, message.overlaps, message.connections, message.force);
         return;
@@ -2459,11 +3001,14 @@ export class ChatViewProvider implements ControlHost {
       return;
     }
 
-    // Name a fresh session from its first user message.
+    // Name a fresh session from its first user message (provisional: the
+    // automatic namer replaces it with a model-generated title once the turn
+    // finishes).
     const session = this.getActiveSession();
     if (session) {
       if (session.title === 'New session' && (userText || attachments.length > 0)) {
         session.title = (userText || 'New session').slice(0, 40);
+        session.titleSource = 'provisional';
         this.onStateChanged?.();
       }
       session.updatedAt = Date.now();
@@ -2851,6 +3396,13 @@ export class ChatViewProvider implements ControlHost {
       clearTimeout(this.backgroundDrainTimer);
       this.backgroundDrainTimer = null;
     }
+    if (this.titleDrainTimer != null) {
+      clearTimeout(this.titleDrainTimer);
+      this.titleDrainTimer = null;
+    }
+    this.titleJob?.controller.abort();
+    this.titleJob = null;
+    this.titlePending.clear();
     setPerfSink(null);
     for (const reg of this.sessionRegistries.values()) {
       reg.killAll();

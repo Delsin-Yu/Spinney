@@ -92,3 +92,4 @@ Notes:
 - vision → docs/agents/invariants/vision-images.md
 - file-verbatim-frame → docs/agents/tools.md
 - session-hop → docs/agents/control-plane.md
+- session-title → docs/agents/invariants/session-persistence.md（自动命名与锁定）

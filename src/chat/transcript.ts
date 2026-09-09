@@ -257,6 +257,53 @@ export function removeTranscriptDir(dir: string): void {
   }
 }
 
+/** Node ids are generated (`newId`), so anything else is not a transcript name. */
+const SAFE_NODE_ID = /^[A-Za-z0-9_-]+$/;
+
+/**
+ * Remove the dumps of specific nodes — `<dir>/<nodeId>.jsonl` each — and return
+ * how many files actually existed. Used when a branch is deleted, so the on-disk
+ * record matches the history that is kept. Best effort (never throws).
+ */
+export function removeTranscripts(dir: string, nodeIds: string[]): number {
+  let removed = 0;
+  for (const nodeId of nodeIds) {
+    if (!SAFE_NODE_ID.test(nodeId)) {
+      continue;
+    }
+    const file = path.join(dir, `${nodeId}.jsonl`);
+    try {
+      if (fs.existsSync(file)) {
+        fs.rmSync(file, { force: true });
+        removed++;
+      }
+    } catch {
+      // In use / permissions: leave it rather than breaking the deletion.
+    }
+  }
+  return removed;
+}
+
+/**
+ * Remove one transcript file by its recorded absolute path (a sub-agent node
+ * keeps `agentTranscript`, which may point at a transcript root the setting has
+ * since changed). Only `*.jsonl` absolute paths are touched. Best effort.
+ */
+export function removeTranscriptFile(file: string): boolean {
+  if (!file || !file.endsWith('.jsonl') || !path.isAbsolute(file)) {
+    return false;
+  }
+  try {
+    if (!fs.existsSync(file)) {
+      return false;
+    }
+    fs.rmSync(file, { force: true });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 // ---- Reading / searching ----
 
 const MAX_TRANSCRIPT_MATCHES = 300;

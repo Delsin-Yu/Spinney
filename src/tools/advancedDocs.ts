@@ -209,6 +209,29 @@ export const ADVANCED_TOPIC_DOCS: Record<string, AdvancedTopicDoc> = {
       '想指定分支点：先 list_nodes() 拿到节点 id，再 hop_session({ "prompt": "…", "returnNodeId": "<节点 id>" })。',
     ].join('\n'),
   },
+  'session-title': {
+    tools: ['rename_session'],
+    summary: '给会话改名（会话标题默认自动生成，显式改名会锁定它）',
+    body: [
+      '给会话（整个对话）改标题，而不是改某个节点。',
+      '',
+      '会话标题默认由 harness 自动生成：首轮结束后根据对话内容命名，之后对话继续增长时会自动更新（约每 2 分钟、且新增至少 2 个回合才刷新一次）。显式改名会「锁定」标题，自动命名不再覆盖它；想恢复自动命名由用户在侧栏右键「Auto-rename Session」重新开启。',
+      '',
+      '参数表（rename_session）：',
+      '| 参数 | 类型 | 必填 | 说明 |',
+      '| title | string | 是 | 新的会话标题：短（≤ 20 字）、单行、不带句末标点。 |',
+      '| sessionId | string | 否 | 目标会话 id；省略 = 当前会话。 |',
+      '',
+      '关键行为：',
+      '- 只有主 agent 能调用（子代理调用返回错误）。',
+      '- 改名立即生效：侧栏列表与面板标题同步更新。',
+      '- 锁定后自动命名不再动它；解锁会立刻重新生成一次标题。',
+      '- 标题只用于显示，不影响历史、分支或上下文。',
+      '',
+      '例子：',
+      '{ "title": "会话标题自动命名" }',
+    ].join('\n'),
+  },
 };
 
 /** Registry tools that are folded out of the model's tool list (still callable). */

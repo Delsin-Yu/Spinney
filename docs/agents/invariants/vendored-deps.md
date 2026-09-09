@@ -33,6 +33,24 @@ The tree layout engine is a **vendored, frozen** copy of
 - `new BoundingBox(gap, bottomPadding)` takes **scalars** (no per-node spacing callback),
   so a per-node gap must be expressed by inflating the node's `width`/`height`.
 
+## No obstacle support (do not plan around it)
+
+The engine has **no concept of an arbitrary obstacle / fixed-position node**: no way to
+feed it a rectangle to avoid, and no coordinate input. `grep -i "obstacle|collision|avoid|
+forbid|fixed|pin"` over `src/*.js` matches nothing; `algorithm.js` is 16 functions of pure
+contour separation between the nodes' own boxes (`seperate`, `updateIYL`,
+`nextLeft/RightContour`, `moveSubtree`, `distributeExtra`). The only geometry lever is a
+node's own box size (plus the two global scalars). `d3-flextree` is the same (only
+`nodeSize`/`spacing`; `extents` is a read-only output getter).
+
+Consequences: "keep this card at a user-chosen position and let the rest flow around it"
+cannot be delegated to the engine. It would need either (a) our own post-layout repair pass
+(shifts subtrees out of the pinned rect — the collision code this design deliberately
+avoided, and it cascades), or (b) an engine with fixed-node support (Graphviz `pos="x,y!"`,
+ELK) which is EPL-2.0 plus ~1–1.6 MB wasm — rejected on licence/CSP/size grounds.
+This is why the manual-drag/pin feature was reverted rather than extended.
+
+
 ## Why this engine
 
 - Same algorithm as `d3-flextree` (van der Ploeg, *Drawing Non-layered Tidy Trees in

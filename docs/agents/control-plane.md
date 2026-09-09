@@ -17,7 +17,7 @@ Control plane routes (all require `Authorization: Bearer <token>`):
 | Route | Behaviour |
 | --- | --- |
 | `GET /health` | `{ok, instanceId, pid, port, busy, sessionId}` |
-| `GET /state` | busy + active session/node + the session list |
+| `GET /state` | busy + active session/node + the session list (id, title, node count, active, `titleSource`, `titleLocked`) |
 | `POST /wait-for-finish` | block until idle (`scope:'all'` also waits for sub-agents / background jobs), then flush the last persist. `interrupt:true` is the escape hatch |
 | `POST /navigate` | check out a node (and open the panel) |
 | `POST /continue` | send a caller-supplied user message that continues from a node |

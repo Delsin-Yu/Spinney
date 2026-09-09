@@ -14,5 +14,16 @@
   keep any new colour theme-driven rather than hardcoded.
 - **Change session persistence** → `loadSessions`/`persist`/`activateSession` in
   `ChatViewProvider.ts` and the `StorageKey`s.
+- **Delete a branch / node** → `branchIds` + `detachBranch` in `src/chat/tree.ts`
+  (pure data), the `Branch deletion` block in `ChatViewProvider.ts`
+  (`deleteBranchInteractive` → modal confirm → `deleteBranch`), the per-node
+  transcript removal in `src/chat/transcript.ts` (`removeTranscripts` /
+  `removeTranscriptFile`), and the card's `.node-del` button in `media/main.js`.
+  The palette command is `agentHarness.deleteBranch`.
+- **Change session titles** → `src/chat/sessionTitles.ts` (gates, digest, prompts,
+  fallback) and the "Session titles" block in `ChatViewProvider.ts`
+  (`applySessionTitle` / `renameSession` / the auto-title drain + backfill). The
+  sidebar commands are `agentHarness.renameSession` / `agentHarness.autoRenameSession`;
+  the agent-facing tool is `rename_session`.
 - **Change the API client** → `src/agent/deepseek.ts`.
 

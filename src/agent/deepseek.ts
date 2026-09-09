@@ -1,5 +1,5 @@
 import * as path from 'path';
-import { ChatMessage, StreamChunk, ThinkingEffort, ToolDefinition, UploadedFile, detectImageMime, imageIntegrityError } from './types';
+import { ChatMessage, StreamChunk, ThinkingEffort, ToolDefinition, UploadedFile, Usage, detectImageMime, imageIntegrityError } from './types';
 import { perf } from '../perf';
 
 export interface DeepSeekOptions {
@@ -16,6 +16,10 @@ export interface CompletionRequest {
   model?: string;
   /** Reasoning effort for this request. Omitted when 'none' / undefined. */
   thinkingEffort?: ThinkingEffort;
+  /** Cap the completion length (`max_tokens`). Omitted when not a positive number. */
+  maxTokens?: number;
+  /** Sampling temperature. Omitted when not a finite number. */
+  temperature?: number;
 }
 
 /** A single currency balance entry from DeepSeek's `/user/balance` endpoint. */
@@ -192,6 +196,12 @@ export class DeepSeekClient {
     if (request.thinkingEffort && request.thinkingEffort !== 'none') {
       body.reasoning_effort = request.thinkingEffort;
     }
+    if (typeof request.maxTokens === 'number' && request.maxTokens > 0) {
+      body.max_tokens = Math.floor(request.maxTokens);
+    }
+    if (typeof request.temperature === 'number' && Number.isFinite(request.temperature)) {
+      body.temperature = request.temperature;
+    }
 
     let response: Response;
     try {
@@ -283,5 +293,69 @@ export class DeepSeekClient {
         }
       }
     }
+  }
+
+  /**
+   * Non-streaming completion (`stream: false`), for small side tasks that want a
+   * single short answer and no SSE plumbing — e.g. generating a session title.
+   * Returns the assistant text ('' when the API answered with nothing) and the
+   * usage when the API reported it. Throws `DeepSeekError` like `stream`.
+   */
+  async complete(request: CompletionRequest): Promise<{ text: string; usage?: Usage }> {
+    if (!this.options.apiKey) {
+      throw new DeepSeekError(
+        'No DeepSeek API key configured. Set "agentHarness.apiKey" or the DEEPSEEK_API_KEY environment variable.',
+      );
+    }
+    const url = `${this.options.baseUrl.replace(/\/$/, '')}/chat/completions`;
+    const body: Record<string, unknown> = {
+      model: request.model && request.model.trim() ? request.model : this.options.model,
+      messages: request.messages,
+      stream: false,
+    };
+    if (request.tools && request.tools.length > 0) {
+      body.tools = request.tools;
+    }
+    if (request.thinkingEffort && request.thinkingEffort !== 'none') {
+      body.reasoning_effort = request.thinkingEffort;
+    }
+    if (typeof request.maxTokens === 'number' && request.maxTokens > 0) {
+      body.max_tokens = Math.floor(request.maxTokens);
+    }
+    if (typeof request.temperature === 'number' && Number.isFinite(request.temperature)) {
+      body.temperature = request.temperature;
+    }
+
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${this.options.apiKey}`,
+        },
+        body: JSON.stringify(body),
+        signal: request.signal,
+      });
+    } catch (err) {
+      if (request.signal?.aborted) {
+        throw new DeepSeekError('Request aborted.');
+      }
+      const message = err instanceof Error ? err.message : String(err);
+      throw new DeepSeekError(`Network error calling DeepSeek: ${message}`);
+    }
+    if (!response.ok) {
+      const text = await response.text().catch(() => '');
+      throw new DeepSeekError(
+        `DeepSeek API error ${response.status}: ${text || response.statusText}`,
+        response.status,
+      );
+    }
+    const data = (await response.json()) as {
+      choices?: Array<{ message?: { content?: string | null } }>;
+      usage?: Usage;
+    };
+    const text = data.choices?.[0]?.message?.content ?? '';
+    return { text: typeof text === 'string' ? text : '', usage: data.usage };
   }
 }

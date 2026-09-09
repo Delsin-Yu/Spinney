@@ -111,6 +111,7 @@ Click **Stop** at any time to interrupt.
 - **Pan**: drag the empty canvas, or hold the middle mouse button anywhere.
 - **Zoom**: `Ctrl/Cmd + wheel` (0.4–1.5), or wheel over the background. **Wheel over a node** scrolls that node's content instead.
 - **Resize a card**: drag its bottom-right corner (a wireframe previews the size; layout resolves on mouse-up; size is stored per node).
+- **Delete a branch**: hover a card and click the 🗑 in its header (or run the palette command `Agent Harness: Delete Branch at Checked-out Turn`). A modal confirmation always comes first — the turn and *everything below it* (sub-agent cards included) are removed from the history **and** their JSONL transcript dumps are deleted from disk, so `search_transcripts` can no longer recall them. The checkout moves to the parent of the deleted branch. Blocked while the agent or a sub-agent inside that branch is running.
 - **Fit to view** / **follow the active node**: toolbar buttons.
 
 ### Sessions & branches
