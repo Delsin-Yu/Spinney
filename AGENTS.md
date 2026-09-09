@@ -32,6 +32,12 @@ Notes:
 
 - A reload restarts the extension host; chat sessions persist in
   `agentHarness.state`, so the conversation survives it.
+- **Automated alternative:** if the `hvsc` supervisor is running
+  (`tools/hyper-vscode/.state/daemon.json` with a live pid), the reload can be
+  driven from the CLI instead of asking the user:
+  `node tools/hyper-vscode/hvsc.mjs reboot <instanceId> --continue "<message>"`
+  (see "External control plane & the `hvsc` supervisor" below). Never add
+  `--wait` from inside a turn — it deadlocks.
 - Edits to *this file* also only reach the agent prompt at session start — ask
   the user to reload if the new instructions should apply immediately.
 - Docs-only edits (README / `AGENTS.md`) do not need `build-deploy` unless
@@ -80,6 +86,52 @@ above.
 
 Launch: F5 (`.vscode/launch.json` → "Run Extension", pre-task `npm: compile`).
 `-allow-missing-repository` is required because the repo has no git remote.
+
+## External control plane & the `hvsc` supervisor
+
+The extension cannot reload its own window and report back — it dies with the
+reload. So the reload lifecycle lives **outside** the extension:
+
+- `src/http/controlServer.ts` — an opt-in local HTTP control plane
+  (`agentHarness.httpApi.enabled`, default **off**; loopback only; bearer token
+  written to `<globalStorage>/http/<instanceId>.json`, mode 0600).
+- `tools/hyper-vscode/hvsc.mjs` + `serve.ps1` — a workspace-local supervisor
+  (excluded from the `.vsix` via `.vscodeignore`) that launches/supervises `code`
+  windows and drives the reboot. State lives in `tools/hyper-vscode/.state/`:
+  `daemon.json` (port/token), `instances.json` (re-adopted after a daemon
+  restart), `daemon.log`.
+
+Control plane routes (all require `Authorization: Bearer <token>`):
+
+| Route | Behaviour |
+| --- | --- |
+| `GET /health` | `{ok, instanceId, pid, port, busy, sessionId}` |
+| `GET /state` | busy + active session/node + the session list |
+| `POST /wait-for-finish` | block until idle (`scope:'all'` also waits for sub-agents / background jobs), then flush the last persist. `interrupt:true` is the escape hatch |
+| `POST /navigate` | check out a node (and open the panel) |
+| `POST /continue` | send a caller-supplied user message that continues from a node |
+| `POST /reload-window` | 202, then `workbench.action.reloadWindow` (refuses while busy) |
+
+`hvsc` commands: `serve` / `start` / `status` / `rm` / `reboot` / `jobs`. The
+reboot flow is `wait-for-finish` → `reload-window` (shared profile) or kill +
+relaunch (`--isolated`) → poll `/health` → `continue`.
+
+Operational rules:
+
+- The daemon must run **outside** VS Code (a standalone terminal, or
+  `Start-Process`): a VS Code task and a harness background terminal both die
+  with the window (the latter via `dispose()` → `killAll()`).
+- Profile **passthrough** is the default (`code -n`, no `--user-data-dir`), so the
+  new window shares the user's `workspaceState`. Its env vars do **not** reach
+  that window, so the control plane must be enabled in settings
+  (`agentHarness.httpApi.enabled`, workspace or user scope). `--isolated` keeps a
+  separate profile and allows a hard kill/relaunch.
+- Never pass `--wait` to `hvsc reboot` from inside a turn: the supervisor's
+  `/wait-for-finish` would wait for that very turn (deadlock). Fire it without
+  `--wait` and let the supervisor `/continue` the agent afterwards.
+- `/continue` makes the agent run a caller-supplied instruction — a
+  **local-trust RCE boundary**. Keep `agentHarness.httpApi.enabled` off unless a
+  controller needs it, and never log the token.
 
 ## Architecture & data flow
 
@@ -135,6 +187,12 @@ User (editor WebviewPanel) <--postMessage--> ChatViewProvider (src/chat)
   (JSONL, one API message per line, meta + tool stats on line 1),
   `summarizeTranscript` (tool-call / denied-call stats), `sumUsage`,
   `removeTranscriptDir`. Pure fs, no VS Code UI.
+- `src/http/controlServer.ts` — the opt-in local HTTP control plane
+  (`/health`, `/state`, `/wait-for-finish`, `/navigate`, `/continue`,
+  `/reload-window`); token + discovery file, loopback only. See "External control
+  plane & the `hvsc` supervisor".
+- `tools/hyper-vscode/` — the `hvsc` supervisor (CLI + daemon + `serve.ps1`),
+  **not** shipped in the `.vsix`.
 - `src/agent/agent.ts` — the agent loop, the **system prompt** (`CORE_PROMPT`,
   `identityLines`, `buildSystemPrompt`), message sanitizing, interrupt/rollback,
   `AGENTS.md` snapshot (static `agentsMdSnapshot`), model/effort switching.
@@ -453,6 +511,8 @@ content. See `parseArgs` in `src/tools/index.ts`.
 `maxInlineToolOutput` (bytes, default `32768`; `0` = always inline — above it a
 tool result spills to a temp file). `SubAgentPool` clamps `maxConcurrentSubagents`
 to **≥ 1** (a non-positive limit would otherwise deadlock every sub-agent).
+`httpApi.enabled` (default `false` — the local control plane) and `httpApi.port`
+(default `0` = ephemeral).
 - Models: `deepseek-chat`, `deepseek-reasoner`, `deepseek-v4-flash`,
   `deepseek-v4-pro`, `deepseek-v4-flash-vision-exp`,
   `deepseek-v4.1-flash-expires-on-0910`.
