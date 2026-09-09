@@ -177,16 +177,22 @@
           "description": "Write each finished sub-agent's full conversation to disk as JSONL (one API message per line, meta + tool-call stats on line 1) and hand its path back to the caller.",
           "scope": "window"
         },
+        "agentHarness.saveSessionTranscripts": {
+          "type": "boolean",
+          "default": true,
+          "description": "Write each finished main-agent turn to disk as JSONL (same format as sub-agent transcripts) so search_transcripts can recall earlier conversations. Session history otherwise lives only in the extension's stored state.",
+          "scope": "window"
+        },
         "agentHarness.subAgentTranscriptDir": {
           "type": "string",
           "default": "",
-          "description": "Folder for sub-agent transcripts, relative to the workspace root (a per-session subfolder is created inside). Leave empty to use the extension's global storage.",
+          "description": "Folder for transcript dumps (main-agent turns + sub-agent runs), relative to the workspace root; a per-session subfolder is created inside. Leave empty to use the extension's global storage.",
           "scope": "window"
         },
         "agentHarness.maxInlineToolOutput": {
           "type": "number",
           "default": 32768,
-          "description": "Maximum size (bytes) of a search_files / list_dir result returned inline. Larger results are written to a temp file and only its path plus a short preview are returned. Set 0 to always inline.",
+          "description": "Maximum size (bytes) of a search_files / list_dir / search_transcripts result returned inline. Larger results are written to a temp file and only its path plus a short preview are returned. Set 0 to always inline.",
           "scope": "window"
         },
         "agentHarness.httpApi.enabled": {

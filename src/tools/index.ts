@@ -3,6 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { AgentTool, ToolDefinition } from '../agent/types';
+import { listTranscriptSessions, searchTranscripts, TranscriptKind } from '../chat/transcript';
 import { getShell } from './shell';
 import { BackgroundRegistry, CommandHandle, OUTPUT_CAP, spawnShellCommand } from './background';
 
@@ -574,6 +575,75 @@ const searchFilesTool: AgentTool = {
   },
 };
 
+// ---- search_transcripts (grep the harness's own transcript dumps) ----
+
+/**
+ * `search_transcripts` reads the JSONL dumps written by `src/chat/transcript.ts`
+ * — one file per main-agent turn (`kind: 'session'`) and per sub-agent run
+ * (`kind: 'subagent'`) under `<root>/<sessionId>/<nodeId>.jsonl`. Those folders
+ * normally live in the extension's global storage, i.e. **outside** the
+ * workspace, so `search_files` cannot reach them.
+ *
+ * The roots are supplied by the provider (they depend on
+ * `agentHarness.subAgentTranscriptDir` and the global-storage path), resolved at
+ * call time so a settings change needs no tool rebuild.
+ */
+function makeSearchTranscriptsTool(getRoots: () => string[]): AgentTool {
+  return {
+    definition: {
+      type: 'function',
+      function: {
+        name: 'search_transcripts',
+        description:
+          'Search the on-disk transcripts of every session (and sub-agent run) for a regex pattern — use this to recall what happened in a previous conversation. Transcripts are JSONL files at <root>/<sessionId>/<nodeId>.jsonl: line 1 is a meta record (kind, session title, node, status, prompt, summary, tool stats) and each following line is one API message rendered as "[role] text → tool(args)". Returns "file:line: text" hits with the ABSOLUTE path, so `read_file <path>` with those line numbers shows the full untruncated record. These folders normally live outside the workspace (extension global storage), so search_files cannot reach them. Omit `query` to get an index of sessions (id, file count, size, last write, titles) — with `sessionId` it lists that session\'s files instead. Optional: sessionId (limit to one session), kind ("session" = main-agent turns, "subagent" = sub-agent runs), caseSensitive (default false), maxResults (default 50, cap 300), context (0-10 neighbouring lines, "-" separators).',
+        parameters: {
+          type: 'object',
+          properties: {
+            query: { type: 'string', description: 'Regex to search for (JS regex syntax). Omit to list sessions instead.' },
+            sessionId: { type: 'string', description: 'Limit the search to one session id.' },
+            kind: { type: 'string', enum: ['session', 'subagent'], description: 'Limit to main-agent turns or sub-agent runs.' },
+            caseSensitive: { type: 'boolean', description: 'Default false.' },
+            maxResults: { type: 'number', description: 'Default 50 (capped at 300).' },
+            context: { type: 'number', description: 'Lines of context around each hit (0-10, default 0).' },
+          },
+          required: [],
+        },
+      },
+    },
+    async execute(args, signal) {
+      ensureNotAborted(signal);
+      const roots = getRoots();
+      if (roots.length === 0) {
+        return 'Error: transcript search is unavailable (no transcript folder).';
+      }
+      const sessionId = args.sessionId ? String(args.sessionId).trim() : undefined;
+      const kindArg = args.kind ? String(args.kind).trim() : '';
+      if (kindArg && kindArg !== 'session' && kindArg !== 'subagent') {
+        return 'Error: "kind" must be "session" or "subagent".';
+      }
+      const query = args.query == null ? '' : String(args.query);
+      if (!query.trim()) {
+        return limitInline(listTranscriptSessions(roots, sessionId).text, 'search_transcripts');
+      }
+      let result;
+      try {
+        result = searchTranscripts({
+          roots,
+          pattern: query,
+          sessionId,
+          kind: kindArg ? (kindArg as TranscriptKind) : undefined,
+          caseSensitive: args.caseSensitive === true,
+          maxResults: typeof args.maxResults === 'number' ? args.maxResults : undefined,
+          context: typeof args.context === 'number' ? args.context : undefined,
+        });
+      } catch (err) {
+        return `Error: invalid regex: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      return limitInline(result.text, 'search_transcripts');
+    },
+  };
+}
+
 /**
  * Run a command in the foreground and resolve with a human-readable result
  * (mirroring the original exec_command contract). When `moveOnTimeout` is set
@@ -868,6 +938,12 @@ export class ToolRegistry {
   /** Tools kept registered (so a call still hits their guard) but not advertised. */
   private hidden = new Set<string>();
   private backgroundRegistry: BackgroundRegistry | null = null;
+  /**
+   * Transcript roots for `search_transcripts`, resolved at call time (they
+   * depend on `agentHarness.subAgentTranscriptDir` and the global-storage path,
+   * so a settings change needs no rebuild).
+   */
+  private transcriptRoots: (() => string[]) | null = null;
 
   constructor() {
     this.buildTools();
@@ -883,6 +959,7 @@ export class ToolRegistry {
       replaceInFileTool,
       listDirTool,
       searchFilesTool,
+      makeSearchTranscriptsTool(() => this.transcriptRoots?.() ?? []),
       makeExecCommandTool(getRegistry),
       makeCheckBackgroundTool(getRegistry),
       makeKillBackgroundTool(getRegistry),
@@ -899,6 +976,16 @@ export class ToolRegistry {
    */
   setBackgroundRegistry(registry: BackgroundRegistry | null): void {
     this.backgroundRegistry = registry;
+    this.buildTools();
+  }
+
+  /**
+   * Point `search_transcripts` at the transcript roots (the provider owns the
+   * config + global-storage path). Passing `null` disables the tool's search
+   * (it returns an explicit error instead of silently finding nothing).
+   */
+  setTranscriptRoots(provider: (() => string[]) | null): void {
+    this.transcriptRoots = provider;
     this.buildTools();
   }
 
