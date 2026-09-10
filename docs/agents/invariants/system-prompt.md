@@ -7,9 +7,13 @@
   `Agent.systemPrompt` / `Agent.subAgentSystemPrompt` / `Agent.setAgentsMd` are
   thin wrappers kept for their callers.
 - Placeholders: `{{identity}}` (harness name + model + reasoning effort, from
-  `identityLines()`), `{{environment}}` (OS / shell / workspace root, from
-  `process.platform` + `getShell()` + `getWorkspaceRoot()`), `{{agentsMd}}` (the
-  session's snapshot). The sub-agent template adds `{{depth}}`, `{{permissions}}`
+  `identityLines()`), `{{environment}}` (OS / shell / agent root + its kind, from
+  `process.platform` + `getShell()` + `agentRootInfo()` — `EnvironmentFacts` is
+  `{ os, shell, root, rootKind: 'workspace' | 'scratch' }`; in no-repo mode it
+  renders a second line stating that relative paths and the default `cwd` are
+  based on the harness root, to use absolute paths for real files and not to
+  assume a repository layout), `{{agentsMd}}` (the session's snapshot). The
+  sub-agent template adds `{{depth}}`, `{{permissions}}`
   and `{{fanOut}}`; it stays lean — identity + environment + three behaviour lines
   — and never repeats the main template.
 - `renderPromptTemplate()` fills them. An unknown placeholder name or a malformed
@@ -40,7 +44,7 @@
   file names. Other users install this extension into unrelated workspaces, where
   such a fact is simply wrong. Workspace facts belong in the workspace's own
   `AGENTS.md` snapshot (and the docs it points at). Facts the harness *detects* at
-  runtime (OS, shell, workspace root) may be injected through `{{environment}}` —
+  runtime (OS, shell, agent root) may be injected through `{{environment}}` —
   they are observations, not assumptions baked into the text.
 - **Hard rule 2 — no model ids in plugin text.** `src/agent/models.ts` is the only
   place a model id may appear; everything else derives names at runtime

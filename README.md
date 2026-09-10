@@ -3,7 +3,7 @@
 A minimalistic VS Code extension: an **agentic coding assistant** whose chat is a **branchable tree** in an editor tab, driven by the official **DeepSeek API**. The agent can:
 
 - ✅ **Chat** — each conversation is a 2D pannable/zoomable **chat tree**; any block can branch into a new thread
-- ✅ **Read / write / edit** files and list directories in your workspace
+- ✅ **Read / write / edit** files and list directories in your workspace (or in the harness scratch folder when no folder is open)
 - ✅ **Run shell commands** (builds, tests, git, npm, …)
 - ✅ Be **interrupted** at any time (Stop button / abort)
 
@@ -32,7 +32,7 @@ The agent can call these tools:
 | `write_file` | Write/overwrite a file (creates parent dirs). |
 | `replace_in_file` | Replace an exact substring (must be unique). |
 | `list_dir` | List directory entries. |
-| `exec_command` | Run a shell command in the workspace root. |
+| `exec_command` | Run a shell command (`cwd` defaults to the harness root: the workspace folder, or the scratch folder when none is open). |
 | `read_image` | Read & upload an image for the vision model. |
 
 ### 3. DeepSeek official API
@@ -51,10 +51,17 @@ The send pane's status row shows a compact readout: live **status** text, then a
 The send pane is the active node's **input dock**: it sits at the bottom of the checked-out node's card, so it pans/zooms with the tree and it is always obvious which node a message goes to — check out another node and the pane moves to its card. Its contents scale with the card: resizing the card with its bottom-right handle grows/shrinks the pane's controls and fonts too (0.8×–1.6×, and the tree zoom scales it further). With an empty session (no node yet) the pane is hosted by a bare **New session** card — a normal node card with just the input, no prompt/transcript — which pans and zooms with the view like any other node.
 
 ### 6. Persistent sessions + branches
-Multiple **sessions** are listed in the **Activity Bar sidebar** (title, node count, busy). Each session is a tree of turns with persistent branch history; everything is stored in workspace storage and restored on reload. Delete/clear a session from the sidebar (right-click → Delete).
+Multiple **sessions** are listed in the **Activity Bar sidebar** (title, node count, busy). Each session is a tree of turns with persistent branch history; everything is stored in workspace storage (the profile's **global storage** when no folder is open) and restored on reload. Delete/clear a session from the sidebar (right-click → Delete).
 
 ### 7. Workspace instructions (AGENTS.md)
-If the workspace root contains an **`AGENTS.md`** file, its contents are read **once when the extension host starts** and appended to the agent's system prompt under a `## 工作区 AGENTS.md（项目说明）` heading. Later edits to `AGENTS.md` do **not** reach a running window (the snapshot is not re-read when you merely start a new session) — reload the window to pick them up. Run **`Agent Harness: Show System Prompt`** from the command palette to read the exact prompt the model is receiving.
+If the workspace root contains an **`AGENTS.md`** file, its contents are read **once when the extension host starts** and appended to the agent's system prompt under a `## 工作区 AGENTS.md（项目说明）` heading. Later edits to `AGENTS.md` do **not** reach a running window (the snapshot is not re-read when you merely start a new session) — reload the window to pick them up. Opening or closing a workspace folder does re-snapshot it. Run **`Agent Harness: Show System Prompt`** from the command palette to read the exact prompt the model is receiving.
+
+### 8. No folder open (no-repo mode)
+An empty VS Code window (no workspace folder) is a supported mode — the sidebar, chat trees, tools and sessions all keep working:
+- Every relative `path` and `exec_command`'s default `cwd` resolve against the **harness root**: the workspace folder when one is open, otherwise a scratch root at `<globalStorage>/no-workspace` (created on demand). There is no repository layout to be relative to — reach real files by **absolute path**.
+- Scratch output (oversized tool results such as `.agent-harness/tool-output/…`, screenshots) goes to `<globalStorage>/no-workspace/.agent-harness/` instead of a workspace-local `.agent-harness/`.
+- `search_files` prints **absolute** paths with no folder open, and sub-agent transcripts land under the scratch root when `agentHarness.subAgentTranscriptDir` is relative.
+- Sessions are stored in the profile's **global storage** (with a folder open they stay in workspace storage), so a no-repo conversation does not disappear when you open a folder later.
 
 ---
 

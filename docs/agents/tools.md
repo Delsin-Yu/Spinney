@@ -1,5 +1,11 @@
 # Tools (the agent's surface)
 
+> **Path base.** Every relative `path` — and `exec_command`'s default `cwd` —
+> resolves against the **harness root** (`agentRootInfo()`): the workspace folder
+> when one is open, otherwise the no-repo scratch folder
+> `<globalStorage>/no-workspace`. Nothing else serves as a path base. See
+> `docs/agents/no-repo-mode.md`.
+
 | Tool | Args | Behavior |
 | --- | --- | --- |
 | `read_file` | `path`, `startLine?`, `endLine?` | Returns `File: <path> (N lines, <EOL>)` header + LF-normalized content (line-numbered if a range is given). Always LF content, but reports on-disk EOL. `N` follows the `wc -l` convention (a trailing newline does **not** add a line); `read_file(path, 1, 1)` is the cheap way to get just the count. |
@@ -7,7 +13,7 @@
 | `replace_in_file` | `path`, `oldText`, `newText`, `frame?` | Exact-substring replace. `oldText` must occur **exactly once** (else error). Matches/writes in normalized LF; preserves on-disk EOL. The replacement is inserted **verbatim** (function-form replace), so `String.replace` dollar-patterns in `newText` stay literal. |
 | `list_dir` | `path?`, `glob?`, `recursive?` | Sorted entries; directories suffixed with `/`. `glob` filters against the path relative to the listed dir (`*.ts` = top level, `**/*.ts` = any depth); `recursive` walks subdirs (heavy dirs skipped) and prints relative paths. Capped at 2000 entries with an explicit note. |
 | `search_transcripts` | `query?`, `sessionId?`, `kind?`, `caseSensitive?`, `maxResults?`, `context?` | Regex search over the harness's own transcript dumps — the **only** way to recall a previous session (history otherwise lives in the Memento, which no tool can grep). Files are `<root>/<sessionId>/<nodeId>.jsonl` (usually **outside** the workspace, in global storage, so `search_files` cannot reach them). Each hit is `file:line: text` with the **absolute** path, so `read_file` with those line numbers pages the full record; `context` (0–10) uses `-` separators. `query` omitted ⇒ index of sessions (id, files, size, last write, kind mix, titles), or of one session's files with `sessionId`. `kind` = `session` (main-agent turns) / `subagent`. Default 50 hits / hard cap 300; files >8 MB skipped; capped runs say so. |
-| `search_files` | `pattern`, `path?`, `glob?`, `caseSensitive?`, `maxResults?`, `context?` | Regex search returning `file:line: text` (paths **workspace-relative**). `path` may be a **file or a directory**. `maxResults` default 200 / hard cap 300; `context` (0–10) adds surrounding lines with `-` separators (`src/a.ts-11- text`). Hit lines are trimmed + clipped to 160 chars. Heavy dirs skipped; files >1 MB skipped. A capped/short-circuited search appends an explicit `…[search stopped early: …]` note — never silently truncated. |
+| `search_files` | `pattern`, `path?`, `glob?`, `caseSensitive?`, `maxResults?`, `context?` | Regex search returning `file:line: text` (paths **workspace-relative**, or **absolute** when no folder is open — a default search of the empty scratch root is not a way to find your files). `path` may be a **file or a directory**. `maxResults` default 200 / hard cap 300; `context` (0–10) adds surrounding lines with `-` separators (`src/a.ts-11- text`). Hit lines are trimmed + clipped to 160 chars. Heavy dirs skipped; files >1 MB skipped. A capped/short-circuited search appends an explicit `…[search stopped early: …]` note — never silently truncated. |
 
 > **Oversized results spill to a file.** Every tool whose output is unbounded
 > (`search_files`, `search_transcripts`, `list_dir`, `exec_command`,
@@ -15,8 +21,9 @@
 > `limitInline()`: above
 > `agentHarness.maxInlineToolOutput`
 > (default 32768 bytes, `0` = always inline) the full text is written to
-> `.agent-harness/tool-output/<tool>-<id>.txt` (workspace-relative; the system
-> temp dir when no folder is open) and only the absolute path,
+> `<agentRoot>/.agent-harness/tool-output/<tool>-<id>.txt` (under the workspace
+> folder, or `<globalStorage>/no-workspace/.agent-harness/tool-output/` with no
+> folder open) and only the absolute path,
 > byte/line count and an 8-line preview are returned — so a `context`-heavy search
 > on a big file or a chatty command cannot flood the context. The spilled file is a
 > normal file:

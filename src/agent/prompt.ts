@@ -1,5 +1,5 @@
 import { harnessLog } from '../perf';
-import { getWorkspaceRoot } from '../tools';
+import { agentRootInfo } from '../tools';
 import { getShell } from '../tools/shell';
 import { DEFAULT_MODEL } from './models';
 import { ThinkingEffort } from './types';
@@ -55,7 +55,7 @@ export const SYSTEM_PROMPT_TEMPLATE = [
   '例：「把这 30 个文件的一致性审一遍」→ 分 4 批各派一个只读子代理，各自报差异，你只汇总冲突项。',
   '',
   '## 风格',
-  '- 在用户工作区干活，路径可绝对或相对根；回复简洁，解释放回复不放文件。',
+  '- 在用户工作区干活，路径可绝对或相对根（根见环境行）；回复简洁，解释放回复不放文件。',
   '- 没被要求就不改东西；改多个文件一次一个。',
   '- 用户能看到你的思路和推理，别把推理当隐私藏着。',
   '',
@@ -87,14 +87,25 @@ export function identityLines(model: string, effort: ThinkingEffort): string[] {
   return lines;
 }
 
-/** The runtime facts injected as `{{environment}}`. */
+/**
+ * The runtime facts injected as `{{environment}}`.
+ *
+ * Also consumed by `src/agent/profile.ts`, which passes the type through
+ * unchanged (`describeAgent`'s optional `facts` parameter) — so this shape is
+ * part of that module's API too.
+ */
 export interface EnvironmentFacts {
   /** Human-readable OS name, e.g. "Windows". */
   os: string;
   /** Label of the shell `exec_command` runs through, e.g. "Git Bash". */
   shell: string;
-  /** First workspace folder, or null when none is open. */
-  workspace: string | null;
+  /** Harness root: the workspace folder, or the scratch root in no-repo mode. */
+  root: string;
+  /**
+   * What {@link root} points at — 'workspace' when a folder is open, 'scratch'
+   * for the `<globalStorage>/no-workspace` root used in no-repo mode.
+   */
+  rootKind: 'workspace' | 'scratch';
 }
 
 function osLabel(platform: string): string {
@@ -117,19 +128,22 @@ function osLabel(platform: string): string {
  * deterministic render (a test, the prompt-dump script) never touches them.
  */
 export function currentEnvironmentFacts(): EnvironmentFacts {
-  let workspace: string | null = null;
-  try {
-    workspace = getWorkspaceRoot();
-  } catch {
-    workspace = null;
-  }
-  return { os: osLabel(process.platform), shell: getShell().label, workspace };
+  const { root, kind } = agentRootInfo();
+  return { os: osLabel(process.platform), shell: getShell().label, root, rootKind: kind };
 }
 
-/** One line of runtime facts, e.g. "当前环境：Windows / Git Bash / 工作区 D:\repo". */
+/**
+ * The runtime facts (two lines in no-repo mode), e.g.
+ * "当前环境：Windows / Git Bash / 工作区 D:\repo".
+ */
 export function environmentSection(facts: EnvironmentFacts): string {
-  const workspace = facts.workspace ? `工作区 ${facts.workspace}` : '未打开工作区文件夹';
-  return `当前环境：${facts.os} / ${facts.shell} / ${workspace}`;
+  if (facts.rootKind === 'workspace') {
+    return `当前环境：${facts.os} / ${facts.shell} / 工作区 ${facts.root}`;
+  }
+  return (
+    `当前环境：${facts.os} / ${facts.shell} / 未打开工作区文件夹（no-repo 模式）\n` +
+    `相对路径和命令的默认 cwd 都以 harness 根 ${facts.root} 为基准；要操作真实文件请给绝对路径，不要假设存在仓库结构。`
+  );
 }
 
 /**

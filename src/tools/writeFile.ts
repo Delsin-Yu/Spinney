@@ -9,7 +9,7 @@ export const writeFileTool: AgentTool = {
     function: {
       name: 'write_file',
       description:
-        'Write content to a file, creating parent directories as needed. Fully overwrites the file. Path may be absolute or relative to the workspace root. When overwriting an existing file, its line-ending style (CRLF/LF) is preserved. Content may be supplied either as a normal JSON string (escaped) or, for large/multi-line content, as a verbatim frame: set frame:true, put a short JSON header for the path, then frame the content between <<<RAW:content>>> and <<<END_RAW:content>>>.',
+        'Write content to a file, creating parent directories as needed. Fully overwrites the file. Path may be absolute or relative to the harness root (the workspace folder, or the harness scratch folder when no folder is open). When overwriting an existing file, its line-ending style (CRLF/LF) is preserved. Content may be supplied either as a normal JSON string (escaped) or, for large/multi-line content, as a verbatim frame: set frame:true, put a short JSON header for the path, then frame the content between <<<RAW:content>>> and <<<END_RAW:content>>>.',
       parameters: {
         type: 'object',
         properties: {

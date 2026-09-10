@@ -3,6 +3,7 @@ import { CHAT_VIEW_TYPE } from './chat/ChatPanel';
 import { ChatViewProvider } from './chat/ChatViewProvider';
 import { SessionsProvider } from './chat/SessionsProvider';
 import { ControlServer } from './http/controlServer';
+import { setHarnessStorageDir } from './tools';
 
 let chatProvider: ChatViewProvider | undefined;
 
@@ -18,7 +19,15 @@ function toSessionId(arg: unknown): string {
 }
 
 export function activate(context: vscode.ExtensionContext): void {
-  chatProvider = new ChatViewProvider(context.extensionUri, context.workspaceState, context.globalStorageUri);
+  // Pick the Memento that owns sessions/config. With no folder open, VS Code
+  // buckets `workspaceState` under the (empty) window workspace, so those
+  // no-repo sessions would become invisible the moment a folder is opened;
+  // no-folder sessions really belong to the profile, hence `globalState`.
+  const storage = vscode.workspace.workspaceFolders?.length ? context.workspaceState : context.globalState;
+  // Wire relative-path resolution to the extension's global storage before any
+  // tool can run, so no-repo sessions (no workspace folder) still resolve.
+  setHarnessStorageDir(context.globalStorageUri?.fsPath ?? null);
+  chatProvider = new ChatViewProvider(context.extensionUri, storage, context.globalStorageUri);
 
   // Window recovery: VS Code re-creates the webview panels it serialized at
   // shutdown and hands each one back through this serializer. Registering it
@@ -53,6 +62,9 @@ export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
     sessionsTree,
     controlServer,
+    // AGENTS.md is otherwise read once per activation: re-read it (and log the
+    // new mode + agent root) whenever a folder is added or removed.
+    vscode.workspace.onDidChangeWorkspaceFolders(() => chatProvider?.onWorkspaceFoldersChanged()),
     vscode.commands.registerCommand('agentHarness.openChat', () => chatProvider?.openChat()),
     vscode.commands.registerCommand('agentHarness.focus', () => chatProvider?.openChat()),
     vscode.commands.registerCommand('agentHarness.openSession', (arg) => {

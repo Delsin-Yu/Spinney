@@ -25,7 +25,32 @@ import { writeFileTool } from './writeFile';
  * both modules have finished loading — never at module-init time.
  */
 
-/** Resolve the first workspace folder root. */
+/**
+ * The harness's own storage dir (VS Code global storage), injected once at
+ * activation by {@link setHarnessStorageDir}. It is the parent of the
+ * no-workspace root below, and the only way a tool can learn about it (tools
+ * have no `ExtensionContext`).
+ */
+let harnessStorageDir: string | null = null;
+/** The no-workspace root is created at most once per storage dir. */
+let noWorkspaceRootReady = false;
+
+/** Point the harness at its global storage dir (see `docs/agents/no-repo-mode.md`). */
+export function setHarnessStorageDir(dir: string | null): void {
+  harnessStorageDir = dir;
+  noWorkspaceRootReady = false;
+}
+
+/** Is a workspace folder open? */
+export function hasWorkspaceFolder(): boolean {
+  return (vscode.workspace.workspaceFolders?.length ?? 0) > 0;
+}
+
+/**
+ * Resolve the first workspace folder root. **Throws** when no folder is open —
+ * it answers "which folder is the workspace", let {@link getAgentRoot} answer
+ * "where do relative paths go" instead.
+ */
 export function getWorkspaceRoot(): string {
   const folders = vscode.workspace.workspaceFolders;
   if (!folders || folders.length === 0) {
@@ -34,12 +59,50 @@ export function getWorkspaceRoot(): string {
   return folders[0].uri.fsPath;
 }
 
-/** Resolve a possibly-relative path against the workspace root. */
+/** The scratch root that stands in for a workspace folder in no-repo mode. */
+function noWorkspaceRoot(): string {
+  const base = harnessStorageDir ?? path.join(os.tmpdir(), 'agent-harness-storage');
+  return path.join(base, 'no-workspace');
+}
+
+export type AgentRootKind = 'workspace' | 'scratch';
+
+/**
+ * The one base every relative path and every default `cwd` resolves against:
+ * the workspace folder when one is open, otherwise a dedicated scratch root
+ * under global storage ("no-repo mode") so the whole tool surface stays usable
+ * instead of failing on "No workspace folder is open.".
+ *
+ * The scratch root is created on demand — the first call may touch the disk.
+ */
+export function agentRootInfo(): { root: string; kind: AgentRootKind } {
+  const folders = vscode.workspace.workspaceFolders;
+  if (folders && folders.length > 0) {
+    return { root: folders[0].uri.fsPath, kind: 'workspace' };
+  }
+  const root = noWorkspaceRoot();
+  if (!noWorkspaceRootReady) {
+    try {
+      fs.mkdirSync(root, { recursive: true });
+      noWorkspaceRootReady = true;
+    } catch {
+      // Leave the flag unset so a transient failure is retried on the next call.
+    }
+  }
+  return { root, kind: 'scratch' };
+}
+
+/** Shorthand for {@link agentRootInfo}`().root`. */
+export function getAgentRoot(): string {
+  return agentRootInfo().root;
+}
+
+/** Resolve a possibly-relative path against the agent root (workspace folder, or scratch). */
 export function resolvePath(input: string): string {
   if (path.isAbsolute(input)) {
     return input;
   }
-  return path.resolve(getWorkspaceRoot(), input);
+  return path.resolve(getAgentRoot(), input);
 }
 
 export function ensureNotAborted(signal?: AbortSignal): void {
@@ -91,15 +154,16 @@ function truncate(s: string, n = 200): string {
 }
 
 /**
- * Where oversized tool results are spilled. Workspace-local `.agent-harness/`
- * keeps every agent-produced artifact in one place; it falls back to the system
- * temp dir when no workspace folder is open. `.agent-harness` is in `SKIP_DIRS`,
- * so a repo-wide search never returns the agent's own scratch — grep a spilled
- * file by passing its exact path instead (single-file search still works).
+ * Where oversized tool results are spilled. Under the agent root, so a
+ * workspace-local `.agent-harness/` keeps every agent-produced artifact in one
+ * place and no-repo mode gets the same layout inside its scratch root (global
+ * storage). `.agent-harness` is in `SKIP_DIRS`, so a repo-wide search never
+ * returns the agent's own scratch — grep a spilled file by passing its exact
+ * path instead (single-file search still works).
  */
 function spillDir(): string {
   try {
-    return path.join(getWorkspaceRoot(), '.agent-harness', 'tool-output');
+    return path.join(getAgentRoot(), '.agent-harness', 'tool-output');
   } catch {
     return path.join(os.tmpdir(), 'agent-harness-tool-output');
   }

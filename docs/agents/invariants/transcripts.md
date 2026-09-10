@@ -2,9 +2,11 @@
 - **Layout:** `<root>/<sessionId>/<nodeId>.jsonl`, one file per main-agent turn
   (`kind:'session'`) and per sub-agent run (`kind:'subagent'`). Node ids are
   unique per session, so both kinds coexist in one folder. `<root>` is
-  `<agentHarness.subAgentTranscriptDir>` (workspace-relative) or, by default,
-  `<globalStorage>/transcripts/` — i.e. **outside** the workspace, which is why
-  `search_transcripts` exists (`search_files` cannot walk there).
+  `<agentHarness.subAgentTranscriptDir>` (relative to the agent root — the
+  workspace folder, or the no-repo scratch folder `<globalStorage>/no-workspace`)
+  or, by default, `<globalStorage>/transcripts/` — i.e. **outside** the
+  workspace, which is why `search_transcripts` exists (`search_files` cannot walk
+  there).
 - **Why main-agent turns are dumped:** session history lives only in the Memento
   (`agentHarness.state`, a sqlite blob) and is clipped to 64 KiB per message on
   persist, so no tool can grep it. `ChatViewProvider.finishTurn` calls

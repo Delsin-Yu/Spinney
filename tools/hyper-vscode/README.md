@@ -30,7 +30,8 @@ Consequences:
   vars (`AGENT_HARNESS_INSTANCE_ID`, `DEEPSEEK_API_KEY`, …) do **not** reach the
   new window. Enable the control plane in the user's settings instead:
   `"agentHarness.httpApi.enabled": true`. The instance id then becomes
-  `pid-<extension-host pid>` and the daemon matches it by workspace + launch time.
+  `pid-<extension-host pid>` and the daemon matches it by workspace + launch time
+  (see *No-repo mode* below for the no-folder case).
 - The extension host's parent is the **user's** main process, so a hard kill would
   take every window with it. Reboot therefore goes through
   `POST /reload-window` on the control plane.
@@ -41,6 +42,29 @@ Consequences:
 process. A hard kill is safe there, but the chat state is separate from the
 user's.
 
+## No-repo mode (no workspace folder)
+
+A window opened with **no folder** is a first-class instance: `code -n` is spawned
+with no path at all, the extension publishes an honest `workspace: null` in its
+discovery file, and the daemon stores `workspace: null` in the record.
+
+```powershell
+# daemon that starts a bare window right away
+powershell -ExecutionPolicy Bypass -File tools\hyper-vscode\serve.ps1 -NoWorkspace
+
+# or against a running daemon
+node tools\hyper-vscode\hvsc.mjs start --no-workspace
+```
+
+`hvsc status` prints `(no workspace)` for such an instance (never `null`).
+
+**Matching:** an instance is matched to its control plane by instance id first,
+then by *same workspace* + launch time. For no-repo instances "same workspace"
+means *both sides are null* — that is what lets a record be re-adopted after an
+extension-host restart (a new discovery file and port, same window), which is
+also how `hvsc reboot` finds the endpoint again. So a no-repo window and an
+older no-repo record are deliberately treated as the same workspace.
+
 ## Quick start
 
 ```powershell
@@ -49,12 +73,16 @@ user's.
 
 # 2) start the daemon in a standalone terminal (it must outlive the window)
 powershell -ExecutionPolicy Bypass -File tools\hyper-vscode\serve.ps1 -Port 7777 -Workspace .
+#    ...or with a window that has no folder open at all: swap -Workspace . for -NoWorkspace
 
 # 3) in another terminal
-node tools\hyper-vscode\hvsc.mjs status          # id / profile mode / harness port
+node tools\hyper-vscode\hvsc.mjs status          # id / workspace / profile mode / harness port
+node tools\hyper-vscode\hvsc.mjs start --no-workspace   # extra bare window, no folder
 node tools\hyper-vscode\hvsc.mjs reboot <id> --continue "[reboot] 已重启，继续验证" --wait
 node tools\hyper-vscode\hvsc.mjs jobs <jobId>    # step-by-step log
 ```
+
+`hvsc start` with no argument still falls back to the daemon's own cwd.
 
 ## Reboot sequence
 
@@ -76,7 +104,8 @@ and never log the token.
 ```
 GET  /health
 GET  /instances
-POST /instances             { workspace, args?, isolated? }
+POST /instances             { workspace|null, noWorkspace?:true, args?, isolated? }
+                            # workspace:null or noWorkspace:true → no-repo window (bare `code -n`)
 POST /instances/:id/reboot  { reason?, continue?, timeoutMs?, scope?, wait? }
 GET  /jobs/:id
 ```

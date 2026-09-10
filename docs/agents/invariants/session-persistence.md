@@ -5,6 +5,13 @@
   one-time historical-dump marker) and `agentHarness.sessionTitleBackfill` (the
   one-time historical-title marker; left unset when a pass is interrupted or the
   model is unavailable, so it resumes on the next activation).
+- Which Memento holds those keys depends on the window (`src/extension.ts`):
+  `context.workspaceState` when a workspace folder is open, **`context.globalState`
+  when none is** — an empty window's `workspaceState` bucket would make every
+  no-repo session invisible the moment a folder is opened, while no-folder
+  sessions really belong to the profile (see `docs/agents/no-repo-mode.md`).
+  Consequence: session state is shared by every no-folder window of a profile, so
+  drive one at a time.
 - A session is `{ id, title, createdAt, updatedAt, nodes: Record<id, TreeNode>,
   rootId, activeNodeId, orphanItems }` plus the title bookkeeping
   (`titleSource: 'provisional'|'auto'|'manual'`, `titleLocked`, `titleAutoAt`,

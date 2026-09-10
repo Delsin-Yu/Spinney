@@ -14,6 +14,13 @@ Both folders are **created on demand** (and were wiped once already), so an empt
 `list_dir`/`search_files` walks skip it — grep a spilled file by its **exact path**
 instead. Never write scratch files to `C:\Temp` or the repo root.
 
+**No folder open (no-repo mode).** There is no workspace-local folder, so scratch
+output goes under the harness scratch root instead:
+`<globalStorage>/no-workspace/.agent-harness/` (screenshots and `tool-output/` as
+above, created on demand). The same rule applies — this location replaces the
+`.agent-harness/` that a folder would provide, and scratch files still never go to
+`C:\Temp` or the system temp dir. See `docs/agents/no-repo-mode.md`.
+
 **Want the output to outlive the session?** It must not live here: this folder is
 gitignored, so a `git clean`/fresh clone loses it while a tracked doc keeps
 referring to it. Long-lived research/verification material belongs in

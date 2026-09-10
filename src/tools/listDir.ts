@@ -12,7 +12,7 @@ export const listDirTool: AgentTool = {
     function: {
       name: 'list_dir',
       description:
-        'List the entries of a directory. Path may be absolute or relative to the workspace root. Directories are suffixed with "/". An optional glob filters entries against their path relative to the listed directory (e.g. "*.ts" for top-level, "**/*.ts" for any depth); recursive:true walks subdirectories (heavy dirs node_modules/.git/out/dist/build are skipped) and prints each entry\'s relative path.',
+        'List the entries of a directory. Path may be absolute or relative to the harness root (the workspace folder, or the harness scratch folder when no folder is open). Directories are suffixed with "/". An optional glob filters entries against their path relative to the listed directory (e.g. "*.ts" for top-level, "**/*.ts" for any depth); recursive:true walks subdirectories (heavy dirs node_modules/.git/out/dist/build are skipped) and prints each entry\'s relative path.',
       parameters: {
         type: 'object',
         properties: {

@@ -1,6 +1,6 @@
 import { AgentTool } from '../agent/types';
 import { BackgroundRegistry, CommandHandle, OUTPUT_CAP, spawnShellCommand } from './background';
-import { getWorkspaceRoot, limitInline, resolvePath } from './index';
+import { getAgentRoot, limitInline, resolvePath } from './index';
 import { getShell } from './shell';
 
 /**
@@ -99,14 +99,14 @@ export function makeExecCommandTool(getRegistry: () => BackgroundRegistry | null
       function: {
         name: 'exec_command',
         description:
-          'Run a shell command in the workspace root and return its combined stdout/stderr. Use for builds, tests, git, npm, etc. Optionally set cwd relative to the workspace root. Set timeout (seconds, default 120). timeout_behavior controls what happens when a command runs past timeout: "stop" (default) kills it, "move_to_background" promotes the still-running command to a background terminal (returns its id), and "start_in_background" launches it in the background immediately (returns its id and does not wait). Commands run through the detected shell (currently ' +
+          'Run a shell command in the harness root (the workspace folder, or the harness scratch folder when no folder is open) and return its combined stdout/stderr. Use for builds, tests, git, npm, etc. Optionally set cwd relative to the harness root. Set timeout (seconds, default 120). timeout_behavior controls what happens when a command runs past timeout: "stop" (default) kills it, "move_to_background" promotes the still-running command to a background terminal (returns its id), and "start_in_background" launches it in the background immediately (returns its id and does not wait). Commands run through the detected shell (currently ' +
           getShell().label +
           ') and in that shell syntax (bash-style for Git Bash, PowerShell syntax otherwise).',
         parameters: {
           type: 'object',
           properties: {
             command: { type: 'string', description: 'The shell command to run.' },
-            cwd: { type: 'string', description: 'Working directory, relative to workspace root.' },
+            cwd: { type: 'string', description: 'Working directory, relative to the harness root.' },
             timeout: { type: 'number', description: 'Timeout in seconds (default 120).' },
             timeout_behavior: {
               type: 'string',
@@ -124,7 +124,7 @@ export function makeExecCommandTool(getRegistry: () => BackgroundRegistry | null
       if (!command) {
         throw new Error('Command must not be empty.');
       }
-      const cwd = args.cwd ? resolvePath(String(args.cwd)) : getWorkspaceRoot();
+      const cwd = args.cwd ? resolvePath(String(args.cwd)) : getAgentRoot();
       const timeoutSec = typeof args.timeout === 'number' ? args.timeout : 120;
       const timeoutMs = timeoutSec * 1000;
       const behavior = String(args.timeout_behavior ?? 'stop');

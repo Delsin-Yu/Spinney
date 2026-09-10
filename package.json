@@ -226,7 +226,7 @@
         "agentHarness.subAgentTranscriptDir": {
           "type": "string",
           "default": "",
-          "description": "Folder for transcript dumps (main-agent turns + sub-agent runs), relative to the workspace root; a per-session subfolder is created inside. Leave empty to use the extension's global storage.",
+          "description": "Folder for transcript dumps (main-agent turns + sub-agent runs), relative to the harness root (the workspace folder, or the harness scratch folder when no folder is open); a per-session subfolder is created inside. Leave empty to use the extension's global storage.",
           "scope": "window"
         },
         "agentHarness.autoSessionTitles": {

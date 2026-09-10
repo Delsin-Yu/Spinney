@@ -1,7 +1,16 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { AgentTool } from '../agent/types';
-import { SKIP_DIRS, ensureNotAborted, getWorkspaceRoot, globToRegex, limitInline, resolvePath } from './index';
+import {
+  SKIP_DIRS,
+  ensureNotAborted,
+  getAgentRoot,
+  getWorkspaceRoot,
+  globToRegex,
+  hasWorkspaceFolder,
+  limitInline,
+  resolvePath,
+} from './index';
 
 const MAX_SEARCH_FILE = 1_000_000;
 const MAX_SEARCH_FILES = 4000;
@@ -29,12 +38,12 @@ export const searchFilesTool: AgentTool = {
     function: {
       name: 'search_files',
       description:
-        'Search files in the workspace for a regex pattern and return matching "file:line: text" lines (paths are relative to the workspace root). `path` may be a file or a directory (default = workspace root). An optional glob (e.g. "**/*.ts") filters which files are searched; caseSensitive defaults to false; maxResults caps the matches (default 200, hard cap 300); context adds up to 10 surrounding lines per match (context lines use "-" separators, e.g. "src/a.ts-11- text"). Heavy dirs (node_modules/.git/out...) are skipped automatically. When the search stops before scanning everything (match cap / oversized files) the result ends with an explicit note — never treat a capped result as complete.',
+        'Search files in the workspace for a regex pattern and return matching "file:line: text" lines (paths are relative to the harness root; absolute when no folder is open). `path` may be a file or a directory (default = the harness root: the workspace folder, or the harness scratch folder when no folder is open). An optional glob (e.g. "**/*.ts") filters which files are searched; caseSensitive defaults to false; maxResults caps the matches (default 200, hard cap 300); context adds up to 10 surrounding lines per match (context lines use "-" separators, e.g. "src/a.ts-11- text"). Heavy dirs (node_modules/.git/out...) are skipped automatically. When the search stops before scanning everything (match cap / oversized files) the result ends with an explicit note — never treat a capped result as complete.',
       parameters: {
         type: 'object',
         properties: {
           pattern: { type: 'string', description: 'Regex to search for (JS regex syntax).' },
-          path: { type: 'string', description: 'File or directory to search (default = workspace root).' },
+          path: { type: 'string', description: 'File or directory to search (default = the harness root: the workspace folder, or the harness scratch folder when no folder is open).' },
           glob: { type: 'string', description: 'Optional glob filter, e.g. "**/*.ts".' },
           caseSensitive: { type: 'boolean', description: 'Default false.' },
           maxResults: { type: 'number', description: 'Default 200 (capped at 300).' },
@@ -56,18 +65,14 @@ export const searchFilesTool: AgentTool = {
     } catch (err) {
       return `Error: invalid regex: ${err instanceof Error ? err.message : String(err)}`;
     }
-    const root = args.path ? resolvePath(String(args.path)) : getWorkspaceRoot();
+    const root = args.path ? resolvePath(String(args.path)) : getAgentRoot();
     const glob = args.glob ? globToRegex(String(args.glob)) : null;
     const maxResults =
       typeof args.maxResults === 'number' ? Math.min(Math.max(1, args.maxResults), MAX_SEARCH_MATCHES) : 200;
     const context =
       typeof args.context === 'number' ? Math.min(Math.max(0, Math.floor(args.context)), MAX_CONTEXT_LINES) : 0;
-    let wsRoot: string | null = null;
-    try {
-      wsRoot = getWorkspaceRoot();
-    } catch {
-      // No workspace folder: results fall back to absolute paths.
-    }
+    // With no folder open we print absolute paths: scratch-root-relative paths would be ambiguous.
+    const wsRoot = hasWorkspaceFolder() ? getWorkspaceRoot() : null;
 
     /** Path shown in a hit: workspace-relative when inside it, else absolute. */
     const display = (full: string): string => {

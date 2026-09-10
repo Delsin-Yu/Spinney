@@ -11,10 +11,11 @@ one-time historical backfill is keyed by the Memento marker
 the first turn and refresh it when the conversation grows; a manual rename locks
 the title; the one-time historical backfill is keyed by the Memento marker
 `agentHarness.sessionTitleBackfill`),
-`subAgentTranscriptDir` (default `""` = global storage; else workspace-relative;
-now the root for **both** transcript kinds),
+`subAgentTranscriptDir` (default `""` = global storage; else relative to the
+**agent root** — the workspace folder, or the no-repo scratch folder
+`<globalStorage>/no-workspace`; now the root for **both** transcript kinds),
 `maxInlineToolOutput` (bytes, default `32768`; `0` = always inline — above it a
-tool result spills to a temp file). `SubAgentPool` clamps `maxConcurrentSubagents`
+tool result spills to `<agentRoot>/.agent-harness/tool-output/`). `SubAgentPool` clamps `maxConcurrentSubagents`
 to **≥ 1** (a non-positive limit would otherwise deadlock every sub-agent).
 `httpApi.enabled` (default `false` — the local control plane) and `httpApi.port`
 (default `0` = ephemeral).
