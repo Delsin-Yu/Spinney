@@ -32,10 +32,11 @@
   `TurnRun`, `runs`, `workerFor`) plus `src/chat/panels.ts` (`PanelManager`, one tab per
   session) and the per-panel routing in `ChatViewProvider.handlePanelMessage` / `postTo`.
 - **Background terminals** → `src/chat/backgroundHub.ts` (the `(session, node)`
-  registries + session-local ids), the `// ---- Background terminals ----` section of
-  `src/chat/runtime.ts` (notice injection, `postBackgrounds`), the tools in
-  `src/tools/background.ts` / `backgroundTools.ts` / `execCommand.ts`, and each card's
-  in-card dock in `media/main.js` (there is no `#bg-panel`).
+  registries + session-local ids + the `onRegistered` hook), the
+  `// ---- Background terminals ----` / `// ---- Completion signals ----` sections of
+  `src/chat/runtime.ts` (the `kind:'bg'` card, notice injection, `postBackgrounds`), the tools in
+  `src/tools/background.ts` / `backgroundTools.ts` / `execCommand.ts`, and each job's flying card
+  (`renderBgBody`) in `media/main.js` — the in-card dock and `#bg-panel` are both gone.
 - **Per-session model / effort** → the `model` / `effort` (and `modelFromSettings` /
   `effortFromSettings`) fields on `AgentSession` in `src/chat/tree.ts`, their resolution
   in `ChatViewProvider.effectiveModel` / `effectiveEffort`, and the write path

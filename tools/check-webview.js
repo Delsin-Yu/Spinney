@@ -513,42 +513,69 @@ if (contextLabel !== 'ctx 50%') {
   expectComposer('once nothing is running', []);
 }
 
-// --- P2: the background dock lives in the owning node's card ------------------
-// `backgrounds` is one flat snapshot whose tasks are tagged with the node that
-// owns them. Every task must land in *its own* node's dock (never in another
-// card's), a collapsed card must keep only the compact one-line summary, and a
-// node that owns nothing must keep a hidden dock.
+// --- Sidecar cards: background job cards + the Delivered badge ----------------
+// A background job now renders as its own `kind:'bg'` card in the owner's sidecar
+// grid (the bottom dock is gone), and both sidecar kinds carry a `Delivered` badge
+// once their completion signal reached the agent. The notification block is
+// injected mid-turn, so it must land inside the owner's card without tearing down
+// the answer that is streaming there.
 {
-  const A = 'dock-node-a';   // root, on the view path (expanded)
-  const B = 'dock-node-b';   // child, view focus (expanded)
-  const C = 'dock-node-c';   // child, off the path (collapsed) — owns a job
-  const D = 'dock-node-d';   // child, off the path — owns nothing
-  const node = (id, parentId, children) => ({
-    id,
-    parentId,
-    children,
-    title: id,
-    status: 'done',
-    createdAt: 0,
-    preview: id + ' preview',
-    usage: null,
-    size: null,
-  });
-  const task = (id, nodeId, command, extra) => ({
-    id,
-    nodeId,
-    command,
-    status: 'running',
-    exitCode: null,
-    killed: false,
-    elapsed: 1,
-    truncated: false,
-    outputTail: command + ' output',
-    pendingDelivery: false,
-    ...(extra || {}),
-  });
+  const A = 'bg-node-a';     // root, on the view path
+  const B = 'bg-node-b';     // turn child, view focus
+  const JOB = 'bg-node-job'; // `kind:'bg'` sidecar of A — running
+  const SUB = 'bg-node-sub'; // `kind:'agent'` sidecar of A — delivered
+  const JOB2 = 'bg-node-job2'; // `kind:'bg'` sidecar of B — finished + delivered
+  const node = (id, parentId, children, extra) => Object.assign(
+    {
+      id,
+      parentId,
+      children,
+      title: id,
+      status: 'done',
+      createdAt: 0,
+      preview: id + ' preview',
+      usage: null,
+      size: null,
+    },
+    extra || {},
+  );
+  const task = (id, nodeId, cardNodeId, command, extra) => Object.assign(
+    {
+      id,
+      nodeId,
+      cardNodeId,
+      command,
+      status: 'running',
+      exitCode: null,
+      killed: false,
+      elapsed: 1,
+      truncated: false,
+      outputTail: command + ' output',
+      pendingDelivery: false,
+    },
+    extra || {},
+  );
 
-  dispatch({ type: 'tree', viewId: B, activeId: null, rootId: A, nodes: [node(A, null, [B, C, D]), node(B, A, []), node(C, A, []), node(D, A, [])] });
+  dispatch({
+    type: 'tree',
+    viewId: B,
+    activeId: null,
+    rootId: A,
+    nodes: [
+      node(A, null, [B, JOB, SUB]),
+      node(B, A, [JOB2]),
+      node(JOB, A, [], { kind: 'bg', bgTaskId: 7, bgCommand: 'smoke-job-a', status: 'running' }),
+      node(SUB, A, [], { kind: 'agent', agentStatus: 'done', delivered: true, agentSummary: 'done' }),
+      node(JOB2, B, [], {
+        kind: 'bg',
+        bgTaskId: 8,
+        bgCommand: 'smoke-job-b',
+        bgExitCode: 0,
+        delivered: true,
+        bgOutputTail: 'smoke-job-b output',
+      }),
+    ],
+  });
   dispatch({ type: 'path', ids: [A, B], nodes: [{ id: A, status: 'done', items: [] }, { id: B, status: 'done', items: [] }] });
 
   const cards = new Map();
@@ -556,115 +583,100 @@ if (contextLabel !== 'ctx 50%') {
     if (child.dataset && child.dataset.id) cards.set(child.dataset.id, child);
   }
   const cardOf = (id) => cards.get(id);
-  // A dock only counts when it really is a child of that card: `querySelector`
-  // falls back to a shared stub on a miss, which must not read as "there".
-  const dockOf = (id) => {
+  const has = (element, name) => !!element && element.classList.contains(name);
+  const textOf = (element, selector) => String((findByClass(element, selector) || {}).textContent || '');
+  const deliveredBadge = (id) => {
     const card = cardOf(id);
-    if (!card) return null;
-    const dock = card.querySelector('.node-bg');
-    return dock && card.children.indexOf(dock) >= 0 ? dock : null;
+    return card ? findByClass(card, 'node-delivered-badge') : null;
   };
-  const itemsOf = (dock) => ((dock && dock.querySelector('.bg-dock-list')) || { children: [] }).children
-    .filter((child) => hasClass(child, 'bg-item'));
+  const killOf = (id) => {
+    const card = cardOf(id);
+    return card ? findByClass(card, 'bg-kill') : null;
+  };
 
-  // (a) The message must not throw: a `backgrounds` handler that touches the
-  // deleted standalone panel would fail silently in the real webview.
-  if (dispatch({ type: 'backgrounds', tasks: [task(7, A, 'smoke-a'), task(8, B, 'smoke-b'), task(9, C, 'smoke-c')] })) {
-    problems.push('a `backgrounds` message threw — the webview no longer understands the provider\'s shape');
+  // (a) The message must not throw: the webview has to understand the new shape.
+  if (dispatch({ type: 'backgrounds', tasks: [task(7, A, JOB, 'smoke-job-a')] })) {
+    problems.push("a `backgrounds` message threw — the webview no longer understands the provider's shape");
   }
 
-  // (b) Each node's card has its own dock holding exactly its own task.
-  const expectDock = (id, taskId, command) => {
-    const card = cardOf(id);
-    if (!card) {
-      problems.push(`no card was rendered for node ${id}`);
-      return;
+  // (b) Every job card was rendered once, and the old bottom dock is gone.
+  for (const id of [JOB, SUB, JOB2]) {
+    if (!cardOf(id)) {
+      problems.push(`no card was rendered for sidecar node ${id}`);
     }
-    const dock = dockOf(id);
-    if (!dock) {
-      problems.push(`node ${id} has no .node-bg dock inside its card`);
-      return;
+  }
+  for (const id of [A, B]) {
+    if (findByClass(cardOf(id), 'node-bg')) {
+      problems.push(`node ${id} still renders a .node-bg dock — the job moved to its own card`);
     }
-    if (hasClass(dock, 'hidden')) {
-      problems.push(`node ${id} owns a background task but its dock is hidden`);
-      return;
+  }
+
+  // (c) A running job's card shows its command/status and offers a kill button; a
+  // job that already left the snapshot falls back to its persisted terminal state
+  // (the card is a record after delivery, D1) and is not killable.
+  if (cardOf(JOB)) {
+    const status = textOf(cardOf(JOB), 'bg-status');
+    const cmd = textOf(cardOf(JOB), 'bg-card-cmd');
+    if (status !== 'running' || cmd !== 'smoke-job-a') {
+      problems.push(`the running job card shows ${JSON.stringify(status + ' / ' + cmd)}, expected "running / smoke-job-a"`);
     }
-    const items = itemsOf(dock);
-    if (items.length !== 1) {
-      problems.push(`node ${id}'s dock holds ${items.length} background items, expected exactly 1`);
-      return;
+    if (!killOf(JOB)) {
+      problems.push('a running job card has no kill button');
     }
-    const idText = String((items[0].querySelector('.bg-id') || {}).textContent);
-    const cmdText = String((items[0].querySelector('.bg-cmd') || {}).textContent);
-    if (idText !== '#' + taskId || cmdText !== command) {
+  }
+  if (cardOf(JOB2)) {
+    const status = textOf(cardOf(JOB2), 'bg-status');
+    if (status !== 'exit 0') {
+      problems.push(`a delivered job card shows ${JSON.stringify(status)}, expected its persisted "exit 0"`);
+    }
+    if (killOf(JOB2)) {
+      problems.push('a finished job card still offers a kill button');
+    }
+  }
+
+  // (d) `Delivered` (D1) shows on both sidecar kinds once the signal reached the
+  // agent, and not before.
+  const badgeSub = deliveredBadge(SUB);
+  const badgeJob = deliveredBadge(JOB2);
+  if (!badgeSub || badgeSub.textContent !== 'Delivered') {
+    problems.push('a delivered sub-agent card has no `Delivered` badge');
+  }
+  if (!badgeJob || badgeJob.textContent !== 'Delivered') {
+    problems.push('a delivered background card has no `Delivered` badge');
+  }
+  if (deliveredBadge(JOB)) {
+    problems.push('a job card that is still pending shows `Delivered`');
+  }
+
+  // (e) The notification block is injected at a tool boundary of a *running* turn,
+  // so it lands inside the owner's card, after the answer streamed so far and
+  // before whatever streams next — and it is not a user bubble.
+  dispatch({ type: 'delta', nodeId: B, text: 'before the notice' });
+  dispatch({
+    type: 'backgroundNotice',
+    nodeId: B,
+    item: { kind: 'subagent', id: 'sub-notice', name: '子代理完成', doneText: '1 个子代理完成', content: 'child done' },
+  });
+  dispatch({ type: 'delta', nodeId: B, text: 'after the notice' });
+  {
+    const items = findByClass(cardOf(B), 'node-items');
+    const kinds = (items ? items.children : []).map((child) => (child.dataset && child.dataset.kind) || '?');
+    if (kinds.join(',') !== 'assistant,background,assistant') {
       problems.push(
-        `node ${id}'s dock shows ${JSON.stringify(idText + ' ' + cmdText)}, expected just its own task ` +
-          `#${taskId} (${command}) — the tasks were not grouped by nodeId`,
+        `a mid-turn notice produced ${JSON.stringify(kinds)} in node ${B}, expected an assistant / ` +
+          'notification / assistant sequence',
       );
     }
-    if (!findByClass(items[0], 'bg-kill')) {
-      problems.push(`the running task in node ${id}'s dock has no kill button`);
+    const notice = (items ? items.children : []).find((child) => (child.dataset && child.dataset.kind) === 'background');
+    const badge = notice ? findByClass(notice, 'bgnotify-badge') : null;
+    if (!badge || badge.textContent !== 'SUB') {
+      problems.push('a sub-agent notification block is not badged `SUB` (it would read as a background terminal)');
     }
-  };
-  expectDock(A, 7, 'smoke-a');
-  expectDock(B, 8, 'smoke-b');
-  expectDock(C, 9, 'smoke-c');
-
-  // A collapsed card keeps the dock, but as the compact one-line summary only
-  // (the per-task rows stay in the DOM and come back when it is re-expanded).
-  {
-    const dockC = dockOf(C);
-    if (!hasClass(cardOf(C), 'expanded')) {
-      const summary = String((dockC.querySelector('.bg-dock-count') || {}).textContent);
-      if (!hasClass(dockC, 'collapsed') || summary !== '1 background task · 1 running') {
-        problems.push(
-          `a collapsed card's dock shows ${JSON.stringify(summary)} (collapsed=${hasClass(dockC, 'collapsed')}), ` +
-            'expected the compact "1 background task · 1 running" summary',
-        );
-      }
-      const kills = findByClass(dockC, 'bg-dock-kills');
-      if (!kills || kills.children.length === 0) {
-        problems.push("the collapsed card's dock has no kill button for its running task");
-      }
-    } else {
-      problems.push(`node ${C} was expected to be collapsed but its card is expanded`);
+    if (has(notice, 'user')) {
+      problems.push('the notification block was rendered as a user bubble');
     }
-  }
-
-  // (c) A node with no tasks keeps a dock that is hidden.
-  {
-    const dockD = dockOf(D);
-    if (!dockD) {
-      problems.push(`node ${D} owns nothing but has no dock element at all`);
-    } else if (!hasClass(dockD, 'hidden') || itemsOf(dockD).length !== 0) {
-      problems.push(`node ${D} owns no background task but its dock is visible / not empty`);
-    }
-  }
-
-  // (d) A snapshot that no longer lists a node's job removes the row and hides
-  // that node's dock again (a delivered job must not leave a stale row behind).
-  dispatch({ type: 'backgrounds', tasks: [task(7, A, 'smoke-a'), task(8, B, 'smoke-b')] });
-  {
-    const dockC = dockOf(C);
-    const left = itemsOf(dockC).length;
-    if (!hasClass(dockC, 'hidden') || left !== 0) {
-      problems.push(`node ${C}'s dock kept ${left} item(s) after its job left the snapshot (expected a hidden dock)`);
-    }
-    if (itemsOf(dockOf(A)).length !== 1) {
-      problems.push(`node ${A}'s dock changed when another node's job left the snapshot`);
-    }
-  }
-
-  // The legacy nodeId-less shape renders into the view focus node's dock.
-  dispatch({ type: 'background', tasks: [task(11, undefined, 'smoke-legacy')] });
-  {
-    const legacyDock = dockOf(B);
-    const ids = itemsOf(legacyDock).map((item) => String((item.querySelector('.bg-id') || {}).textContent));
-    if (ids.indexOf('#11') < 0) {
-      problems.push(
-        `a legacy (nodeId-less) \`background\` message did not render into the view focus node's dock ` +
-          `(node ${B} shows ${JSON.stringify(ids)})`,
-      );
+    if (cards.has('sub-notice')) {
+      problems.push('the notification opened a card of its own — it must stay inside the owner node');
     }
   }
 }
@@ -685,3 +697,8 @@ if (problems.length > 0) {
 }
 
 console.log(`check-webview: OK — ${TURN_MESSAGES.length} messages, ${notes.join(', ')}.`);
+// Exit explicitly, the same way the failure path above does: the webview's own
+// token meter is a `setInterval` (media/main.js `tpsTimer`), and a green run
+// otherwise leaves it pending forever — the process would hang after printing OK
+// (which reads as "the checker is slow/stuck" to whoever ran it from a shell).
+process.exit(0);

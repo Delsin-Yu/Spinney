@@ -13,7 +13,7 @@
  * Host by a plain node script (require the compiled `out/chat/sessionTitles.js`).
  */
 import { ChatMessage } from '../agent/types';
-import { AgentSession, TitleSource, TreeNode, messageText } from './tree';
+import { AgentSession, TitleSource, TreeNode, isSidecar, messageText } from './tree';
 
 /** Hard cap on a stored title (the sidebar / panel budget). */
 export const AUTO_TITLE_MAX_CHARS = 40;
@@ -43,15 +43,15 @@ export const TITLE_BATCH_SYSTEM_PROMPT = [
   '只输出这些行，不要输出解释、不要小标题、不要空行。',
 ].join('\n');
 
-/** Main-agent turns that carry a conversation (sub-agent sidecars excluded). */
+/** Main-agent turns that carry a conversation (sidecar cards excluded). */
 export function turnCount(session: AgentSession): number {
-  return Object.values(session.nodes).filter((n) => n.kind !== 'agent' && n.messages.length > 0).length;
+  return Object.values(session.nodes).filter((n) => !isSidecar(n) && n.messages.length > 0).length;
 }
 
 /** True when at least one main turn has a non-empty user prompt to name from. */
 export function hasNameableContent(session: AgentSession): boolean {
   return Object.values(session.nodes).some(
-    (n) => n.kind !== 'agent' && n.messages.some((m) => m.role === 'user' && !!messageText(m.content).trim()),
+    (n) => !isSidecar(n) && n.messages.some((m) => m.role === 'user' && !!messageText(m.content).trim()),
   );
 }
 
@@ -127,10 +127,10 @@ function clipLine(text: string, limit: number): string {
   return one.length > limit ? `${one.slice(0, limit)}…` : one;
 }
 
-/** Main-agent turns in creation order (sub-agent sidecars excluded). */
+/** Main-agent turns in creation order (sidecar cards excluded). */
 function orderedTurns(session: AgentSession): TreeNode[] {
   return Object.values(session.nodes)
-    .filter((n) => n.kind !== 'agent' && n.messages.length > 0)
+    .filter((n) => !isSidecar(n) && n.messages.length > 0)
     .sort((a, b) => a.createdAt - b.createdAt);
 }
 

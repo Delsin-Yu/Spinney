@@ -58,8 +58,20 @@ export interface TreeNode {
   createdAt: number;
   /** Optional user-resized card bounds (px). Absent ⇒ size from CSS defaults. */
   customSize?: { w: number; h: number };
-  /** 'agent' = a sub-agent branch (display-only sidecar; not in the API path). */
-  kind?: 'turn' | 'agent';
+  /**
+   * 'agent' = a sub-agent branch, 'bg' = a background terminal's card. Both are
+   * **display-only sidecars**: they hang off to the right of their parent and are
+   * never part of the API path / checkout chain.
+   */
+  kind?: 'turn' | 'agent' | 'bg';
+  /**
+   * A sidecar's completion signal has reached its reader (the parent turn saw the
+   * tool result / the injected notice). Rendered as a `Delivered` badge; a turn
+   * node never uses it. Set for both kinds: a background job is delivered when its
+   * notice is injected, a sub-agent when its result is handed over (sync tool
+   * result, async notice, or a resumed follow-up).
+   */
+  delivered?: boolean;
   /** 0 = main agent turn, 1 = sub-agent, 2 = sub-sub-agent (max depth). */
   agentDepth?: number;
   agentStatus?: 'running' | 'done' | 'killed' | 'error';
@@ -69,6 +81,16 @@ export interface TreeNode {
   agentWrite?: boolean;
   /** Absolute path of this sub-agent's JSONL transcript dump (when enabled). */
   agentTranscript?: string;
+  /** kind === 'bg': the session-local background task this card mirrors. */
+  bgTaskId?: number;
+  /** kind === 'bg': the command line (kept so the card survives a restart). */
+  bgCommand?: string;
+  /** kind === 'bg': terminal-state snapshot, written when the process ends. */
+  bgExitCode?: number | null;
+  bgKilled?: boolean;
+  bgElapsedMs?: number;
+  /** kind === 'bg': last ~800 chars of output, captured at the terminal state. */
+  bgOutputTail?: string;
 }
 
 /**
@@ -227,17 +249,18 @@ export function attachNode(session: AgentSession, node: TreeNode): void {
   session.nodes[node.id] = node;
   const parent = node.parentId ? session.nodes[node.parentId] : undefined;
   if (parent) {
-    // A turn continuation is the main-chain spine: keep it before any sub-agent
-    // (kind === 'agent') siblings, so sub-agents branch off to the side instead
-    // of being confused with a conversational branch.
-    if (node.kind === 'agent') {
+    // A turn continuation is the main-chain spine: keep it before any sidecar
+    // (`kind === 'agent'` sub-agent / `kind === 'bg'` background card) sibling, so
+    // sidecars branch off to the side instead of being confused with a
+    // conversational branch.
+    if (isSidecar(node)) {
       parent.children.push(node.id);
     } else {
-      const firstAgent = parent.children.findIndex((c) => session.nodes[c]?.kind === 'agent');
-      if (firstAgent === -1) {
+      const firstSidecar = parent.children.findIndex((c) => isSidecar(session.nodes[c]));
+      if (firstSidecar === -1) {
         parent.children.push(node.id);
       } else {
-        parent.children.splice(firstAgent, 0, node.id);
+        parent.children.splice(firstSidecar, 0, node.id);
       }
     }
   } else {
@@ -276,13 +299,14 @@ export function pathIds(session: AgentSession, nodeId: string | null): string[] 
 }
 
 /** The flat API history of a branch: every turn node's messages along the path.
- * Agent (sub-agent) nodes are display-only sidecars — their internal conversation
- * is a separate history and must never be concatenated into the parent's. */
+ * Sidecar nodes (`kind === 'agent'` sub-agents, `kind === 'bg'` background cards)
+ * are display-only — a sub-agent's conversation is a separate history and must
+ * never be concatenated into the parent's, and a background card has none. */
 export function pathMessages(session: AgentSession, nodeId: string | null): ChatMessage[] {
   const out: ChatMessage[] = [];
   for (const id of pathIds(session, nodeId)) {
     const node = session.nodes[id];
-    if (node && node.kind !== 'agent') {
+    if (node && !isSidecar(node)) {
       out.push(...node.messages);
     }
   }
@@ -300,21 +324,30 @@ export function nodeUsage(node: TreeNode): Usage | undefined {
   return undefined;
 }
 
-/** Follow the newest child chain from `fromId` down to a leaf. Sub-agent
- * (`kind === 'agent'`) sidecars are skipped: they are display-only and must
- * never become the checked-out node (their history is not in the API path). */
+/** Follow the newest child chain from `fromId` down to a leaf. Sidecars
+ * (`kind === 'agent'` / `'bg'`) are skipped: they are display-only and must never
+ * become the checked-out node (their history is not in the API path). */
 export function leafOf(session: AgentSession, fromId: string | null): string | null {
   const seen = new Set<string>();
   let cur = fromId;
   while (cur && session.nodes[cur] && !seen.has(cur)) {
     seen.add(cur);
-    const kids = session.nodes[cur].children.filter((id) => session.nodes[id]?.kind !== 'agent');
+    const kids = session.nodes[cur].children.filter((id) => !isSidecar(session.nodes[id]));
     if (kids.length === 0) {
       return cur;
     }
     cur = kids[kids.length - 1];
   }
   return cur && session.nodes[cur] ? cur : null;
+}
+
+/**
+ * A display-only sidecar card (`'agent'` sub-agent / `'bg'` background terminal).
+ * Sidecars hang to the right of their parent, are never checked out, never
+ * contribute to the API path, and never count as a conversational branch.
+ */
+export function isSidecar(node: TreeNode | undefined): boolean {
+  return node?.kind === 'agent' || node?.kind === 'bg';
 }
 
 /**
@@ -411,7 +444,21 @@ export function pruneSession(session: AgentSession): void {
     if (node.kind === 'agent' && node.agentStatus === 'running') {
       node.agentStatus = 'killed';
     }
-    if (node.messages.length === 0 && node.displayItems.length === 0 && node.children.length === 0) {
+    // A background card survives a restart as a record (D1), but its process does
+    // not: the hub is in-memory and tore every job down on dispose. Never leave a
+    // card claiming to run, and never leave one waiting for a notice that can no
+    // longer be delivered.
+    if (node.kind === 'bg') {
+      node.delivered = true;
+    }
+    // A sidecar with no content at all is a placeholder from a half-built state;
+    // a `bg` card is kept as long as it mirrors a real job (`bgTaskId`).
+    if (
+      node.messages.length === 0 &&
+      node.displayItems.length === 0 &&
+      node.children.length === 0 &&
+      node.bgTaskId === undefined
+    ) {
       delete session.nodes[node.id];
     }
   }
@@ -501,13 +548,20 @@ function normalizeTreeSession(raw: AgentSession): AgentSession {
         ? { w: node.customSize.w, h: node.customSize.h }
         : undefined,
     };
-    n.kind = node.kind === 'agent' ? 'agent' : undefined;
+    n.kind = node.kind === 'agent' ? 'agent' : node.kind === 'bg' ? 'bg' : undefined;
+    n.delivered = node.delivered === true ? true : undefined;
     n.agentDepth = typeof node.agentDepth === 'number' ? node.agentDepth : undefined;
     n.agentStatus = (node.agentStatus as TreeNode['agentStatus']) ?? undefined;
     n.agentSummary = typeof node.agentSummary === 'string' ? node.agentSummary : undefined;
     n.agentModel = typeof node.agentModel === 'string' ? node.agentModel : undefined;
     n.agentWrite = typeof node.agentWrite === 'boolean' ? node.agentWrite : undefined;
     n.agentTranscript = typeof node.agentTranscript === 'string' ? node.agentTranscript : undefined;
+    n.bgTaskId = typeof node.bgTaskId === 'number' ? node.bgTaskId : undefined;
+    n.bgCommand = typeof node.bgCommand === 'string' ? node.bgCommand : undefined;
+    n.bgExitCode = typeof node.bgExitCode === 'number' || node.bgExitCode === null ? node.bgExitCode : undefined;
+    n.bgKilled = typeof node.bgKilled === 'boolean' ? node.bgKilled : undefined;
+    n.bgElapsedMs = typeof node.bgElapsedMs === 'number' ? node.bgElapsedMs : undefined;
+    n.bgOutputTail = typeof node.bgOutputTail === 'string' ? node.bgOutputTail : undefined;
     session.nodes[id] = n;
   }
   pruneSession(session);

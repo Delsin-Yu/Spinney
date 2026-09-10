@@ -29,10 +29,12 @@
 - **Stop**: stops only the run of the focused node (and its own sub-agents). Other runs continue.
 - **Model / thinking effort**: **per session** (each tab has its own selection, persisted with
   the session; settings provide the default for new sessions).
-- **Background terminals**: no standalone panel. They render **inside the owning node's card**
-  (bottom dock). Deleting a branch / clearing / deleting a session that owns *running* jobs
-  asks for a modal confirmation and then kills them. Task ids are **session-local** (a task id
-  is only resolvable inside its own session).
+- **Background terminals**: no standalone panel and no dock. A job renders as a `kind:'bg'`
+  sidecar card beside the node that spawned it (the same right-hand grid as the sub-agent
+  windows), and its completion notice is injected **into that node's own transcript** (a
+  `.bgnotify` block) — no new node, no view focus move. Deleting a branch / clearing / deleting
+  a session that owns *running* jobs asks for a modal confirmation and then kills them. Task
+  ids are **session-local** (a task id is only resolvable inside its own session).
 - **Control plane**: no back-compat obligation — pick the cleanest shape (`hvsc` + this repo's
   own tooling are updated together).
 
@@ -48,12 +50,12 @@ ChatViewProvider (coordinator, 1 per window)
 SessionRuntime (1 per session)
 ├─ session (tree) + activeNodeId = VIEW focus
 ├─ runs: Map<nodeId, TurnRun>          (P1: at most one; P3: many)
-├─ subAgentPool (per-session budget) / runningSubAgents / notice queues
-├─ background: Map<nodeId, BackgroundRegistry> + id index (P2)
-├─ pending injected turns (background notices + hop returns), per session
+├─ subAgentPool (per-session budget) / runningSubAgents
+├─ background: Map<nodeId, BackgroundRegistry> + id index (P2) + bgNodes (task → card)
+├─ completion signals: Map<nodeId, SignalNotice[]> (hop returns: RuntimeHost.queueHopReturn)
 └─ model / thinkingEffort (P4)
 
-TurnRun (1 per send = 1 new node)
+TurnRun (1 per send = 1 new node; an injected completion-signal turn reuses its node, fresh:false)
 ├─ nodeId + the node it appends to (turn basis, independent of the view)
 ├─ agent: Agent                        (P1: session-level agent reused; P3: dedicated per run)
 ├─ stream coalescing buffers + live tool deltas
@@ -68,7 +70,14 @@ TurnRun (1 per send = 1 new node)
 - A running turn is bound to **its own node** (`run.nodeId`) and writes into **that node's**
   `displayItems` / `messages`. It never follows the view.
 - Consequence: `checkoutNode` must **not** swap the history of a live run. Re-basing the
-  agent's history happens at `beginTurn` (a new child of the view focus), the only safe moment.
+  agent's history happens at `beginTurn` (a new child of the view focus) and at
+  `beginInjectedTurn` (the **same** node, when a queued completion signal finds it idle) — both
+  only bind a worker whose node has no live run, which is the safe moment in each case.
+- A completion signal is therefore delivered one of two ways, and neither follows the view:
+  injected into the node's **running** turn at its next tool boundary (`Agent.setSignalHandler`,
+  `agent.ts:625-634`), or as an injected turn on that same node when it is idle
+  (`drainSignals` → `beginInjectedTurn`, `fresh:false`). It never creates a node under the owner
+  and never moves `session.activeNodeId`.
 - Therefore `mainStreamNodeId()` is replaced by explicit routing: **every** streaming message
   carries `nodeId`. The webview must never infer the stream target from the view.
 
@@ -114,7 +123,7 @@ nodeWorkers: Map<nodeId, { agent: Agent; tools: ToolRegistry }>
 | message | shape | notes |
 | --- | --- | --- |
 | `state` | `{ sessionId, busy, status, runningNodes: string[] }` | `busy` = any run in the session; `runningNodes` = nodes with a live run. Composer shows Stop iff `runningNodes.includes(viewFocusId)`. |
-| `tree` | `{ activeId, viewId, rootId, nodes[] }` | `activeId` = stream target; `viewId` = view focus. |
+| `tree` | `{ activeId, viewId, rootId, nodes[] }` | `activeId` = stream target; `viewId` = view focus. Each node carries `kind` (`'turn' \| 'agent' \| 'bg'`), `delivered` (sidecars only) and, for a `kind:'bg'` card, its terminal snapshot (`bgTaskId` / `bgCommand` / `bgExitCode` / `bgKilled` / `bgElapsedMs` / `bgOutputTail`) so the card re-renders without asking the in-memory hub. |
 | `path` | `{ ids, nodes[] }` | the **view** path. |
 | `nodeUpdate` | `{ id, status, title, usage }` | unchanged. |
 | `panTo` | `{ id }` | unchanged (host pans the view, not the stream target). |
@@ -123,8 +132,8 @@ nodeWorkers: Map<nodeId, { agent: Agent; tools: ToolRegistry }>
 | `toolCallDelta` | `{ nodeId, index, id, name, args }` | idem. |
 | `toolStart` / `toolEnd` | `{ nodeId, ... }` | idem. |
 | `done` / `interrupted` / `error` | `{ nodeId, ... }` | idem: clears that node's live tool cards / tps meter. |
-| `backgrounds` | `{ tasks: Array<Task & { nodeId }> }` | replaces `background`: flat list, each task tagged with its owning node; the webview groups by `nodeId` and renders each node's dock. `#bg-panel` is gone. |
-| `backgroundNotice` | `{ nodeId, item }` | the card is appended to that node. |
+| `backgrounds` | `{ tasks: Array<Task & { nodeId, cardNodeId, pendingDelivery }> }` | replaces `background`: flat list, each task tagged with its owning node **and** with the `kind:'bg'` card that mirrors it (`cardNodeId`, null when the branch is gone). The webview keys it by `task.id` and patches that card instead of grouping by `nodeId`; `#bg-panel` and the in-card dock are gone. |
+| `backgroundNotice` | `{ nodeId, item }` | appended inside that node's card as a `.msg.bgnotify` block (`item.kind: 'background' \| 'subagent'` picks the `BG` / `SUB` badge). Injected at a tool boundary of a running turn, so the webview finalizes the streaming answer before it adds the block. |
 | `status`, `notice`, `config`, `context`, `sessionStats`, `balance`, `user`, `imagePicked`, `reset` | unchanged | `reset` is per-tab (each tab is its own webview). |
 
 ### 3.2 webview → host
@@ -195,11 +204,12 @@ Each phase ends with: `npm run compile` clean → `npm run check:webview` clean 
   *Accept*: two sessions streaming simultaneously into their own tabs; switching tabs while
   one runs does not disturb it; checkout while a run streams keeps the run's messages
   (no `[slice]` line in the output channel, node history correct).
-- **P2 — node-local background + in-card dock**.
-  `BackgroundHub`, session-local ids, notice injected into the owning node (view untouched),
-  modal-confirm-then-kill on delete/clear, docks in the node card, `#bg-panel` removed.
-  *Accept*: two nodes each own jobs, shown in their own cards; a notice for node X arrives
-  even when the view sits on node Y.
+- **P2 — node-local background + flying job card**.
+  `BackgroundHub`, session-local ids, a `kind:'bg'` card beside the owning node (created by the
+  hub's `onRegistered` hook), the completion notice injected into the owning node's own turn,
+  modal-confirm-then-kill on delete/clear, `#bg-panel` and the in-card dock removed.
+  *Accept*: two nodes each own jobs, shown beside them in their own cards; a notice for node X
+  arrives in X's own transcript (no new node, no focus move) even when the view sits on node Y.
 - **P3 — branch-level concurrency**.
   `runs: Map<nodeId, TurnRun>` with a dedicated agent per run, per-node Stop, per-node
   composer (Send vs Stop), per-node interrupt bookkeeping.
@@ -236,8 +246,9 @@ message landing in another session's transcript, duplicate session ids, …). Th
 Rules that keep a reboot verifiable (the self-driving loop):
 
 - `POST /wait-for-finish {holdMs}` arms a hold (`ChatViewProvider.isHeld()`), and **every** turn
-  start is refused while it is armed — `beginTurn` and `beginInjectedTurn` both gate on it,
-  injected background/sub-agent notice turns included. `/reload-window` itself refuses while a
+  start is refused while it is armed — `beginTurn` and `beginInjectedTurn` both gate on it, and
+  the completion-signal hook returns nothing while it is held (`runtime.ts:2502-2506`) — injected
+  background/sub-agent notice turns included. `/reload-window` itself refuses while a
   turn runs, so the hold is what closes the race: once idle, nothing new can start.
 - Restore the **focus before** the reboot: `wait-for-finish`'s `{sessionId, nodeId}` is what the
   daemon carries into `/continue`, so the window must already show the intended session/node.
