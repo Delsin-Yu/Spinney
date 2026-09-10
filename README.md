@@ -21,6 +21,7 @@ Open the **Agent Harness** icon in the Activity Bar, pick a session (or `Open Ch
 - **Drag a card's corner** to resize it (persisted per node); a wireframe previews the target and the tree re-resolves on mouse-up.
 - Tool calls & thinking are **folded by default** (with a one-line brief), configurable via `agentHarness.foldToolCalls` / `agentHarness.foldThinking`.
 - Streams tokens live into the active block; a per-card green light pins the scroll to the newest content while a turn runs, releases itself when the turn finishes, and can also be toggled by hand.
+- **Sub-agents** sit to the right of the card that spawned them, packed into an aligned lattice that grows **rightward** — at most 4 rows per column, then a new column — so a 12-way parallel `spawn_agents` fans out sideways instead of stretching the canvas into a long ribbon. A sub-agent's own sub-agents do the same beside *its* card.
 - The sidebar lists your **sessions** (titles + node count + busy state).
 
 ### 2. File & command tools

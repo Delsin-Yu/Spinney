@@ -59,7 +59,13 @@
   (not just `pos[a] = {x,y}`), so an agent node's own children (a depth-2 sub-agent spawned by a depth-1
   sub-agent) get their own positions and connectors. Otherwise its card collapses onto the origin and its
   connector is misplaced. The turn spine and the sidecar reservation are owned by the vendored engine: each
-  node's box is inflated by its sidecar block (`agentGap + blockW` wide, `max(cardH, blockH)` tall), so no
-  other card can overlap a window or sit between a parent card and its own sub-agents. `agentExpanded`
+  node's box is inflated by its sidecar grid (`agentGap + blockW` wide, `max(cardH, blockH)` tall), so no
+  other card can overlap a window or sit between a parent card and its own sub-agents. The grid is
+  **column-major with a bounded row count** (`agentMaxRows`, 4): rows/columns are separated by
+  `agentVGap` / `agentColGap` and row 0 sits `agentTopPad` below the card, which is what makes the
+  `cells` corridors card-free by construction — `main.js drawEdges()` routes every parent→sub-agent
+  connector through them (an orthogonal elbow), so no connector crosses a card either. Widening the grid
+  (`agentColGap` / `agentMaxRows`) without updating that routing table puts connectors on top of cards.
+  `agentExpanded`
   walks up the agent ancestors so a depth-2 sub-agent stays open beside its expanded depth-1 parent.
 

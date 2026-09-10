@@ -59,17 +59,27 @@ Hand-written (~90 lines, no collision resolution):
 
 1. split children into turn kids / agent kids (`kind === 'agent'`),
 2. for each node, lay out each agent subtree **recursively** with the same algorithm and
-   stack the windows into one block (block width = widest window, height = sum + gaps),
-3. build the engine tree over the turn spine with each node's box **inflated** by its block
+   pack the windows into one grid: **column-major**, at most `agentMaxRows` (4) rows per
+   column, a new column to the right per further window — rows aligned across columns and
+   columns aligned across rows, lattice lines anchored on the window cards, each column/row
+   reserving the largest card overhang (block width = Σ column reservations + gaps, height =
+   `agentTopPad` + Σ row reservations + gaps),
+3. build the engine tree over the turn spine with each node's box **inflated** by its grid
    (`agentGap + blockW` wide, `max(cardH, blockH)` tall) — the engine then reserves the
    sidecar rectangle itself,
-4. place each block inside that reserved box at the parent card's right edge.
+4. place each grid inside that reserved box at the parent card's right edge, and hand the
+   webview the `cells` routing table (`busX` / `chanX` / `corrY`) so `media/main.js
+   drawEdges()` can route each connector through the row/column gaps as an orthogonal elbow
+   — every segment card-free by construction, which is what removes the connector crossings
+   that sank the earlier side-by-side trial (see `../bench/nlttl-benchmark.md` REVISION 3).
 
 Overlap-freedom *and* non-interposition follow by construction: the block lives inside the
 parent's exclusive rectangle, so no card can overlap a window or sit between a parent card
-and its own sub-agents. Verified on 20 synthetic scenarios (`verify-tree.js`) and on all 7
-persisted sessions that contain agent nodes (`analyze-interposition.js check ALL`): 0
-interpositions, 0 foreign connector crossings. A post-hoc packing variant (lay out first,
-pack windows into free space afterwards) is more compact on paper but measured 26
+and its own sub-agents. Verified on 24 synthetic scenarios (`verify-tree.js`, incl. a
+`parallel` profile with up to 12 windows per parent) and on all 7 persisted sessions that
+contain agent nodes (`analyze-interposition.js check ALL`): 0 overlaps, 0 interpositions,
+0 connector crossings — foreign *and* own-group (the corridors are card-free), plus 0
+lattice violations (`gridBad` in `grid-sweep.js`). A post-hoc packing variant (lay out
+first, pack windows into free space afterwards) is more compact on paper but measured 26
 interpositions / 26 crossings on the real 109-node session — see
 `../bench/nlttl-benchmark.md` REVISION 2.

@@ -126,7 +126,15 @@
   function with no DOM; `main.js` positions cards with it. The tidy-tree geometry
   is delegated to the vendored, pinned engine (below); this file only maps our two
   child kinds onto it (turn = below, agent = right) and reserves each node's
-  sidecar block inside the node's engine box.
+  sidecar **grid** inside the node's engine box. A node's agent children are packed
+  **column-major** into an aligned lattice — at most `agentMaxRows` (4) rows per
+  column, a new column to the right for every further window — with the lattice
+  lines anchored on the window *cards* (not on their subtree boxes, which the engine
+  centres its card over) and each column/row reserving the largest card overhang, so
+  every card in a column shares an x and every card in a row shares a y. Returns, in
+  addition to `pos`/`width`/`height`, a `cells` **routing table** (per agent child:
+  `busX` / `chanX` / `corrY`, the card-free corridors `main.js` draws the connectors
+  through). `agentMaxRows: 1` reproduces the old single-column ribbon.
 - `media/vendor/non-layered-tidy-tree-layout/` — **vendored, pinned** tree layout
   engine (`@2.0.2`, MIT): `dist/` (the file the webview loads), `src/` (readable
   source for offline re-audit), `LICENSE`, `PROVENANCE.md` (hashes + audit record).
