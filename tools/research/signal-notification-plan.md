@@ -86,6 +86,11 @@ node tools/harness-test.mjs health sessions concurrency navigation selftest
 仍在、`delivered` 仍为真、终态快照（`bgTaskId`/`bgExitCode`/`bgElapsedMs`/`bgOutputTail`）完好、
 宿主消失时仍在跑的卡片不再自称 running、两类 sidecar 都不进 `pathMessages` 与 `leafOf`。12/12 通过。
 
+**跨 reload 实测**：07:19 的一次真实窗口 reload 之后（扩展宿主换成新实例 `pid-46892`），
+`list_nodes` 仍列出三张 `[bg, delivered, done]` 卡片
+（`mtw5717gl6xls7` / `mtw571l39z95rg` / `mtw59t92q7zbsn`）——即 bg 卡片、`delivered` 标志与终态快照
+都从磁盘正确重建，`list_nodes` 的 `bg` 标记也来自 `serialize`/`pruneSession` 的新字段。
+
 ### 遗留问题（本次未修）
 
 1. **卡住的子代理会永久阻塞窗口 reload，且控制面无法杀掉子代理**：`/reload-window` 在有子代理
