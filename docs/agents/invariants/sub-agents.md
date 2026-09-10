@@ -15,10 +15,11 @@
   independent, reading-heavy parts — without the nudge, read-only sub-agents never
   volunteer to decompose. `mode:'sync'` blocks and returns `{ results }`;
   `mode:'async'` returns
-  `{ spawned, async:true, ids }` immediately and the outcome is delivered as **one** injected notice
-  when the batch settles. An async **resume** whose owner is a sub-agent is routed through
-  `queueSubAgentChildNotice` (queued for that sub-agent's next finish, or auto-resumed) instead of the
-  main agent's notice queue.
+  `{ spawned, async:true, ids }` immediately and the whole batch settles into **one** completion
+  signal for the parent node (`onAsyncBatchDone` → `queueSubAgentSignal`, `runtime.ts:2029`). A
+  signal is delivered either at the parent turn's **next tool boundary** (injected into the running
+  turn, so the model reacts on its next hop) or, when the parent is idle, as an injected turn on
+  that same node — never as a new node.
 - `send_agent_message({ id, message, write?, model?, mode })` resumes a **finished** sub-agent (the
   `id` from a prior `spawn_agents`) with a follow-up `message`. `sync` blocks and returns the resumed
   result; `async` returns immediately and delivers the result as a notice. `model` is validated with
@@ -27,6 +28,13 @@
   history and `pathMessages` (in `tree.ts`) skips it, so it never leaks into the parent's API path. On
   finish the sub-agent's conversation (minus the synthesized system prompt) is stored in `node.messages`
   so a follow-up can continue it, even across a restart.
+- **`Delivered`:** a sidecar node carries `delivered` (`tree.ts:75`) once its outcome reached its
+  reader, which is what the card's `Delivered` badge shows (`main.js:896-910`). A `sync`
+  `spawn_agents` / `send_agent_message` hands the summary back as the caller's tool result, so
+  `finish` sets it directly (`runtime.ts:1905-1913`, `runtime.ts:1777-1784`); an async batch sets it
+  when its notice is actually delivered (`settleSignals`, `runtime.ts:2679-2695`, followed by a
+  `postTree()`). A sub-agent that was still running when the host went away is normalized to
+  `killed` on load (`tree.ts:444-446`) and stays as a record card.
 - **Transcript dumps (`node.agentTranscript`):** because the caller can only ever see the sub-agent's
   summary, `runSubAgent`'s `finish` also writes the whole conversation to disk as **JSONL**
   (`src/chat/transcript.ts`, `kind: 'subagent'`) and returns the absolute path: `spawn_agents` sync
@@ -38,9 +46,14 @@
   grep it. A resume **overwrites** the same `<nodeId>.jsonl` with the extended conversation. Folder,
   config and the shared search surface are described in "Transcripts" above.
 - Async results for a **sub-agent parent** (a depth-1 sub-agent that spawned depth-2 children in async
-  mode) are routed by `queueSubAgentChildNotice`: if the parent is still running the notice is queued and
-  delivered at its next finish (`flushSubAgentChildNotices`); if it already finished it is auto-resumed
-  with the notice — the mirror of the main agent's async delivery (`subAgentNoticeQueue`).
+  mode) take the same path as the main agent's (D3): `queueSubAgentSignal` (`runtime.ts:2029-2054`)
+  queues the signal under the parent node when the parent is live — the parent's own
+  `Agent.setSignalHandler` hook (`runtime.ts:1974`) then injects it at its next tool boundary, so a
+  depth-1 sub-agent learns about its depth-2 children **mid-turn**, exactly like the main agent — and
+  resumes the parent with the notice when it already finished (its history is not in the API path, so
+  it cannot receive an injected turn; the idle drain does the same, `runtime.ts:2554-2566`). Either way
+  the notice lands inside the parent node's own card as a `.bgnotify` block (`renderSignalCards`,
+  `runtime.ts:2646-2677`) — a child's completion never opens a node under it.
 - A sub-agent branch is checked-out as **read-only** and the composer pane is **hidden** while such a node
   is focused (`setComposerVisible(false)` in `setActiveLeaf`); only the parent drives it via
   `spawn_agents` / `send_agent_message`. `onKillAgent` aborts a running sub-agent from its card's ✕.
@@ -58,7 +71,10 @@
 - **Layout invariant (`media/tree.js`):** agent windows must be laid out **recursively** — `layoutSub(a)`
   (not just `pos[a] = {x,y}`), so an agent node's own children (a depth-2 sub-agent spawned by a depth-1
   sub-agent) get their own positions and connectors. Otherwise its card collapses onto the origin and its
-  connector is misplaced. The turn spine and the sidecar reservation are owned by the vendored engine: each
+  connector is misplaced. The same grid holds the `kind:'bg'` background job cards: the layout treats both
+  sidecar kinds alike (`isSidecarKind`, `tree.js:53-56`; `agentKids`, `tree.js:99-101`), so a job occupies
+  the next free lattice cell exactly like a sub-agent window, with no second geometry. The turn spine and
+  the sidecar reservation are owned by the vendored engine: each
   node's box is inflated by its sidecar grid (`agentGap + blockW` wide, `max(cardH, blockH)` tall), so no
   other card can overlap a window or sit between a parent card and its own sub-agents. The grid is
   **column-major with a bounded row count** (`agentMaxRows`, 4): rows/columns are separated by

@@ -20,18 +20,22 @@
   (`run.nodeId`), keys runs by node (`runs: Map<nodeId, TurnRun>`), keeps one node
   worker (its own `Agent` + `ToolRegistry`) per node (`workerFor`), puts an explicit
   `nodeId` on every streaming message, bookkeeps interrupts per node, holds the
-  per-session model/effort, and injects background-completion notices. Reaches the
-  provider through the narrow `RuntimeHost`.
+  per-session model/effort, and delivers the completion signals (background terminals /
+  async sub-agents) — a `kind:'bg'` card per job (`onBackgroundRegistered`) plus the
+  per-node `signals` queue, handed to a running turn at its next tool boundary or
+  injected into the idle owning node. Reaches the provider through the narrow `RuntimeHost`.
 - `src/chat/backgroundHub.ts` — `BackgroundHub` (one per window): background terminals
-  keyed by `(session, node)`, session-local task ids, an `id → owner` index, and the
+  keyed by `(session, node)`, session-local task ids, an `id → owner` index, the
+  `onRegistered` / `onUpdated` / `onFinish` hooks, and the
   removal lifecycles (`removeNode` / `removeSession` / `killAll`); exposes the
   `BackgroundAccess` the tools register through. Pure module, no `vscode`.
 - `src/chat/SessionsProvider.ts` — the native sidebar `TreeDataProvider` listing
   session titles; it re-reads items from `ChatViewProvider` on every refresh.
 - `src/chat/tree.ts` — the Chat Tree data model: `TreeNode` / `AgentSession`,
   path assembly (`pathIds` / `pathMessages`), `attachNode`, `pruneSession`,
-  branch removal (`branchIds` / `detachBranch`), and the v1→v2 state migration.
-  Pure data layer, no VS Code UI.
+  branch removal (`branchIds` / `detachBranch`), the `isSidecar` predicate (a
+  sub-agent `kind:'agent'` window vs. a background job `kind:'bg'` card — both
+  display-only sidecars) and the v1→v2 state migration. Pure data layer, no VS Code UI.
 - `src/chat/sessionTitles.ts` — automatic session titles: the gates
   (`shouldAutoTitle`: locked / cooldown / growth), the conversation digest, the
   naming prompts (single + batched), `sanitizeTitle` / `parseBatchTitles`, and the
@@ -59,7 +63,9 @@
   `health`, `sessions`, `concurrency`, `navigation`, `background`, `branch`,
   `selftest`). Dev tooling: `.vscodeignore` excludes `tools/**`, so it is never shipped.
 - `src/agent/agent.ts` — the agent loop: message sanitizing, interrupt/rollback,
-  model/effort switching, and the interception of the provider-orchestrated tools
+  model/effort switching, the completion-signal injection hook
+  (`setSignalHandler`; consulted after each whole tool batch, like the `read_image`
+  image block) and the interception of the provider-orchestrated tools
   (`spawn_*` / `send_*` / `hop_session` / `list_nodes` / `rename_session` /
   `read_image`). The prompt text is **not** here — see `prompt.ts`.
 - `src/agent/prompt.ts` — **the system prompt**: both templates, the
@@ -112,21 +118,24 @@
   `harnessLog()` writes a line to the same channel without the `[perf]` prefix
   (used by the prompt-template guard).
 - `media/main.js` — webview client (tree rendering, pan/zoom, streaming into the
-  active node, composer, streaming meter, live tool drafts, drag-to-resize cards).
+  active node, composer, streaming meter, live tool drafts, drag-to-resize cards,
+  background job cards + `.bgnotify` notification blocks).
   Canvas gestures live in one block near the end: LMB/MMB drag pans by offset,
   RMB-hold autoscroll-pans towards the cursor (browser middle-click semantics,
   with an origin marker and the `all-scroll` cursor), ctrl+wheel zooms.
   The composer is the
   active node's input dock: `setActiveLeaf` moves `#composer` into the
   checked-out card's bottom. It has no other home — with an empty session the
-  placeholder card hosts it, and with a focused sub-agent branch (or no active
-  node) the pane is **hidden entirely** (`setComposerVisible(false)`); there is
+  placeholder card hosts it, and with a focused sidecar card (a sub-agent window or
+  a background job card — `isSidecarKind`, `main.js:111`) or no active
+  node the pane is **hidden entirely** (`setComposerVisible(false)`); there is
   no floating/docked fallback. `--cs` follows the host card's width.
 - `media/tree.js` — the Chat Tree layout algorithm (`window.treeLayout`), a pure
   function with no DOM; `main.js` positions cards with it. The tidy-tree geometry
   is delegated to the vendored, pinned engine (below); this file only maps our two
-  child kinds onto it (turn = below, agent = right) and reserves each node's
-  sidecar **grid** inside the node's engine box. A node's agent children are packed
+  child kinds onto it (turn = below, sidecar = right, where a sidecar is a
+  `kind:'agent'` sub-agent window or a `kind:'bg'` job card) and reserves each node's
+  sidecar **grid** inside the node's engine box. A node's sidecar children are packed
   **column-major** into an aligned lattice — at most `agentMaxRows` (4) rows per
   column, a new column to the right for every further window — with the lattice
   lines anchored on the window *cards* (not on their subtree boxes, which the engine
@@ -140,7 +149,8 @@
   source for offline re-audit), `LICENSE`, `PROVENANCE.md` (hashes + audit record).
   Not an npm dependency; never update it in place — see
   `docs/agents/invariants/vendored-deps.md`.
-- `media/style.css` — chat UI styling (incl. tree node cards / toolbar). Every
+- `media/style.css` — chat UI styling (incl. tree node cards / toolbar, the
+  `kind:'bg'` job card and the `.bgnotify` / `Delivered` badges). Every
   size inside `#composer` is `calc(<design px> * var(--cs))` so the input dock's
   controls and fonts scale with its host card.
 - `media/markdown-it.min.js` — vendored markdown renderer.

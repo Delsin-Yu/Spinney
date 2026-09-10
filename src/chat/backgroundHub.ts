@@ -38,6 +38,12 @@ export interface BackgroundHubHooks {
   onUpdated?: (owner: BackgroundOwner) => void;
   /** A task of this owner transitioned to finished (deliver the notice). */
   onFinish?: (owner: BackgroundOwner, task: BackgroundTask) => void;
+  /**
+   * A new job was registered for this owner: the coordinator creates the job's
+   * card (a `kind: 'bg'` sidecar node beside the owning node). Called once per
+   * job, synchronously from {@link BackgroundHub.register}.
+   */
+  onRegistered?: (owner: BackgroundOwner, task: BackgroundTask) => void;
 }
 
 /** What the tools get: the owner they register into + the hub they resolve ids in. */
@@ -94,6 +100,11 @@ export class BackgroundHub {
     const id = this.mintId(owner.sessionId);
     this.registryFor(owner).register(handle, command, cwd, notifyAgent, id);
     this.ownerIndex(owner.sessionId).set(id, owner);
+    const task = this.findRegistry(owner.sessionId, owner.nodeId)?.get(id);
+    if (task) {
+      // The coordinator turns this into the job's card (`kind: 'bg'` sidecar).
+      this.hooks.onRegistered?.(owner, task);
+    }
     return id;
   }
 

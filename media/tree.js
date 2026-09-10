@@ -3,7 +3,8 @@
  *
  * Two kinds of children, two directions:
  *   - turn children hang BELOW their parent (the conversation spine),
- *   - agent (sub-agent) children sit to the RIGHT of the parent card, packed into
+ *   - sidecar children — sub-agent windows (`kind: 'agent'`) and background job
+ *     cards (`kind: 'bg'`) — sit to the RIGHT of the parent card, packed into
  *     an aligned COLUMN-MAJOR GRID: at most `agentMaxRows` rows per column, and
  *     every further window opens a new column to the right —
  *     X0Y0..X0Y3, X1Y0..X1Y3, X2Y0.. — so "heavily parallel" work fans out
@@ -49,6 +50,11 @@
  * Exposed as `window.treeLayout`.
  */
 (function () {
+  /** A display-only sidecar card: a sub-agent window or a background job card. */
+  function isSidecarKind(kind) {
+    return kind === 'agent' || kind === 'bg';
+  }
+
   const DEFAULTS = {
     nodeW: 320,
     hGap: 48,
@@ -88,9 +94,11 @@
     const widths = o.widths || {};
     const size = (id) => ({ w: widths[id] || o.nodeW, h: heights[id] || 120 });
     const kidsOf = (id) => (nodesById[id] && nodesById[id].children) || [];
-    const isAgent = (id) => !!nodesById[id] && nodesById[id].kind === 'agent';
-    const turnKids = (id) => kidsOf(id).filter((c) => !!nodesById[c] && !isAgent(c));
-    const agentKids = (id) => kidsOf(id).filter((c) => !!nodesById[c] && isAgent(c));
+    // Sidecars: sub-agent windows (`kind: 'agent'`) and background job cards
+    // (`kind: 'bg'`). Both hang to the RIGHT of their parent, in the same lattice.
+    const isSidecar = (id) => !!nodesById[id] && isSidecarKind(nodesById[id].kind);
+    const turnKids = (id) => kidsOf(id).filter((c) => !!nodesById[c] && !isSidecar(c));
+    const agentKids = (id) => kidsOf(id).filter((c) => !!nodesById[c] && isSidecar(c));
 
     if (!nodesById[rootId]) {
       return { pos: {}, cells: {}, width: o.nodeW + o.pad * 2, height: 120 + o.pad * 2 };

@@ -248,6 +248,17 @@ export class Agent {
   /** Provider hook that renames a session for the `rename_session` tool. */
   private renameSessionHandler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null =
     null;
+  /**
+   * Provider hook that returns the completion signals (background terminal /
+   * async sub-agent) this node's turn should inject **now**. It is consulted at
+   * every tool boundary — after the whole tool batch of one assistant round, so
+   * the `assistant(tool_calls) -> tool(...)` window stays intact — and the
+   * returned texts are pushed as `user` messages right before the next request,
+   * exactly like the `read_image` image block. A non-empty result therefore
+   * extends the running turn by one round; the model sees the signal on its very
+   * next hop instead of at the end of the turn.
+   */
+  private signalHandler: (() => string[]) | null = null;
   /** Whether `spawn_readonly_agents` is exposed (read-only agents only). */
   private canSpawnReadOnly = false;
   /** Whether this agent may spawn sub-agents (a depth-2 sub-agent may not). */
@@ -320,6 +331,17 @@ export class Agent {
     handler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null,
   ): void {
     this.renameSessionHandler = handler;
+  }
+
+  /**
+   * Set the provider hook that delivers queued completion signals (a finished
+   * background terminal / async sub-agent) into a **running** turn, at its next
+   * tool boundary. The hook returns the texts to inject; it drains its own queue,
+   * so it is called at most once per assistant tool round and must be cheap and
+   * never throw.
+   */
+  setSignalHandler(handler: (() => string[]) | null): void {
+    this.signalHandler = handler;
   }
 
   /** Allow/deny this agent from hopping to a fresh session (main agent only). */
@@ -599,6 +621,16 @@ export class Agent {
               throw new Error('interrupted');
             }
             await this.executeToolCall(assistant.tool_calls[i], signal, indices[i]);
+          }
+          // Completion signals (background terminals / async sub-agents) queue up
+          // while this turn runs. They are injected here — after the **whole**
+          // tool batch, so the assistant(tool_calls) -> tool(...) window stays
+          // intact (a foreign message inside it would make `sanitizeMessages`
+          // drop the block on the next resume), and before the next request, so
+          // the model reacts on its very next hop instead of at the turn's end.
+          // Same shape as the image block below.
+          for (const text of this.signalHandler?.() ?? []) {
+            this.messages.push({ role: 'user', content: text });
           }
           // Any read_image uploads now become a user content block so the model
           // can actually see them. Image content blocks are only valid in a user

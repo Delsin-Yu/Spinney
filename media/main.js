@@ -107,6 +107,25 @@
   let resizeRaf = null;
 
   // ---- Element helpers ----
+  /** True for the display-only sidecars: sub-agent windows and job cards. */
+  function isSidecarKind(kind) {
+    return kind === 'agent' || kind === 'bg';
+  }
+
+  /**
+   * Depth-first lookup of a plain class inside one element's own subtree. Used
+   * where "absent" must be observable (`querySelector` is forgiving in the offline
+   * webview checker's stub DOM, so a miss there is not a miss).
+   */
+  function byClass(root, name) {
+    for (const child of (root && root.children) || []) {
+      if (child.classList && child.classList.contains(name)) return child;
+      const nested = byClass(child, name);
+      if (nested) return nested;
+    }
+    return null;
+  }
+
   function el(tag, className, text) {
     const node = document.createElement(tag);
     if (className) node.className = className;
@@ -677,7 +696,9 @@
     const node = el('div', 'msg bgnotify');
     node.dataset.kind = 'background';
     const head = el('div', 'bgnotify-head');
-    head.appendChild(el('span', 'bgnotify-badge', 'BG'));
+    // The badge names the producer, so a background terminal and a sub-agent batch
+    // are told apart at a glance (they used to share the same "BG").
+    head.appendChild(el('span', 'bgnotify-badge ' + (item.kind === 'subagent' ? 'sub' : 'bg'), item.kind === 'subagent' ? 'SUB' : 'BG'));
     head.appendChild(el('span', 'bgnotify-id', '#' + (item.id != null ? item.id : '')));
     head.appendChild(el('span', 'bgnotify-status', item.doneText || 'finished'));
     node.appendChild(head);
@@ -749,27 +770,20 @@
     }
   }
 
-  // ---- Background terminals: a dock at the bottom of the owning node's card ----
-  // There is no standalone panel any more (spec §1): a job belongs to the node
-  // whose turn spawned it, so the flat `backgrounds` snapshot is grouped by
-  // `nodeId` and each group renders inside that node's own card. A job is shown
-  // while it runs and until its completion notice reaches the agent; a delivered
-  // job drops out of the snapshot.
+  // ---- Background terminals: a flying job card, right of the owning node ----
+  // A job belongs to the node whose turn spawned it, so it renders as its own
+  // `kind: 'bg'` card in that node's sidecar grid (the same lattice the sub-agents
+  // use). There is no dock at the bottom of the card any more (D4): one job, one
+  // home. The host creates the card (a normal tree node) and drives it with the
+  // flat `backgrounds` snapshot; the card survives delivery as a `Delivered`
+  // record, so its terminal state is also persisted on the node itself.
   function shortCommand(cmd) {
     const s = String(cmd || '');
     return s.length > 60 ? s.slice(0, 60) + '…' : s;
   }
 
-  function dockedTask(task) {
-    return task.status === 'running' || (task.status === 'finished' && task.pendingDelivery === true);
-  }
-
-  function statusTextFor(task) {
-    if (task.status === 'running') return 'running';
-    if (task.pendingDelivery) return 'pending delivery';
-    if (task.killed) return 'killed';
-    return 'exit ' + (task.exitCode ?? '?');
-  }
+  /** task.id -> BackgroundInfo of the last snapshot (live jobs only). */
+  let bgTasks = new Map();
 
   function killBackgroundButton(id) {
     const kill = el('button', 'bg-kill', 'kill');
@@ -782,160 +796,118 @@
     return kill;
   }
 
-  // One `.bg-item` (head + collapsible output + kill). Items are patched in place
-  // on every snapshot, so a refresh never collapses an output the user opened.
-  function createBgItem(task) {
-    const item = el('div', 'bg-item');
-    const head = el('div', 'bg-item-head');
-    head.appendChild(el('span', 'bg-id', '#' + task.id));
-    head.appendChild(el('span', 'bg-cmd', shortCommand(task.command)));
-    const status = el('span', 'bg-status');
-    head.appendChild(status);
-    const chev = el('span', 'chev', '▶');
-    head.appendChild(chev);
-    const body = el('div', 'bg-body hidden');
-    head.addEventListener('click', () => {
-      body.classList.toggle('hidden');
-      chev.classList.toggle('open');
-    });
-    item.appendChild(head);
-    item.appendChild(body);
-    item._refs = { head, status, body, output: null, kill: null };
-    updateBgItem(item, task);
-    return item;
+  function statusTextFor(task, meta) {
+    if (task && task.status === 'running') return 'running';
+    if (task && task.pendingDelivery) return 'pending delivery';
+    if (task && task.killed) return 'killed';
+    if (task) return 'exit ' + (task.exitCode != null ? task.exitCode : '?');
+    // No live snapshot: the job is over (its card is a record now).
+    if (meta && meta.bgKilled) return 'killed';
+    if (meta && meta.bgExitCode != null) return 'exit ' + meta.bgExitCode;
+    return meta && meta.status ? meta.status : 'finished';
   }
 
-  function updateBgItem(item, task) {
-    const refs = item._refs;
-    const running = task.status === 'running';
-    item.classList.toggle('running', running);
-    item.classList.toggle('finished', !running);
-    refs.status.textContent = statusTextFor(task);
-    refs.status.classList.toggle('pending', task.status === 'finished' && !!task.pendingDelivery);
-    if (task.outputTail) {
-      if (!refs.output) {
-        refs.output = el('pre', 'bg-output');
-        refs.body.appendChild(refs.output);
-      }
-      refs.output.textContent = task.outputTail;
-    }
-    // Only a live job can be killed.
-    if (running && !refs.kill) {
-      refs.kill = killBackgroundButton(task.id);
-      refs.head.appendChild(refs.kill);
-    }
+  /** Output tail: the live snapshot when the job runs, else the stored terminal one. */
+  function outputTailFor(task, meta) {
+    if (task && task.outputTail) return task.outputTail;
+    return (meta && meta.bgOutputTail) || '';
   }
 
   /**
-   * The dock of `card`, created on first use and cached on the card. It is the
-   * card's last child — except on the card that hosts the composer pane, where
-   * the pane stays at the very bottom and the dock sits directly above it. Either
-   * way the transcript keeps its own scroll area: the dock is `flex: 0 0 auto`
-   * while `.node-body` keeps `flex: 1 1 auto`.
+   * (Re)build one job card's body from the tree node + the latest snapshot. The
+   * card's head is created once by `createNodeCard`; the body is small enough to
+   * rebuild on every snapshot (the host coalesces them to ~5/s at most).
    */
-  function ensureDock(card) {
-    if (!card) return null;
-    if (card._bgDock) return card._bgDock;
-    const dock = el('div', 'node-bg hidden');
-    const head = el('div', 'bg-dock-head');
-    // The count doubles as the title ("2 background tasks · 1 running"), so the
-    // one-line summary needs no extra label — it must stay readable in a 320px
-    // collapsed card next to the kill buttons.
-    const count = el('span', 'bg-dock-count', '');
-    head.appendChild(count);
-    const kills = el('span', 'bg-dock-kills');
-    head.appendChild(kills);
-    const list = el('div', 'bg-dock-list');
-    dock.appendChild(head);
-    dock.appendChild(list);
-    dock._list = list;
-    dock._count = count;
-    dock._kills = kills;
-    dock._items = new Map();        // task id -> .bg-item (kept across snapshots)
-    dock._killButtons = new Map();  // task id -> compact kill button
-    if (composerEl.parentElement === card) card.insertBefore(dock, composerEl);
-    else card.appendChild(dock);
-    card._bgDock = dock;
-    return dock;
-  }
+  function renderBgBody(card, meta) {
+    if (!card) return;
+    const task = meta && meta.bgTaskId != null ? bgTasks.get(Number(meta.bgTaskId)) : null;
+    const itemsEl = card.querySelector('.node-items');
+    if (!itemsEl) return;
+    itemsEl.innerHTML = '';
+    const running = !!(task && task.status === 'running');
+    card.classList.toggle('bg-running', running);
+    card.classList.toggle('bg-done', !running);
 
-  /** A collapsed card keeps its dock, but only as the one-line summary. */
-  function syncDockMode(card) {
-    const dock = card && card._bgDock;
-    if (dock) dock.classList.toggle('collapsed', !card.classList.contains('expanded'));
-  }
+    const statusEl = card.querySelector('.node-status');
+    if (statusEl) statusEl.textContent = statusTextFor(task, meta);
 
-  /** Render one node's own tasks into its own dock (hidden when it owns none). */
-  function renderNodeDock(card, tasks) {
-    const dock = ensureDock(card);
-    if (!dock) return;
-    const shown = new Set(tasks.map((t) => t.id));
-    for (const [id, item] of dock._items) {
-      if (shown.has(id)) continue;
-      item.remove();              // delivered / gone: the row leaves the dock
-      dock._items.delete(id);
+    const row = el('div', 'bg-card-status');
+    row.appendChild(el('span', 'bg-card-id', '#' + (meta && meta.bgTaskId != null ? meta.bgTaskId : '')));
+    const status = el('span', 'bg-status' + (task && task.pendingDelivery ? ' pending' : ''), statusTextFor(task, meta));
+    row.appendChild(status);
+    if (task && typeof task.elapsed === 'number' && running) {
+      row.appendChild(el('span', 'bg-elapsed', task.elapsed + 's'));
     }
-    for (const task of tasks) {
-      let item = dock._items.get(task.id);
-      if (!item) {
-        item = createBgItem(task);
-        dock._items.set(task.id, item);
-        dock._list.appendChild(item);
-      } else {
-        updateBgItem(item, task);
-      }
+    itemsEl.appendChild(row);
+
+    const cmd = el('div', 'bg-card-cmd', (meta && meta.bgCommand) || (task && task.command) || '');
+    itemsEl.appendChild(cmd);
+
+    const tail = outputTailFor(task, meta);
+    if (tail) {
+      itemsEl.appendChild(el('pre', 'bg-output', tail));
     }
-    // Compact line for a collapsed card: the counts + one kill button per live job.
-    const running = tasks.filter((t) => t.status === 'running');
-    dock._count.textContent =
-      tasks.length + ' background task' + (tasks.length === 1 ? '' : 's') + ' · ' + running.length + ' running';
-    const live = new Set(running.map((t) => t.id));
-    for (const [id, kill] of dock._killButtons) {
-      if (live.has(id)) continue;
-      kill.remove();
-      dock._killButtons.delete(id);
+
+    // Only a live job can be killed.
+    const existing = byClass(card, 'bg-kill');
+    if (running && !existing) {
+      const head = card.querySelector('.node-head');
+      const kill = killBackgroundButton(meta.bgTaskId);
+      const del = head.querySelector('.node-del');
+      if (del) head.insertBefore(kill, del); else head.appendChild(kill);
+    } else if (!running && existing) {
+      existing.remove();
     }
-    for (const task of running) {
-      if (dock._killButtons.has(task.id)) continue;
-      const kill = killBackgroundButton(task.id);
-      kill.textContent = 'kill #' + task.id;
-      kill.classList.add('bg-dock-kill');
-      dock._killButtons.set(task.id, kill);
-      dock._kills.appendChild(kill);
-    }
-    dock.classList.toggle('hidden', tasks.length === 0);
-    syncDockMode(card);
   }
 
   /**
-   * `backgrounds` (P2): one flat snapshot of the session's jobs, each tagged with
-   * the node that owns it. Group by owner and render each group into that node's
-   * card. Every card of the snapshot gets its dock (even one that owns nothing:
-   * a hidden dock keeps its height stable when a job starts or is killed).
-   * The legacy `background` shape carries no owner — those jobs belong to the
-   * view focus node, the only node an older one-run host could spawn them from.
+   * `backgrounds`: one flat snapshot of the session's live jobs, each tagged with
+   * the node that owns it and with the card that mirrors it. Patch every job card
+   * in place; jobs the snapshot no longer lists keep their persisted terminal state.
    */
   function renderBackgrounds(tasks, legacy) {
-    const byNode = new Map();
+    bgTasks = new Map();
     for (const task of tasks || []) {
-      if (!dockedTask(task)) continue;
-      const nodeId = task.nodeId || (legacy ? treeActiveId : null);
-      if (!nodeId) continue;
-      if (!byNode.has(nodeId)) byNode.set(nodeId, []);
-      byNode.get(nodeId).push(task);
+      if (!task || task.id == null) continue;
+      // Legacy shape (an older host): no owner is named, so the jobs belong to the
+      // focused node — the only node a one-run host could have spawned them from.
+      if (legacy && !task.nodeId) task.nodeId = treeActiveId;
+      bgTasks.set(Number(task.id), task);
     }
     let touched = false;
-    for (const id in nodeEls) {
-      renderNodeDock(nodeEls[id], byNode.get(id) || []);
+    for (const id in treeNodes) {
+      const meta = treeNodes[id];
+      if (!meta || meta.kind !== 'bg') continue;
+      renderBgBody(nodeEls[id], meta);
       touched = true;
     }
-    // The dock is part of the card's height, so the tree must re-place the cards
-    // — the same way a growing `.node-items` does (debounced: the host coalesces
-    // snapshots, so a burst must not relayout per message).
+    // The card's height feeds the layout, so re-place the tree when a job changed
+    // (debounced: the host coalesces snapshots).
     if (touched) scheduleLayout();
   }
 
   // ---- Tree rendering ----
+  /**
+   * A sidecar that has handed its result over shows a `Delivered` badge (D1): the
+   * agent already saw this completion (a background notice was injected, a
+   * sub-agent's summary came back as a tool result). Created/removed lazily so a
+   * tree repaint never accumulates badges.
+   */
+  function applyDeliveredBadge(card, meta) {
+    if (!card) return;
+    const wanted = !!(meta && meta.delivered && isSidecarKind(meta.kind));
+    let badge = byClass(card, 'node-delivered-badge');
+    if (wanted && !badge) {
+      badge = el('span', 'node-delivered-badge', 'Delivered');
+      const head = card.querySelector('.node-head');
+      const status = head.querySelector('.node-status');
+      if (status) head.insertBefore(badge, status); else head.appendChild(badge);
+    } else if (!wanted && badge) {
+      badge.remove();
+    }
+    card.classList.toggle('delivered', wanted);
+  }
+
   function pathIdsFromTree(nodes, activeId) {
     const out = [];
     const seen = new Set();
@@ -1032,7 +1004,6 @@
       itemsEl.scrollTop = itemsEl.scrollHeight;
     }
     card._needsBottomScroll = false;
-    syncDockMode(card);
   }
 
   function collapsedCard(id, meta) {
@@ -1045,9 +1016,6 @@
     promptElCard.classList.add('hidden');
     itemsEl.classList.add('hidden');
     excerptEl.classList.remove('hidden');
-    // The dock stays (a job must remain visible from the collapsed card) but
-    // shrinks to its one-line summary.
-    syncDockMode(card);
   }
 
   function setActiveLeaf(id) {
@@ -1059,7 +1027,9 @@
     // spawn_agents / send_agent_message), and a session with no active node has
     // no card to inline it in — in both cases the pane is hidden entirely.
     const node = id ? treeNodes[id] : null;
-    const hostCard = card && !(node && node.kind === 'agent') ? card : null;
+    // A sidecar (sub-agent window / background job card) never hosts the composer:
+    // it is driven by the agent, and a job card has no conversation at all.
+    const hostCard = card && !(node && isSidecarKind(node.kind)) ? card : null;
     // Un-hide before mounting so autoGrow() measures a rendered input.
     setComposerVisible(!!hostCard);
     mountComposer(hostCard);
@@ -1088,10 +1058,12 @@
   function updateBranchBanner() {
     if (!branchBanner) return;
     const node = treeNodes[treeActiveId];
-    const isAgent = !!(node && node.kind === 'agent');
-    // Sub-agent nodes are display sidecars, not conversational branches — only a
-    // *turn* child makes the next message a branch.
-    const hasTurnChildren = !!(node && node.children && node.children.some((c) => treeNodes[c] && treeNodes[c].kind !== 'agent'));
+    const isAgent = !!(node && isSidecarKind(node.kind));
+    // Sidecar cards are display-only, not conversational branches — only a *turn*
+    // child makes the next message a branch.
+    const hasTurnChildren = !!(
+      node && node.children && node.children.some((c) => treeNodes[c] && !isSidecarKind(treeNodes[c].kind))
+    );
     if (isAgent) {
       branchBanner.textContent = '子代理分支（只读）—— 由主 agent 通过 spawn_agents / send_agent_message 驱动';
       branchBanner.classList.remove('hidden');
@@ -1115,7 +1087,7 @@
   // navigated away from collapse.
   function agentExpanded(id) {
     let n = treeNodes[id];
-    while (n && n.kind === 'agent') {
+    while (n && isSidecarKind(n.kind)) {
       if (n.id === treeActiveId || n.parentId === treeActiveId) return true;
       n = treeNodes[n.parentId];
     }
@@ -1421,7 +1393,10 @@
       const child = nodeEls[id];
       const parent = nodeEls[meta.parentId];
       if (!child || !parent) continue;
-      const isAgent = meta.kind === 'agent';
+      const isAgent = isSidecarKind(meta.kind);
+      const edgeCls = meta.kind === 'bg'
+        ? (meta.bgKilled ? ' edge-error' : (meta.delivered ? ' edge-done' : ''))
+        : (meta.agentStatus === 'done' ? ' edge-done' : meta.agentStatus === 'error' ? ' edge-error' : '');
       const px = parseFloat(parent.style.left);
       const py = parseFloat(parent.style.top);
       const pw = parent.offsetWidth;
@@ -1437,7 +1412,7 @@
         // of its column → into the window's left edge. Every segment runs in a
         // card-free corridor, so the connector crosses no card at all (the
         // previous spline cut across the nearer columns' windows).
-        const cls = meta.agentStatus === 'done' ? ' edge-done' : meta.agentStatus === 'error' ? ' edge-error' : '';
+        const cls = edgeCls;
         const route = layoutCells[id];
         const pr = px + pw;
         let d = '';
@@ -1498,11 +1473,17 @@
     }
 
     for (const id in nodeEls) {
+      const meta = treeNodes[id] || { title: '', status: 'done', preview: '' };
       const onPath = activePathSet.has(id) || agentExpanded(id);
       if (onPath) {
-        expandedCard(id, treeNodes[id], pathNodes[id]);
+        expandedCard(id, meta, pathNodes[id]);
       } else {
-        collapsedCard(id, treeNodes[id]);
+        collapsedCard(id, meta);
+      }
+      applyDeliveredBadge(nodeEls[id], meta);
+      // A job card has no conversation: its body mirrors the live job.
+      if (meta.kind === 'bg') {
+        renderBgBody(nodeEls[id], meta);
       }
     }
     setActiveLeaf(treeActiveId);
@@ -1554,11 +1535,17 @@
       if (card._itemScroll) card._itemScroll.scrollToBottom();
     }
     for (const id in nodeEls) {
+      const meta = treeNodes[id] || { title: '', status: 'done', preview: '' };
       const onPath = activePathSet.has(id) || agentExpanded(id);
       if (onPath) {
-        expandedCard(id, treeNodes[id] || { title: '', status: 'done', preview: '' }, pathNodes[id]);
+        expandedCard(id, meta, pathNodes[id]);
       } else {
-        collapsedCard(id, treeNodes[id] || { title: '', preview: '' });
+        collapsedCard(id, meta);
+      }
+      applyDeliveredBadge(nodeEls[id], meta);
+      // A job card has no conversation: its body mirrors the live job.
+      if (meta.kind === 'bg') {
+        renderBgBody(nodeEls[id], meta);
       }
     }
     setActiveLeaf(treeActiveId);
@@ -2462,7 +2449,14 @@
         addUserPrompt(msg.text, msg.attachments);
         break;
       case 'backgroundNotice':
-        routeTo(msg.nodeId, () => addBackgroundNotice(msg.item));
+        // Delivered at a tool boundary of a *running* turn, so the block lands in
+        // the middle of the transcript: close out the answer that was streaming
+        // above it first, or that answer would never be finalized (it stays a raw
+        // text node and its markdown is never rendered).
+        routeTo(msg.nodeId, () => {
+          finalizeStreamingAnswer();
+          addBackgroundNotice(msg.item);
+        });
         break;
       case 'imagePicked':
         addPendingAttachment(msg.dataUrl, msg.name);

@@ -24,6 +24,7 @@ import {
   UserAttachment,
   branchIds,
   detachBranch,
+  isSidecar,
   migrateState,
   messageText,
   newId,
@@ -228,6 +229,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     this.backgroundHub.setHooks({
       onUpdated: (owner) => this.runtimes.get(owner.sessionId)?.refreshBackgrounds(),
       onFinish: (owner, task) => this.runtimes.get(owner.sessionId)?.onBackgroundFinished(owner, task),
+      onRegistered: (owner, task) => this.runtimes.get(owner.sessionId)?.onBackgroundRegistered(owner, task),
     });
     // Runtimes are created on demand (`runtimeFor`), NOT for every stored
     // session: a runtime builds its own agent history when it is constructed, and
@@ -1013,7 +1015,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    * reuses is rewritten. Never throws into the agent loop.
    */
   dumpSessionTranscript(node: TreeNode, session: AgentSession, status: TurnStatus): void {
-    if (!this.getConfig().saveSessionTranscripts || node.kind === 'agent') {
+    if (!this.getConfig().saveSessionTranscripts || isSidecar(node)) {
       return;
     }
     const messages = node.messages;
@@ -1708,7 +1710,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       return false;
     }
     const ids = branchIds(session, nodeId);
-    const turns = ids.filter((id) => session.nodes[id]?.kind !== 'agent').length;
+    const turns = ids.filter((id) => !isSidecar(session.nodes[id])).length;
     const agents = ids.length - turns;
     // A branch owns its background jobs: deleting it kills whatever it spawned,
     // so the confirmation says so before anything is torn down.

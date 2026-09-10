@@ -31,7 +31,7 @@
  * Usage:
  *   node tools/harness-test.mjs <suite...|all> [options]
  *
- *   Suites: health sessions concurrency navigation background branch selftest
+ *   Suites: health sessions concurrency navigation background signals branch selftest
  *
  *   --instance <pid-NNNN>    target that discovery instance (by id or file stem)
  *   --discovery <file>       target the control plane recorded in that JSON file
@@ -59,7 +59,7 @@ import * as path from 'node:path';
 // ---------------------------------------------------------------------------
 
 const EXT_ID = 'minimal-host.minimal-agent-harness';
-const SUITES = ['health', 'sessions', 'concurrency', 'navigation', 'background', 'branch', 'selftest'];
+const SUITES = ['health', 'sessions', 'concurrency', 'navigation', 'background', 'signals', 'branch', 'selftest'];
 const DEFAULT_TIMEOUT_SEC = 180;
 const DEFAULT_INTERVAL_MS = 250;
 /** How long a suite waits for a turn's transcript dump to appear. */
@@ -74,9 +74,16 @@ const REQUEST_TIMEOUT_MS = 20_000;
 const FIELD_PHASE = {
   'sessions[].running': 'P1 (per-session runtimes)',
   'sessions[].runningNodes': 'P1 (runs keyed by node)',
+  'sessions[].nodes': 'P1 (per-session runtimes)',
   'sessions[].runningBackgrounds': 'P2 (node-local background ownership)',
   'sessions[].backgroundNodes': 'P2 (node-local background ownership)',
   'backgrounds[].nodeId': 'P2 (node-local background ownership)',
+  // The `signals` suite would like the id-level view of the tree. `/state` exposes a
+  // node *count*, never per-node records, so these two stay `skip`s — the facts they
+  // would prove are asserted indirectly (owner id + unchanged count + the dump only a
+  // main turn node writes).
+  'sessions[].bgNodes': "P2 (a job card is a `kind:'bg'` node — /state reports counts, not ids)",
+  'sessions[].cardDelivered': 'P2 (D1: `Delivered` is a tree/webview flag, not a control-plane field)',
 };
 
 const USAGE = `harness-test — drives the live Agent Harness window over its local control plane
@@ -91,6 +98,8 @@ Suites:
   concurrency   both sessions report a live run at the same time
   navigation    POST /navigate + POST /continue on one session, another keeps running
   background    a start_in_background job's ownership as reported by /state
+  signals       a finished job's notice lands INSIDE the owning node: no new node,
+                unchanged node count, backgroundNodes still the turn node
   branch        two nodes of ONE session stream at once; node-scoped POST /stop
   selftest      pure-logic checks of this script's own helpers (needs no window)
 
@@ -637,6 +646,95 @@ function toolCallsOf(parsed, name) {
   return out;
 }
 
+// ---- completion signals (what the `signals` suite reads) -------------------
+
+/**
+ * The host's background-completion wording (`runtime.ts` `buildBackgroundSignal`),
+ * as it appears in the `role:'user'` message injected into the owning node. Every
+ * prompt this harness sends deliberately avoids it, so finding both fragments in a
+ * dump can only mean the host put them there.
+ */
+const SIGNAL_FRAGMENTS = ['Background command', 'finished with exit code'];
+
+/**
+ * The injected completion notice inside one node's transcript, if any: the first
+ * `role:'user'` message carrying the host's wording, plus the role of the message
+ * right before it — the injection *point*.
+ *
+ * Which role precedes it is implementation-defined and both are correct
+ * (`docs/agents/invariants/conversation-validity.md`):
+ *   - `tool`      — the owner's turn was still streaming, so the signal landed at
+ *                   the next tool boundary (`Agent.setSignalHandler`, the mid-turn
+ *                   hook added by the signal work);
+ *   - `assistant` — the turn had already closed, so the host delivered it as an
+ *                   injected turn on that same node (`beginInjectedTurn`, `fresh:false`).
+ * A notice that *is* the node's first message is neither: that is the shape of the
+ * old "one node per notice" behaviour this work removes.
+ */
+function findSignalNotice(parsed, { fragments = SIGNAL_FRAGMENTS } = {}) {
+  const messages = Array.isArray(parsed?.messages) ? parsed.messages : [];
+  for (let i = 0; i < messages.length; i += 1) {
+    const message = messages[i];
+    if (!message || message.role !== 'user') {
+      continue;
+    }
+    const text = messageText(message);
+    if (!fragments.every((fragment) => text.includes(fragment))) {
+      continue;
+    }
+    const before = i > 0 ? String(messages[i - 1]?.role ?? '?') : null;
+    return {
+      index: i,
+      total: messages.length,
+      text,
+      before,
+      /** Human label of the boundary the notice was injected at. */
+      boundary: before === 'tool' ? 'tool batch' : before === 'assistant' ? 'turn closed' : null,
+      injected: before === 'tool' || before === 'assistant',
+    };
+  }
+  return null;
+}
+
+/** Parse a node's dump straight off disk; `null` when it is not there (yet). */
+function readTranscriptNow(cx, sessionId, nodeId) {
+  const file = path.join(cx.transcriptDir(sessionId), `${nodeId}.jsonl`);
+  try {
+    return { file, parsed: parseTranscriptJsonl(fs.readFileSync(file, 'utf8')) };
+  } catch {
+    return null;
+  }
+}
+
+/** Every `<nodeId>.jsonl` dump in one session's transcript folder. */
+function sessionTranscriptFiles(dir) {
+  let entries;
+  try {
+    entries = fs.readdirSync(dir);
+  } catch {
+    return [];
+  }
+  return entries.filter((name) => name.endsWith('.jsonl')).map((name) => path.join(dir, name));
+}
+
+/** The session's dumps that carry an injected completion notice, with their node. */
+function dumpsWithNotice(dir, { fragments = SIGNAL_FRAGMENTS } = {}) {
+  const out = [];
+  for (const file of sessionTranscriptFiles(dir)) {
+    let parsed;
+    try {
+      parsed = parseTranscriptJsonl(fs.readFileSync(file, 'utf8'));
+    } catch {
+      continue;
+    }
+    const notice = findSignalNotice(parsed, { fragments });
+    if (notice) {
+      out.push({ file, nodeId: path.basename(file, '.jsonl'), notice });
+    }
+  }
+  return out;
+}
+
 // ---------------------------------------------------------------------------
 // HTTP client (no /wait-for-finish: it would deadlock an agent caller)
 // ---------------------------------------------------------------------------
@@ -720,6 +818,25 @@ function isSessionRunning(state, id, field) {
 function sessionRunningNodes(state, sessionId) {
   const info = sessionMap(state).get(sessionId);
   return info && Array.isArray(info.runningNodes) ? info.runningNodes.map(String) : [];
+}
+
+/**
+ * Node ids a session (by id) reports as owning a **running** background job, from
+ * `sessions[].backgroundNodes`; `null` when the host does not expose the field at
+ * all (so a caller can tell "absent" from "empty").
+ */
+function sessionBackgroundNodes(state, sessionId) {
+  const info = sessionMap(state).get(sessionId);
+  return info && Array.isArray(info.backgroundNodes) ? info.backgroundNodes.map(String) : null;
+}
+
+/**
+ * `/state`'s node count for one session — every tree node, sidecar cards included —
+ * or `null` when the session (or the field) is absent.
+ */
+function sessionNodeCount(state, sessionId) {
+  const info = sessionMap(state).get(sessionId);
+  return info && Number.isFinite(info.nodes) ? info.nodes : null;
 }
 
 /**
@@ -876,6 +993,25 @@ function backgroundPrompt(runId) {
   return (
     `HARNESS-TEST ${runId} BG: call the exec_command tool exactly once with ${args}, ` +
     'then reply with the returned background id and nothing else. Do not call any other tool.'
+  );
+}
+
+/**
+ * The `signals` suite's prompt: start a short background job, then keep the *same*
+ * turn busy with two foreground rounds, so the job finishes **while its owner still
+ * streams** — the mid-turn delivery path. The wording deliberately avoids the host's
+ * own completion phrases ("Background command", "finished with exit code"), so
+ * finding them in a dump can only mean the host injected them.
+ */
+function signalPrompt(runId, { jobMs = 6000, busyMs = 12000 } = {}) {
+  const job = JSON.stringify({ command: sleepCmd(jobMs), timeout_behavior: 'start_in_background' });
+  const wait = JSON.stringify({ command: sleepCmd(busyMs) });
+  return (
+    `HARNESS-TEST ${runId} SIG: a timing check of background terminals. ` +
+    `Step 1: call the exec_command tool with ${job} — that starts a short job and returns immediately. ` +
+    `Step 2: then call exec_command with ${wait} and wait for it to finish; do not put it in the background. ` +
+    `Step 3: call exec_command once more with ${wait} and wait for it to finish. ` +
+    'Then reply with the single word "DONE". Use the exec_command tool only, and do not join, kill or poll the background terminal.'
   );
 }
 
@@ -1476,6 +1612,274 @@ async function suiteBackground(cx) {
 }
 
 // ---------------------------------------------------------------------------
+// Suite: signals (a completion signal lands INSIDE the node that started the job)
+// ---------------------------------------------------------------------------
+
+/**
+ * Acceptance for the completion-signal work (`tools/research/signal-notification-plan.md`
+ * §3.2/§3.3, §4 P0+P1, §6): a finished background terminal is delivered into the
+ * node that started it — never into a new node, never as a user bubble.
+ *
+ *   1. `/session/start` runs a turn that starts a short background job and then
+ *      keeps working (two foreground tool rounds), so the job finishes **while its
+ *      owner still streams** — the mid-turn delivery path the plan's P1 adds;
+ *   2. the owning node's own transcript dump must gain a `role:'user'` message
+ *      carrying the host's completion wording, at an injection point: right after
+ *      the whole tool batch of a round (mid-turn hook) or right after the reply
+ *      that closed the turn (idle injected turn). A notice that *opens* a node is
+ *      the shape this work removes;
+ *   3. the session's node count must be **unchanged** by the delivery — the notice
+ *      creates no node — and the owning turn node must still exist;
+ *   4. `sessions[].backgroundNodes` still reports the **turn** node that started the
+ *      job, never the `kind:'bg'` card it spawned (`docs/agents/invariants/background-terminals.md`).
+ *
+ * `/state` exposes a node *count* and the background owner ids, never a per-node id
+ * list nor a `delivered` flag, so the id-level halves of (3)/(4) are `skip`s and the
+ * facts are proved indirectly: the owner id, the unchanged count, and a dump only a
+ * main turn node writes (a `kind:'bg'` card is a sidecar and never dumps).
+ */
+async function suiteSignals(cx) {
+  const checks = makeChecks();
+  const name = 'signals';
+
+  if (!cx.saveSessionTranscripts) {
+    return suiteResult(
+      name,
+      'SKIP',
+      'agentHarness.saveSessionTranscripts is off — where a completion signal lands is only observable in the per-node transcript dump',
+      checks,
+    );
+  }
+
+  // ---- phase gate (cheap; no turn is spent when the capability is absent) ----
+  const gate = (state) => missingFields(state, ['sessions[].nodes', 'sessions[].backgroundNodes']);
+  const skipMissing = (missing) =>
+    suiteResult(
+      name,
+      'SKIP',
+      `missing /state ${missing.join(' + ')} (expected in phase ${phaseFor(missing[0])})`,
+      checks,
+    );
+  const probe = await cx.client.state();
+  const probeSessions = resolveField(probe.body, 'sessions').values[0];
+  const probed = Array.isArray(probeSessions) && probeSessions.length > 0;
+  if (probed && gate(probe.body).length > 0) {
+    return skipMissing(gate(probe.body));
+  }
+
+  const started = await startSession(cx, { label: 'SIG', prompt: signalPrompt(cx.runId) });
+  if (started.fail) {
+    return suiteResult(name, 'FAIL', started.fail, checks);
+  }
+  if (started.skip) {
+    return suiteResult(name, 'SKIP', started.skip, checks);
+  }
+  const sessionId = started.sessionId;
+  const ownerNode = started.nodeId;
+  checks.note(`owning session ${sessionId} / turn node ${ownerNode}`);
+
+  if (!probed) {
+    const after = await cx.client.state();
+    if (gate(after.body).length > 0) {
+      return skipMissing(gate(after.body));
+    }
+  }
+
+  // ---- 1. the job registers under the turn node that started it ----
+  // The pre-delivery snapshot: the card exists from `register` onward (the hub's
+  // `onRegistered` hook runs synchronously), so this count already includes it.
+  const jobBudgetMs = Math.min(cx.flags.timeoutMs, 60000);
+  const observed = await pollState(
+    cx,
+    (state) => {
+      const owners = sessionBackgroundNodes(state, sessionId);
+      return owners && owners.length > 0 ? owners : undefined;
+    },
+    jobBudgetMs,
+  );
+  if (!observed.ok) {
+    // Separate "the host is wrong" from "the prompt did not drive a job": the dump
+    // proves whether a background command was really started.
+    const read = await readTranscript(cx, sessionId, ownerNode, { waitMs: jobBudgetMs });
+    const calls = read.skip
+      ? []
+      : toolCallsOf(read.parsed, 'exec_command').filter((c) => c.args && c.args.timeout_behavior === 'start_in_background');
+    if (read.skip || calls.length === 0) {
+      checks.subskip('the run started a background job', read.skip ?? `${calls.length} start_in_background call(s) in the dump`);
+      return suiteResult(name, 'SKIP', 'inconclusive: no background job observable (the prompt may not have driven one)', checks);
+    }
+    checks.check(
+      'the owning session lists the background node in sessions[].backgroundNodes',
+      false,
+      'a background job was started but /state never reported an owning node',
+    );
+    return suiteResult(name, 'FAIL', 'the host never reported the running background', checks);
+  }
+  const ownerList = sessionBackgroundNodes(observed.state, sessionId) ?? [];
+  const nodeCountBefore = sessionNodeCount(observed.state, sessionId);
+  checks.note(`pre-delivery snapshot: nodes=${nodeCountBefore}, backgroundNodes=[${ownerList.join(', ')}]`);
+
+  // (c) Semantics unchanged: the owner is the *turn* node, and only it owns the job.
+  checks.check('exactly one node owns the running background', ownerList.length === 1, `backgroundNodes=[${ownerList.join(', ')}]`);
+  checks.check(
+    `the owner is the node that started the job (${ownerNode})`,
+    ownerList[0] === ownerNode,
+    `reported ${ownerList[0]}`,
+  );
+
+  // ---- 2. wait for the notice to land in that node's own transcript ----
+  // Sampling `/state` alongside the dump also catches the headline P1 condition:
+  // "the job finished while its owner turn was still streaming".
+  const waitMs = Math.min(cx.flags.timeoutMs, 120000);
+  let midTurnWindow = false;
+  const landed = await pollUntil(
+    async () => {
+      const state = await cx.client.state();
+      if (state.status === 200 && state.body && state.body.ok !== false) {
+        const owners = sessionBackgroundNodes(state.body, sessionId) ?? [];
+        if (!owners.includes(ownerNode) && sessionRunningNodes(state.body, sessionId).includes(ownerNode)) {
+          midTurnWindow = true;
+        }
+      }
+      const read = readTranscriptNow(cx, sessionId, ownerNode);
+      if (!read) {
+        return undefined;
+      }
+      const notice = findSignalNotice(read.parsed);
+      return notice ? { notice } : undefined;
+    },
+    { timeoutMs: waitMs, intervalMs: Math.max(cx.flags.intervalMs, 500) },
+  );
+  if (!landed.ok) {
+    return signalsWithoutNotice(cx, checks, { name, sessionId, ownerNode, waitMs });
+  }
+  const notice = landed.value.notice;
+
+  // (b) The landing point: a `user` message inside the owner's OWN transcript, at an
+  // injection point — never the message that opened a node.
+  checks.check(
+    "the completion notice lands in the owning node's own transcript",
+    true,
+    `user message ${notice.index + 1}/${notice.total}`,
+  );
+  checks.check(
+    "the notice did not open a node (it is not that node's first message)",
+    notice.index > 0,
+    `index ${notice.index} of ${notice.total}`,
+  );
+  if (notice.injected) {
+    checks.check(
+      "the notice sits at an injection point (after a tool batch, or after the turn's reply)",
+      true,
+      `preceded by a "${notice.before}" message — ${
+        notice.before === 'tool' ? 'tool boundary (mid-turn hook)' : 'the turn had closed (idle injected turn)'
+      }`,
+    );
+  } else {
+    checks.subskip(
+      "the notice sits at an injection point (after a tool batch, or after the turn's reply)",
+      `the message before it has role ${JSON.stringify(notice.before)} — the node's own history ended there (an interrupted or empty turn), which /state cannot distinguish`,
+    );
+  }
+  checks.note(
+    midTurnWindow
+      ? 'the job finished while its owner turn was still streaming → the notice was eligible for the mid-turn hook (P1)'
+      : 'no /state sample caught "job finished while its owner still streamed" — the notice went through the idle injected-turn path (P0)',
+  );
+
+  // ---- 3. the delivery created no node, and the owner is still there ----
+  const after = await cx.client.state();
+  const nodeCountAfter = sessionNodeCount(after.body, sessionId);
+  checks.check(
+    'the delivery did not add a node to the session',
+    Number.isFinite(nodeCountBefore) && nodeCountBefore === nodeCountAfter,
+    `nodes ${nodeCountBefore} → ${nodeCountAfter}`,
+  );
+  const nav = await cx.client.navigate({ sessionId, nodeId: ownerNode });
+  checks.check(
+    `the node that owns the job still exists (${ownerNode})`,
+    apiAccepted(nav),
+    `POST /navigate → HTTP ${nav.status}${nav.body && nav.body.error ? `: ${nav.body.error}` : ''}`,
+  );
+  const ownerDump = path.join(cx.transcriptDir(sessionId), `${ownerNode}.jsonl`);
+  checks.check(
+    'the reported owner is a main turn node, not a display-only card',
+    fs.existsSync(ownerDump),
+    `dump ${ownerNode}.jsonl ${fs.existsSync(ownerDump) ? 'present' : 'missing'}`,
+  );
+
+  // The control plane has no per-node view, so these two stay skips (the facts above
+  // are only indirect evidence for them).
+  checks.subskip(
+    "the job's card is a node of its own (id-level)",
+    `missing /state field sessions[].bgNodes (${phaseFor('sessions[].bgNodes')}) — evidenced indirectly by the unchanged node count and the owner id`,
+  );
+  checks.subskip(
+    'the card flips to Delivered when the notice lands',
+    `missing /state field sessions[].cardDelivered (${phaseFor('sessions[].cardDelivered')}) — the badge lives in the tree/webview, not on the control plane`,
+  );
+
+  const bad = checks.failures().length;
+  return suiteResult(
+    name,
+    bad ? 'FAIL' : 'PASS',
+    bad
+      ? `${bad} check(s) failed`
+      : `the notice for a job of ${sessionId} landed in ${ownerNode} (${notice.boundary ?? notice.before}) without adding a node`,
+    checks,
+  );
+}
+
+/**
+ * No notice in the owner's dump. Tell the three reasons apart: it landed in another
+ * node (the shape this work removes → FAIL), the model joined/killed the job through
+ * a tool (`notifyAgent: false` — that tool result *is* the signal → SKIP), or the job
+ * is simply still running (→ SKIP).
+ */
+async function signalsWithoutNotice(cx, checks, { name, sessionId, ownerNode, waitMs }) {
+  const elsewhere = dumpsWithNotice(cx.transcriptDir(sessionId)).filter((hit) => hit.nodeId !== ownerNode);
+  if (elsewhere.length > 0) {
+    checks.check(
+      'the completion notice lands in the owning node (it did not open a new node)',
+      false,
+      `found in ${elsewhere.map((hit) => hit.nodeId).join(', ')} instead of ${ownerNode}`,
+    );
+    return suiteResult(
+      name,
+      'FAIL',
+      `the completion notice opened a new node (${elsewhere[0].nodeId}) instead of landing in ${ownerNode}`,
+      checks,
+    );
+  }
+  const read = readTranscriptNow(cx, sessionId, ownerNode);
+  const absorbed = read
+    ? ['join_background', 'kill_background'].some((tool) => toolCallsOf(read.parsed, tool).length > 0)
+    : false;
+  if (absorbed) {
+    checks.subskip(
+      'the completion notice lands in the owning node',
+      'the model joined/killed the job through a tool — that tool result IS the signal, so no notice is sent',
+    );
+    return suiteResult(name, 'SKIP', 'inconclusive: the job was joined/killed through a tool, whose result is the signal', checks);
+  }
+  const now = await cx.client.state();
+  if ((sessionBackgroundNodes(now.body, sessionId) ?? []).includes(ownerNode)) {
+    return suiteResult(
+      name,
+      'SKIP',
+      `inconclusive: the background job was still running when the ${Math.round(waitMs / 1000)}s notice budget ran out`,
+      checks,
+    );
+  }
+  checks.check(
+    "the completion notice lands in the owning node's own transcript",
+    false,
+    `no user message with the completion wording in ${ownerNode}.jsonl, and the job is no longer running`,
+  );
+  return suiteResult(name, 'FAIL', `the job finished but its completion notice never reached ${ownerNode}'s transcript`, checks);
+}
+
+// ---------------------------------------------------------------------------
 // Suite: branch (P3 — two nodes of ONE session stream at once)
 // ---------------------------------------------------------------------------
 
@@ -1882,6 +2286,91 @@ function suiteSelftest(cx) {
       flattenContent(undefined) === '',
   );
 
+  // -- completion notices (the `signals` suite)
+  const noticeText = 'Background command `node -e "setTimeout(()=>{},6000)"` (id 1) finished with exit code 0.';
+  const sigJsonl = (messages) =>
+    [
+      JSON.stringify({ type: 'meta', kind: 'session', sessionId: 's1', nodeId: 'n1' }),
+      ...messages.map((m) => JSON.stringify(m)),
+    ].join('\n') + '\n';
+  const sigCall = {
+    role: 'assistant',
+    content: '',
+    tool_calls: [{ id: 'c1', function: { name: 'exec_command', arguments: '{"timeout_behavior":"start_in_background"}' } }],
+  };
+  const mid = findSignalNotice(
+    parseTranscriptJsonl(
+      sigJsonl([
+        { role: 'user', content: 'HARNESS-TEST RID SIG: a timing check' },
+        sigCall,
+        { role: 'tool', tool_call_id: 'c1', content: '[command started in background: id 1]' },
+        { role: 'user', content: noticeText },
+        { role: 'assistant', content: 'DONE' },
+      ]),
+    ),
+  );
+  checks.check(
+    'findSignalNotice finds a mid-turn notice at the tool boundary',
+    mid !== null && mid.index === 3 && mid.total === 5 && mid.before === 'tool' && mid.boundary === 'tool batch' && mid.injected === true,
+  );
+  const idle = findSignalNotice(
+    parseTranscriptJsonl(
+      sigJsonl([
+        { role: 'user', content: 'HARNESS-TEST RID SIG: a timing check' },
+        { role: 'assistant', content: 'started id 1' },
+        { role: 'user', content: noticeText },
+        { role: 'assistant', content: 'ok' },
+      ]),
+    ),
+  );
+  checks.check(
+    'findSignalNotice accepts the closed-turn shape (idle injected turn)',
+    idle !== null && idle.before === 'assistant' && idle.boundary === 'turn closed' && idle.injected === true,
+  );
+  const opened = findSignalNotice(
+    parseTranscriptJsonl(sigJsonl([{ role: 'user', content: noticeText }, { role: 'assistant', content: 'ok' }])),
+  );
+  checks.check(
+    'findSignalNotice flags a notice that opened a node (the removed shape)',
+    opened !== null && opened.index === 0 && opened.before === null && opened.injected === false && opened.boundary === null,
+  );
+  checks.check(
+    'findSignalNotice ignores tool output, other transcripts and junk',
+    findSignalNotice(parseTranscriptJsonl(sigJsonl([{ role: 'tool', tool_call_id: 'c1', content: '[command started in background: id 1]' }]))) === null &&
+      findSignalNotice(t) === null &&
+      findSignalNotice(null) === null,
+  );
+  checks.check(
+    'the harness never sends the host completion wording in its own prompts',
+    SIGNAL_FRAGMENTS.every((fragment) => noticeText.includes(fragment)) &&
+      !signalPrompt('RID').includes('Background command') &&
+      !signalPrompt('RID').includes('finished with exit code'),
+  );
+  checks.check(
+    'signalPrompt drives a background job then two foreground rounds',
+    signalPrompt('RID').includes('HARNESS-TEST RID SIG') &&
+      signalPrompt('RID').includes('"timeout_behavior":"start_in_background"') &&
+      signalPrompt('RID').includes('6000') &&
+      signalPrompt('RID', { jobMs: 1500 }).includes('1500'),
+  );
+  checks.check(
+    'sessionNodeCount reads the per-session node count',
+    sessionNodeCount({ sessions: [{ id: 's1', nodes: 3 }, { id: 's2' }] }, 's1') === 3 &&
+      sessionNodeCount({ sessions: [{ id: 's2' }] }, 's2') === null &&
+      sessionNodeCount({}, 'sx') === null,
+  );
+  checks.check(
+    'sessionBackgroundNodes tells "absent" from "empty"',
+    sessionBackgroundNodes({ sessions: [{ id: 's1', backgroundNodes: ['n1'] }, { id: 's2', backgroundNodes: [] }] }, 's1').join() === 'n1' &&
+      sessionBackgroundNodes({ sessions: [{ id: 's2', backgroundNodes: [] }] }, 's2').length === 0 &&
+      sessionBackgroundNodes({ sessions: [{ id: 's2' }] }, 's2') === null &&
+      sessionBackgroundNodes({}, 'sx') === null,
+  );
+  checks.check(
+    'signals is a registered suite',
+    SUITES.includes('signals') && expandSuites(['signals']).join() === 'signals',
+  );
+
   // -- poll helpers
   checks.check('makeRunId produces a marker prefix', /^harness-[a-z0-9]+-[a-z0-9]+$/.test(makeRunId(1, () => 0.5)));
   checks.check('sleepCmd builds the probe command', sleepCmd(15000) === 'node -e "setTimeout(()=>{},15000)"');
@@ -1978,6 +2467,31 @@ async function selftestAsync(cx, result) {
   const missing = await waitForFile(`${file}.nope`, 10, 5);
   fs.rmSync(file, { force: true });
   checks.check('waitForFile finds an existing file and times out otherwise', found === file && missing === null);
+
+  // `readTranscriptNow` / `dumpsWithNotice` over a real (temporary) session folder.
+  const sigDir = path.join(os.tmpdir(), `harness-test-signals-${process.pid}`);
+  fs.mkdirSync(sigDir, { recursive: true });
+  const sigLines = (nodeId, body) =>
+    [JSON.stringify({ type: 'meta', kind: 'session', nodeId }), ...body.map((m) => JSON.stringify(m))].join('\n') + '\n';
+  const sigNotice = 'Background command `cmd` (id 1) finished with exit code 0.';
+  fs.writeFileSync(
+    path.join(sigDir, 'n1.jsonl'),
+    sigLines('n1', [{ role: 'user', content: 'prompt' }, { role: 'user', content: sigNotice }]),
+  );
+  fs.writeFileSync(path.join(sigDir, 'n2.jsonl'), sigLines('n2', [{ role: 'user', content: 'no notice here' }]));
+  const readBack = readTranscriptNow({ transcriptDir: () => sigDir }, 's1', 'n1');
+  const notThere = readTranscriptNow({ transcriptDir: () => sigDir }, 's1', 'nope');
+  const carrying = dumpsWithNotice(sigDir);
+  fs.rmSync(sigDir, { recursive: true, force: true });
+  checks.check(
+    'readTranscriptNow parses a dump and tolerates a missing one',
+    readBack !== null && readBack.parsed.meta.nodeId === 'n1' && readBack.parsed.messages.length === 2 && notThere === null,
+  );
+  checks.check(
+    'dumpsWithNotice names only the dumps carrying a notice',
+    carrying.length === 1 && carrying[0].nodeId === 'n1' && carrying[0].notice.index === 1,
+  );
+  checks.check('dumpsWithNotice tolerates a missing folder', dumpsWithNotice(path.join(sigDir, 'gone')).length === 0);
   checks.check('timeoutSignal is available on this Node', typeof timeoutSignal === 'function');
   checks.check(
     'selectTarget output feeds the client',
@@ -2014,6 +2528,7 @@ const SUITE_FNS = {
   concurrency: suiteConcurrency,
   navigation: suiteNavigation,
   background: suiteBackground,
+  signals: suiteSignals,
   branch: suiteBranch,
   selftest: suiteSelftestAll,
 };

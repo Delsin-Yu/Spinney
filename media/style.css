@@ -674,159 +674,64 @@ button.icon-btn {
   overflow: auto;
 }
 
-/* ---- Background terminals: per-node dock (bottom of the owning card) ----
-   There is no standalone panel: each node's jobs render into its own card's dock.
-   The dock is a flex item of the card (`flex: 0 0 auto`) while `.node-body` keeps
-   `flex: 1 1 auto` — so the dock adds height to the card and never eats into the
-   transcript's own scroll area. `.node-resize` is absolutely positioned, so
-   appending the dock last does not disturb it (main.js keeps it above the
-   composer pane on the card that hosts the input). */
-.node-bg {
-  flex: 0 0 auto;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 5px 8px;
-  border-top: 1px solid var(--border);
-  background: var(--bg2);
-}
-
-.node-bg.hidden {
-  display: none;
-}
-
-.bg-dock-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.bg-dock-count {
-  color: var(--text-dim);
-  font-size: 10px;
-  font-family: "Consolas", "Courier New", monospace;
-  white-space: nowrap;
-  /* Shrinks (and ellipsises) before the kill buttons, which must stay clickable. */
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.bg-dock-kills {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  margin-left: auto;
-  flex: 0 0 auto;
-}
-
-.bg-dock-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  max-height: 170px;
-  overflow-y: auto;
-  scrollbar-gutter: stable;
-}
-
-/* A collapsed card has no room for the per-task rows (heads and their collapsible
-   output bodies), so the dock collapses to its one-line summary — the counts plus
-   one kill button per live job. Re-expanding restores the full list, which stayed
-   in the DOM all along. */
-.node-bg.collapsed .bg-dock-list {
-  display: none;
-}
-
-.node-bg:not(.collapsed) .bg-dock-head {
-  display: none;
-}
-
-.bg-item {
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg3);
-  overflow: hidden;
-}
-
-.bg-item.running {
+/* Background job cards: a `kind: 'bg'` sidecar window right of the owning node.
+   (D4 removed the old per-node dock that used to sit at the bottom of the card —
+   one job now has exactly one home.) */
+.node.bg {
   border-left: 3px solid var(--warn);
 }
 
-.bg-item.finished {
-  border-left: 3px solid var(--success);
+.node.bg.bg-done,
+.node.bg.delivered {
+  border-left-color: var(--success);
 }
 
-.bg-item-head {
+.bg-card-status {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 5px 8px;
-  cursor: pointer;
-  user-select: none;
+  font-size: 11px;
+  font-family: "Consolas", "Courier New", monospace;
 }
 
-.bg-id {
-  color: var(--accent);
-  font-family: "Consolas", "Courier New", monospace;
+.bg-card-id {
+  color: var(--text-dim);
+}
+
+.bg-card-cmd {
+  margin-top: 4px;
+  color: var(--text-dim);
   font-size: 11px;
+  font-family: "Consolas", "Courier New", monospace;
+  word-break: break-all;
+}
+
+.bg-elapsed {
+  color: var(--text-dim);
+  margin-left: auto;
+}
+
+/* `Delivered` badge (D1): this sidecar's completion signal already reached the
+   agent — a background notice was injected, or a sub-agent's result came back as a
+   tool result. Both sidecar kinds show it. */
+.node-delivered-badge {
+  font-size: 9px;
   font-weight: 600;
+  letter-spacing: 0.03em;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--success);
+  color: var(--bg1);
+  flex: 0 0 auto;
 }
 
-.bg-cmd {
-  flex: 1;
-  min-width: 0;
-  color: var(--text);
-  font-family: "Consolas", "Courier New", monospace;
-  font-size: 11px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+.bgnotify-badge.bg {
+  background: var(--warn);
+  color: var(--bg1);
 }
 
-.bg-status {
-  color: var(--text-dim);
-  font-size: 11px;
-  white-space: nowrap;
-}
-
-.bg-item.running .bg-status {
-  color: var(--warn);
-}
-
-.bg-status.pending {
-  color: var(--accent);
-  animation: pulse 1s ease-in-out infinite;
-}
-
-.bg-item-head .chev {
-  color: var(--text-dim);
-  font-size: 10px;
-  transition: transform 0.15s ease;
-}
-
-.bg-item-head .chev.open {
-  transform: rotate(90deg);
-}
-
-.bg-body {
-  padding: 0 8px 8px;
-  border-top: 1px solid var(--border);
-  max-height: 160px;
-  overflow: auto;
-  color: var(--text-dim);
-  font-family: "Consolas", "Courier New", monospace;
-  font-size: 11px;
-}
-
-.bg-body.hidden {
-  display: none;
-}
-
-.bg-output {
-  margin: 0;
-  white-space: pre-wrap;
-  word-break: break-word;
+.bgnotify-badge.sub {
+  background: var(--accent, var(--success));
 }
 
 .bg-kill {
@@ -1057,11 +962,10 @@ button.icon-btn {
 .thinking-body,
 .bgnotify-output,
 .bgnotify-cmd,
-/* The background dock lives inside #tree-canvas (user-select: none), so its
-   output must opt back in to stay copyable like the old panel's. */
-.bg-cmd,
-.bg-output,
-.bg-dock-count {
+/* A job card lives inside #tree-canvas (user-select: none), so its command and
+   output must opt back in to stay copyable. */
+.bg-card-cmd,
+.bg-output {
   user-select: text;
   -webkit-user-select: text;
 }

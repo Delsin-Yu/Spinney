@@ -138,8 +138,13 @@ export interface SubAgentJob {
 /** A background terminal summarized for the webview UI. */
 interface BackgroundInfo {
   id: number;
-  /** The node that owns the job — its card renders the dock (P2). */
+  /** The node that owns the job — the node that started it, never the view focus. */
   nodeId: string;
+  /**
+   * The `kind:'bg'` card that mirrors this job (null when its branch is gone): the
+   * webview patches that card instead of docking a row at the bottom of the owner.
+   */
+  cardNodeId?: string | null;
   command: string;
   status: 'running' | 'finished';
   exitCode: number | null;
@@ -151,18 +156,51 @@ interface BackgroundInfo {
   pendingDelivery: boolean;
 }
 
-/** A queued background-completion notification waiting for the agent to go idle. */
-interface BackgroundNotice {
-  text: string;
-  /** The background-terminal id, used to drop a notice the agent already handled via join/kill. */
-  taskId: number;
-  /** The node the job belongs to: the notice turn is based on it, never on the view. */
+/** What produced a signal: drives the notification block's badge, nothing else. */
+export type SignalKind = 'background' | 'subagent';
+
+/**
+ * One message for a batch of signals (D2): a single `user` message per delivery, so
+ * a burst of finishes costs the model one round of context, not N.
+ */
+function combineSignalText(batch: SignalNotice[]): string {
+  if (batch.length === 1) {
+    return batch[0].text;
+  }
+  const background = batch.filter((s) => s.kind === 'background').length;
+  const subagents = batch.length - background;
+  const parts = [
+    background > 0 ? `${background} background terminal(s)` : '',
+    subagents > 0 ? `${subagents} sub-agent batch(es)` : '',
+  ].filter(Boolean);
+  const lines = batch.map((s) => `- ${s.text.replace(/\n/g, '\n  ')}`);
+  return `[Completion signals] ${parts.join(' + ')} finished:\n${lines.join('\n')}`;
+}
+
+/**
+ * One queued "the work you started has finished" signal, waiting for delivery.
+ *
+ * A signal is delivered **at the next tool boundary of its owner node's running
+ * turn** (so the model reacts on its next hop), or — when the node is idle — as an
+ * injected turn on that same node. Either way it lands in the node that started
+ * the work, never on the view focus, and it renders as a notification block
+ * inside that node's card rather than as a user bubble.
+ */
+interface SignalNotice {
+  /** The node that owns the work: where the signal (and its block) lands. */
   nodeId: string;
-  /** Card fields: task id, command, status phrase, and output tail. */
-  id: number;
-  cmd: string;
-  doneText: string;
-  output: string;
+  kind: SignalKind;
+  /**
+   * The sidecar card(s) that produced the signal (`kind:'bg'` node / the sub-agent
+   * node). Flipped to `delivered` the moment the signal reaches the agent.
+   */
+  sourceNodeIds?: string[];
+  /** The text injected as a `role:'user'` message (one batch = one message). */
+  text: string;
+  /** Card fields of the notification block (`backgroundNotice.item`). */
+  card: { kind: SignalKind; id: string | number; name: string; doneText: string; content: string };
+  /** Background only: its task id, for the join/kill staleness check. */
+  taskId?: number;
 }
 
 /**
@@ -291,16 +329,19 @@ export class SessionRuntime {
   readonly level2Counts = new Map<string, number>();
   /** Running sub-agents: agentNodeId -> { agent, abort } for individual kill. */
   readonly runningSubAgents = new Map<string, { agent: Agent; abort: AbortController }>();
-  /** Sub-agent completion notifications queued for the parent (async mode). */
-  readonly subAgentNoticeQueue: Array<{ nodeId: string; summary: string; status: string; count?: number }> = [];
-  /** Async depth-2 results queued for a still-running sub-agent parent, resumed on its finish. */
-  readonly subAgentChildNotices = new Map<string, Array<{ message: string }>>();
-  private lastSubAgentDrain: ReturnType<typeof setTimeout> | null = null;
 
-  /** Background-completion notifications waiting for the agent to go idle. */
-  private backgroundNotifQueue: BackgroundNotice[] = [];
-  /** Coalesces idle background-notice delivery so a burst of finishes batches into one turn. */
-  private backgroundDrainTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Completion signals waiting to be delivered, keyed by the node that owns the
+   * work. There is **one** queue for both producers (background terminals and
+   * async sub-agents) because their delivery rules are identical: take them at the
+   * owner turn's next tool boundary, or (idle node) inject them as a turn on that
+   * same node.
+   */
+  private readonly signals = new Map<string, SignalNotice[]>();
+  /** Coalesces delivery so a burst of finishes becomes one message / one turn. */
+  private signalDrainTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Background task id -> the `kind:'bg'` card that mirrors it. */
+  private readonly bgNodes = new Map<number, string>();
   /** Coalesces background UI refreshes (chatty processes fire onUpdated many times/s). */
   private bgFlushTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -349,10 +390,9 @@ export class SessionRuntime {
     // nothing to (re)base — it only seeds the view-derived counters.
     this.currentPromptTokens = this.getLatestPromptTokens();
 
-    // Deliver any background-completion notice queued for this session (e.g. it
-    // finished while the agent was busy and the user switched away before the
-    // drain ran).
-    this.drainBackgroundQueue();
+    // Deliver any completion signal queued for this session (e.g. it finished
+    // while the agent was busy and the user switched away before the drain ran).
+    this.drainSignals();
   }
 
   /**
@@ -388,6 +428,9 @@ export class SessionRuntime {
       // And it can hand a self-contained task to a fresh session, which reports
       // its answer back here (only the main agent may do this).
       agent.setCanHop(true);
+      // Completion signals (a finished background terminal or an async sub-agent)
+      // are injected into this node's *running* turn at its next tool boundary.
+      agent.setSignalHandler(() => this.takeSignalsFor(node));
       agent.setHopHandler((args) => Promise.resolve(this.host.handleHopSession(this, node, args)));
       agent.setListNodeHandler(() => Promise.resolve(this.handleListNodes(node)));
       // And it can rename the session (an explicit rename locks the title, so the
@@ -474,17 +517,13 @@ export class SessionRuntime {
   /** Tear down: kill background jobs, abort sub-agents, cancel timers. */
   dispose(): void {
     this.disposed = true;
-    if (this.backgroundDrainTimer != null) {
-      clearTimeout(this.backgroundDrainTimer);
-      this.backgroundDrainTimer = null;
+    if (this.signalDrainTimer != null) {
+      clearTimeout(this.signalDrainTimer);
+      this.signalDrainTimer = null;
     }
     if (this.bgFlushTimer != null) {
       clearTimeout(this.bgFlushTimer);
       this.bgFlushTimer = null;
-    }
-    if (this.lastSubAgentDrain != null) {
-      clearTimeout(this.lastSubAgentDrain);
-      this.lastSubAgentDrain = null;
     }
     for (const run of this.runs.values()) {
       if (run.flushTimer != null) {
@@ -780,10 +819,20 @@ export class SessionRuntime {
       usage: nodeUsage(node),
       size: node.customSize ?? null,
       kind: node.kind,
+      delivered: node.delivered === true,
       agentDepth: node.agentDepth,
       agentStatus: node.agentStatus,
       agentModel: node.agentModel,
       agentWrite: node.agentWrite,
+      // A `kind:'bg'` card carries the terminal snapshot of its job, so it renders
+      // (and re-renders after a reload) without asking the hub, which is
+      // in-memory and forgot the job the moment the window went away.
+      bgTaskId: node.bgTaskId,
+      bgCommand: node.bgCommand,
+      bgExitCode: node.bgExitCode,
+      bgKilled: node.bgKilled,
+      bgElapsedMs: node.bgElapsedMs,
+      bgOutputTail: node.bgOutputTail,
       // Agent nodes carry their own transcript so they re-render after reload.
       items: node.kind === 'agent' ? node.displayItems.map(clipDisplayItem) : undefined,
     }));
@@ -1440,8 +1489,7 @@ export class SessionRuntime {
         // P3: `busy` clears only once the *last* run of the session is gone.
         this.syncBusy();
         void this.refreshBalance();
-        this.drainBackgroundQueue();
-        this.drainSubAgentNotices();
+        this.drainSignals();
         break;
       case 'interrupted':
         if (run) this.flushStreamDeltas(run);
@@ -1454,8 +1502,7 @@ export class SessionRuntime {
         if (run) this.finishTurn(run, 'interrupted');
         this.syncBusy();
         void this.refreshBalance();
-        this.drainBackgroundQueue();
-        this.drainSubAgentNotices();
+        this.drainSignals();
         break;
       case 'error':
         if (run) {
@@ -1469,8 +1516,7 @@ export class SessionRuntime {
         if (run) this.finishTurn(run, 'error');
         this.syncBusy();
         void this.refreshBalance();
-        this.drainBackgroundQueue();
-        this.drainSubAgentNotices();
+        this.drainSignals();
         break;
       default:
         break;
@@ -1728,8 +1774,15 @@ export class SessionRuntime {
       void this.runSubAgent(job, signal).then((r) => this.deliverResumeAsync(node, r), () => {});
       return Promise.resolve(JSON.stringify({ resumed: true, id: node.id, async: true }));
     }
-    return this.runSubAgent(job, signal).then((r) =>
-      JSON.stringify({
+    return this.runSubAgent(job, signal).then((r) => {
+      // Sync resume: the resumed output is the tool result, so the caller is
+      // informed by construction — settle the card (D1).
+      if (!node.delivered) {
+        node.delivered = true;
+        this.host.persist();
+        this.postTree();
+      }
+      return JSON.stringify({
         resumed: true,
         id: node.id,
         ok: r.ok,
@@ -1737,39 +1790,20 @@ export class SessionRuntime {
         model: r.model,
         transcript: node.agentTranscript,
         stats: summarizeTranscript(node.messages),
-      }),
-    );
+      });
+    });
   }
 
   /** Async resume: deliver the resumed sub-agent's outcome to whoever owns it —
-   * the main agent (a card + one notice) or a sub-agent parent (queued/auto-resumed). */
+   * the main agent (a card + one signal), or a sub-agent parent (queued for its
+   * next tool boundary, or auto-resumed when it is already done). */
   private deliverResumeAsync(node: TreeNode, result: { ok: boolean; summary: string; model?: string }): void {
     const parent = this.session.nodes[node.parentId ?? ''] ?? null;
     if (!parent) {
       return;
     }
     const cardText = `子代理 #${node.id.slice(-6)} ${result.ok ? '完成' : '失败'}: ${result.summary || '(no summary)'}${this.transcriptNote(node)}`;
-    parent.displayItems.push({
-      kind: 'background',
-      id: `sub-msg-${node.id}`,
-      name: '子代理完成',
-      content: cardText,
-      doneText: '子代理完成',
-    });
-    this.post({
-      type: 'backgroundNotice',
-      nodeId: parent.id,
-      item: { id: `sub-msg-${node.id}`, name: '子代理完成', doneText: '子代理完成', content: cardText },
-    });
-    if (parent.kind === 'agent') {
-      // The owner is a sub-agent: hand it the result the same way an async child
-      // batch is handed over (queued for its next finish, or auto-resumed), so the
-      // notice is never injected as a main-agent turn bound to a sub-agent node.
-      this.queueSubAgentChildNotice(parent, [{ ok: result.ok, summary: result.summary, node }]);
-    } else {
-      this.subAgentNoticeQueue.push({ nodeId: parent.id, summary: cardText, status: 'done', count: 1 });
-      this.scheduleSubAgentDrain();
-    }
+    this.queueSubAgentSignal(parent, [{ ok: result.ok, summary: result.summary, node }], cardText);
     this.host.persist();
   }
 
@@ -1843,20 +1877,18 @@ export class SessionRuntime {
     this.postTree();
 
     if (mode === 'async') {
-      // A main-agent turn node owns the batch; a sub-agent node instead hands the
-      // result to its own parent (see `onAsyncBatchDone`). P3 cannot ask "the
-      // active run" any more — `parent`'s kind is the stable answer.
-      const mainParent = parent.kind !== 'agent';
       const tasks = jobs.map((job) => {
         const run = () => this.runSubAgent(job, signal);
         return (childDepth === 1 ? this.subAgentPool.withSlot(run) : run()).then((result) => ({ job, result }));
       });
-      // Notify the parent once the whole batch settles, so it reacts a single time.
+      // Notify the parent once the whole batch settles, so it reacts a single time
+      // (`onAsyncBatchDone` handles a main-agent parent and a sub-agent parent the
+      // same way now — the batch belongs to `parent`, whoever it is).
       void Promise.allSettled(tasks).then((settled) => {
         const list = settled.map((s, i) =>
           s.status === 'fulfilled' ? s.value : { job: jobs[i], result: { ok: false, summary: 'cancelled' } },
         );
-        this.onAsyncBatchDone(mainParent, parent, list.map((l) => ({ ...l.result, node: l.job.node })));
+        this.onAsyncBatchDone(parent, list.map((l) => ({ ...l.result, node: l.job.node })));
       });
       return JSON.stringify({
         spawned: jobs.length,
@@ -1870,6 +1902,15 @@ export class SessionRuntime {
       const results = await Promise.all(
         jobs.map((job) => (childDepth === 1 ? this.subAgentPool.withSlot(() => this.runSubAgent(job, signal)) : this.runSubAgent(job, signal))),
       );
+      // Sync mode: the summaries are the tool result, so the caller is informed by
+      // construction — no notice will follow. Settle their cards (D1).
+      for (const job of jobs) {
+        if (!job.node.delivered) {
+          job.node.delivered = true;
+        }
+      }
+      this.host.persist();
+      this.postTree();
       return {
         results: results.map((r, i) => ({
           agentNodeId: jobs[i].node.id,
@@ -1916,8 +1957,11 @@ export class SessionRuntime {
         }
         this.post({ type: 'agentDone', id: job.node.id, status, summary });
         this.host.persist();
-        // This sub-agent (depth-1) may have async depth-2 results queued while it ran.
-        this.flushSubAgentChildNotices(job.node);
+        // This sub-agent (depth-1) may have queued its depth-2 children's completion
+        // signals while it ran. Now that it stopped, the drain can hand them over:
+        // an idle sub-agent node is resumed with them (a live one would have taken
+        // them at its own tool boundary — see `takeSignalsFor`).
+        this.drainSignals();
         resolve({ ok: status === 'done', summary, model: job.spec.model || this.model });
       };
 
@@ -1925,6 +1969,9 @@ export class SessionRuntime {
       subAgent = sub;
       sub.setModel(job.spec.model || this.model);
       sub.setThinkingEffort(this.thinkingEffort);
+      // A sub-agent takes its own children's completion signals at its own tool
+      // boundary, exactly like the main agent (D3).
+      sub.setSignalHandler(() => this.takeSignalsFor(job.node));
       // Depth is hard-capped at 2, so only a depth-1 sub-agent may fan out. A
       // writable one gets `spawn_agents` (children may write); a read-only one
       // gets `spawn_readonly_agents` instead, whose args cannot express
@@ -1967,51 +2014,51 @@ export class SessionRuntime {
   }
 
   /**
-   * Async mode: the depth-1 sub-agent's own (depth-2) sub-agents finished while
-   * it was still running. If the parent is done we resume it with the notification
-   * so it can react; if it is still running we leave the notice queued and deliver
-   * it at the parent's next finish. This is the "parent receives its own children's
-   * results" counterpart to the main agent's async delivery.
+   * Deliver one batch of finished sub-agents to their **parent node** as a single
+   * completion signal (D2: one message, one block per signal).
+   *
+   * The parent may be the main agent's turn, or another sub-agent. Both are handled
+   * the same way now:
+   *  - parent still running → the signal waits and is injected at its next tool
+   *    boundary (`takeSignalsFor`), so a sub-agent hears about its depth-2 children
+   *    mid-turn exactly like the main agent does (D3);
+   *  - parent already finished → resume it with the notification (a sub-agent's own
+   *    conversation is a separate history, so it cannot be "injected" into a turn
+   *    that no longer exists).
    */
-  private queueSubAgentChildNotice(parent: TreeNode, results: Array<{ ok: boolean; summary: string; node: TreeNode }>): void {
+  private queueSubAgentSignal(parent: TreeNode, results: Array<{ ok: boolean; summary: string; node: TreeNode }>, cardText?: string): void {
     const lines = results.map(
       (r) => `子代理 #${r.node.id.slice(-6)} ${r.ok ? '完成' : '失败'}: ${r.summary || '(no summary)'}${this.transcriptNote(r.node)}`,
     );
-    const notice = `[子代理批次] ${results.length} 个子代理完成\n${lines.join('\n')}`;
-    if (this.runningSubAgents.has(parent.id)) {
-      // Parent still working: deliver when it reaches a rest point (its finish).
-      const q = this.subAgentChildNotices.get(parent.id) ?? [];
-      q.push({ message: notice });
-      this.subAgentChildNotices.set(parent.id, q);
+    const body = cardText ?? lines.join('\n');
+    const doneText = `${results.length} 个子代理完成`;
+    const text = `[子代理批次] ${doneText}\n${body}`;
+    const signal: SignalNotice = {
+      nodeId: parent.id,
+      kind: 'subagent',
+      sourceNodeIds: results.map((r) => r.node.id),
+      text,
+      card: { kind: 'subagent', id: `sub-${parent.id}`, name: '子代理完成', doneText, content: body },
+    };
+    if (parent.kind === 'agent' && !this.isNodeLive(parent.id)) {
+      // A finished sub-agent parent cannot receive an injected turn on its own
+      // node (its history is not in the API path), so resume it with the text.
+      const abort = new AbortController();
+      void this.runSubAgent(
+        { node: parent, spec: { instruction: text, write: parent.agentWrite ?? false, model: undefined }, resume: true, sessionId: this.sessionId },
+        abort.signal,
+      );
       return;
     }
-    // Parent already finished: resume it so it can react to its children.
-    const abort = new AbortController();
-    void this.runSubAgent(
-      { node: parent, spec: { instruction: notice, write: parent.agentWrite ?? false, model: undefined }, resume: true, sessionId: this.sessionId },
-      abort.signal,
-    );
+    this.pushSignal(signal);
   }
 
-  /** Deliver queued async child results to a sub-agent that just finished. */
-  private flushSubAgentChildNotices(node: TreeNode): void {
-    const queued = this.subAgentChildNotices.get(node.id);
-    if (!queued || queued.length === 0) {
-      return;
+  /** True when this node has a live run (its turn would take signals mid-turn). */
+  private isNodeLive(nodeId: string): boolean {
+    if (this.runs.has(nodeId)) {
+      return true;
     }
-    const notice = queued.shift()!;
-    if (queued.length === 0) {
-      this.subAgentChildNotices.delete(node.id);
-    }
-    if (this.runningSubAgents.has(node.id)) {
-      // A newer run already owns this node; leave the notice for it.
-      return;
-    }
-    const abort = new AbortController();
-    void this.runSubAgent(
-      { node, spec: { instruction: notice.message, write: node.agentWrite ?? false, model: undefined }, resume: true, sessionId: this.sessionId },
-      abort.signal,
-    );
+    return this.runningSubAgents.has(nodeId);
   }
 
   /** Route a sub-agent's events to its own node (streaming carries a nodeId). */
@@ -2161,92 +2208,22 @@ export class SessionRuntime {
    * deliver one combined notice so the main agent reacts a single time. All
    * still belongs to the single parent node.
    */
-  private onAsyncBatchDone(mainParent: boolean, parent: TreeNode, results: Array<{ ok: boolean; summary: string; node: TreeNode }>): void {
-    if (!mainParent) {
-      // The parent is a sub-agent: deliver its children's completion to it so it
-      // can react (S2). It may still be running; queue or resume accordingly.
-      this.queueSubAgentChildNotice(parent, results);
-      return;
-    }
-    const lines = results.map((r) => `子代理 #${r.node.id.slice(-6)} ${r.ok ? '完成' : '失败'}: ${r.summary || '(no summary)'}${this.transcriptNote(r.node)}`);
-    const cardText = lines.join('\n');
-    const doneText = `${results.length} 个子代理完成`;
-    // 1. A dedicated card at the end of the main node (visual separation).
-    parent.displayItems.push({ kind: 'background', id: `sub-aware-${parent.id}`, name: '子代理完成', content: cardText, doneText });
-    this.post({ type: 'backgroundNotice', nodeId: parent.id, item: { id: `sub-${parent.id}`, name: '子代理完成', doneText, content: cardText } });
-    // 2. One combined notice → the main agent answers once.
-    this.subAgentNoticeQueue.push({ nodeId: parent.id, summary: cardText, status: 'done', count: results.length });
-    this.scheduleSubAgentDrain();
+  /**
+   * Async mode, all sub-agents of the batch settled: queue **one** completion
+   * signal for the parent node (D2) instead of opening a turn right away. The
+   * parent may be the main agent's turn or a depth-1 sub-agent; `queueSubAgentSignal`
+   * picks between "inject at the next tool boundary / next idle moment" and
+   * "resume the finished sub-agent", so a sub-agent parent is notified exactly like
+   * the main agent (D3). The notification block itself is only rendered when the
+   * signal is actually delivered (`takePendingSignals`), so what the UI shows and
+   * what the agent knew stay in step.
+   */
+  private onAsyncBatchDone(parent: TreeNode, results: Array<{ ok: boolean; summary: string; node: TreeNode }>): void {
+    const lines = results.map(
+      (r) => `子代理 #${r.node.id.slice(-6)} ${r.ok ? '完成' : '失败'}: ${r.summary || '(no summary)'}${this.transcriptNote(r.node)}`,
+    );
+    this.queueSubAgentSignal(parent, results, lines.join('\n'));
     this.host.persist();
-  }
-
-  private scheduleSubAgentDrain(): void {
-    if (this.busy) {
-      return;
-    }
-    if (this.lastSubAgentDrain != null) {
-      return;
-    }
-    this.lastSubAgentDrain = setTimeout(() => {
-      this.lastSubAgentDrain = null;
-      this.drainSubAgentNotices();
-    }, 75);
-  }
-
-  /** When the main agent is idle, deliver queued async sub-agent results. */
-  private drainSubAgentNotices(): void {
-    if (this.dead || this.busy) {
-      return;
-    }
-    if (this.heldBackoff(() => this.scheduleSubAgentDrain())) {
-      return;
-    }
-    // The worker's `finally` hasn't reset `isRunning` yet when this is called from
-    // the `done` callback — sendUserMessage would drop the notice. Defer a tick.
-    // P3: the agent that matters is the *target node's* worker.
-    const firstId = this.subAgentNoticeQueue.find((n) => this.session.nodes[n.nodeId] !== undefined)?.nodeId;
-    const targetAgent = firstId ? this.nodeWorkers.get(firstId)?.agent : undefined;
-    if (targetAgent && targetAgent.running) {
-      setTimeout(() => this.drainSubAgentNotices(), 0);
-      return;
-    }
-    // Notices are session-local now, so a notice whose node no longer exists is
-    // simply stale (its branch/session was deleted) and gets dropped.
-    const notices = this.subAgentNoticeQueue.splice(0).filter((n) => this.session.nodes[n.nodeId] !== undefined);
-    if (notices.length === 0) {
-      return;
-    }
-    // Bind this injected turn to the parent node: it bypasses beginTurn, so the
-    // reply (and any further spawn) must belong to that node.
-    const parentId = notices[0].nodeId;
-    const parent = this.session.nodes[parentId];
-    // Continue from the parent node's path: an injected turn bypasses beginTurn,
-    // so pin the *node's own agent* history to this node explicitly (the user may
-    // have checked out another branch while the async batch was running).
-    const run = parent ? this.beginInjectedTurn(parent) : null;
-    if (!parent || !run) {
-      // Held (a reload is due), the node vanished, or that node already has a live
-      // run: put the notices back so the drain retries later instead of dropping
-      // them.
-      this.subAgentNoticeQueue.push(...notices);
-      this.scheduleSubAgentDrain();
-      return;
-    }
-    this.lastStatus = '子代理完成';
-    this.setBusy(true);
-    this.post({ type: 'status', text: this.lastStatus });
-    // Re-affirm the view in the webview BEFORE the resumed turn streams: a nested
-    // sub-agent spawn may have left messagesEl pinned to a sub-agent card, and
-    // this injected turn has no `path`/`tree` round-trip of its own. postPath
-    // follows the view focus, so the reply cannot leak into a sub-agent card.
-    this.postPath();
-    // One clean combined message: per batch, a header + the per-sub-agent lines.
-    const parts = notices.map((n) => {
-      const count = n.count ?? 1;
-      const head = n.status === 'done' ? `${count} 个子代理完成` : `${count} 个子代理完成（含失败/中断）`;
-      return `[子代理批次] ${head}\n${n.summary || '(no summary)'}`;
-    });
-    run.agent.sendUserMessage(`子代理通知：\n${parts.join('\n\n')}`);
   }
 
   private cleanupSubAgents(): void {
@@ -2277,7 +2254,12 @@ export class SessionRuntime {
     };
     const ordered = Object.values(session.nodes).sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
     const lines = ordered.map((node) => {
-      const marks = [node.kind === 'agent' ? 'agent' : 'turn', node.kind === 'agent' ? node.agentStatus ?? node.status : node.status];
+      const kindMark = node.kind === 'agent' ? 'agent' : node.kind === 'bg' ? 'bg' : 'turn';
+      const marks = [
+        kindMark,
+        node.delivered ? 'delivered' : '',
+        node.kind === 'agent' ? node.agentStatus ?? node.status : node.status,
+      ].filter(Boolean);
       if (node.id === session.activeNodeId) {
         marks.push('checked out');
       }
@@ -2298,6 +2280,8 @@ export class SessionRuntime {
     return {
       id: task.id,
       nodeId: owner.nodeId,
+      // The `kind:'bg'` card that mirrors this job (null when its branch is gone).
+      cardNodeId: this.bgNodes.get(task.id) ?? null,
       command: task.command,
       status: task.status,
       exitCode: task.exitCode,
@@ -2364,207 +2348,354 @@ export class SessionRuntime {
     return true;
   }
 
+  // ---- Completion signals (background terminals + async sub-agents) ----
+
   /**
-   * Called by the hub when a background terminal of this session transitions to
-   * finished (naturally or via kill). Builds the notice, queues it, and drains
-   * immediately — delivering now if the agent is idle, or waiting for the
-   * current turn to finish otherwise.
+   * Called by the hub when a job of this session is registered: create the flying
+   * node that mirrors it — a `kind:'bg'` sidecar beside the owning turn, in the same
+   * right-hand grid the sub-agents use. The card is created here (not by the
+   * webview) so the tree stays the single source of truth: it is laid out, sized,
+   * persisted and deleted like any other node.
+   */
+  onBackgroundRegistered(owner: BackgroundOwner, task: BackgroundTask): void {
+    if (this.dead) {
+      return;
+    }
+    const parent = this.session.nodes[owner.nodeId];
+    if (!parent) {
+      return;
+    }
+    // `attachNode` checks the new node out; a job started by a turn must never move
+    // the view focus (same trick as `spawnChildren` for sub-agent cards).
+    const prevActive = this.session.activeNodeId;
+    const node = createNode(newId(), parent.id, this.truncateField(task.command, 60), 'running');
+    node.kind = 'bg';
+    node.bgTaskId = task.id;
+    node.bgCommand = task.command;
+    attachNode(this.session, node);
+    this.session.activeNodeId = prevActive;
+    this.bgNodes.set(task.id, node.id);
+    this.host.persist();
+    this.postTree();
+    this.postBackgrounds();
+  }
+
+  /**
+   * Called by the hub when a job of this session ends (naturally or via kill).
+   * First snapshot its terminal state onto the card — the hub is in-memory, the
+   * card must outlive it — then queue the completion signal. `scheduleSignalDrain`
+   * delivers it at the owning turn's next tool boundary, or as an injected turn on
+   * that same node when it is idle.
    */
   onBackgroundFinished(owner: BackgroundOwner, task: BackgroundTask): void {
     if (this.dead) {
       return;
     }
+    this.snapshotBackgroundCard(task);
     if (task.notifyAgent !== true) {
-      // Tool-initiated kill/join already informed the agent via the tool result, so
-      // the task is considered delivered and leaves the pending dock state.
+      // A tool-initiated kill/join already informed the agent through the tool
+      // result, so this signal is never sent: settle the card instead (D1).
       task.delivered = true;
+      this.settleSignals([this.staleSignalFor(task)]);
       this.postBackgrounds();
       return;
     }
-    const notice = this.buildBackgroundNotice(owner, task);
-    this.backgroundNotifQueue.push(notice);
-    this.scheduleBackgroundDrain();
+    this.pushSignal(this.buildBackgroundSignal(owner, task));
   }
 
-  /**
-   * Coalesce idle background-notice delivery: several jobs finishing in quick
-   * succession while the agent is idle are batched into a single turn instead of
-   * one turn each. While the agent is busy the notices simply stay queued and are
-   * drained when the current turn ends.
-   */
-  private scheduleBackgroundDrain(): void {
-    if (this.busy) {
+  /** Write a job's terminal state onto its card so it survives a restart (D1). */
+  private snapshotBackgroundCard(task: BackgroundTask): void {
+    const node = this.bgCardFor(task.id);
+    if (!node) {
       return;
     }
-    if (this.backgroundDrainTimer != null) {
-      return;
-    }
-    this.backgroundDrainTimer = setTimeout(() => {
-      this.backgroundDrainTimer = null;
-      this.drainBackgroundQueue();
-    }, 75);
+    const out = task.handle.getOutput().trim();
+    node.bgCommand = task.command;
+    node.bgExitCode = task.exitCode;
+    node.bgKilled = task.killed === true;
+    node.bgElapsedMs = Math.max(0, Date.now() - task.startedAt);
+    node.bgOutputTail = out.length > 800 ? `…${out.slice(-800)}` : out;
+    node.status = task.killed ? 'interrupted' : 'done';
+    this.host.persist();
+    this.postTree();
   }
 
-  private buildBackgroundNotice(owner: BackgroundOwner, task: BackgroundTask): BackgroundNotice {
+  /** The `kind:'bg'` node mirroring a task (undefined when its branch is gone). */
+  private bgCardFor(taskId: number): TreeNode | undefined {
+    const nodeId = this.bgNodes.get(taskId);
+    return nodeId ? this.session.nodes[nodeId] : undefined;
+  }
+
+  /** A signal carrying only the card it settles: used when no notice will be sent. */
+  private staleSignalFor(task: BackgroundTask): SignalNotice {
+    const card = this.bgCardFor(task.id);
+    return {
+      nodeId: card?.parentId ?? '',
+      kind: 'background',
+      sourceNodeIds: card ? [card.id] : [],
+      taskId: task.id,
+      text: '',
+      card: { kind: 'background', id: task.id, name: task.command, doneText: '', content: '' },
+    };
+  }
+
+  private buildBackgroundSignal(owner: BackgroundOwner, task: BackgroundTask): SignalNotice {
     const cmd = this.truncateField(task.command, 100);
     const doneText = task.killed
       ? 'was killed by the user'
       : `finished with exit code ${task.exitCode ?? 'unknown'}`;
     const output = this.truncateField(task.handle.getOutput().trim(), 1200);
     const text = `Background command \`${cmd}\` (id ${task.id}) ${doneText}.${output ? `\nOutput:\n${output}` : ''}`;
-    return { text, taskId: task.id, nodeId: owner.nodeId, id: task.id, cmd, doneText, output };
+    const card = this.bgCardFor(task.id);
+    return {
+      nodeId: owner.nodeId,
+      kind: 'background',
+      sourceNodeIds: card ? [card.id] : [],
+      taskId: task.id,
+      text,
+      card: { kind: 'background', id: task.id, name: cmd, doneText, content: output },
+    };
   }
 
   private truncateField(value: string, limit: number): string {
     return value.length > limit ? value.slice(0, limit) + '…' : value;
   }
 
-  /** Combine several queued notices into one agent-facing message. */
-  private combineNotices(notices: BackgroundNotice[]): string {
-    if (notices.length === 1) {
-      return notices[0].text;
+  /** Queue one signal under the node that owns the work and schedule delivery. */
+  private pushSignal(signal: SignalNotice): void {
+    const queue = this.signals.get(signal.nodeId);
+    if (queue) {
+      queue.push(signal);
+    } else {
+      this.signals.set(signal.nodeId, [signal]);
     }
-    const lines = notices.map((n) => `- ${n.text}`);
-    return `[Background terminal notice] ${notices.length} background tasks finished:\n${lines.join('\n')}`;
+    this.scheduleSignalDrain();
   }
 
   /**
-   * Deliver a batch of background-completion notices: render one card per notice
-   * in the owning node's branch, then start a single turn with a combined
-   * message so the agent reacts once (instead of one auto-turn per finished job).
-   *
-   * The notice turn is based on the node that *owns* the job — never on the view
-   * focus — and does not pan the view, so a job finishing in node X while the
-   * user sits on node Y lands in X without moving anything. One group (owner node)
-   * goes per drain: `beginTurn` refuses when that owner node is itself streaming
-   * (P3), and the rest is re-queued to drain when the session is free again.
+   * Coalesce delivery so a burst of finishes becomes one message (and, when the
+   * owner node is idle, one injected turn) instead of one per job.
    */
-  private injectBackgroundNotices(notices: BackgroundNotice[]): void {
+  private scheduleSignalDrain(delay = 75): void {
+    if (this.signalDrainTimer != null) {
+      return;
+    }
+    this.signalDrainTimer = setTimeout(() => {
+      this.signalDrainTimer = null;
+      this.drainSignals();
+    }, delay);
+  }
+
+  /**
+   * The agent hook (`Agent.setSignalHandler`): hand this node's queued signals to
+   * its **running** turn, which injects them as one `user` message at its next tool
+   * boundary. Called at most once per assistant tool round; must not throw.
+   */
+  private takeSignalsFor(node: TreeNode): string[] {
+    if (this.dead) {
+      return [];
+    }
+    const queue = this.signals.get(node.id);
+    if (!queue || queue.length === 0) {
+      return [];
+    }
+    if (this.host.isHeld()) {
+      // A reload is waiting for this window to go idle: do not extend the turn with
+      // new work. The idle drain picks the signals up after the hold expires.
+      return [];
+    }
+    const batch = this.takePendingSignals(node.id);
+    if (batch.length === 0) {
+      return [];
+    }
+    this.renderSignalCards(node.id, batch);
+    return [combineSignalText(batch)];
+  }
+
+  /**
+   * Deliver every queued signal whose owning node can receive it right now.
+   *
+   * A live node keeps its signals for the agent hook (they belong mid-turn, at the
+   * next tool boundary). An idle node gets an **injected turn on itself** — never a
+   * new node under it, never the view focus — or, for a sub-agent node, a resume
+   * (its history is not the session path, so `beginInjectedTurn` would rebase it on
+   * its parent's messages).
+   */
+  drainSignals(): void {
     if (this.dead) {
       return;
     }
-    if (notices.length === 0) {
+    if (this.heldBackoff(() => this.scheduleSignalDrain(500))) {
       return;
     }
-    if (this.busy) {
-      this.backgroundNotifQueue.push(...notices);
-      return;
-    }
-    const groups = new Map<string, BackgroundNotice[]>();
-    for (const n of notices) {
-      const group = groups.get(n.nodeId);
-      if (group) {
-        group.push(n);
-      } else {
-        groups.set(n.nodeId, [n]);
-      }
-    }
-    const first = [...groups.entries()].find(([nodeId]) => Boolean(this.session.nodes[nodeId]));
-    if (!first) {
-      // Every notice's owning node is gone (its branch was deleted): drop them.
-      for (const n of notices) {
-        this.markDelivered(n.taskId);
-      }
-      this.postBackgrounds();
-      return;
-    }
-    const [ownerNodeId, batch] = first;
-    const deferred = notices.filter((n) => n.nodeId !== ownerNodeId);
-    if (deferred.length > 0) {
-      this.backgroundNotifQueue.push(...deferred);
-    }
-    // The notice turn is a new node *under the owning node*, so the card and the
-    // agent's reply land in their own block of the branch that spawned the job.
-    const title =
-      batch.length === 1
-        ? `Background #${batch[0].id}: ${batch[0].cmd}`
-        : `Background: ${batch.length} tasks finished`;
-    const run = this.beginTurn(titleFromPrompt(title), { parentId: ownerNodeId, pan: false });
-    if (!run) {
-      this.backgroundNotifQueue.push(...batch);
-      return;
-    }
-    for (const n of batch) {
-      // The notice is now reaching the agent, so the task leaves the pending dock.
-      this.markDelivered(n.taskId);
-      run.items.push({ kind: 'background', id: String(n.id), name: n.cmd, doneText: n.doneText, content: n.output });
-      this.post({
-        type: 'backgroundNotice',
-        nodeId: run.nodeId,
-        item: { id: n.id, name: n.cmd, doneText: n.doneText, content: n.output },
-      });
-    }
-    // Refresh the docks so the just-delivered jobs drop out of the pending list.
-    this.postBackgrounds();
-    this.lastStatus = 'Background terminal finished';
-    this.setBusy(true);
-    this.post({ type: 'status', text: this.lastStatus });
-    run.agent.sendUserMessage(this.combineNotices(batch));
-  }
-
-  /**
-   * True when a queued notice must not be delivered: the task was later joined or
-   * killed via a tool, it no longer exists (cleared/removed), or the node that
-   * owned it is gone (its branch was deleted).
-   */
-  private taskAlreadyHandled(notice: BackgroundNotice): boolean {
-    const hit = this.hub.lookup(this.sessionId, notice.taskId);
-    if (!hit) {
-      // The task was removed (cleared session / deleted); its notice is stale.
-      return true;
-    }
-    if (!this.session.nodes[notice.nodeId]) {
-      // The owning branch was deleted; nothing may own the notice any more.
-      return true;
-    }
-    return hit.task.notifyAgent !== true;
-  }
-
-  /**
-   * After a turn ends, deliver any background-completion notifications queued
-   * while it was running. Deferred a tick so the previous turn's finally block
-   * has reset agent.running to false (otherwise sendUserMessage rejects). Drops
-   * notices for tasks already handled by a join/kill instead of delivering them.
-   */
-  drainBackgroundQueue(): void {
-    if (this.busy) {
-      return;
-    }
-    if (this.heldBackoff(() => this.scheduleBackgroundDrain())) {
-      return;
-    }
-    const queue = this.backgroundNotifQueue;
-    // Collect every real (not already handled) notice so they can be delivered
-    // together in one turn rather than one per turn.
-    const real: BackgroundNotice[] = [];
-    let i = 0;
-    while (i < queue.length) {
-      const q = queue[i];
-      if (this.taskAlreadyHandled(q)) {
-        // The agent already handled this task via join/kill (or it was removed):
-        // drop the stale notice and treat the job as delivered so it also leaves
-        // the pending panel.
-        this.markDelivered(q.taskId);
-        queue.splice(i, 1);
+    let retry = false;
+    for (const nodeId of [...this.signals.keys()]) {
+      const node = this.session.nodes[nodeId];
+      if (!node) {
+        // The owning branch was deleted: nothing may own the signal any more.
+        this.settleSignals(this.takePendingSignals(nodeId, { settleStale: false }));
+        this.signals.delete(nodeId);
         continue;
       }
-      real.push(queue.splice(i, 1)[0]);
-    }
-    if (real.length === 0) {
-      // Only stale notices were dropped; refresh so those jobs leave the pending panel.
-      this.postBackgrounds();
-      return;
-    }
-    setTimeout(() => {
-      if (this.busy) {
-        this.backgroundNotifQueue.push(...real);
-        return;
+      if (this.isNodeLive(nodeId)) {
+        // Its turn is streaming: the tool-boundary hook owns the delivery.
+        continue;
       }
-      this.injectBackgroundNotices(real);
-    }, 0);
+      if (this.nodeWorkers.get(nodeId)?.agent.running) {
+        // The turn's `finally` has not reset `isRunning` yet — sending now would be
+        // dropped silently. Retry a tick later.
+        retry = true;
+        continue;
+      }
+      const batch = this.takePendingSignals(nodeId);
+      if (batch.length === 0) {
+        continue;
+      }
+      if (node.kind === 'agent') {
+        const abort = new AbortController();
+        void this.runSubAgent(
+          {
+            node,
+            spec: { instruction: combineSignalText(batch), write: node.agentWrite ?? false, model: undefined },
+            resume: true,
+            sessionId: this.sessionId,
+          },
+          abort.signal,
+        );
+        this.renderSignalCards(nodeId, batch);
+        continue;
+      }
+      // Same node, `fresh: false`: the notice and the reply are appended to the turn
+      // that spawned the job, and the view focus does not move.
+      const run = this.beginInjectedTurn(node);
+      if (!run) {
+        // Held (a reload is due) or that node already has a live run: keep them.
+        this.pushBackSignals(nodeId, batch);
+        retry = true;
+        continue;
+      }
+      this.renderSignalCards(nodeId, batch);
+      this.lastStatus = batch.some((s) => s.kind === 'subagent') ? '子代理完成' : 'Background terminal finished';
+      this.setBusy(true);
+      this.post({ type: 'status', text: this.lastStatus });
+      // Re-affirm the view in the webview BEFORE the turn streams: a nested sub-agent
+      // spawn may have left the webview pinned to a sub-agent card, and this injected
+      // turn has no `path`/`tree` round-trip of its own. postPath follows the view
+      // focus, so the reply cannot leak into a sub-agent card.
+      this.postPath();
+      run.agent.sendUserMessage(combineSignalText(batch));
+    }
+    if (retry) {
+      this.scheduleSignalDrain(75);
+    }
   }
 
-  /** Kill a background terminal from the UI (a node card's dock). */
+  /** Pull this node's deliverable signals out of the queue (drops stale ones). */
+  private takePendingSignals(nodeId: string, opts?: { settleStale?: boolean }): SignalNotice[] {
+    const queue = this.signals.get(nodeId);
+    if (!queue || queue.length === 0) {
+      return [];
+    }
+    const batch: SignalNotice[] = [];
+    const stale: SignalNotice[] = [];
+    for (const signal of queue.splice(0)) {
+      if (this.signalStale(signal)) {
+        stale.push(signal);
+      } else {
+        batch.push(signal);
+      }
+    }
+    if (queue.length === 0) {
+      this.signals.delete(nodeId);
+    }
+    if (stale.length > 0 && opts?.settleStale !== false) {
+      this.settleSignals(stale);
+    }
+    return batch;
+  }
+
+  /** Put a batch back at the front of its queue (delivery was not possible). */
+  private pushBackSignals(nodeId: string, batch: SignalNotice[]): void {
+    const queue = this.signals.get(nodeId);
+    if (queue) {
+      queue.unshift(...batch);
+    } else {
+      this.signals.set(nodeId, [...batch]);
+    }
+  }
+
+  /**
+   * True when a queued signal must not be delivered: the task was joined or killed
+   * through a tool (its result is the signal), it no longer exists (cleared), or the
+   * node that owns it is gone (its branch was deleted).
+   */
+  private signalStale(signal: SignalNotice): boolean {
+    if (!this.session.nodes[signal.nodeId]) {
+      return true;
+    }
+    if (signal.taskId == null) {
+      return false;
+    }
+    const hit = this.hub.lookup(this.sessionId, signal.taskId);
+    return !hit || hit.task.notifyAgent !== true;
+  }
+
+  /**
+   * Render one notification block per signal inside the owning node's card. The
+   * block is part of that node's own transcript (`DisplayItem.kind: 'background'`),
+   * so a reload re-renders it, and it is deliberately **not** a `kind:'user'` item:
+   * replaying one of those would be skipped, or would clobber the pinned prompt.
+   */
+  private renderSignalCards(nodeId: string, batch: SignalNotice[]): void {
+    const node = this.session.nodes[nodeId];
+    for (const signal of batch) {
+      if (signal.taskId != null) {
+        this.markDelivered(signal.taskId);
+      }
+      if (node) {
+        node.displayItems.push({
+          kind: 'background',
+          id: String(signal.card.id),
+          name: signal.card.name,
+          doneText: signal.card.doneText,
+          content: signal.card.content,
+        });
+      }
+      this.post({ type: 'backgroundNotice', nodeId, item: signal.card });
+    }
+    this.settleSignals(batch);
+    this.host.persist();
+    if (node) {
+      this.post({
+        type: 'nodeUpdate',
+        id: node.id,
+        status: node.status,
+        title: node.title,
+        usage: nodeUsage(node),
+      });
+    }
+  }
+
+  /** Flip the source cards of a batch to `Delivered` and repaint them once (D1). */
+  private settleSignals(batch: SignalNotice[]): void {
+    let touched = false;
+    for (const signal of batch) {
+      for (const id of signal.sourceNodeIds ?? []) {
+        const card = this.session.nodes[id];
+        if (card && !card.delivered) {
+          card.delivered = true;
+          touched = true;
+        }
+      }
+    }
+    if (touched) {
+      this.host.persist();
+      this.postTree();
+    }
+  }
+
+  /** Kill a background terminal from the UI (a job card's kill button). */
+
   onKillBackground(id: number): void {
     const hit = this.hub.lookup(this.sessionId, id);
     if (!hit) {
@@ -2610,12 +2741,11 @@ export class SessionRuntime {
     // A cleared conversation drops its background jobs too: the provider asks
     // for a confirmation first, so anything still running here is killed here.
     this.hub.removeSession(this.sessionId, { kill: true });
-    this.backgroundNotifQueue = [];
-    this.subAgentNoticeQueue.length = 0;
-    this.subAgentChildNotices.clear();
-    if (this.backgroundDrainTimer != null) {
-      clearTimeout(this.backgroundDrainTimer);
-      this.backgroundDrainTimer = null;
+    this.signals.clear();
+    this.bgNodes.clear();
+    if (this.signalDrainTimer != null) {
+      clearTimeout(this.signalDrainTimer);
+      this.signalDrainTimer = null;
     }
     this.setBusy(false);
     this.lastStatus = '';
@@ -2629,7 +2759,7 @@ export class SessionRuntime {
 
   /**
    * Apply a confirmed branch deletion to this session: drop anything the removed
-   * nodes still queued (the pending interruption notice, async child notices),
+   * nodes still queued (the pending interruption notice, completion signals),
    * re-check out the surviving view focus and repaint. The provider does the tree
    * surgery, the transcript dumps and the persistence.
    */
@@ -2640,18 +2770,25 @@ export class SessionRuntime {
       this.interruptedNodes.delete(id);
       this.nodeWorkers.delete(id);
     }
-    // Depth-2 results queued for a removed (finished) sub-agent can never be
-    // delivered; a queued main-agent notice for a removed node is dropped by
-    // drainSubAgentNotices itself (it filters on the node still existing).
+    // Completion signals queued for a removed node can never be delivered (its
+    // branch is gone). Their source cards go with the branch anyway.
     for (const id of ids) {
-      this.subAgentChildNotices.delete(id);
+      this.signals.delete(id);
     }
     // Background jobs are owned by nodes: dropping a branch kills the jobs it
-    // spawned (the provider confirmed that with the user) and drops its notices.
+    // spawned (the provider confirmed that with the user) and forgets their cards.
     for (const id of ids) {
       this.hub.removeNode(this.sessionId, id, { kill: true });
+      const node = this.session.nodes[id];
+      if (node?.kind === 'bg' && node.bgTaskId != null) {
+        this.bgNodes.delete(node.bgTaskId);
+      }
     }
-    this.backgroundNotifQueue = this.backgroundNotifQueue.filter((n) => !ids.includes(n.nodeId));
+    for (const [taskId, nodeId] of [...this.bgNodes]) {
+      if (!this.session.nodes[nodeId]) {
+        this.bgNodes.delete(taskId);
+      }
+    }
     this.postBackgrounds();
     this.checkoutNode(this.session, this.session.activeNodeId);
     this.currentPromptTokens = this.getLatestPromptTokens();
