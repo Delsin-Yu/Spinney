@@ -64,12 +64,31 @@ waits for the harness to be idle (`runPendingSessionStart` also polls
 `activeSessionHasRunningBackground()`). A failed return logs to the agent output
 channel and drops the result — the child's transcript is still on disk.
 
-`hvsc` commands: `serve` / `start` / `status` / `rm` / `reboot` / `jobs`. The
-reboot flow is `wait-for-finish` → `reload-window` (shared profile) or kill +
+`hvsc` commands: `serve` / `start` / `status` / `adopt` / `rm` / `reboot` / `jobs`.
+The reboot flow is `wait-for-finish` → `reload-window` (shared profile) or kill +
 relaunch (`--isolated`) → poll `/health` → `continue`. `hvsc start --no-workspace`
 launches a `code` window with no folder open (`workspace: null` is a first-class
 instance identity: matching treats two nulls as a match, so no workspace path is
 required).
+
+**Targets are windows, not records.** A window the daemon never launched (the user
+opened it, or a previous daemon did) has no record, so `hvsc reboot <id>` used to
+be impossible for it. Now an unknown target is *adopted on first use*:
+`hvsc reboot --current --continue "…"` targets the window the command runs inside
+(the harness terminal's process ancestry contains that window's extension-host pid
+= its discovery file), `--workspace <path>` targets the one live window with that
+folder open, and a bare `pid-19940` targets a discovery file directly. `hvsc status`
+lists both records and windows nobody owns; `hvsc adopt …` registers one without
+rebooting. An adopted record is **reload-only** (`isolated: false`, `rm --kill`
+refuses it): its main process is shared with every other window of the user's
+profile, so killing it is never an option. Ambiguous or unknown targets fail with
+the list of live windows instead of reloading the wrong one.
+
+Matching a record to a control plane is ordered (id → same workspace + appeared
+after we launched/reloaded it, newest first → the one live window on that
+workspace), and *all* candidates are probed. That is what survives a reload (new
+extension host, new port, new instance id) and what keeps a lingering discovery
+file of the dying instance from shadowing its replacement.
 
 Operational rules:
 

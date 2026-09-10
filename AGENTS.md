@@ -12,7 +12,7 @@
 2. `powershell -File build-deploy.ps1`：编译 → 打包 `.vsix` → `code --install-extension --force`。只有用户明确说"只构建"时才加 `-NoInstall`。
 3. **让用户 `Ctrl+Shift+P` → "Developer: Reload Window"**。扩展宿主在 reload 之前一直跑旧代码，所以 reload 之前不要宣称改动已生效，也不要把这步留给人猜。
 
-- 自动替代：`hvsc` supervisor 在跑时（`tools/hyper-vscode/.state/daemon.json` 里有活的 pid），改用 `node tools/hyper-vscode/hvsc.mjs reboot <instanceId> --continue "<消息>"` 驱动 reload；**回合内永远不要加 `--wait`**（会死锁）。
+- 自动替代：`hvsc` supervisor 在跑时（`tools/hyper-vscode/.state/daemon.json` 里有活的 pid），改用 `node tools/hyper-vscode/hvsc.mjs reboot <instanceId> --continue "<消息>"` 驱动 reload；当前窗口不是 hvsc 启动的（没有 instanceId）就用 `reboot --current`，它会临时收养当前窗口（只 reload，绝不 kill）；**回合内永远不要加 `--wait`**（会死锁）。
 - 只改文档（`README.md` / `AGENTS.md`）不需要 `build-deploy`，除非要顺带刷新已打包的 `.vsix`。
 - reload 会重启扩展宿主；会话存在 `agentHarness.state` 里，对话不丢。
 

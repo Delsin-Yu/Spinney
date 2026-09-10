@@ -42,5 +42,5 @@ if (-not $NoInstance) {
 }
 
 Write-Host "Hyper-Vscode daemon -> http://127.0.0.1:$Port   (Ctrl+C to stop)" -ForegroundColor Cyan
-Write-Host "  hvsc start <workspace> | hvsc start --no-workspace | hvsc status | hvsc reboot <id> --continue ""...""" -ForegroundColor DarkGray
+Write-Host "  hvsc start <workspace> | hvsc start --no-workspace | hvsc status | hvsc reboot <id|--current> --continue ""...""" -ForegroundColor DarkGray
 & node @nodeArgs

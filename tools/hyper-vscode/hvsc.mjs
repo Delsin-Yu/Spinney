@@ -10,10 +10,17 @@
  *
  *   hvsc serve   [--port 7777] [--start <workspace>|--no-workspace] [--isolated]
  *   hvsc start   [<workspace>|--no-workspace] [--isolated] [--arg <codeArg>]
- *   hvsc status                                        # list instances
+ *   hvsc status                                        # instances + unmanaged windows
+ *   hvsc adopt   [--current|<instanceId|pid-N>] [--workspace <path>]   # register a foreign window
  *   hvsc rm      <instanceId|--stale> [--kill]         # forget (optionally kill an isolated one)
- *   hvsc reboot  <instanceId|--all> --continue "<message>" [--reason "..."] [--wait]
+ *   hvsc reboot  [<instanceId|--current|--all>] --continue "<message>" [--reason "..."] [--wait]
  *   hvsc jobs    [<jobId>]
+ *
+ * A reboot targets a *window*, not necessarily one this daemon launched: a window
+ * the user started themselves (or any other launcher) is adopted on demand, so
+ * `hvsc reboot --current --continue "…"` reloads the very window the command runs
+ * in even though we have no record of it. Because we did not launch it we never
+ * kill it — it is asked to reload itself, like every other shared-profile window.
  *
  * Instances are launched with **profile passthrough** by default (no
  * `--user-data-dir`), so the new window shares the user's profile and therefore
@@ -47,7 +54,10 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const TOOL_DIR = dirname(fileURLToPath(import.meta.url));
-const STATE_DIR = join(TOOL_DIR, '.state');
+/** Where the daemon keeps daemon.json / instances.json / daemon.log. Overridable
+ * so a second (test) daemon can run beside the real one without fighting over
+ * `.state/` — every hvsc invocation that should talk to it sets the same var. */
+const STATE_DIR = process.env.HYPER_VSCODE_STATE_DIR || join(TOOL_DIR, '.state');
 const STATE_FILE = join(STATE_DIR, 'daemon.json');
 const INSTANCES_FILE = join(STATE_DIR, 'instances.json');
 const LOG_FILE = join(STATE_DIR, 'daemon.log');
@@ -99,6 +109,12 @@ function collectArgs(argv, name) {
 /** Human-readable workspace for logs/CLI: a no-repo window has none. */
 const wsLabel = (workspace) => workspace ?? '(no workspace)';
 
+/** One-line summary of the live harness windows, for "target not found" errors. */
+function describeDiscoveries(list) {
+  if (!list?.length) return 'no live harness window found (is agentHarness.httpApi.enabled on?)';
+  return `live harness windows: ${list.map((d) => `${d.instanceId} @ ${wsLabel(d.workspace)} :${d.port}`).join(', ')}`;
+}
+
 function readJson(file) {
   try {
     return JSON.parse(readFileSync(file, 'utf8'));
@@ -123,19 +139,20 @@ function run(cmd, args) {
 
 /** Where the extension writes its per-process discovery files. */
 function globalStorageDirs() {
+  // Documented as an *override*: a lab/test daemon points at its own root and
+  // must not see (or adopt) the user's real windows.
+  if (process.env.HYPER_VSCODE_GLOBAL_STORAGE) return [process.env.HYPER_VSCODE_GLOBAL_STORAGE];
   const dirs = [];
-  const push = (p) => p && dirs.push(p);
-  push(process.env.HYPER_VSCODE_GLOBAL_STORAGE);
   const appData = process.env.APPDATA;
   if (appData) {
     for (const flavor of ['Code', 'Code - Insiders', 'Cursor', 'VSCodium']) {
-      push(join(appData, flavor, 'User', 'globalStorage', EXT_ID));
+      dirs.push(join(appData, flavor, 'User', 'globalStorage', EXT_ID));
     }
   }
   const home = process.env.HOME || process.env.USERPROFILE;
   if (home) {
-    push(join(home, '.config', 'Code', 'User', 'globalStorage', EXT_ID));
-    push(join(home, 'Library', 'Application Support', 'Code', 'User', 'globalStorage', EXT_ID));
+    dirs.push(join(home, '.config', 'Code', 'User', 'globalStorage', EXT_ID));
+    dirs.push(join(home, 'Library', 'Application Support', 'Code', 'User', 'globalStorage', EXT_ID));
   }
   return dirs;
 }
@@ -165,48 +182,72 @@ function readDiscoveries() {
 }
 
 /**
- * Find the harness control plane for an instance. In passthrough mode the
- * `AGENT_HARNESS_INSTANCE_ID` env never reaches the new window (it attaches to
- * the running main process), so fall back to "same workspace, started after we
- * launched it, newest first".
+ * Every control plane that could belong to `record`, best first:
+ *
+ *   1. the same instance id — exact: that very extension host;
+ *   2. a discovery on the same workspace that appeared *after* we launched (or
+ *      reloaded) it, newest first. This is how a window whose env never reaches
+ *      it (passthrough `code -n`) is matched at all, and how a reload — which
+ *      leaves the window behind a *new* extension host, instance id and port —
+ *      is followed;
+ *   3. nothing above and exactly one live window on that workspace: that one.
+ *      Still the best guess (the user may have reloaded the window by hand long
+ *      after we last saw it) and, with a single candidate, not ambiguous.
+ *
+ * Returning *all* candidates matters: a discovery file whose extension host is
+ * still shutting down would otherwise shadow its replacement (the id match wins,
+ * its `/health` still answers, and the caller drives a dying port).
+ *
+ * `claimed` keeps one discovery file from serving two records; `exact` drops
+ * tier 3 — used after a daemon restart, where a guess could steal a *different*
+ * record's window.
  */
-/** A recovered record only counts as alive if its control plane appeared soon
- * after we launched (or reloaded) it — not hours later, which is another window. */
-const MATCH_WINDOW_MS = 30 * 60 * 1000;
-
-function matchDiscovery(record, claimed) {
-  const all = readDiscoveries().filter((d) => !claimed || !claimed.has(d.file));
-  const byId = all.find((d) => d.instanceId === record.id);
-  if (byId) return byId;
+function matchDiscoveries(record, { claimed, exact = false } = {}) {
+  const all = readDiscoveries().filter((d) => !claimed?.has(d.file));
+  const out = [];
+  const push = (d) => {
+    if (d && !out.includes(d)) out.push(d);
+  };
+  push(all.find((d) => d.instanceId === record.id));
   const since = record.launchedAt ?? record.startedAt ?? 0;
-  return (
-    all
-      .filter(
-        (d) =>
-          samePath(d.workspace, record.workspace) &&
-          (d.startedAt ?? 0) >= since &&
-          (d.startedAt ?? 0) - since < MATCH_WINDOW_MS,
-      )
-      .sort((a, b) => a.startedAt - since - (b.startedAt - since))[0] ?? null
-  );
+  const sameWs = all.filter((d) => samePath(d.workspace, record.workspace));
+  const newer = sameWs.filter((d) => (d.startedAt ?? 0) >= since).sort((a, b) => (b.startedAt ?? 0) - (a.startedAt ?? 0));
+  for (const d of newer) push(d);
+  if (!exact && !out.length && sameWs.length === 1) push(sameWs[0]);
+  return out;
+}
+
+/** The single best control plane for a record (or null). */
+function matchDiscovery(record, claimed, opts) {
+  return matchDiscoveries(record, { claimed, ...opts })[0] ?? null;
 }
 
 /**
  * The harness endpoint a record points at dies with its extension host (window
  * reload, extension-host restart, crash), which leaves a live window behind a
  * *new* discovery file and port. Probe the cached endpoint and re-discover when
- * it no longer answers, so `reboot` never drives a closed port.
+ * it no longer answers, so `reboot` never drives a closed port. Returns the live
+ * endpoint, or null when no control plane answers at all (the caller reports
+ * that instead of fetching a closed port).
  */
 async function resolveHarness(record, timeoutMs = 5000) {
-  if (record.harness) {
+  const probe = async (rec) => {
+    if (!rec) return null;
     try {
-      const health = await harnessFetch(record.harness, '/health', { timeoutMs });
-      if (health.status === 200 && health.json?.ok) return record.harness;
+      const health = await harnessFetch(rec, '/health', { timeoutMs });
+      return health.status === 200 && health.json?.ok ? rec : null;
     } catch {
-      /* stale endpoint: fall through to re-discovery */
+      return null;
     }
+  };
+  const cached = await probe(record.harness);
+  if (cached) return cached;
+  for (const cand of matchDiscoveries(record)) {
+    if (cand.file === record.harness?.file) continue;
+    const live = await probe(cand);
+    if (live) return live;
   }
-  return matchDiscovery(record) ?? record.harness;
+  return null;
 }
 
 async function harnessFetch(rec, path, { method = 'GET', body, timeoutMs = 15000 } = {}) {
@@ -362,11 +403,17 @@ function samePath(a, b) {
   return resolve(a).replace(/[\\/]+/g, '/').toLowerCase() === resolve(b).replace(/[\\/]+/g, '/').toLowerCase();
 }
 
+/**
+ * Wait for the record's *fresh* control plane. A reboot replaces the extension
+ * host, so everything that was up before (`since`) is ignored — including the
+ * old instance id, whose discovery file may linger for a while. Candidates are
+ * tried newest first.
+ */
 async function waitForHarness(record, since, timeoutMs) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const rec = matchDiscovery(record);
-    if (rec && (rec.startedAt ?? 0) >= since) {
+    for (const rec of matchDiscoveries(record, { exact: true })) {
+      if ((rec.startedAt ?? 0) < since) continue; // the instance we just replaced
       try {
         const health = await harnessFetch(rec, '/health', { timeoutMs: 5000 });
         if (health.status === 200 && health.json?.ok) return rec;
@@ -442,32 +489,120 @@ async function serve(argv) {
    * Point a record at its *live* harness endpoint and persist the correction.
    * Without this a record keeps aiming at the port of an extension host that has
    * since been replaced, and every later `/wait-for-finish` fails with
-   * "fetch failed". Returns the live endpoint (or null when there is none).
+   * "fetch failed". Returns the live endpoint (or null when nothing answers, so
+   * callers can report that instead of fetching a closed port).
    */
   async function refreshRecord(record, timeoutMs = 5000) {
     const rec = await resolveHarness(record, timeoutMs);
-    if (rec && rec !== record.harness) {
+    if (rec && rec.file !== record.harness?.file) {
       const was = record.harness?.port;
       record.harness = rec;
-      record.alive = true;
       saveInstances();
       log(`${record.id} harness re-discovered on port ${rec.port} (was ${was ?? 'none'})`);
     }
+    record.alive = !!rec;
     return rec;
   }
 
+  /**
+   * Adopt a window the daemon never launched: `reboot` must work for a window the
+   * user opened themselves (or that any other launcher started), which has no
+   * record here and — with a shared profile — not even our env vars.
+   *
+   * An adopted record is reload-only: `isolated: false` means the reboot takes
+   * the `/reload-window` path, so we can never kill a window we do not own (its
+   * main process is shared with every other window of the user's profile).
+   */
+  function adopt(d, why) {
+    const now = Date.now();
+    const record = {
+      id: d.instanceId,
+      workspace: d.workspace ?? null,
+      extraArgs: [],
+      isolated: false,
+      adopted: true,
+      adoptedAt: now,
+      adoptedReason: why,
+      codePid: null,
+      codeArgs: [],
+      launchedAt: d.startedAt ?? now,
+      startedAt: d.startedAt ?? now,
+      harness: d,
+      alive: true,
+    };
+    instances.set(record.id, record);
+    saveInstances();
+    log(`adopted ${record.id} (${wsLabel(record.workspace)}, harness :${d.port}) — ${why}`);
+    return record;
+  }
+
+  /** The record already pointing at this discovery, if any (adoption is idempotent). */
+  function recordForDiscovery(d) {
+    for (const r of instances.values()) {
+      if (r.harness?.file === d.file || r.harness?.instanceId === d.instanceId || r.id === d.instanceId) return r;
+    }
+    return null;
+  }
+
+  /**
+   * Resolve a reboot/adopt target to a record, adopting an unmanaged window on
+   * first use. Accepted targets:
+   *
+   *   - a record id (or an argument of `hvsc status`);
+   *   - a live harness instance id (`pid-1234`) or its extension-host pid;
+   *   - `current` / any unknown id plus `callerPids`: harness terminals are
+   *     descendants of the window's extension host, so one of the caller's
+   *     ancestors *is* the discovery pid — that is how the window a command runs
+   *     in is found without any record;
+   *   - `workspace` (hints.workspace), when exactly one live window uses it.
+   */
+  function resolveTarget(id, hints = {}) {
+    const known = instances.get(id);
+    if (known) return known;
+    if (/^\d+$/.test(String(id))) {
+      // A bare pid (as shown by `hvsc status`) names the window just as well.
+      const byPid = [...instances.values()].find((r) => r.harness?.pid === Number(id) || r.codePid === Number(id));
+      if (byPid) return byPid;
+    }
+    const all = readDiscoveries();
+    const pick = (d, why) => recordForDiscovery(d) ?? adopt(d, why);
+    const byId = all.find((d) => d.instanceId === id || String(d.pid) === String(id));
+    if (byId) return pick(byId, `instance id ${id}`);
+    for (const raw of hints.callerPids ?? []) {
+      const d = all.find((x) => x.pid === Number(raw));
+      if (d) return pick(d, `caller ancestry (extension host pid ${d.pid})`);
+    }
+    const ws = typeof hints.workspace === 'string' && hints.workspace.trim() ? hints.workspace : null;
+    if (ws) {
+      const matches = all.filter((d) => samePath(d.workspace, ws));
+      if (matches.length === 1) return pick(matches[0], `workspace ${wsLabel(matches[0].workspace)}`);
+      if (matches.length > 1) {
+        throw new Error(`${ws} is open in ${matches.length} windows (${matches.map((d) => d.instanceId).join(', ')}): name one explicitly`);
+      }
+      throw new Error(`no live harness window has ${ws} open — ${describeDiscoveries(all)}`);
+    }
+    throw new Error(`no instance "${id}" and no window matched it — ${describeDiscoveries(all)}`);
+  }
+
   // Re-adopt instances recorded by a previous daemon run (a daemon restart used
-  // to orphan them: the records only lived in memory). Newest first, and a
-  // discovery file may be claimed by only one record.
+  // to orphan them: the records only lived in memory). Newest first, one
+  // discovery file per record, and no guessing (`exact`): an older record must
+  // not steal the window a newer one owns.
   const claimed = new Set();
   for (const rec of (readJson(INSTANCES_FILE) ?? []).filter((r) => r?.id).sort((a, b) => (b.launchedAt ?? 0) - (a.launchedAt ?? 0))) {
-    rec.harness = matchDiscovery(rec, claimed);
+    rec.harness = matchDiscovery(rec, claimed, { exact: true });
     if (rec.harness) {
       claimed.add(rec.harness.file);
     }
     rec.alive = !!rec.harness;
+    // An adopted record is derived state — a foreign window, nothing of ours to
+    // supervise — so drop it once that window is gone.
+    if (rec.adopted && !rec.alive) {
+      log(`dropped adopted instance ${rec.id} (its window is gone)`);
+      continue;
+    }
     instances.set(rec.id, rec);
-    log(`recovered instance ${rec.id} (${rec.alive ? `harness :${rec.harness.port}` : 'no live harness'})`);
+    log(`recovered instance ${rec.id}${rec.adopted ? ' (adopted)' : ''} (${rec.alive ? `harness :${rec.harness.port}` : 'no live harness'})`);
   }
   if (instances.size > 0) {
     saveInstances();
@@ -505,7 +640,8 @@ async function serve(argv) {
       log(`${record.id} ${step}`);
     };
     const rec0 = await refreshRecord(record);
-    if (!rec0) throw new Error('no harness endpoint discovered for this instance (is agentHarness.httpApi.enabled on?)');
+    if (!rec0) throw new Error(`${record.id} has no live control plane — ${describeDiscoveries(readDiscoveries())}`);
+    if (record.adopted) mark('adopted window (not launched by hvsc) — reload only');
     mark('wait-for-finish');
     const waited = await harnessFetch(rec0, '/wait-for-finish', {
       method: 'POST',
@@ -531,17 +667,17 @@ async function serve(argv) {
     } else {
       // Shared profile: the extension host's parent is the *user's* main process,
       // so killing it would take every window down. Ask the harness to reload.
-      mark('reload-window (shared profile)');
+      mark(record.adopted ? 'reload-window (adopted window)' : 'reload-window (shared profile)');
       const reload = await harnessFetch(rec0, '/reload-window', { method: 'POST', body: {}, timeoutMs: 15000 });
       if (reload.status !== 202) throw new Error(`/reload-window failed: ${JSON.stringify(reload.json)}`);
       record.launchedAt = Date.now();
     }
     const fresh = await waitForHarness(record, record.launchedAt, 180000);
-    if (!fresh) throw new Error('the instance did not come back within 180s');
+    if (!fresh) throw new Error('the instance did not come back within 180s (window reload failed?)');
     record.harness = fresh;
     record.alive = true;
     saveInstances();
-    mark(`back up on port ${fresh.port}`);
+    mark(`back up on port ${fresh.port} (instance ${fresh.instanceId})`);
     if (opts.continueMessage) {
       mark('continue');
       const cont = await harnessFetch(fresh, '/continue', {
@@ -612,7 +748,9 @@ async function serve(argv) {
           for (const record of instances.values()) {
             record.harnessLive = !!(await refreshRecord(record, 1500));
           }
-          return send(200, { ok: true, instances: [...instances.values()] });
+          // Also report windows we have no record for: they are reboot targets too
+          // (`hvsc reboot <instanceId>` adopts them on demand).
+          return send(200, { ok: true, instances: [...instances.values()], discoveries: readDiscoveries() });
         }
         if (req.method === 'POST' && parts[0] === 'instances' && parts.length === 1) {
           // No-repo mode: `{ workspace: null }` and `{ noWorkspace: true }` both
@@ -627,9 +765,25 @@ async function serve(argv) {
           );
           return send(201, { ok: true, instance: record });
         }
+        if (req.method === 'POST' && parts[0] === 'instances' && parts[1] === 'adopt') {
+          // Register a window this daemon did not launch, so later calls can name
+          // it by id. `{ instanceId }` (or `{ current: true }` + `callerPids`).
+          try {
+            const record = resolveTarget(String(body.instanceId ?? body.id ?? 'current'), body);
+            return send(200, { ok: true, instance: record, adopted: record.adopted === true });
+          } catch (err) {
+            return send(404, { ok: false, error: err instanceof Error ? err.message : String(err) });
+          }
+        }
         if (req.method === 'POST' && parts[0] === 'instances' && parts[2] === 'reboot') {
-          const record = instances.get(parts[1]);
-          if (!record) return send(404, { ok: false, error: `no such instance: ${parts[1]}` });
+          // The target need not be ours: an unknown id is resolved against the live
+          // discovery files (and the caller's ancestry) and adopted on the spot.
+          let record;
+          try {
+            record = resolveTarget(parts[1], body);
+          } catch (err) {
+            return send(404, { ok: false, error: err instanceof Error ? err.message : String(err) });
+          }
           const opts = {
             reason: body.reason ?? '',
             continueMessage: typeof body.continue === 'string' ? body.continue : '',
@@ -643,18 +797,28 @@ async function serve(argv) {
             while (job.status === 'running') await sleep(250);
             return send(job.status === 'completed' ? 200 : 500, { ok: job.status === 'completed', job });
           }
-          return send(202, { ok: true, jobId: job.id, status: job.status });
+          return send(202, { ok: true, jobId: job.id, status: job.status, instanceId: record.id, adopted: record.adopted === true });
         }
         if (req.method === 'DELETE' && parts[0] === 'instances' && parts[1]) {
           const record = instances.get(parts[1]);
-          if (!record) return send(404, { ok: false, error: `no such instance: ${parts[1]}` });
+          if (!record) {
+            const live = readDiscoveries().find((d) => d.instanceId === parts[1]);
+            return send(404, {
+              ok: false,
+              error: live
+                ? `${parts[1]} is a live window hvsc never launched — nothing to forget (use \`hvsc reboot\` to reload it, or \`hvsc adopt\` to register it).`
+                : `no such instance: ${parts[1]} — ${describeDiscoveries(readDiscoveries())}`,
+            });
+          }
           let killed = false;
           if (body.kill === true) {
             if (!record.isolated) {
               return send(409, {
                 ok: false,
                 error:
-                  'shared-profile instance: killing it would take every window of the same main process down. ' +
+                  (record.adopted
+                    ? 'adopted window (hvsc did not launch it): killing it could take every window of the same main process down. '
+                    : 'shared-profile instance: killing it would take every window of the same main process down. ') +
                   'Use `hvsc reboot` (control plane /reload-window), or forget it without --kill.',
               });
             }
@@ -738,6 +902,75 @@ async function daemonFetch(rec, path, { method = 'GET', body, timeoutMs = 180000
   }
 }
 
+/**
+ * Ancestors of `pid`, nearest first — one process query for the whole chain
+ * (spawning a shell per level would cost a second and this runs on every
+ * `status`/`--current`).
+ */
+function ancestryPids(pid, levels = 12) {
+  if (process.platform === 'win32') {
+    const r = run('powershell', [
+      '-NoProfile',
+      '-Command',
+      `$p=${Number(pid)}; for($i=0; $i -lt ${levels} -and $p; $i++){ Write-Output $p; $p=(Get-CimInstance Win32_Process -Filter "ProcessId=$p" -ErrorAction SilentlyContinue).ParentProcessId }`,
+    ]);
+    return r.out
+      .split(/\r?\n/)
+      .map((s) => Number(s.trim()))
+      .filter((n) => Number.isFinite(n) && n > 0);
+  }
+  const out = [];
+  let p = Number(pid);
+  for (let i = 0; i < levels && Number.isFinite(p) && p > 1; i++) {
+    const r = run('ps', ['-o', 'ppid=', '-p', String(p)]);
+    p = Number(r.out.trim());
+    if (!Number.isFinite(p) || p <= 0) break;
+    out.push(p);
+  }
+  return out;
+}
+
+/**
+ * The live harness window *this command runs inside*, or null.
+ *
+ * This is what makes `--current` work for a window hvsc never launched: the
+ * harness spawns its shells as descendants of the window's extension host, so one
+ * of our ancestors is that window's discovery pid. `AGENT_HARNESS_INSTANCE_ID` is
+ * checked first (an isolated/managed window carries it), then the ancestry.
+ */
+function currentWindow() {
+  const all = readDiscoveries();
+  const env = (process.env.AGENT_HARNESS_INSTANCE_ID ?? '').trim();
+  if (env) {
+    const byEnv = all.find((d) => d.instanceId === env || String(d.pid) === env);
+    if (byEnv) return byEnv;
+  }
+  for (const pid of ancestryPids(process.ppid)) {
+    const d = all.find((x) => x.pid === pid);
+    if (d) return d;
+  }
+  return null;
+}
+
+/** Resolve a `--workspace <path>` target to a single live window's instance id. */
+function windowForWorkspace(ws) {
+  const matches = readDiscoveries().filter((d) => samePath(d.workspace, ws));
+  if (matches.length === 1) return matches[0].instanceId;
+  if (matches.length > 1) {
+    throw new Error(`${ws} is open in ${matches.length} windows (${matches.map((d) => d.instanceId).join(', ')}) — name one explicitly`);
+  }
+  throw new Error(`no live harness window has ${ws} open — ${describeDiscoveries(readDiscoveries())}`);
+}
+
+function printTargets() {
+  const cur = currentWindow();
+  console.log(
+    cur
+      ? `[hvsc] current window: ${cur.instanceId} @ ${wsLabel(cur.workspace)} :${cur.port}`
+      : '[hvsc] could not identify the current window (run in a harness terminal, or name a target)',
+  );
+}
+
 async function main() {
   const [cmd, ...argv] = process.argv.slice(2);
   if (!cmd || cmd === 'help' || cmd === '--help') {
@@ -751,14 +984,48 @@ async function main() {
   const rec = daemon();
   if (cmd === 'status' || cmd === 'instances') {
     const { json } = await daemonFetch(rec, '/instances');
+    const managedFiles = new Set((json?.instances ?? []).map((i) => i.harness?.file).filter(Boolean));
+    const managedIds = new Set((json?.instances ?? []).map((i) => i.harness?.instanceId).filter(Boolean));
     for (const i of json?.instances ?? []) {
       const stale = i.alive === false || i.harnessLive === false;
+      const live = i.harness?.instanceId && i.harness.instanceId !== i.id ? ` -> ${i.harness.instanceId}` : '';
       console.log(
-        `${i.id}  ${wsLabel(i.workspace)}  ${i.isolated ? 'isolated' : 'passthrough'}  ` +
+        `${i.id}${live}  ${wsLabel(i.workspace)}  ${i.isolated ? 'isolated' : i.adopted ? 'adopted' : 'passthrough'}  ` +
           `harness=${i.harness ? `:${i.harness.port}` : 'not-found'}  ${stale ? 'STALE' : 'alive'}`,
       );
     }
     if (!(json?.instances ?? []).length) console.log('(no instances)');
+    const free = (json?.discoveries ?? []).filter((d) => !managedFiles.has(d.file) && !managedIds.has(d.instanceId));
+    if (free.length) {
+      console.log('\nharness windows hvsc did not launch (rebootable by id, or with --current):');
+      for (const d of free) console.log(`  ${d.instanceId}  ${wsLabel(d.workspace)}  :${d.port}`);
+    }
+    const cur = currentWindow();
+    if (cur) console.log(`\ncurrent window: ${cur.instanceId}  ${wsLabel(cur.workspace)}  :${cur.port}`);
+    return;
+  }
+  if (cmd === 'adopt') {
+    // Register a window this daemon did not launch, so later calls can name it.
+    const cur = hasFlag(argv, '--current');
+    const wsArg = argValue(argv, '--workspace');
+    const positional = argv[0] && !argv[0].startsWith('--') ? argv[0] : null;
+    let target = cur ? currentWindow()?.instanceId ?? 'current' : positional;
+    if (!target && wsArg) target = resolve(wsArg);
+    if (!target) {
+      console.error('[hvsc] adopt needs --current, --workspace <path> or a live instance id');
+      printTargets();
+      process.exit(1);
+    }
+    const { status, json } = await daemonFetch(rec, '/instances/adopt', {
+      method: 'POST',
+      body: { instanceId: target, workspace: wsArg ? resolve(wsArg) : undefined, callerPids: cur ? ancestryPids(process.ppid) : undefined },
+    });
+    console.log(
+      status === 200
+        ? `${json.instance.id}  ${wsLabel(json.instance.workspace)}  ${json.adopted ? 'adopted' : 'already managed'}  harness=:${json.instance.harness?.port ?? '?'}`
+        : `adopt failed: ${json?.error ?? JSON.stringify(json)}`,
+    );
+    process.exitCode = status === 200 ? 0 : 1;
     return;
   }
   if (cmd === 'start') {
@@ -786,11 +1053,33 @@ async function main() {
       console.error('[hvsc] --continue "<message>" is required (the caller supplies it).');
       process.exit(1);
     }
-    const targets = hasFlag(argv, '--all')
-      ? (await daemonFetch(rec, '/instances')).json.instances.map((i) => i.id)
-      : [argv[0]].filter((a) => a && !a.startsWith('--'));
-    if (!targets.length) {
-      console.error('[hvsc] specify an instance id (see `hvsc status`) or --all');
+    const wsArg = argValue(argv, '--workspace');
+    // `--current` = the window this command runs in, which need not be one we
+    // launched: resolve it locally and let the daemon do the same from our
+    // ancestry if we cannot (e.g. the discovery file has just been rewritten).
+    const wantCurrent = hasFlag(argv, '--current');
+    const positional = argv[0] && !argv[0].startsWith('--') ? argv[0] : null;
+    let targets;
+    let hints = {};
+    try {
+      if (hasFlag(argv, '--all')) {
+        targets = (await daemonFetch(rec, '/instances')).json.instances.map((i) => i.id);
+      } else if (wantCurrent) {
+        targets = [currentWindow()?.instanceId ?? 'current'];
+        hints = { callerPids: ancestryPids(process.ppid) };
+      } else if (wsArg) {
+        targets = [windowForWorkspace(resolve(wsArg))];
+      } else {
+        targets = [positional];
+      }
+    } catch (err) {
+      console.error(`[hvsc] ${err instanceof Error ? err.message : err}`);
+      printTargets();
+      process.exit(1);
+    }
+    if (!targets.length || targets.some((t) => !t)) {
+      console.error('[hvsc] specify an instance id, --current, --workspace <path> or --all (see `hvsc status`)');
+      printTargets();
       process.exit(1);
     }
     for (const id of targets) {
@@ -802,13 +1091,15 @@ async function main() {
           timeoutMs: Number(argValue(argv, '--timeout', '60000')),
           scope: argValue(argv, '--scope', 'all'),
           wait: hasFlag(argv, '--wait'),
+          ...hints,
         },
       });
       if (status === 202) {
         console.log(`${id}: job ${json.jobId} scheduled (poll: hvsc jobs ${json.jobId})`);
       } else {
-        console.log(`${id}: ${JSON.stringify(json.job ?? json)}`);
+        console.log(`${id}: ${json?.error ?? JSON.stringify(json.job ?? json)}`);
       }
+      if (status !== 202) process.exitCode = 1;
     }
     return;
   }
