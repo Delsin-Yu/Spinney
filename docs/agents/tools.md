@@ -30,7 +30,7 @@
 > `read_file` can page it, and `search_files` can grep it **by its exact path**
 > (`.agent-harness` is in `SKIP_DIRS`, so repo-wide walks skip it). A write failure
 > falls back to inlining, so a result is never lost.
-| `exec_command` | `command`, `cwd?`, `timeout?`, `timeout_behavior?` | Runs through the detected shell (`getShell()`), returns combined stdout+stderr trimmed. Errors/timeouts/aborts are prefixed with a `[...]` note. `timeout_behavior` = `stop` (default, kill on timeout) / `move_to_background` (promote a still-running command to a background terminal and return its id) / `start_in_background` (launch immediately, return id, don't wait). |
+| `exec_command` | `command` (alias `cmd`), `cwd?`, `timeout?`, `timeout_behavior?` | Runs through the detected shell (`getShell()`), returns combined stdout+stderr trimmed. Errors/timeouts/aborts are prefixed with a `[...]` note. `timeout_behavior` = `stop` (default, kill on timeout) / `move_to_background` (promote a still-running command to a background terminal and return its id) / `start_in_background` (launch immediately, return id, don't wait). |
 | `check_background_terminal` | `pid` | Status of a background terminal (running / finished, exit code, output so far). |
 | `kill_background` | `pid` | Kills a background terminal's process tree. Tool-initiated kills suppress the injected completion notice. |
 | `join_background` | `pid` | Blocks until the background terminal finishes and returns its final exit code + output. Honours Stop. |
@@ -66,4 +66,14 @@ frame form lets a tool carry large/multi-line content without JSON escaping:
 The JSON header holds small fields; each `<<<RAW:label>>>` block is captured
 verbatim and merged into `args`. Use it for `write_file`/`replace_in_file`
 content. See `parseArgs` in `src/tools/index.ts`.
+
+Required arguments are validated **before** the tool body runs (`ToolRegistry.execute`
+against the schema it advertises), so an absent value never surfaces as the
+tool's own complaint about the symptom: `exec_command` called without `command`
+answers `Error: exec_command is missing required argument "command". It sent: ….
+Parameters: command, cwd, timeout, timeout_behavior.` — plus a `Did you mean …?`
+hint when a sent key is a near-miss of the required one. One name is additionally
+folded in as an alias: `exec_command` accepts `cmd` for `command` (only when
+`command` is absent — a correct call is never touched). Aliases + validation live
+in `ARG_ALIASES` / `applyArgAliases` / `missingArgumentError` in `src/tools/index.ts`.
 

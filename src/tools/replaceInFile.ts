@@ -27,7 +27,7 @@ export const replaceInFileTool: AgentTool = {
     const oldText = String(args.oldText ?? '');
     const newText = String(args.newText ?? '');
     if (!oldText) {
-      throw new Error('oldText must not be empty.');
+      throw new Error('replace_in_file requires a non-empty "oldText".');
     }
     const content = await fs.promises.readFile(filePath, 'utf8');
     const eol = detectEol(content);
