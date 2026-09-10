@@ -4,7 +4,7 @@ There is no unit-test suite: behaviour is verified against a **live** window. Tw
 exist — the manual F5 flow below, and `tools/harness-test.mjs`, a control-plane acceptance
 harness (dev tooling, never shipped) that drives the running extension over HTTP and asserts
 host behaviour: `node tools/harness-test.mjs <suite...|all>` (suites `health`, `sessions`,
-`concurrency`, `navigation`, `background`, `branch`, `selftest`; see
+`concurrency`, `navigation`, `background`, `signals`, `branch`, `selftest`; see
 `multi-session.md` §5.1). Manual F5 checks still cover what the harness cannot see — the F5
 flow exercises read/write/exec against a scratch file (`_e2e.txt` is a leftover scratch
 fixture, safe to ignore or delete). Before a release, confirm `npm run compile` is clean and
