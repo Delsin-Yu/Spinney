@@ -1,7 +1,10 @@
 ## Config keys (`agentHarness.*`)
 `apiKey` (or `DEEPSEEK_API_KEY` env), `model`, `baseUrl`, `commandTimeout`
-(seconds, default 120), `maxTurns` (default 20), `contextWindow` (0 = auto),
-`thinkingEffort` (`none|low|medium|high`), `foldToolCalls` (default `true`),
+(seconds, default 600 = 10 minutes — the default for `exec_command` when the tool
+call does not pass its own `timeout`; a non-positive/absent value falls back to
+600), `maxTurns`
+(default 20), `contextWindow` (0 = auto), `thinkingEffort`
+(`none|low|medium|high`), `foldToolCalls` (default `true`),
 `foldThinking` (default `true`), `maxConcurrentSubagents` (default 15),
 `maxLevel2Subagents` (default 2), `saveSubAgentTranscripts` (default `true`),
 `saveSessionTranscripts` (default `true` — dump each main-agent turn; the
@@ -28,3 +31,32 @@ to **≥ 1** (a non-positive limit would otherwise deadlock every sub-agent).
   agentic loop.
 - `thinkingEffort` sends `reasoning_effort` only when not `none`.
 
+### When a change takes effect (no reload required)
+`extension.ts` listens to `onDidChangeConfiguration` and routes an
+`agentHarness.*` change to `ChatViewProvider.onConfigurationChanged(event)`. The
+split is **push vs. pull**: a key that is read once and cached somewhere live has
+to be *pushed* to that owner; a key read at its point of use is *pulled* and needs
+no handling.
+
+| Key | Applied | Mechanism |
+| --- | --- | --- |
+| `apiKey`, `baseUrl` | next request (even mid-turn) | pulled into the shared `DeepSeekClient` via `configure()` — the main agent and every sub-agent hold that instance |
+| `maxTurns` | next tool round (main agent) / next `spawn_agents` (sub-agents) | pushed: `Agent.setMaxTurns`; sub-agents re-read it at spawn |
+| `contextWindow` | immediately | pushed: recompute + `postContext()` |
+| `maxConcurrentSubagents` | immediately (raising wakes queued tasks; lowering drains) | pushed: `SubAgentPool.setMaxConcurrent` |
+| `model`, `thinkingEffort` | immediately when *that key* changed, else the dropdown selection wins | pushed through `onSetModel` / `onSetThinkingEffort`; skipped while a turn is running, like the dropdowns |
+| `foldToolCalls`, `foldThinking` | immediately, incl. cards already on screen | pushed: `postConfig()` → the webview re-applies the default to existing cards |
+| `httpApi.enabled`, `httpApi.port` | immediately | pushed: `ControlServer.restart()` (rebind the listener; disabling just leaves `start()` a no-op) |
+| `commandTimeout`, `maxInlineToolOutput`, `maxLevel2Subagents`, `saveSessionTranscripts`, `saveSubAgentTranscripts`, `subAgentTranscriptDir`, `autoSessionTitles` | immediately | pulled at the point of use (they already were — no listener needed) |
+
+- **`model` / `thinkingEffort` arbitration:** the chat dropdowns persist their
+  pick in the `agentHarness.runtimeConfig` Memento. The pick shadows the setting
+  only while the setting is unchanged: `persistRuntimeConfig` also stores the
+  setting values in force (`modelFromSettings` / `effortFromSettings`), and
+  `loadRuntimeConfig` falls back to the setting when they differ. So editing the
+  setting (live or while VS Code is closed) wins over an older pick; a pick made
+  after the edit keeps winning. A record without those fields predates the rule
+  and is trusted.
+- **Not a setting:** the `AGENTS.md` snapshot is taken once per activation
+  (`loadAgentsMd`), so that one still needs a window reload — see
+  `invariants/agents-md-snapshot.md`.

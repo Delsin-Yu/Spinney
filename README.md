@@ -98,6 +98,12 @@ You can also choose the model and base URL in settings:
 - `agentHarness.model` → `deepseek-chat` (default) or `deepseek-reasoner`
 - `agentHarness.baseUrl` → `https://api.deepseek.com` (default)
 
+All `agentHarness.*` settings apply **immediately** — no window reload: the API
+key / base URL are re-read into the live client (the next request uses them),
+and the remaining keys are read at their point of use. The only exception is
+`AGENTS.md`, whose snapshot into the system prompt is taken once per activation
+(reload after editing it). See `docs/agents/invariants/config-keys.md`.
+
 > Note: `deepseek-reasoner` may not support tool/function calling. Use `deepseek-chat` for the agentic (tool-using) loop.
 
 ---

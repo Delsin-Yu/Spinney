@@ -55,6 +55,24 @@
   // User-configurable folding (set via the `config` message).
   let foldToolCalls = true;
   let foldThinking = true;
+
+  /**
+   * Apply a changed fold default to the cards already on screen — a settings
+   * change must not wait for the next repaint. Card bodies are the only state
+   * that matters (the chevron and the `.open` marker follow it), so a later
+   * click on the header still toggles that single card as usual.
+   */
+  function applyFoldDefault(bodySelector, folded) {
+    if (!messagesEl) return;
+    for (const body of messagesEl.querySelectorAll(bodySelector)) {
+      body.classList.toggle('hidden', folded);
+      const parent = body.parentElement;
+      if (!parent) continue;
+      const chev = parent.querySelector('.chev');
+      if (chev) chev.classList.toggle('open', !folded);
+      if (parent.classList.contains('thinking')) parent.classList.toggle('open', !folded);
+    }
+  }
   // The active node's pinned user prompt (sticky at the top of an expanded card).
   let promptEl = null;
   // Drag-to-resize a card: bounds for the custom size + a live wireframe preview.
@@ -1894,13 +1912,25 @@
       case 'panTo':
         panToNode(String(msg.id ?? ''));
         break;
-      case 'config':
+      case 'config': {
+        const prevFoldToolCalls = foldToolCalls;
+        const prevFoldThinking = foldThinking;
         renderModelSelect(msg.model);
         renderEffortSelect(msg.thinkingEffort);
         foldToolCalls = msg.foldToolCalls !== false;
         foldThinking = msg.foldThinking !== false;
+        // A changed fold default must apply to the cards already on screen too,
+        // not only to the ones rendered after it (clicking a header still
+        // toggles that single card afterwards).
+        if (foldToolCalls !== prevFoldToolCalls) {
+          applyFoldDefault('.tool-body', foldToolCalls);
+        }
+        if (foldThinking !== prevFoldThinking) {
+          applyFoldDefault('.thinking-body', foldThinking);
+        }
         updateImageVisibility();
         break;
+      }
       case 'state':
         setBusy(msg.busy);
         setStatus(msg.status);

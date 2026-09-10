@@ -65,6 +65,18 @@ export function activate(context: vscode.ExtensionContext): void {
     // AGENTS.md is otherwise read once per activation: re-read it (and log the
     // new mode + agent root) whenever a folder is added or removed.
     vscode.workspace.onDidChangeWorkspaceFolders(() => chatProvider?.onWorkspaceFoldersChanged()),
+    // Settings are otherwise read once per activation. Push a change into the
+    // live objects (a new API key must work without reloading the window).
+    vscode.workspace.onDidChangeConfiguration((event) => {
+      if (!event.affectsConfiguration('agentHarness')) {
+        return;
+      }
+      chatProvider?.onConfigurationChanged(event);
+      // The control plane can only be (re)bound by restarting its listener.
+      if (event.affectsConfiguration('agentHarness.httpApi')) {
+        void controlServer.restart();
+      }
+    }),
     vscode.commands.registerCommand('agentHarness.openChat', () => chatProvider?.openChat()),
     vscode.commands.registerCommand('agentHarness.focus', () => chatProvider?.openChat()),
     vscode.commands.registerCommand('agentHarness.openSession', (arg) => {

@@ -136,10 +136,17 @@ function lastAssistantText(node: TreeNode): string {
   return '';
 }
 
-/** Locally persists the active model + thinking-effort selection. */
+/**
+ * Locally persists the active model + thinking-effort selection. The two
+ * `*FromSettings` fields record the `agentHarness.*` values that were in force
+ * when the selection was stored, so a later edit of the *setting* (an explicit
+ * choice too) can win over an older dropdown pick — see `loadRuntimeConfig`.
+ */
 interface RuntimeConfig {
   model: string;
   thinkingEffort: ThinkingEffort;
+  modelFromSettings?: string;
+  effortFromSettings?: string;
 }
 
 /** One sub-agent run: its dispatch spec plus the tree node that owns it. */
@@ -307,7 +314,8 @@ export class ChatViewProvider implements ControlHost {
     const cfg = vscode.workspace.getConfiguration('agentHarness');
     const apiKey = (cfg.get<string>('apiKey') ?? '').trim() || (process.env.DEEPSEEK_API_KEY ?? '').trim();
     const model = cfg.get<string>('model') ?? DEFAULT_MODEL;
-    const baseUrl = cfg.get<string>('baseUrl') ?? 'https://api.deepseek.com';
+    // A blank base URL means "use the default" rather than a relative URL.
+    const baseUrl = (cfg.get<string>('baseUrl') ?? '').trim() || 'https://api.deepseek.com';
     const maxTurns = cfg.get<number>('maxTurns') ?? 20;
     const thinkingEffort = (cfg.get<string>('thinkingEffort') ?? 'none') as ThinkingEffort;
     const foldToolCalls = cfg.get<boolean>('foldToolCalls') ?? true;
@@ -356,6 +364,60 @@ export class ChatViewProvider implements ControlHost {
     this.loadAgentsMd();
     const info = agentRootInfo();
     this.output.appendLine(`[workspace] folders changed → ${info.kind} mode; agent root = ${info.root}`);
+  }
+
+  /**
+   * Apply a settings change to the live objects, so editing `agentHarness.*`
+   * takes effect in this window instead of only after a reload.
+   *
+   * - **API key / base URL** are re-read into the shared `DeepSeekClient`. The
+   *   main agent and every sub-agent hold that same instance, so a new key works
+   *   on the very next request. This is deliberately applied even while a turn is
+   *   running: the options are read when each request is built.
+   * - **`maxTurns`**, the **context window** and the **sub-agent pool limit** are
+   *   pushed to their live owners.
+   * - **`model`** / **`thinkingEffort`** are applied only when those two keys
+   *   actually changed: they are also set from the chat's dropdowns (via
+   *   `onSetModel` / `onSetThinkingEffort`), and an unrelated settings edit must
+   *   not clobber a dropdown selection. Like the dropdowns, they are skipped
+   *   while a turn is running.
+   *
+   * Every other `agentHarness.*` key is already read lazily at its point of use
+   * — `autoSessionTitles`, `maxLevel2Subagents`, `saveSessionTranscripts`,
+   * `saveSubAgentTranscripts`, `subAgentTranscriptDir`, `maxInlineToolOutput`,
+   * `commandTimeout` — so nothing else has to happen here.
+   */
+  public onConfigurationChanged(event?: vscode.ConfigurationChangeEvent): void {
+    const cfg = this.getConfig();
+    this.client.configure({ apiKey: cfg.apiKey, baseUrl: cfg.baseUrl });
+    this.agent.setMaxTurns(cfg.maxTurns);
+    const contextWindow = this.getContextWindow(this.model);
+    if (contextWindow !== this.contextWindow) {
+      this.contextWindow = contextWindow;
+      this.postContext();
+    }
+    this.subAgentPool?.setMaxConcurrent(cfg.maxConcurrentSubagents);
+    const modelChanged = !event || event.affectsConfiguration('agentHarness.model');
+    const effortChanged = !event || event.affectsConfiguration('agentHarness.thinkingEffort');
+    if (modelChanged) {
+      this.onSetModel(cfg.model);
+    }
+    if (effortChanged) {
+      this.onSetThinkingEffort(cfg.thinkingEffort);
+    }
+    if (this.busy && (modelChanged || effortChanged)) {
+      this.output.appendLine('[config] model/thinkingEffort change skipped: a turn is running');
+    }
+    // Repaint the dropdowns and the fold defaults (the webview re-applies the
+    // latter to the cards already on screen).
+    this.postConfig();
+    if (!event || event.affectsConfiguration('agentHarness.apiKey') || event.affectsConfiguration('agentHarness.baseUrl')) {
+      // The credentials may be exactly what was missing: refresh the credit line.
+      void this.refreshBalance();
+    }
+    this.output.appendLine(
+      `[config] settings changed live: key=${cfg.apiKey ? 'set' : 'missing'} baseUrl=${cfg.baseUrl} maxTurns=${cfg.maxTurns} maxSubagents=${cfg.maxConcurrentSubagents}`,
+    );
   }
 
   private buildAgent(): void {
@@ -474,16 +536,30 @@ export class ChatViewProvider implements ControlHost {
   private loadRuntimeConfig(): RuntimeConfig {
     const defaults = this.getConfig();
     const stored = this.storage.get<Partial<RuntimeConfig>>(CONFIG_KEY) ?? {};
-    return {
-      model: stored.model ?? defaults.model,
-      thinkingEffort: stored.thinkingEffort ?? defaults.thinkingEffort,
-    };
+    // A dropdown pick shadows the setting only while that setting is unchanged:
+    // editing `agentHarness.model` in settings.json is an explicit choice as
+    // well, so it wins over a pick made *before* the edit (a pick made after it
+    // is persisted together with the new setting value and keeps winning). A
+    // record without the snapshot fields predates this rule, so it is trusted.
+    const model =
+      stored.model && (stored.modelFromSettings === undefined || stored.modelFromSettings === defaults.model)
+        ? stored.model
+        : defaults.model;
+    const thinkingEffort =
+      stored.thinkingEffort &&
+      (stored.effortFromSettings === undefined || stored.effortFromSettings === defaults.thinkingEffort)
+        ? stored.thinkingEffort
+        : defaults.thinkingEffort;
+    return { model, thinkingEffort };
   }
 
   private persistRuntimeConfig(): void {
+    const cfg = this.getConfig();
     void this.storage.update(CONFIG_KEY, {
       model: this.model,
       thinkingEffort: this.thinkingEffort,
+      modelFromSettings: cfg.model,
+      effortFromSettings: cfg.thinkingEffort,
     } satisfies RuntimeConfig);
   }
 
