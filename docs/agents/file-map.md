@@ -86,6 +86,9 @@
   (used by the prompt-template guard).
 - `media/main.js` — webview client (tree rendering, pan/zoom, streaming into the
   active node, composer, streaming meter, live tool drafts, drag-to-resize cards).
+  Canvas gestures live in one block near the end: LMB/MMB drag pans by offset,
+  RMB-hold autoscroll-pans towards the cursor (browser middle-click semantics,
+  with an origin marker and the `all-scroll` cursor), ctrl+wheel zooms.
   The composer is the
   active node's input dock: `setActiveLeaf` moves `#composer` into the
   checked-out card's bottom. It has no other home — with an empty session the

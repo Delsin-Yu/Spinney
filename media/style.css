@@ -1437,3 +1437,39 @@ button.icon-btn {
 .node.agent-error { border-color: var(--error-text); }
 .node.agent-done .node-agent-badge { background: var(--success); }
 .node.agent-error .node-agent-badge { background: var(--error-text); }
+
+/* Right-button autoscroll (the browser's middle-click autoscroll, on RMB hold).
+   The marker is pinned to the viewport and the canvas travels underneath it, so
+   it is `fixed` and not part of #tree-canvas. The cursor is `all-scroll`: the
+   4-way glyph Chrome uses for its own autoscroll — CSS has no diagonal *pan*
+   cursor, and the two diagonal glyphs it does have (nesw/nwse-resize) read as
+   "resize this card" on a tree of resizable cards. The `!important` is needed
+   to beat `#tree-wrap:active { cursor: grabbing }`, which is engaged for the
+   whole press, and the descendant selector so it holds over card contents
+   (which are text-selectable and would otherwise show the I-beam). */
+#tree-wrap.autoscrolling,
+#tree-wrap.autoscrolling * {
+  cursor: all-scroll !important;
+}
+
+.autoscroll-origin {
+  position: fixed;
+  width: 30px;
+  height: 30px;
+  margin: -15px 0 0 -15px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--bg3);
+  color: var(--text);
+  opacity: 0.9;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+  z-index: 1000;
+}
+
+.autoscroll-origin svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  fill: currentColor;
+}

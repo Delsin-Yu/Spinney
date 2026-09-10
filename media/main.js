@@ -1475,6 +1475,9 @@
   }
 
   treeCanvas.addEventListener('pointerdown', (e) => {
+    // Resizing is a left-button gesture: RMB belongs to autoscroll, and MMB to
+    // pan, so neither must grab the handle.
+    if (e.button !== 0) return;
     const handle = e.target.closest('.node-resize');
     if (!handle) return;
     const card = handle.closest('.node');
@@ -1523,6 +1526,154 @@
     if (e.button === 1) e.preventDefault();
   });
 
+  // ---- Right-button autoscroll pan (the browser's middle-click autoscroll) ----
+  // The press point becomes an origin and the view keeps travelling towards the
+  // cursor, at a speed proportional to how far the cursor is from that origin.
+  // Unlike the drag-pan above, the pan continues while the cursor sits still —
+  // that is the whole point of the mode.
+  //
+  // Cursor: there is no diagonal *pan* cursor to use. CSS has exactly two
+  // bidirectional diagonal glyphs (`nesw-resize` / `nwse-resize`) and both are
+  // resize cursors that would read as "resize this card" on a tree of cards, so
+  // the gesture uses `all-scroll` — the 4-way glyph Chrome itself shows for its
+  // middle-click autoscroll — and the origin marker carries the "any direction"
+  // meaning instead.
+  const AUTOSCROLL_DEAD_PX = 10;     // slack around the origin before it moves
+  const AUTOSCROLL_RAMP_PX = 600;    // cursor offset at which the curve saturates
+  const AUTOSCROLL_MAX_PX_S = 2400;  // speed the curve converges to (2400 px/s)
+  let autoscroll = null;                // { originX, originY, x, y, last, raf }
+  let autoscrollEl = null;              // origin marker (pinned to the viewport)
+  // Whether the RMB gesture in flight started somewhere a context menu is
+  // actually useful: node content (copy the selected text) or the composer
+  // (paste). A press on the canvas background is a pan request, never a menu
+  // request — see the `contextmenu` listener below for why that matters.
+  let rmbPressWantsMenu = true;
+
+  // easeOutExpo, right-way-round: `t` is the cursor offset normalised by
+  // AUTOSCROLL_RAMP_PX, and the curve returns the *fraction of max speed*.
+  // Steep out of the origin (a 30px nudge is already ~30% of max) and then one
+  // long flat tail, so the far end can never outrun what the eye can track and a
+  // wider panel does not need a bigger cap — only a bigger AUTOSCROLL_RAMP_PX.
+  // The `t >= 1` case is the textbook 1 - 2^-10t guard: at t = 1 the formula
+  // gives 0.999, not 1.
+  function autoscrollEase(t) {
+    return t >= 1 ? 1 : 1 - Math.pow(2, -10 * t);
+  }
+
+  function autoscrollSpeed(dist) {
+    const t = clamp((dist - AUTOSCROLL_DEAD_PX) / AUTOSCROLL_RAMP_PX, 0, 1);
+    return AUTOSCROLL_MAX_PX_S * autoscrollEase(t);
+  }
+
+  function startAutoscroll(e) {
+    autoscroll = {
+      originX: e.clientX,
+      originY: e.clientY,
+      x: e.clientX,
+      y: e.clientY,
+      last: performance.now(),
+      raf: null,
+    };
+    autoscrollEl = el('div', 'autoscroll-origin');
+    // Inline SVG (CSP-safe, no external asset): four arrows around a centre dot,
+    // i.e. the same affordance the browser draws at its autoscroll origin.
+    autoscrollEl.innerHTML =
+      '<svg viewBox="0 0 32 32" aria-hidden="true">' +
+      '<path d="M16 3 12 9h8z"/><path d="M16 29 20 23h-8z"/>' +
+      '<path d="M3 16 9 12v8z"/><path d="M29 16 23 20v-8z"/>' +
+      '<circle cx="16" cy="16" r="3"/>' +
+      '</svg>';
+    autoscrollEl.style.left = e.clientX + 'px';
+    autoscrollEl.style.top = e.clientY + 'px';
+    document.body.appendChild(autoscrollEl);
+    treeWrap.classList.add('autoscrolling');
+    // The camera belongs to the user now: drop follow, or a streaming turn's
+    // auto-pan fights the gesture frame by frame.
+    setFollow(false);
+    try { treeWrap.setPointerCapture(e.pointerId); } catch { /* noop */ }
+    autoscroll.raf = requestAnimationFrame(autoscrollStep);
+  }
+
+  function autoscrollStep() {
+    if (!autoscroll) return;
+    autoscroll.raf = requestAnimationFrame(autoscrollStep);
+    const now = performance.now();
+    // Clamp dt: a backgrounded window must not teleport the view on return.
+    const dt = Math.min(0.05, (now - autoscroll.last) / 1000);
+    autoscroll.last = now;
+    const dx = autoscroll.x - autoscroll.originX;
+    const dy = autoscroll.y - autoscroll.originY;
+    const dist = Math.hypot(dx, dy);
+    if (dist <= AUTOSCROLL_DEAD_PX) return;
+    const speed = autoscrollSpeed(dist);
+    // The *view* travels towards the cursor (browser semantics: the content
+    // moves against it), so the canvas offset moves the opposite way.
+    pan.x -= (dx / dist) * speed * dt;
+    pan.y -= (dy / dist) * speed * dt;
+    applyTransform();
+  }
+
+  function stopAutoscroll() {
+    if (!autoscroll) return;
+    if (autoscroll.raf != null) cancelAnimationFrame(autoscroll.raf);
+    autoscroll = null;
+    if (autoscrollEl) { autoscrollEl.remove(); autoscrollEl = null; }
+    treeWrap.classList.remove('autoscrolling');
+  }
+
+  treeWrap.addEventListener('pointerdown', (e) => {
+    if (e.button === 2) {
+      // RMB is a pan gesture on the *canvas* only. Over a card it stays a plain
+      // right-click: the content there is text-selectable, and the menu is how
+      // you copy it (the tree canvas is a canvas, not a scroll container, so
+      // there is no "pan the card's text" gesture to preserve).
+      if (e.target.closest('.node')) return;
+      e.preventDefault();
+      startAutoscroll(e);
+      return;
+    }
+    // Any other button ends the gesture, exactly like the browser cancels
+    // autoscroll on the next click.
+    stopAutoscroll();
+  });
+
+  window.addEventListener('pointermove', (e) => {
+    if (!autoscroll) return;
+    autoscroll.x = e.clientX;
+    autoscroll.y = e.clientY;
+  });
+  // Pointerup / -cancel / blur / Esc all end it: the pan must never outlive the
+  // gesture that started it (the canvas has no scroll bounds to stop it either).
+  window.addEventListener('pointerup', stopAutoscroll);
+  window.addEventListener('pointercancel', stopAutoscroll);
+  window.addEventListener('blur', stopAutoscroll);
+  window.addEventListener('keydown', (e) => {
+    if (autoscroll && e.key === 'Escape') stopAutoscroll();
+  });
+
+  // Which surface the RMB gesture started on decides whether it may end in a menu.
+  window.addEventListener('pointerdown', (e) => {
+    if (e.button !== 2) return;
+    rmbPressWantsMenu = !treeWrap.contains(e.target) || !!e.target.closest('.node');
+  }, true);
+
+  // VS Code's webview host shows its own context menu for any `contextmenu` that
+  // reaches it un-prevented — it listens on the inner iframe's window
+  // (webview/browser/pre/index.html) and bails out early on `defaultPrevented`.
+  // That window listener is the last hop, so a `preventDefault` anywhere in our
+  // own document still beats it, and vetoing is the only way a pan gesture can be
+  // kept from ending in that menu.
+  //
+  // The decision reads the *press* target, not a timer: the previous version
+  // suppressed for one second after the press, so a hold longer than that fell
+  // out of the window and the release opened the menu (which then swallowed the
+  // next RMB press instead of panning). Capture phase so no inner handler can
+  // stopPropagation() past it; the target is already known here.
+  document.addEventListener('contextmenu', (e) => {
+    if (rmbPressWantsMenu && !autoscroll) return;
+    e.preventDefault();
+  }, true);
+
   // Zoom around a screen-space cursor position.
   function zoomAt(clientX, clientY, factor) {
     const rect = treeWrap.getBoundingClientRect();
@@ -1544,6 +1695,8 @@
     if (dragging || resizing) {
       return;
     }
+    // A wheel is the browser's way out of autoscroll; the zoom below still runs.
+    stopAutoscroll();
     // ctrl/cmd + wheel always scales the viewport, even when the pointer is over
     // a node (so zooming stays possible while hovering content).
     if (e.ctrlKey || e.metaKey) {
