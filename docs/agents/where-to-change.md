@@ -11,7 +11,12 @@
   placeholders); the loop, tool interception and `maxTurns` are in
   `src/agent/agent.ts`. See `docs/agents/invariants/system-prompt.md`.
 - **Add a setting** → `package.json` `contributes.configuration` +
-  `ChatViewProvider.getConfig()` / `buildAgent()`.
+  `ChatViewProvider.getConfig()`. A setting must take effect **without a window
+  reload**: read it at its point of use (the preferred shape), or, if some live
+  owner caches it, push it from `ChatViewProvider.onConfigurationChanged()`
+  (wired in `extension.ts` from `onDidChangeConfiguration`). `buildAgent()` runs
+  once per activation, so a value read only there is a bug. Extend the table in
+  `docs/agents/invariants/config-keys.md` with the new key.
 - **Change the UI** → `media/main.js` (behavior) and/or `media/style.css`
   (styling); the HTML shell is in `getHtml()` in `ChatViewProvider.ts`.
   `style.css` maps every colour token in `:root` to a `--vscode-*` theme variable

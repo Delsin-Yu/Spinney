@@ -56,6 +56,25 @@ export class DeepSeekClient {
   constructor(private readonly options: DeepSeekOptions) {}
 
   /**
+   * Update the connection settings **in place**. The same client instance is
+   * shared by the main agent and every sub-agent, so re-reading
+   * `agentHarness.apiKey` / `baseUrl` here makes a new key work on the very next
+   * request — no window reload, and safe to call mid-turn (each request reads
+   * the options when it is built). Fields absent from the patch are kept.
+   */
+  configure(patch: Partial<DeepSeekOptions>): void {
+    if (typeof patch.apiKey === 'string') {
+      this.options.apiKey = patch.apiKey;
+    }
+    if (typeof patch.baseUrl === 'string' && patch.baseUrl.trim()) {
+      this.options.baseUrl = patch.baseUrl;
+    }
+    if (typeof patch.model === 'string' && patch.model.trim()) {
+      this.options.model = patch.model;
+    }
+  }
+
+  /**
    * Fetch the account's wallet balance from DeepSeek's `/user/balance` endpoint.
    * Used to show the remaining credit in the UI. Throws `DeepSeekError` on
    * missing key, network failure, or malformed response so the caller can

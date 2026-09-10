@@ -161,6 +161,17 @@ export class ControlServer implements vscode.Disposable {
     }
   }
 
+  /**
+   * Re-read the configuration and rebind the listener. Called when
+   * `agentHarness.httpApi.*` changes, so enabling/disabling the control plane
+   * (or moving its port) does not need a window reload. `start()` is a no-op
+   * when the plane is disabled, which is how a disable takes effect.
+   */
+  async restart(): Promise<void> {
+    this.dispose();
+    await this.start();
+  }
+
   dispose(): void {
     this.server?.close();
     this.server = null;

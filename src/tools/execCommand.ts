@@ -1,7 +1,23 @@
+import * as vscode from 'vscode';
 import { AgentTool } from '../agent/types';
 import { BackgroundRegistry, CommandHandle, OUTPUT_CAP, spawnShellCommand } from './background';
 import { getAgentRoot, limitInline, resolvePath } from './index';
 import { getShell } from './shell';
+
+/** Fallback when `agentHarness.commandTimeout` is absent or not a positive number. */
+const DEFAULT_COMMAND_TIMEOUT_SEC = 600;
+
+/**
+ * The effective default timeout for `exec_command`, read live so a settings
+ * change applies to the next command instead of needing a window reload. A tool
+ * call that passes an explicit `timeout` always wins over this.
+ */
+function defaultCommandTimeoutSec(): number {
+  const configured = vscode.workspace.getConfiguration('agentHarness').get<number>('commandTimeout');
+  return typeof configured === 'number' && Number.isFinite(configured) && configured > 0
+    ? configured
+    : DEFAULT_COMMAND_TIMEOUT_SEC;
+}
 
 /**
  * Run a command in the foreground and resolve with a human-readable result
@@ -99,7 +115,7 @@ export function makeExecCommandTool(getRegistry: () => BackgroundRegistry | null
       function: {
         name: 'exec_command',
         description:
-          'Run a shell command in the harness root (the workspace folder, or the harness scratch folder when no folder is open) and return its combined stdout/stderr. Use for builds, tests, git, npm, etc. Optionally set cwd relative to the harness root. Set timeout (seconds, default 120). timeout_behavior controls what happens when a command runs past timeout: "stop" (default) kills it, "move_to_background" promotes the still-running command to a background terminal (returns its id), and "start_in_background" launches it in the background immediately (returns its id and does not wait). Commands run through the detected shell (currently ' +
+          'Run a shell command in the harness root (the workspace folder, or the harness scratch folder when no folder is open) and return its combined stdout/stderr. Use for builds, tests, git, npm, etc. Optionally set cwd relative to the harness root. Set timeout (seconds; defaults to the agentHarness.commandTimeout setting, which is 600 = 10 minutes unless changed). timeout_behavior controls what happens when a command runs past timeout: "stop" (default) kills it, "move_to_background" promotes the still-running command to a background terminal (returns its id), and "start_in_background" launches it in the background immediately (returns its id and does not wait). Commands run through the detected shell (currently ' +
           getShell().label +
           ') and in that shell syntax (bash-style for Git Bash, PowerShell syntax otherwise).',
         parameters: {
@@ -107,7 +123,10 @@ export function makeExecCommandTool(getRegistry: () => BackgroundRegistry | null
           properties: {
             command: { type: 'string', description: 'The shell command to run.' },
             cwd: { type: 'string', description: 'Working directory, relative to the harness root.' },
-            timeout: { type: 'number', description: 'Timeout in seconds (default 120).' },
+            timeout: {
+              type: 'number',
+              description: 'Timeout in seconds (defaults to agentHarness.commandTimeout, 600 = 10 minutes unless changed).',
+            },
             timeout_behavior: {
               type: 'string',
               enum: ['stop', 'move_to_background', 'start_in_background'],
@@ -125,7 +144,7 @@ export function makeExecCommandTool(getRegistry: () => BackgroundRegistry | null
         throw new Error('Command must not be empty.');
       }
       const cwd = args.cwd ? resolvePath(String(args.cwd)) : getAgentRoot();
-      const timeoutSec = typeof args.timeout === 'number' ? args.timeout : 120;
+      const timeoutSec = typeof args.timeout === 'number' ? args.timeout : defaultCommandTimeoutSec();
       const timeoutMs = timeoutSec * 1000;
       const behavior = String(args.timeout_behavior ?? 'stop');
       if (behavior !== 'stop' && behavior !== 'move_to_background' && behavior !== 'start_in_background') {

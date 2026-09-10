@@ -267,7 +267,7 @@ export class Agent {
     private readonly client: DeepSeekClient,
     private readonly tools: ToolRegistry,
     private readonly onEvent: (event: AgentEvent) => void,
-    private readonly maxTurns = 20,
+    private maxTurns = 20,
   ) {
     this.reset();
   }
@@ -282,6 +282,17 @@ export class Agent {
   setThinkingEffort(effort: ThinkingEffort): void {
     this.thinkingEffort = effort;
     this.refreshSystemIdentity();
+  }
+
+  /**
+   * Set the tool-round limit for subsequent turns (`agentHarness.maxTurns` may
+   * change while the window is open). A non-positive/non-finite value is ignored
+   * so a bad setting cannot disable the loop guard entirely.
+   */
+  setMaxTurns(maxTurns: number): void {
+    if (Number.isFinite(maxTurns) && maxTurns > 0) {
+      this.maxTurns = Math.floor(maxTurns);
+    }
   }
 
   /** Set a provider hook that runs sub-agents for the `spawn_agents` tool. */
