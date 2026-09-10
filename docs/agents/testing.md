@@ -10,7 +10,7 @@ flow exercises read/write/exec against a scratch file (`_e2e.txt` is a leftover 
 fixture, safe to ignore or delete). Before a release, confirm `npm run compile` is clean and
 `build-deploy.ps1` succeeds.
 
-Two build-time guards are the exception, both run by `vscode:prepublish` so a
+Three build-time guards are the exception, all run by `vscode:prepublish` so a
 regression fails *packaging* instead of the user's session:
 
 - `npm run check:models` (`tools/check-models.js`) — model ids: the settings enum
@@ -25,6 +25,15 @@ regression fails *packaging* instead of the user's session:
   silently in the real webview — the UI just keeps its previous values, which is
   how the Thinking-effort dropdown once stuck on "none" after the chat-side model
   panel was deleted while the `config` handler still called into it.
+- `npm run check:signals` (`tools/check-signal-persist.js`) — the completion-signal
+  persistence contract (`tools/research/signal-notification-plan.md` §0.1 / D1): a
+  `kind:'bg'` background-terminal card must survive a restart with its `delivered`
+  flag and terminal snapshot (`bgTaskId` / `bgExitCode` / `bgElapsedMs` /
+  `bgOutputTail`), a card that was mid-flight when the host went away must stop
+  claiming to run, and both sidecar kinds (`agent` / `bg`) must stay out of the API
+  path (`pathMessages`) and the checkout chain (`leafOf`). It round-trips a fixture
+  through `migrateState` — the exact load path `loadSessions` uses — so it needs
+  `out/` and therefore runs after `compile` in `vscode:prepublish`.
 
 What `check:webview` can **not** tell you: anything visual (no CSS, no layout, no
 theme) and anything about the provider's TypeScript side. Maintenance: adding a

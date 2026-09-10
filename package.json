@@ -283,7 +283,8 @@
     "watch": "tsc -watch -p ./",
     "check:models": "node tools/check-models.js",
     "check:webview": "node tools/check-webview.js",
-    "vscode:prepublish": "npm run compile && npm run check:models && npm run check:webview"
+    "check:signals": "node tools/check-signal-persist.js",
+    "vscode:prepublish": "npm run compile && npm run check:models && npm run check:webview && npm run check:signals"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
