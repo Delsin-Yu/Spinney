@@ -1684,7 +1684,6 @@ async function suiteSignals(cx) {
       return skipMissing(gate(after.body));
     }
   }
-
   // ---- 1. the job registers under the turn node that started it ----
   // The pre-delivery snapshot: the card exists from `register` onward (the hub's
   // `onRegistered` hook runs synchronously), so this count already includes it.
@@ -1742,14 +1741,20 @@ async function suiteSignals(cx) {
         }
       }
       const read = readTranscriptNow(cx, sessionId, ownerNode);
-      if (!read) {
-        return undefined;
+      const notice = read ? findSignalNotice(read.parsed) : null;
+      if (notice) {
+        return { notice };
       }
-      const notice = findSignalNotice(read.parsed);
-      return notice ? { notice } : undefined;
+      // Early bail-out: a notice in ANOTHER node is the removed shape — do not spend
+      // the rest of the budget pretending it may still land here.
+      const elsewhere = dumpsWithNotice(cx.transcriptDir(sessionId)).filter((hit) => hit.nodeId !== ownerNode);
+      return elsewhere.length > 0 ? { elsewhere } : undefined;
     },
     { timeoutMs: waitMs, intervalMs: Math.max(cx.flags.intervalMs, 500) },
   );
+  if (landed.ok && landed.value.elsewhere) {
+    return signalsWithoutNotice(cx, checks, { name, sessionId, ownerNode, waitMs, elsewhere: landed.value.elsewhere });
+  }
   if (!landed.ok) {
     return signalsWithoutNotice(cx, checks, { name, sessionId, ownerNode, waitMs });
   }
@@ -1760,7 +1765,7 @@ async function suiteSignals(cx) {
   checks.check(
     "the completion notice lands in the owning node's own transcript",
     true,
-    `user message ${notice.index + 1}/${notice.total}`,
+    `user message ${notice.index + 1}/${notice.total}: "${notice.text.split('\n')[0].slice(0, 90)}"`,
   );
   checks.check(
     "the notice did not open a node (it is not that node's first message)",
@@ -1795,6 +1800,9 @@ async function suiteSignals(cx) {
     Number.isFinite(nodeCountBefore) && nodeCountBefore === nodeCountAfter,
     `nodes ${nodeCountBefore} → ${nodeCountAfter}`,
   );
+  // The control plane's only per-node probe is `/navigate` ("no such node: X" ⇒ gone);
+  // checking the owner out is harmless here (the harness restores the view focus at the
+  // end of the run) and re-affirms the card the notice landed in.
   const nav = await cx.client.navigate({ sessionId, nodeId: ownerNode });
   checks.check(
     `the node that owns the job still exists (${ownerNode})`,
@@ -1802,10 +1810,11 @@ async function suiteSignals(cx) {
     `POST /navigate → HTTP ${nav.status}${nav.body && nav.body.error ? `: ${nav.body.error}` : ''}`,
   );
   const ownerDump = path.join(cx.transcriptDir(sessionId), `${ownerNode}.jsonl`);
+  const ownerHasDump = fs.existsSync(ownerDump);
   checks.check(
     'the reported owner is a main turn node, not a display-only card',
-    fs.existsSync(ownerDump),
-    `dump ${ownerNode}.jsonl ${fs.existsSync(ownerDump) ? 'present' : 'missing'}`,
+    ownerHasDump,
+    `dump ${ownerNode}.jsonl ${ownerHasDump ? 'present' : 'missing'}`,
   );
 
   // The control plane has no per-node view, so these two stay skips (the facts above
@@ -1836,18 +1845,18 @@ async function suiteSignals(cx) {
  * a tool (`notifyAgent: false` — that tool result *is* the signal → SKIP), or the job
  * is simply still running (→ SKIP).
  */
-async function signalsWithoutNotice(cx, checks, { name, sessionId, ownerNode, waitMs }) {
-  const elsewhere = dumpsWithNotice(cx.transcriptDir(sessionId)).filter((hit) => hit.nodeId !== ownerNode);
-  if (elsewhere.length > 0) {
+async function signalsWithoutNotice(cx, checks, { name, sessionId, ownerNode, waitMs, elsewhere = null }) {
+  const landedElsewhere = elsewhere ?? dumpsWithNotice(cx.transcriptDir(sessionId)).filter((hit) => hit.nodeId !== ownerNode);
+  if (landedElsewhere.length > 0) {
     checks.check(
-      'the completion notice lands in the owning node (it did not open a new node)',
+      "the completion notice lands in the owning node's own transcript",
       false,
-      `found in ${elsewhere.map((hit) => hit.nodeId).join(', ')} instead of ${ownerNode}`,
+      `found in ${landedElsewhere.map((hit) => hit.nodeId).join(', ')} instead of ${ownerNode} — a notice opened a node (the removed shape)`,
     );
     return suiteResult(
       name,
       'FAIL',
-      `the completion notice opened a new node (${elsewhere[0].nodeId}) instead of landing in ${ownerNode}`,
+      `the completion notice opened a new node (${landedElsewhere[0].nodeId}) instead of landing in ${ownerNode}`,
       checks,
     );
   }
@@ -1857,7 +1866,7 @@ async function signalsWithoutNotice(cx, checks, { name, sessionId, ownerNode, wa
     : false;
   if (absorbed) {
     checks.subskip(
-      'the completion notice lands in the owning node',
+      "the completion notice lands in the owning node's own transcript",
       'the model joined/killed the job through a tool — that tool result IS the signal, so no notice is sent',
     );
     return suiteResult(name, 'SKIP', 'inconclusive: the job was joined/killed through a tool, whose result is the signal', checks);
