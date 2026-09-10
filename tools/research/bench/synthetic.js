@@ -132,6 +132,13 @@ const PROFILES = {
     agentTurnProb: 0.4, agentTurnMax: 2, nestedAgentProb: 0.2,
     tallProb: 0.3, medTallProb: 0.2, wideProb: 0.05,
   },
+  // Heavy parallelisation: every turn node fires 1..12 sub-agents at once, so the
+  // sidecar block needs more than one column (the grid's whole point).
+  parallel: {
+    chainProb: 0.3, maxFanout: 3, agentProb: 1, maxAgents: 12,
+    agentTurnProb: 0.5, agentTurnMax: 2, nestedAgentProb: 0.25,
+    tallProb: 0.05, medTallProb: 0.15, wideProb: 0.1,
+  },
 };
 
 const SIZES = [10, 30, 100, 300];

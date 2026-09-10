@@ -16,9 +16,37 @@
  *
  * Signature identical to media/tree.js layoutTree().
  */
-const C = require('./candidates');
+// Loaded from the vendored dist (see engine.js) plus the two helpers this file
+// used to borrow from candidates.js, so the layout regression tests need no npm
+// install. `C` keeps the old call sites below unchanged.
+const nlttl = require('./engine');
 
-const { bfs, bbox, helpers, DEFAULTS } = C;
+const DEFAULTS = { nodeW: 320, hGap: 48, vGap: 72, pad: 20, agentGap: 80, agentVGap: 24 };
+
+function bbox(rects) {
+  let left = Infinity, top = Infinity, right = -Infinity, bottom = -Infinity;
+  for (const r of rects) {
+    left = Math.min(left, r.x); top = Math.min(top, r.y);
+    right = Math.max(right, r.x + r.w); bottom = Math.max(bottom, r.y + r.h);
+  }
+  if (!rects.length) return { left: 0, top: 0, right: 0, bottom: 0 };
+  return { left, top, right, bottom };
+}
+
+function helpers(nodesById, heights, widths, o) {
+  const w = (id) => widths[id] || o.nodeW;
+  const h = (id) => heights[id] || 120;
+  const isAgent = (id) => !!(nodesById[id] && nodesById[id].kind === 'agent');
+  const kids = (id) => (nodesById[id] && nodesById[id].children) || [];
+  return {
+    w, h, isAgent,
+    turnKids: (id) => kids(id).filter((c) => nodesById[c] && !isAgent(c)),
+    agentKids: (id) => kids(id).filter((c) => nodesById[c] && isAgent(c)),
+    allKids: (id) => kids(id).filter((c) => !!nodesById[c]),
+  };
+}
+
+const C = { nlttl, bbox, helpers, DEFAULTS };
 
 function layoutEngineReserve(nodesById, rootId, heights, opts) {
   const o = Object.assign({}, DEFAULTS, opts || {});
@@ -218,5 +246,189 @@ function layoutEngineReserveWrapped(nodesById, rootId, heights, opts, maxCols) {
   };
 }
 
-module.exports = { layoutEngineReserve, layoutEngineReserveWrapped };
+// ------------------------------------------------------------------ shipped grid
+/**
+ * Design G — design N with the sidecar block packed into an aligned, column-major
+ * LATTICE (`agentMaxRows` rows per column; every further window opens a column to
+ * the right) instead of a single vertical stack, plus the connector routing table
+ * the webview draws from.
+ *
+ * This is an independent copy of the shipped `media/tree.js` algorithm: it exists
+ * so `verify-tree.js` can pin the shipped file position-for-position against a
+ * benchmarked design (if someone edits tree.js, `maxDelta` goes non-zero).
+ */
+const GRID_DEFAULTS = {
+  nodeW: 320, hGap: 48, vGap: 72, pad: 20,
+  agentGap: 80, agentVGap: 24, agentColGap: 48, agentMaxRows: 4, agentTopPad: 16,
+};
+
+function layoutEngineReserveGrid(nodesById, rootId, heights, opts) {
+  const o = Object.assign({}, GRID_DEFAULTS, opts || {});
+  const widths = o.widths || {};
+  const size = (id) => ({ w: widths[id] || o.nodeW, h: heights[id] || 120 });
+  const kidsOf = (id) => (nodesById[id] && nodesById[id].children) || [];
+  const isAgent = (id) => !!nodesById[id] && nodesById[id].kind === 'agent';
+  const turnKids = (id) => kidsOf(id).filter((c) => !!nodesById[c] && !isAgent(c));
+  const agentKids = (id) => kidsOf(id).filter((c) => !!nodesById[c] && isAgent(c));
+
+  if (!nodesById[rootId]) {
+    return { pos: {}, cells: {}, width: o.nodeW + o.pad * 2, height: 120 + o.pad * 2 };
+  }
+
+  const memo = new Map();
+
+  function layoutSub(id) {
+    if (memo.has(id)) return memo.get(id);
+
+    const blockOf = (nid) => {
+      const list = agentKids(nid).map(layoutSub);
+      if (!list.length) return { list: [], cells: [], colX: [], rowY: [], w: 0, h: 0 };
+      const R = Math.max(1, o.agentMaxRows | 0);
+      const nCols = Math.ceil(list.length / R);
+      const nRows = Math.min(R, list.length);
+      const anchor = list.map((s) => {
+        const c = s.pos[s.rootId];
+        return { left: c.x, top: c.y, right: s.w - c.x, bottom: s.h - c.y };
+      });
+      const colL = new Array(nCols).fill(0);
+      const colR = new Array(nCols).fill(0);
+      const rowT = new Array(Math.min(R, list.length)).fill(0);
+      const rowB = new Array(Math.min(R, list.length)).fill(0);
+      for (let i = 0; i < list.length; i++) {
+        const c = Math.floor(i / R);
+        const r = i % R;
+        const a = anchor[i];
+        if (a.left > colL[c]) colL[c] = a.left;
+        if (a.right > colR[c]) colR[c] = a.right;
+        if (a.top > rowT[r]) rowT[r] = a.top;
+        if (a.bottom > rowB[r]) rowB[r] = a.bottom;
+      }
+      const colX = [];
+      let cx = 0;
+      for (let c = 0; c < nCols; c++) {
+        colX.push(cx + colL[c]);
+        cx += colL[c] + colR[c] + o.agentColGap;
+      }
+      const rowY = [];
+      let cy = 0;
+      for (let r = 0; r < nRows; r++) {
+        rowY.push(cy + rowT[r]);
+        cy += rowT[r] + rowB[r] + o.agentVGap;
+      }
+      const cells = list.map((s, i) => {
+        const col = Math.floor(i / R);
+        const row = i % R;
+        return { s, col, row, ax: colX[col], ay: rowY[row], left: anchor[i].left, top: anchor[i].top };
+      });
+      return {
+        list, cells, colX, rowY, colL, colR, rowT, rowB, nCols, nRows,
+        w: cx - o.agentColGap,
+        h: o.agentTopPad + cy - o.agentVGap,
+      };
+    };
+
+    const build = (nid) => {
+      const blk = blockOf(nid);
+      return {
+        id: nid,
+        width: size(nid).w + (blk.w ? o.agentGap + blk.w : 0),
+        height: Math.max(size(nid).h, blk.h),
+        children: turnKids(nid).map(build),
+      };
+    };
+
+    const L = new C.nlttl.Layout(new C.nlttl.BoundingBox(o.hGap, o.vGap));
+    const { result } = L.layout(build(id));
+
+    const pos = {};
+    const rects = [];
+    const cells = {};
+    (function walk(n) {
+      pos[n.id] = { x: n.x, y: n.y };
+      rects.push({ x: n.x, y: n.y, w: size(n.id).w, h: size(n.id).h });
+
+      const blk = blockOf(n.id);
+      if (blk.list.length) {
+        const cardW = size(n.id).w;
+        const bx = n.x + cardW + o.agentGap;
+        const by = n.y + o.agentTopPad;
+        const busX = n.x + cardW + o.agentGap / 2;
+        for (let i = 0; i < blk.cells.length; i++) {
+          const cell = blk.cells[i];
+          const s = cell.s;
+          const cardX = bx + cell.ax;
+          const cardY = by + cell.ay;
+          const dx = cardX - cell.left - s.box.left;
+          const dy = cardY - cell.top - s.box.top;
+          for (const sid in s.pos) pos[sid] = { x: s.pos[sid].x + dx, y: s.pos[sid].y + dy };
+          for (let k = 0; k < s.rects.length; k++) {
+            const r = s.rects[k];
+            rects.push({ x: r.x + dx, y: r.y + dy, w: r.w, h: r.h });
+          }
+          for (const cid in s.cells) {
+            const c = s.cells[cid];
+            cells[cid] = {
+              x: c.x + dx, y: c.y + dy, w: c.w, h: c.h,
+              col: c.col, row: c.row, index: c.index, count: c.count,
+              busX: c.busX + dx, chanX: c.chanX + dx, corrY: c.corrY + dy,
+            };
+          }
+          const colStart = bx + cell.ax - blk.colL[cell.col];
+          const prevColEnd = bx + (cell.ax - blk.colL[cell.col]) - o.agentColGap;
+          const rowStart = by + cell.ay - blk.rowT[cell.row];
+          const prevRowEnd = by + (cell.ay - blk.rowT[cell.row]) - o.agentVGap;
+          cells[s.rootId] = {
+            x: bx + cell.ax - cell.left,
+            y: by + cell.ay - cell.top,
+            w: s.w,
+            h: s.h,
+            col: cell.col,
+            row: cell.row,
+            index: i,
+            count: blk.cells.length,
+            busX,
+            chanX: cell.col === 0 ? busX : (prevColEnd + colStart) / 2,
+            corrY: cell.row === 0 ? n.y + o.agentTopPad / 2 : (prevRowEnd + rowStart) / 2,
+          };
+        }
+      }
+
+      for (const c of n.children || []) walk(c);
+    })(result);
+
+    const box = bbox(rects);
+    const outPos = {};
+    for (const k in pos) outPos[k] = { x: pos[k].x - box.left, y: pos[k].y - box.top };
+    const outCells = {};
+    for (const k in cells) {
+      const c = cells[k];
+      outCells[k] = {
+        x: c.x - box.left, y: c.y - box.top, w: c.w, h: c.h,
+        col: c.col, row: c.row, index: c.index, count: c.count,
+        busX: c.busX - box.left, chanX: c.chanX - box.left, corrY: c.corrY - box.top,
+      };
+    }
+    const out = {
+      rootId: id,
+      pos: outPos,
+      cells: outCells,
+      rects: rects.map((r) => ({ x: r.x - box.left, y: r.y - box.top, w: r.w, h: r.h })),
+      box: { left: 0, top: 0, right: box.right - box.left, bottom: box.bottom - box.top },
+      w: box.right - box.left,
+      h: box.bottom - box.top,
+    };
+    memo.set(id, out);
+    return out;
+  }
+
+  const res = layoutSub(rootId);
+  return {
+    pos: res.pos,
+    cells: res.cells,
+    width: res.box.right + o.pad * 2,
+    height: res.box.bottom + o.pad * 2,
+  };
+}
+
+module.exports = { layoutEngineReserve, layoutEngineReserveWrapped, layoutEngineReserveGrid, GRID_DEFAULTS };
 
