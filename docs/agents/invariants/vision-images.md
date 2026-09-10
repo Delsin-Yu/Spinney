@@ -1,7 +1,14 @@
 ## Vision / images
-- Only `deepseek-v4-flash-vision-exp` and `deepseek-v4.1-flash-expires-on-0910`
-  accept images; other models return a 400. Image content blocks are **only
-  allowed in `user` messages** (`system` / `assistant` / `tool` reject them).
+- Image support is **data, not a guess**: `isVisionModel()` reads the catalog —
+  the vendored `deepseek-flash` plus any `vision=true` row the user added in
+  `agentHarness.modelTable`. Image content blocks are **only allowed in `user`
+  messages** (`system` / `assistant` / `tool` reject them).
+- A model that is *not* image-capable does **not** return a 400: DeepSeek
+  silently replaces the image with an `[Unsupported Image]` text part and answers
+  anyway (measured on the vendored base URL — the reply even reasons about the
+  placeholder). That is why the harness hides image blocks itself instead of
+  letting the provider do it — a silent placeholder invites the model to invent
+  what it cannot see.
 - **User-attached images** (file picker `pickImage` / clipboard paste) and
   **agent-read images** (`read_image`) are both uploaded to the DeepSeek Files
   API (`POST /files`, `purpose=user_data`) and referenced by the returned
@@ -21,11 +28,11 @@
   and the `IEND` terminator are verified, so a truncated/corrupt PNG is rejected
   locally with a reason (`bad CRC in the IDAT chunk`, …) instead of a provider
   400.
-- When the active model is not the vision model, image blocks in the history are
+- When the active model is not image-capable, image blocks in the history are
   **hidden, not removed** (see `messagesForCurrentModel` in `agent.ts`): the
   stored `messages` keep the original image blocks, but the copy sent to the API
   replaces each `image_url`/`file` block with a `[image hidden: …]` text part so
-  the request does not 400. Switching back to the vision model restores the
+  the request does not 400. Switching back to an image-capable model restores the
   image blocks automatically. `read_image` returns a similar friendly error, and
   the provider drops newly attached images with a notice.
 - A **provider-rejected image** (a 400 matching `/unsupported image/i`, e.g. a
@@ -43,8 +50,10 @@
   mid-upload rejects with `DeepSeekError('Upload aborted.')` and is treated as an
   interruption rather than a failed upload.
 - The webview hides image thumbnails (history and the composer preview) when the
-  active model is not the vision model (`updateImageVisibility` in `main.js`
-  toggles a `hide-images` class on `#messages` / `#attachments`), and refuses to
-  queue a pending attachment with an inline hint. The conversation data is kept
-  and the thumbnails reappear when a vision model is selected again.
+  active model is not image-capable (`updateImageVisibility` in `main.js` toggles
+  a `hide-images` class on `#messages` / `#attachments`), and refuses to queue a
+  pending attachment with an inline hint. The conversation data is kept and the
+  thumbnails reappear when an image-capable model is selected again. `main.js`
+  has **no copy of the catalog**: the provider posts `models` + `visionModels`
+  from `src/agent/models.ts` in the `config` message.
 

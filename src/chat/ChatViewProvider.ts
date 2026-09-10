@@ -5,7 +5,18 @@ import * as vscode from 'vscode';
 import { Agent } from '../agent/agent';
 import { DeepSeekClient, DeepSeekBalance } from '../agent/deepseek';
 import { AgentEvent, ChatMessage, ContentPart, ThinkingEffort, Usage } from '../agent/types';
-import { DEFAULT_MODEL, contextWindowFor, isKnownModel, isVisionModel, visionModelsLabel } from '../agent/models';
+import {
+  DEFAULT_MODEL,
+  contextWindowFor,
+  isKnownModel,
+  isTableModel,
+  isVisionModel,
+  modelIds,
+  parseModelTable,
+  setModelOverrides,
+  visionModelIds,
+  visionModelsLabel,
+} from '../agent/models';
 import {
   AgentSession,
   DisplayItem,
@@ -211,6 +222,14 @@ export class ChatViewProvider implements ControlHost {
   private activeTurnNode: TreeNode | null = null;
   /** Length of the flat path before the current turn; the turn's messages are sliced from it. */
   private turnPrefixLen = 0;
+  /**
+   * The message that sat at `turnPrefixLen - 1` when the turn started. Identity,
+   * not equality: if the agent's history was swapped mid-turn this no longer
+   * matches, and `finishTurn` refuses to write the slice (see `setAgentMessages`).
+   */
+  private turnPrefixTail: ChatMessage | null = null;
+  /** True while the running turn created its own node (`beginTurn`) instead of continuing one. */
+  private turnNodeFresh = false;
   /** Node whose turn was interrupted last; a branch switch drops the pending notice. */
   private lastInterruptedNodeId: string | null = null;
   private busy = false;
@@ -237,7 +256,7 @@ export class ChatViewProvider implements ControlHost {
   private readonly mediaVersion: string;
   private readonly output: vscode.OutputChannel;
   private model = DEFAULT_MODEL;
-  private thinkingEffort: ThinkingEffort = 'none';
+  private thinkingEffort: ThinkingEffort = 'medium';
   private contextWindow = contextWindowFor(DEFAULT_MODEL);
   private currentPromptTokens = 0;
   private sessions: AgentSession[] = [];
@@ -278,6 +297,9 @@ export class ChatViewProvider implements ControlHost {
     this.mediaVersion = Date.now().toString(36);
     this.output = vscode.window.createOutputChannel('Agent Harness');
     setPerfSink((line) => this.output.appendLine(line));
+    // The user's model table must be installed before anything derives a model
+    // list, a context window or an image capability from the catalog.
+    this.applyModelTable();
     // Resolve the active model/effort before loading sessions so the restored
     // system prompt carries the correct identity.
     const runtime = this.loadRuntimeConfig();
@@ -317,7 +339,7 @@ export class ChatViewProvider implements ControlHost {
     // A blank base URL means "use the default" rather than a relative URL.
     const baseUrl = (cfg.get<string>('baseUrl') ?? '').trim() || 'https://api.deepseek.com';
     const maxTurns = cfg.get<number>('maxTurns') ?? 20;
-    const thinkingEffort = (cfg.get<string>('thinkingEffort') ?? 'none') as ThinkingEffort;
+    const thinkingEffort = (cfg.get<string>('thinkingEffort') ?? 'medium') as ThinkingEffort;
     const foldToolCalls = cfg.get<boolean>('foldToolCalls') ?? true;
     const foldThinking = cfg.get<boolean>('foldThinking') ?? true;
     const maxConcurrentSubagents = cfg.get<number>('maxConcurrentSubagents') ?? 15;
@@ -389,6 +411,9 @@ export class ChatViewProvider implements ControlHost {
    */
   public onConfigurationChanged(event?: vscode.ConfigurationChangeEvent): void {
     const cfg = this.getConfig();
+    // Re-read the model table first: it decides the recognized model list, every
+    // context window and every image capability derived below.
+    this.applyModelTable();
     this.client.configure({ apiKey: cfg.apiKey, baseUrl: cfg.baseUrl });
     this.agent.setMaxTurns(cfg.maxTurns);
     const contextWindow = this.getContextWindow(this.model);
@@ -448,13 +473,73 @@ export class ChatViewProvider implements ControlHost {
   }
 
   private getContextWindow(model: string): number {
-    const override = vscode.workspace
-      .getConfiguration('agentHarness')
-      .get<number>('contextWindow');
-    if (override && override > 0) {
-      return override;
+    // A row in `agentHarness.modelTable` is the most specific answer there is —
+    // the user asked for that model explicitly, so it beats the global fallback.
+    if (!isTableModel(model)) {
+      const override = vscode.workspace
+        .getConfiguration('agentHarness')
+        .get<number>('contextWindow');
+      if (override && override > 0) {
+        return override;
+      }
     }
     return contextWindowFor(model);
+  }
+
+  /**
+   * Read `agentHarness.modelTable`, install it as the model catalog's override
+   * layer, and report what it did. Bad rows are skipped (never half-applied)
+   * and written to the output channel — the setting's syntax is documented in
+   * `package.json`, and silence would make a typo look like a harness bug.
+   */
+  private applyModelTable(): void {
+    const raw = vscode.workspace.getConfiguration('agentHarness').get<unknown>('modelTable');
+    const { specs, errors } = parseModelTable(raw);
+    setModelOverrides(specs);
+    this.output.appendLine(
+      `[config] modelTable: ${specs.length} model(s) — ${modelIds().length} recognized in total`,
+    );
+    for (const spec of specs) {
+      this.output.appendLine(
+        `[config] modelTable: ${spec.id} vision=${spec.vision ? 'yes' : 'no'} max_tokens=${spec.contextWindow}`,
+      );
+    }
+    for (const error of errors) {
+      this.output.appendLine(`[config] modelTable: ${error}`);
+    }
+  }
+
+  /**
+   * Accept a model id only if the catalog (vendored + `agentHarness.modelTable`)
+   * knows it; anything else falls back to the default and says so. A stale id in
+   * settings must not silently hide images or mis-size the context indicator.
+   */
+  private resolveModel(candidate: string): string {
+    if (!candidate || isKnownModel(candidate)) {
+      return candidate || DEFAULT_MODEL;
+    }
+    this.output.appendLine(
+      `[config] unknown model "${candidate}": not in the catalog and not in agentHarness.modelTable — using ${DEFAULT_MODEL}`,
+    );
+    return DEFAULT_MODEL;
+  }
+
+  /**
+   * Install a new API history for the agent and re-baseline the turn slice in the
+   * same breath.
+   *
+   * `finishTurn` stores `agent.getMessages().slice(turnPrefixLen)`, so the basis
+   * and the array it is applied to must never drift apart. Every swap goes
+   * through here: a checkout (session switch, branch click, hop return, panel
+   * restore) can replace the history while a turn is streaming, and an unchecked
+   * numeric basis then slices from the wrong offset — storing ancestor history in
+   * the turn's node (the real session that produced the "1,283,056 tokens at 65%"
+   * 400: a node ended up with ~1,100 duplicated messages).
+   */
+  private setAgentMessages(messages: ChatMessage[]): void {
+    this.agent.setMessages(messages);
+    this.turnPrefixLen = messages.length;
+    this.turnPrefixTail = messages[messages.length - 1] ?? null;
   }
 
   /** Prompt size of the checked-out branch, taken from its latest turn's usage. */
@@ -526,6 +611,11 @@ export class ChatViewProvider implements ControlHost {
     this.post({
       type: 'config',
       model: this.model,
+      // The dropdown offers the vendored model plus whatever the user added in
+      // `agentHarness.modelTable`, and the image affordances follow the same
+      // list — no second copy of the catalog in the webview.
+      models: modelIds(),
+      visionModels: visionModelIds(),
       thinkingEffort: this.thinkingEffort,
       foldToolCalls: cfg.foldToolCalls,
       foldThinking: cfg.foldThinking,
@@ -541,10 +631,11 @@ export class ChatViewProvider implements ControlHost {
     // well, so it wins over a pick made *before* the edit (a pick made after it
     // is persisted together with the new setting value and keeps winning). A
     // record without the snapshot fields predates this rule, so it is trusted.
-    const model =
+    const picked =
       stored.model && (stored.modelFromSettings === undefined || stored.modelFromSettings === defaults.model)
         ? stored.model
         : defaults.model;
+    const model = this.resolveModel(picked);
     const thinkingEffort =
       stored.thinkingEffort &&
       (stored.effortFromSettings === undefined || stored.effortFromSettings === defaults.thinkingEffort)
@@ -764,7 +855,7 @@ export class ChatViewProvider implements ControlHost {
    */
   private checkoutNode(session: AgentSession, nodeId: string | null): void {
     session.activeNodeId = nodeId;
-    this.agent.setMessages(this.buildPath(session, nodeId));
+    this.setAgentMessages(this.buildPath(session, nodeId));
     const node = nodeId ? session.nodes[nodeId] : undefined;
     this.displayItems = node ? node.displayItems : session.orphanItems;
   }
@@ -2087,14 +2178,16 @@ export class ChatViewProvider implements ControlHost {
     // so pin the agent's history to this node explicitly (the user may have
     // checked out another branch while the async batch was running).
     if (parent && session) {
-      this.agent.setMessages(this.buildPath(session, parent.id));
+      this.setAgentMessages(this.buildPath(session, parent.id));
     }
     this.activeTurnNode = parent ?? null;
     this.displayItems = parent ? parent.displayItems : this.displayItems;
     // The slice basis must match `finishTurn`'s array — `agent.getMessages()`,
-    // which includes the leading system message. Using `parent.messages.length`
-    // (the node's own messages only) re-included ancestor history in the node.
-    this.turnPrefixLen = this.agent.getMessages().length;
+    // which includes the leading system message (`setAgentMessages` just set both).
+    // An injected turn does **not** own its node: the parent already has messages
+    // from the turn that spawned the batch, so `finishTurn` appends instead of
+    // assigning (`turnNodeFresh = false`).
+    this.turnNodeFresh = false;
     this.lastStatus = '子代理完成';
     this.setBusy(true);
     this.post({ type: 'status', text: this.lastStatus });
@@ -2141,9 +2234,11 @@ export class ChatViewProvider implements ControlHost {
     attachNode(session, node);
     this.activeTurnNode = node;
     this.displayItems = node.displayItems;
-    // The new node contributes no messages yet, so this is the parent's path.
-    this.agent.setMessages(this.buildPath(session, node.id));
-    this.turnPrefixLen = this.agent.getMessages().length;
+    // The new node contributes no messages yet, so this is the parent's path;
+    // `setAgentMessages` records the slice basis together with the array.
+    this.setAgentMessages(this.buildPath(session, node.id));
+    // A user turn owns a node it just created: `finishTurn` replaces its messages.
+    this.turnNodeFresh = true;
     this.postTree();
     this.post({ type: 'panTo', id: node.id });
     return node;
@@ -2153,13 +2248,36 @@ export class ChatViewProvider implements ControlHost {
    * Close out the running turn: store exactly the messages the agent appended
    * during it (the interrupt checkpoint and the error rollback both land here),
    * then persist, and patch just this card instead of resending the whole tree.
+   *
+   * The slice is *verified* before it is written. `turnPrefixLen` /
+   * `turnPrefixTail` describe the history this turn started from; if the agent's
+   * array was swapped since (`setAgentMessages` re-baselines, but a turn already
+   * in flight cannot be replayed), the offset no longer means "the turn's own
+   * messages" and slicing it would store ancestor history in the node. Losing a
+   * turn's messages to a log line beats silently duplicating ~1M tokens.
    */
   private finishTurn(status: TurnStatus): void {
     const node = this.activeTurnNode;
     this.activeTurnNode = null;
     const session = this.getActiveSession();
     if (node && session && session.nodes[node.id]) {
-      node.messages = this.agent.getMessages().slice(this.turnPrefixLen);
+      const messages = this.agent.getMessages();
+      const start = this.turnPrefixLen;
+      const intact =
+        start > 0 && start <= messages.length && messages[start - 1] === this.turnPrefixTail;
+      if (intact) {
+        const added = messages.slice(start);
+        // An injected (sub-agent notice / hop answer) turn continues a node that
+        // already holds the turn that spawned it — appending keeps both; a user
+        // turn owns the node `beginTurn` just created for it, so it assigns.
+        node.messages = this.turnNodeFresh ? added : [...node.messages, ...added];
+      } else {
+        this.output.appendLine(
+          `[slice] ${node.id}: skipped storing this turn's messages — the agent history was ` +
+            `replaced mid-turn (basis ${start}, tail ${this.turnPrefixTail ? 'set' : 'unset'}, ` +
+            `${messages.length} messages now; kept ${node.messages.length})`,
+        );
+      }
       node.status = status;
       session.updatedAt = Date.now();
       // Mirror the finished turn to disk so it stays searchable later.
@@ -3023,9 +3141,11 @@ export class ChatViewProvider implements ControlHost {
     }
     const userText = text.trim();
 
-    // Only models that accept image input may carry image blocks; on a text-only
-    // model DeepSeek returns a 400. Drop the attachments, send the text alone,
-    // and tell the user to switch models rather than failing the request.
+    // Only models declared image-capable (catalog + `agentHarness.modelTable`) may
+    // carry image blocks. A model that is not would not 400 — DeepSeek silently
+    // swaps the image for an "[Unsupported Image]" text part and the model then
+    // invents what it cannot see — so drop the attachments, send the text alone,
+    // and tell the user to switch models.
     if (attachments.length > 0 && !isVisionModel(this.model)) {
       const vision = visionModelsLabel();
       this.postNotice(
@@ -3129,25 +3249,28 @@ export class ChatViewProvider implements ControlHost {
     if (this.busy) {
       return;
     }
-    if (!model || model === this.model) {
+    // A stale id (settings left over from an older catalog) resolves to the
+    // default rather than silently mis-sizing the indicator or hiding images.
+    const next = this.resolveModel(model);
+    if (!next || next === this.model) {
       return;
     }
-    this.model = model;
-    this.agent.setModel(model);
-    this.contextWindow = this.getContextWindow(model);
+    this.model = next;
+    this.agent.setModel(next);
+    this.contextWindow = this.getContextWindow(next);
     this.persistRuntimeConfig();
     this.postConfig();
     this.postContext();
     if (this.hasHistory()) {
       let notice =
-        'Model changed to ' + model + '. Existing conversation history was produced under a different model, so the next request may miss the prompt cache and reprocess the full context.';
-      if (!isVisionModel(model) && this.activeSessionHasImages()) {
+        'Model changed to ' + next + '. Existing conversation history was produced under a different model, so the next request may miss the prompt cache and reprocess the full context.';
+      if (!isVisionModel(next) && this.activeSessionHasImages()) {
         notice +=
           ' Image blocks are hidden for this text-only model (the image data is kept) and will be restored when you switch back to a vision model.';
       }
       this.postNotice('warning', notice);
     }
-    this.output.appendLine(`[config] model=${model}`);
+    this.output.appendLine(`[config] model=${next}`);
   }
 
   private onSetThinkingEffort(effort: ThinkingEffort): void {

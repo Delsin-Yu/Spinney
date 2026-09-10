@@ -36,7 +36,26 @@ const problems = [];
 
 function scan(file, text, { allowAny = false } = {}) {
   const lines = text.split(/\r?\n/);
+  // A fenced block whose info string mentions `model-table` documents the
+  // `agentHarness.modelTable` syntax, so the ids inside it are *examples of user
+  // configuration*, not copy about the catalog. Everything else is scanned.
+  let fence = false;
+  let modelTableFence = false;
   lines.forEach((line, i) => {
+    const fenceMatch = /^\s*(`{3,})(.*)$/.exec(line);
+    if (fenceMatch) {
+      if (fence) {
+        fence = false;
+        modelTableFence = false;
+      } else {
+        fence = true;
+        modelTableFence = fenceMatch[2].includes('model-table');
+      }
+      return;
+    }
+    if (modelTableFence) {
+      return;
+    }
     for (const match of line.match(MODEL_RE) || []) {
       if (allowAny ? !idSet.has(match) : idSet.has(match)) {
         problems.push(
@@ -50,6 +69,8 @@ function scan(file, text, { allowAny = false } = {}) {
 }
 
 // --- 1. the settings enum must contain exactly the catalog, nothing else ------
+// (`agentHarness.modelTable` is deliberately *not* scanned: its whole purpose is
+// naming models the catalog does not have.)
 const pkgPath = path.join(root, 'package.json');
 const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
 const modelProp = pkg.contributes?.configuration?.properties?.['agentHarness.model'];
@@ -88,20 +109,25 @@ for (const dir of ['docs']) {
 const srcRoot = path.join(root, 'src');
 const catalogRel = path.join('agent', 'models.ts');
 
-const walkSrc = (d) => {
-  for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
-    const full = path.join(d, entry.name);
+function walkCode(dir, ext, skipRel) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
     if (entry.isDirectory()) {
-      walkSrc(full);
-    } else if (entry.name.endsWith('.ts')) {
-      if (path.relative(srcRoot, full) === catalogRel) {
+      walkCode(full, ext, skipRel);
+    } else if (entry.name.endsWith(ext)) {
+      const rel = path.relative(root, full);
+      if (skipRel && skipRel(rel)) {
         continue;
       }
-      scan(path.relative(root, full).replace(/\\/g, '/'), fs.readFileSync(full, 'utf8'));
+      scan(rel.replace(/\\/g, '/'), fs.readFileSync(full, 'utf8'));
     }
   }
-};
-walkSrc(srcRoot);
+}
+walkCode(srcRoot, '.ts', (rel) => rel === path.join('src', catalogRel));
+// The webview lives in media/ and must not carry a second copy of the catalog
+// either: it renders the model list the provider posts (`agentHarness.modelTable`
+// included). Vendored JS is off limits — it is hash-fixed.
+walkCode(path.join(root, 'media'), '.js', (rel) => rel.startsWith(path.join('media', 'vendor')));
 
 if (problems.length) {
   console.error('check-models: model ids drifted\n');

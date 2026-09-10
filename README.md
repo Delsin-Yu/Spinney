@@ -39,14 +39,14 @@ The agent can call these tools:
 Talks to `https://api.deepseek.com/chat/completions` and supports streaming + function calling.
 
 ### 4. Vision (image input)
-Set the model to a vision model (`deepseek-v4-flash-vision-exp` or `deepseek-v4.1-flash-expires-on-0910`) and attach or paste an image in the chat:
+The vendored model `deepseek-flash` (DeepSeek-V4.1-Flash) accepts images. Attach or paste an image in the chat:
 - Click the **📎 attach** button to pick an image file, or
 - **Paste** an image (Ctrl/Cmd+V) from your clipboard into the input.
 
-Images are uploaded to the DeepSeek Files API and referenced by `file_id` (allowed in `user` messages only). Attachments are hidden on text-only models.
+Images are uploaded to the DeepSeek Files API and referenced by `file_id` (allowed in `user` messages only). Attachments are hidden on models that are not image-capable. To add another image-capable model, list it in `agentHarness.modelTable` with `vision=true`.
 
 ### 5. Context + wallet + speed readout
-The send pane's status row shows a compact readout: live **status** text, then a right-aligned group `ctx % · bal ¥ · tok/s`. `ctx` is the active branch's `usage.prompt_tokens` vs. the context window (auto-detected per model; override with `agentHarness.contextWindow`). Per-turn token totals and cache hit/miss are shown once, in the usage line under the latest assistant reply (there is no per-node footer copy).
+The send pane's status row shows a compact readout: live **status** text, then a right-aligned group `ctx % · bal ¥ · tok/s`. `ctx` is the active branch's `usage.prompt_tokens` — the number the API itself reports for the last request — against the model's context window (from the catalog, or your `agentHarness.modelTable` row for it; `agentHarness.contextWindow` is the fallback for models in neither). Per-turn token totals and cache hit/miss are shown once, in the usage line under the latest assistant reply (there is no per-node footer copy).
 
 The send pane is the active node's **input dock**: it sits at the bottom of the checked-out node's card, so it pans/zooms with the tree and it is always obvious which node a message goes to — check out another node and the pane moves to its card. Its contents scale with the card: resizing the card with its bottom-right handle grows/shrinks the pane's controls and fonts too (0.8×–1.6×, and the tree zoom scales it further). With an empty session (no node yet) the pane is hosted by a bare **New session** card — a normal node card with just the input, no prompt/transcript — which pans and zooms with the view like any other node.
 
@@ -95,7 +95,17 @@ DEEPSEEK_API_KEY=sk-...
 ```
 
 You can also choose the model and base URL in settings:
-- `agentHarness.model` → `deepseek-chat` (default) or `deepseek-reasoner`
+- `agentHarness.model` → `deepseek-flash` (default, DeepSeek-V4.1-Flash, image-capable)
+- `agentHarness.modelTable` → extra models for the dropdown, as structured data —
+  edit it in `settings.json` (the setting's description links straight there):
+
+  ```json model-table
+  "agentHarness.modelTable": {
+    "deepseek-v4-pro": { "vision": false, "max_tokens": 1048576 }
+  }
+  ```
+
+  (`max_tokens` = that model's context window; `vision` = whether it takes images.)
 - `agentHarness.baseUrl` → `https://api.deepseek.com` (default)
 
 All `agentHarness.*` settings apply **immediately** — no window reload: the API
@@ -104,7 +114,9 @@ and the remaining keys are read at their point of use. The only exception is
 `AGENTS.md`, whose snapshot into the system prompt is taken once per activation
 (reload after editing it). See `docs/agents/invariants/config-keys.md`.
 
-> Note: `deepseek-reasoner` may not support tool/function calling. Use `deepseek-chat` for the agentic (tool-using) loop.
+> Note: whether a model supports tool/function calling is not something the
+> harness can know — a legacy reasoner model may ignore the `tools` field. If a
+> model you added never calls a tool, try another one.
 
 ---
 
@@ -133,7 +145,7 @@ Click **Stop** at any time to interrupt.
 - `Ctrl/Cmd + click` a node's title to jump back to an earlier turn and continue a branch.
 
 ### Sending images (vision)
-1. Set `agentHarness.model` to a vision model (`deepseek-v4-flash-vision-exp` or `deepseek-v4.1-flash-expires-on-0910`).
+1. Keep a model that is image-capable selected (`deepseek-flash` is; another one needs `vision=true` in `agentHarness.modelTable`).
 2. Attach an image with the **📎** button or paste one into the input.
 3. The image is shown as a thumbnail in your message, uploaded to the DeepSeek Files API, and referenced by `file_id`.
 
