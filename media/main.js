@@ -41,6 +41,14 @@
   const NODE_W = 320;
   const H_GAP = 48;
   const V_GAP = 72;
+  // Sub-agent sidecar grid (see media/tree.js): windows are packed into a
+  // column-major lattice right of the parent card, at most AGENT_MAX_ROWS rows
+  // per column; every further window opens a column to the right.
+  const AGENT_GAP = 80;
+  const AGENT_VGAP = 24;
+  const AGENT_COL_GAP = 48;
+  const AGENT_MAX_ROWS = 4;
+  const AGENT_TOP_PAD = 16;
 
   // The transcript is a pannable tree. `messagesEl` points at the currently
   // checked-out node's items container — every append / stream lands there.
@@ -51,6 +59,10 @@
   let treeActiveId = null;
   let activePathSet = new Set();
   let pathNodes = Object.create(null);   // id -> { status, items }
+  // Agent-child connector routing table from the last layout (media/tree.js
+  // `cells`): id -> { col, row, busX, chanX, corrY, ... }. drawEdges() routes each
+  // parent → sub-agent connector through those card-free corridors.
+  let layoutCells = Object.create(null);
   let pan = { x: 0, y: 0 };
   let zoom = 1;
   let follow = true;
@@ -1242,6 +1254,7 @@
   function relayout() {
     // No-node mode: the placeholder card is the entire tree.
     if (composerCard) {
+      layoutCells = Object.create(null);
       composerCard.style.left = '0px';
       composerCard.style.top = '0px';
       treeCanvas.style.width = composerCard.offsetWidth + 'px';
@@ -1268,9 +1281,13 @@
       hGap: H_GAP,
       vGap: V_GAP,
       widths,
-      agentGap: 80,
-      agentVGap: 24,
+      agentGap: AGENT_GAP,
+      agentVGap: AGENT_VGAP,
+      agentColGap: AGENT_COL_GAP,
+      agentMaxRows: AGENT_MAX_ROWS,
+      agentTopPad: AGENT_TOP_PAD,
     });
+    layoutCells = result.cells || Object.create(null);
     treeCanvas.style.width = result.width + 'px';
     treeCanvas.style.height = result.height + 'px';
     for (const id in result.pos) {
@@ -1352,6 +1369,47 @@
     }
   });
 
+  // Rounded-corner orthogonal path from a list of axis-aligned waypoints.
+  // Duplicate and collinear points are dropped first, so a simple L keeps its L.
+  function elbowPath(waypoints, radius) {
+    const f = (n) => Math.round(n * 100) / 100;
+    const pts = [];
+    for (const p of waypoints) {
+      const last = pts[pts.length - 1];
+      if (last && Math.abs(last.x - p.x) < 0.5 && Math.abs(last.y - p.y) < 0.5) continue;
+      pts.push(p);
+    }
+    if (pts.length < 2) return '';
+    const clean = [];
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[i - 1];
+      const b = pts[i];
+      const c = pts[i + 1];
+      if (a && c && Math.abs((b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)) < 0.25) continue;
+      clean.push(b);
+    }
+    let d = 'M ' + f(clean[0].x) + ' ' + f(clean[0].y);
+    for (let i = 1; i < clean.length - 1; i++) {
+      const prev = clean[i - 1];
+      const cur = clean[i];
+      const next = clean[i + 1];
+      const lenIn = Math.hypot(cur.x - prev.x, cur.y - prev.y);
+      const lenOut = Math.hypot(next.x - cur.x, next.y - cur.y);
+      const r = Math.min(radius, lenIn / 2, lenOut / 2);
+      if (r < 0.5) {
+        d += ' L ' + f(cur.x) + ' ' + f(cur.y);
+        continue;
+      }
+      const inX = cur.x + ((prev.x - cur.x) / lenIn) * r;
+      const inY = cur.y + ((prev.y - cur.y) / lenIn) * r;
+      const outX = cur.x + ((next.x - cur.x) / lenOut) * r;
+      const outY = cur.y + ((next.y - cur.y) / lenOut) * r;
+      d += ' L ' + f(inX) + ' ' + f(inY) + ' Q ' + f(cur.x) + ' ' + f(cur.y) + ' ' + f(outX) + ' ' + f(outY);
+    }
+    const end = clean[clean.length - 1];
+    return d + ' L ' + f(end.x) + ' ' + f(end.y);
+  }
+
   function drawEdges() {
     if (!treeEdges) return;
     treeEdges.setAttribute('width', treeCanvas.style.width || '0');
@@ -1373,16 +1431,34 @@
       const cw = child.offsetWidth;
       const ch = child.offsetHeight;
       if (isAgent) {
-        // One spline: parent RIGHT edge → agent window LEFT edge; the edge turns
-        // green when the sub-agent completes (red on error).
-        const pr = px + pw;
-        const pyMid = py + ph / 2;
-        const cyMid = cy + ch / 2;
-        const mx = (pr + cx) / 2;
+        // Orthogonal elbow through the corridors the layout reserved for this
+        // window (media/tree.js `cells`): parent right edge → the channel between
+        // the card and the grid → the gap above this window's row → the gap left
+        // of its column → into the window's left edge. Every segment runs in a
+        // card-free corridor, so the connector crosses no card at all (the
+        // previous spline cut across the nearer columns' windows).
         const cls = meta.agentStatus === 'done' ? ' edge-done' : meta.agentStatus === 'error' ? ' edge-error' : '';
-        parts.push(
-          '<path data-agent="' + id + '" class="edge-agent' + cls + '" d="M ' + pr + ' ' + pyMid + ' C ' + mx + ' ' + pyMid + ', ' + mx + ' ' + cyMid + ', ' + cx + ' ' + cyMid + '" />',
-        );
+        const route = layoutCells[id];
+        const pr = px + pw;
+        let d = '';
+        if (route) {
+          // Exits are spread over the card's right edge instead of all leaving
+          // from its middle, so a wide fan-out stays readable.
+          const exitY = py + (ph * (route.index + 1)) / (route.count + 1);
+          const midY = cy + ch / 2;
+          const pts = [{ x: pr, y: exitY }, { x: route.busX, y: exitY }];
+          if (route.col > 0) pts.push({ x: route.busX, y: route.corrY }, { x: route.chanX, y: route.corrY });
+          pts.push({ x: route.chanX, y: midY }, { x: cx, y: midY });
+          d = elbowPath(pts, 6);
+        }
+        if (!d) {
+          // Fallback (no routing table yet): the old spline.
+          const pyMid = py + ph / 2;
+          const cyMid = cy + ch / 2;
+          const mx = (pr + cx) / 2;
+          d = 'M ' + pr + ' ' + pyMid + ' C ' + mx + ' ' + pyMid + ', ' + mx + ' ' + cyMid + ', ' + cx + ' ' + cyMid;
+        }
+        parts.push('<path data-agent="' + id + '" class="edge-agent' + cls + '" d="' + d + '" />');
       } else {
         const childMidX = cx + cw / 2;
         const parentBottomX = px + pw / 2;
