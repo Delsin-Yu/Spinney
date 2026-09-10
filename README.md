@@ -137,6 +137,7 @@ Click **Stop** at any time to interrupt.
 - **Pan**: drag the empty canvas, or hold the middle mouse button anywhere.
 - **Zoom**: `Ctrl/Cmd + wheel` (0.4–1.5), or wheel over the background. **Wheel over a node** scrolls that node's content instead.
 - **Resize a card**: drag its bottom-right corner (a wireframe previews the size; layout resolves on mouse-up; size is stored per node).
+- **Copy a node's id**: right-click a card's **header** → *Copy node ID*. The id is what names the node in `list_nodes`, in the transcript dumps (`<root>/<sessionId>/<nodeId>.jsonl`) and in the `agentHarness` output channel's `[node …]` lines. The copy goes through the host (status-bar confirmation); the transcript **below** the header keeps VS Code's own right-click menu, so its text stays selectable and copyable as usual.
 - **Delete a branch**: hover a card and click the 🗑 in its header (or run the palette command `Agent Harness: Delete Branch at Checked-out Turn`). A modal confirmation always comes first — the turn and *everything below it* (sub-agent cards included) are removed from the history **and** their JSONL transcript dumps are deleted from disk, so `search_transcripts` can no longer recall them. The checkout moves to the parent of the deleted branch. Blocked while the agent or a sub-agent inside that branch is running.
 - **Fit to view** / **follow the active node**: toolbar buttons.
 

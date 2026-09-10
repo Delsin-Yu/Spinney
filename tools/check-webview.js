@@ -814,6 +814,91 @@ if (contextLabel !== 'ctx 50%') {
   }
 }
 
+// --- The node header's context menu (copy the node id) ------------------------
+// The header is the one strip on a card whose own menu the host cannot draw
+// (`user-select: none`, and webview content cannot add entries to VS Code's menu),
+// so the webview draws it. What is checked here: RMB on the header opens the menu
+// for *that* node, the entry posts the node's id to the host (the host owns the
+// clipboard), the menu closes after the click, and it is gone once the tree is
+// rebuilt for a different session (a menu that outlived its node would copy the id
+// of a node the session no longer has).
+{
+  const NODE = 'menu-node';
+  dispatch({ type: 'reset' });
+  dispatch({
+    type: 'tree',
+    viewId: NODE,
+    activeId: null,
+    rootId: NODE,
+    nodes: [
+      {
+        id: NODE,
+        parentId: null,
+        children: [],
+        title: 'menu smoke',
+        status: 'done',
+        createdAt: 0,
+        preview: 'menu smoke',
+        usage: null,
+        size: null,
+      },
+    ],
+  });
+  dispatch({ type: 'path', ids: [NODE], nodes: [{ id: NODE, status: 'done', items: [] }] });
+
+  const card = Array.from(elementById('tree-canvas').children).find(
+    (child) => child.dataset && child.dataset.id === NODE,
+  );
+  const head = card ? findByClass(card, 'node-head') : null;
+  const rmb = head && head._listeners && head._listeners.contextmenu;
+  if (typeof rmb !== 'function') {
+    problems.push('a node header has no contextmenu handler — the node id cannot be copied from the card');
+  } else {
+    let prevented = false;
+    rmb({ clientX: 40, clientY: 60, preventDefault: () => { prevented = true; }, stopPropagation() {} });
+    if (!prevented) {
+      problems.push("the header's contextmenu handler does not preventDefault — the host's own menu would win");
+    }
+    const menu = findByClass(document.body, 'node-menu');
+    if (!menu) {
+      problems.push('right-clicking a node header opened no menu');
+    } else {
+      if (menu.dataset.id !== NODE) {
+        problems.push(`the node menu carries ${JSON.stringify(menu.dataset.id)}, expected the card's own id ${NODE}`);
+      }
+      const item = findByClass(menu, 'node-menu-item');
+      if (!item) {
+        problems.push('the node menu has no item');
+      } else {
+        posted.length = 0;
+        const clickOf = item._listeners && item._listeners.click;
+        if (typeof clickOf !== 'function') {
+          problems.push('the node menu item has no click handler');
+        } else {
+          clickOf({ stopPropagation() {} });
+          const sent = posted.find((message) => message && message.type === 'copyNodeId');
+          if (!sent || sent.id !== NODE) {
+            problems.push(
+              `the node menu posted ${JSON.stringify(posted)}, expected { type: 'copyNodeId', id: '${NODE}' }`,
+            );
+          }
+        }
+      }
+      // The menu is transient: after the click, and after the cards are rebuilt.
+      if (findByClass(document.body, 'node-menu')) {
+        problems.push('the node menu is still on screen after its item was clicked');
+      }
+      if (typeof rmb === 'function') {
+        rmb({ clientX: 1, clientY: 2, preventDefault() {}, stopPropagation() {} });
+        dispatch({ type: 'tree', viewId: NODE, activeId: null, rootId: NODE, nodes: [] });
+        if (findByClass(document.body, 'node-menu')) {
+          problems.push('the node menu survived a tree rebuild — it would copy the id of a node that is gone');
+        }
+      }
+    }
+  }
+}
+
 // --- report ------------------------------------------------------------------
 
 if (problems.length > 0) {

@@ -1411,6 +1411,43 @@ button.icon-btn {
 .node-del:focus-visible { opacity: 1; }
 .node-del:hover { background: var(--error-bg); border-color: var(--error-bg); color: #fff; }
 
+/* Node header menu (RMB on a card header — `openNodeMenu` in media/main.js).
+   Pinned to the viewport, not to the card: it must not scale with the canvas zoom
+   or be clipped by the card's `overflow: hidden`. Above everything the panel
+   draws (cards reach z-index 3, the autoscroll origin 1000). */
+.node-menu {
+  position: fixed;
+  z-index: 2000;
+  min-width: 150px;
+  padding: 4px;
+  background: var(--assistant-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.node-menu-item {
+  display: block;
+  width: 100%;
+  padding: 5px 8px;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.node-menu-item:hover,
+.node-menu-item:focus-visible {
+  background: var(--user-bg);
+  color: var(--user-fg);
+}
+
 /* Agent connector edge: dim while running, green on done, red on error. */
 .edge-agent { stroke: var(--text-dim); opacity: 0.6; }
 .edge-agent.edge-done { stroke: var(--success); opacity: 1; }
