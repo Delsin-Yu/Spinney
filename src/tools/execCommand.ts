@@ -141,7 +141,7 @@ export function makeExecCommandTool(getRegistry: () => BackgroundRegistry | null
     async execute(args, signal) {
       const command = String(args.command ?? '');
       if (!command) {
-        throw new Error('Command must not be empty.');
+        throw new Error('exec_command requires a non-empty "command" string.');
       }
       const cwd = args.cwd ? resolvePath(String(args.cwd)) : getAgentRoot();
       const timeoutSec = typeof args.timeout === 'number' ? args.timeout : defaultCommandTimeoutSec();

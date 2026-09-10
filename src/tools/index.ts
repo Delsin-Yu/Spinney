@@ -272,6 +272,110 @@ function parseArgs(argsJson: string): Record<string, unknown> {
   return result;
 }
 
+// ---- Tolerant parameter names + required-argument validation ----
+
+/**
+ * Names the model reaches for instead of the schema's own. The schema stays the
+ * contract (it is what the API advertises, and the prompt never restates it), so
+ * an alias is folded in **only** when the canonical key is absent — a call that
+ * already spells the parameter correctly is never touched, and a stray alias key
+ * is not left behind for the tool to trip over.
+ *
+ * `cmd` is not hypothetical: in one machine's transcripts ~100 `exec_command`
+ * calls sent it, and every one died on "Command must not be empty." — an error
+ * that names neither the missing parameter nor the wrong one, so the agent
+ * retried blind instead of renaming the argument.
+ */
+const ARG_ALIASES: Record<string, Record<string, string>> = {
+  exec_command: { cmd: 'command' },
+};
+
+/** Fold a tool's aliases into its parsed arguments (see {@link ARG_ALIASES}). */
+function applyArgAliases(tool: string, args: Record<string, unknown>): Record<string, unknown> {
+  const aliases = ARG_ALIASES[tool];
+  if (!aliases) {
+    return args;
+  }
+  let out: Record<string, unknown> | undefined;
+  for (const [alias, canonical] of Object.entries(aliases)) {
+    if (!(alias in args)) {
+      continue;
+    }
+    out = out ?? { ...args };
+    const value = out[alias];
+    delete out[alias];
+    if (out[canonical] === undefined) {
+      out[canonical] = value;
+    }
+  }
+  return out ?? args;
+}
+
+/** Levenshtein distance — only used to spot a mistyped parameter name. */
+function editDistance(a: string, b: string): number {
+  const rows: number[][] = [];
+  for (let i = 0; i <= a.length; i++) {
+    rows.push([i]);
+  }
+  for (let j = 0; j <= b.length; j++) {
+    rows[0][j] = j;
+  }
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      rows[i][j] = Math.min(
+        rows[i - 1][j] + 1,
+        rows[i][j - 1] + 1,
+        rows[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+    }
+  }
+  return rows[a.length][b.length];
+}
+
+/** Does `sent` look like a mistyped `required` (`cmd`/`command`, `file`/`path`)? */
+function isNearMiss(sent: string, required: string): boolean {
+  const a = sent.toLowerCase();
+  const b = required.toLowerCase();
+  if (a === b) {
+    return true; // case-only difference
+  }
+  const [short, long] = a.length <= b.length ? [a, b] : [b, a];
+  if (short.length >= 2 && long.startsWith(short)) {
+    return true;
+  }
+  if (short.length >= 3 && long.includes(short)) {
+    return true;
+  }
+  return Math.max(a.length, b.length) >= 5 && editDistance(a, b) <= 2;
+}
+
+/**
+ * Explain a missing required argument so the model can repair the call instead
+ * of retrying it: which argument is absent, the keys it actually sent, the
+ * schema's own names, and a "did you mean" when one of them is a near-miss.
+ */
+function missingArgumentError(
+  tool: string,
+  missing: string[],
+  known: string[],
+  received: string[],
+): string {
+  const hints = missing
+    .map((name) => {
+      const near = received.find((key) => isNearMiss(key, name));
+      return near ? `Did you mean "${name}" instead of "${near}"?` : '';
+    })
+    .filter(Boolean);
+  const plural = missing.length > 1 ? 's' : '';
+  return (
+    `${tool} is missing required argument${plural} ${missing.map((m) => `"${m}"`).join(', ')}. ` +
+    `It sent: ${received.length > 0 ? received.join(', ') : '(nothing)'}. ` +
+    hints.join(' ') +
+    (hints.length > 0 ? ' ' : '') +
+    `Parameters: ${known.join(', ')}.`
+  );
+}
+
 export const SKIP_DIRS = new Set(['node_modules', '.git', 'out', 'dist', 'build', '.agent-harness']);
 
 export class ToolRegistry {
@@ -413,9 +517,20 @@ export class ToolRegistry {
     }
     let args: Record<string, unknown>;
     try {
-      args = parseArgs(argsJson || '{}');
+      args = applyArgAliases(name, parseArgs(argsJson || '{}'));
     } catch (err) {
       return `Error: could not parse tool arguments: ${err instanceof Error ? err.message : String(err)}`;
+    }
+    // Validate the schema's `required` list here, before the tool body runs, so
+    // a missing/renamed argument reports *that* instead of whatever the tool
+    // happens to make of an absent value (e.g. exec_command's misleading
+    // "Command must not be empty.").
+    const schema = tool.definition.function.parameters;
+    const missing = (schema.required ?? []).filter(
+      (key) => args[key] === undefined || args[key] === null,
+    );
+    if (missing.length > 0) {
+      return `Error: ${missingArgumentError(name, missing, Object.keys(schema.properties), Object.keys(args))}`;
     }
     try {
       return await tool.execute(args, signal);
