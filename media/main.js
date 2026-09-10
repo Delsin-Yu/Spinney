@@ -954,6 +954,16 @@
     status.dataset.role = 'status';
     head.appendChild(title);
     head.appendChild(status);
+    // RMB on the header opens *our* menu (copy this node's id) instead of VS
+    // Code's: the header is `user-select: none` (style.css), so the host menu has
+    // nothing to offer there, while the transcript below keeps it -- see
+    // `openNodeMenu` and the capture-phase `contextmenu` listener that suppresses
+    // the host menu over `.node-head`.
+    head.addEventListener('contextmenu', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      openNodeMenu(ev.clientX, ev.clientY, id);
+    });
     // Delete-branch button: hover-revealed (see .node-del), so a destructive
     // action is not one stray click away. The host asks for a modal confirmation
     // before it removes anything (history + transcript dumps).
@@ -1524,6 +1534,9 @@
   }
 
   function renderTree(tree) {
+    // The cards this menu was opened on are about to be rebuilt / removed, so a
+    // menu that stayed up would point at a node the session no longer has.
+    closeNodeMenu();
     treeNodes = Object.create(null);
     for (const n of tree.nodes || []) treeNodes[n.id] = n;
     treeRootId = tree.rootId ?? null;
@@ -1998,9 +2011,82 @@
   // next RMB press instead of panning). Capture phase so no inner handler can
   // stopPropagation() past it; the target is already known here.
   document.addEventListener('contextmenu', (e) => {
+    const target = e.target;
+    if (target && target.closest && target.closest('.node-head')) {
+      // A node header: the menu is ours (see `openNodeMenu`). Suppressed here, in
+      // the same place the pan gesture suppresses it, so the two cases cannot drift
+      // apart; the card's own listener then opens the menu.
+      e.preventDefault();
+      return;
+    }
     if (rmbPressWantsMenu && !autoscroll) return;
     e.preventDefault();
   }, true);
+
+  // ---- Node header menu (RMB) ----
+  // The header's one useful action is the node id: it names the node in
+  // `list_nodes`, in the transcript dumps (`<root>/<sessionId>/<nodeId>.jsonl`) and
+  // in every `[node <id>]` line of the Agent Harness output channel, so it has to
+  // be reachable from the card itself and not only by opening a dump file.
+  //
+  // VS Code's webview host shows *its* menu for any `contextmenu` that reaches it
+  // un-prevented, and webview content cannot contribute entries to that menu, so
+  // the header gets a menu of our own. It is a floating element (not a child of the
+  // card): the canvas under it is transformed, and a menu inside the transform
+  // would scale with the zoom and be clipped by the card's `overflow: hidden`.
+  let nodeMenuEl = null;
+
+  function closeNodeMenu() {
+    if (nodeMenuEl) {
+      nodeMenuEl.remove();
+      nodeMenuEl = null;
+    }
+  }
+
+  /** Open the node menu for `id` at a viewport position (`clientX` / `clientY`). */
+  function openNodeMenu(clientX, clientY, id) {
+    closeNodeMenu();
+    const menu = el('div', 'node-menu');
+    menu.dataset.id = id;
+    const item = el('button', 'node-menu-item', 'Copy node ID');
+    // The id is the whole payload, so it is also the tooltip: the header's title is
+    // a derived sentence, and pasting *it* is never what the menu is for.
+    item.title = id;
+    item.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      closeNodeMenu();
+      // The host owns the clipboard (`vscode.env.clipboard`), exactly like the
+      // sidebar's Copy Session ID — and it can confirm with a status-bar message,
+      // which a webview cannot show.
+      vscode.postMessage({ type: 'copyNodeId', id });
+    });
+    menu.appendChild(item);
+    document.body.appendChild(menu);
+    // Fixed positioning in viewport coordinates: the menu is not part of the
+    // transformed canvas, so panning / zooming under it cannot drag it along.
+    // Measured only now that it is in the DOM, and clamped, so a header near an edge
+    // still gets a fully visible menu.
+    const w = menu.offsetWidth || 150;
+    const h = menu.offsetHeight || 26;
+    menu.style.left = clamp(clientX, 0, Math.max(0, window.innerWidth - w)) + 'px';
+    menu.style.top = clamp(clientY, 0, Math.max(0, window.innerHeight - h)) + 'px';
+    nodeMenuEl = menu;
+  }
+
+  // Anything that is not a press inside the menu closes it — including a second
+  // right-click, which then reopens it on the header under the cursor. Capture
+  // phase, so a pan that starts while the menu is up cannot leave it hanging over
+  // cards that have moved away from it.
+  document.addEventListener('pointerdown', (e) => {
+    if (nodeMenuEl && !(nodeMenuEl.contains && nodeMenuEl.contains(e.target))) closeNodeMenu();
+  }, true);
+  // Zooming / panning moves the cards out from under a viewport-anchored menu, and
+  // so does losing the window.
+  window.addEventListener('wheel', closeNodeMenu, { passive: true });
+  window.addEventListener('blur', closeNodeMenu);
+  window.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeNodeMenu();
+  });
 
   // Zoom around a screen-space cursor position.
   function zoomAt(clientX, clientY, factor) {

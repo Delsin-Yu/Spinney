@@ -2160,6 +2160,12 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       case 'deleteBranch':
         void this.deleteBranchInteractive(session.id, String(message.id ?? ''));
         return;
+      case 'copyNodeId':
+        // The card header's context menu (`media/main.js` `openNodeMenu`): the id
+        // names the node in `list_nodes`, in the transcript dumps and in every
+        // `[node <id>]` output-channel line, so it has to be copyable from the card.
+        void this.copyNodeId(session, String(message.id ?? ''));
+        return;
       case 'layoutDiagnostic':
         rt.logLayoutDiagnostic(message.nodes, message.overlaps, message.connections, message.force);
         return;
@@ -2199,6 +2205,23 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       default:
         return;
     }
+  }
+
+  /**
+   * Copy one node's id to the clipboard — the card header's context menu
+   * (`media/main.js` `openNodeMenu`). Validated against the session's own nodes: a
+   * menu that outlived its node (the branch was deleted, or the tab switched
+   * sessions between opening and clicking) must copy nothing rather than write an id
+   * that names nothing. The clipboard write goes through the host, exactly like the
+   * sidebar's Copy Session ID, so it also gets the status-bar confirmation a
+   * webview cannot show.
+   */
+  private async copyNodeId(session: AgentSession, id: string): Promise<void> {
+    if (!id || !session.nodes[id]) {
+      return;
+    }
+    await vscode.env.clipboard.writeText(id);
+    vscode.window.setStatusBarMessage(`Copied node id: ${id}`, 2000);
   }
 
   /** Kill every running background terminal (session delete / extension dispose). */

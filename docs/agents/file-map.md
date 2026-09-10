@@ -123,6 +123,11 @@
   Canvas gestures live in one block near the end: LMB/MMB drag pans by offset,
   RMB-hold autoscroll-pans towards the cursor (browser middle-click semantics,
   with an origin marker and the `all-scroll` cursor), ctrl+wheel zooms.
+  RMB on a **card header** is the exception to that block: a `.node-head` opens the
+  webview's own **node menu** (`openNodeMenu` → the host's `copyNodeId` case in
+  `ChatViewProvider.handlePanelMessage`), because the header is `user-select: none`
+  and webview content cannot add entries to VS Code's own menu; the capture-phase
+  `contextmenu` listener is where the host menu is suppressed for it.
   The composer is the
   active node's input dock: `setActiveLeaf` moves `#composer` into the
   checked-out card's bottom. It has no other home — with an empty session the
