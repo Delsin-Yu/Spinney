@@ -51,6 +51,7 @@ import {
   UserAttachment,
   attachNode,
   createNode,
+  isSidecar,
   newId,
   nodeUsage,
   pathIds,
@@ -90,6 +91,49 @@ export function clipDisplayItem(item: DisplayItem): DisplayItem {
     return { ...item, thinking: clipForUi(item.thinking, 64 * 1024) };
   }
   return item;
+}
+
+/**
+ * The message a harness-level "continue" turn sends. It is intentionally the
+ * *whole* instruction: the user pressed ▶ Continue instead of typing, so what
+ * reaches the model is the same thing "continue" would have said — no fabricated
+ * user intent beyond that. (The turn resumes the node in place; after an
+ * interruption the agent prepends its own `INTERRUPT_NOTICE` to this message, and
+ * after a failed call the runtime prefixes a failure note — see
+ * `buildFailureContinue`.)
+ */
+export const CONTINUE_MESSAGE = 'Continue from where you stopped.';
+
+/**
+ * The failure variant of the continue message. After a non-interrupt error the
+ * turn's partial messages were rolled back (`Agent.runTurn`), so the model has no
+ * trace of it and would otherwise have to guess why it is being asked again.
+ * The provider's error text already names the attempt count, so it is quoted
+ * verbatim (clipped) rather than paraphrased.
+ */
+function buildFailureContinue(error: string): string {
+  const reason = error.replace(/\s+/g, ' ').trim().slice(0, 500);
+  return (
+    '[Harness continue] Your previous request failed before it produced an answer, so its partial output was ' +
+    'discarded and nothing from it is in this conversation. Redo the last request now: resume the work it asked ' +
+    `for, do not ask for confirmation, and do not start a different task. Failure: ${reason}`
+  );
+}
+
+/**
+ * The failure text of a node whose last turn died on an error: the `⚠️ …` item
+ * `handleAgentEvent` pushed onto its card. Derived from the node's own transcript
+ * rather than a side table, so it survives a reload (the error item is persisted)
+ * and the model is told exactly what the user can read on the card.
+ */
+function lastFailureText(node: TreeNode): string | undefined {
+  for (let i = node.displayItems.length - 1; i >= 0; i--) {
+    const item = node.displayItems[i];
+    if (item.kind === 'assistant' && item.error && item.text) {
+      return item.text.replace(/^⚠️\s*/, '');
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -1319,6 +1363,64 @@ export class SessionRuntime {
     this.lastStatus = 'Thinking…';
     this.post({ type: 'status', text: this.lastStatus });
     void run.agent.sendUserMessage(content);
+  }
+
+  /**
+   * Resume a node in place: run a turn **on `nodeId` itself** with a message the
+   * harness writes, so a turn that ended in `interrupted` or `error` does not
+   * force the user to type "continue" — and, just as important, does not grow a
+   * new card in the tree. This is the same mechanism the background / sub-agent
+   * completion notices use (`beginInjectedTurn`): the run is bound to the existing
+   * node, its reply is appended to that node's own history (`fresh: false`) and
+   * the view focus does not move.
+   *
+   * The model therefore receives exactly the context where it stopped:
+   *  - interrupted → the checkpoint `preservePartialTurn` stored (its partial
+   *    text/reasoning is already in the history) plus the pending
+   *    `INTERRUPT_NOTICE`, which this node's agent still holds — nothing is
+   *    re-derived and the interrupted tool call is still named;
+   *  - failed → the history the rollback restored, i.e. right after the last
+   *    completed tool call, plus `buildFailureContinue`'s note, because the model
+   *    has no other way to learn why it is being asked again.
+   *
+   * Refused (returns false, no turn) while the reboot hold is armed, while that
+   * node is already streaming, or for a node that is not a conversational turn (a
+   * sub-agent window / job card has no history of its own in this path).
+   */
+  async continueFrom(nodeId: string): Promise<boolean> {
+    const node = this.session.nodes[nodeId];
+    // Only a real turn node can be continued: `isSidecar` covers the sub-agent
+    // windows and the `kind:'bg'` job cards.
+    if (!node || isSidecar(node)) {
+      return false;
+    }
+    if (this.runs.has(nodeId)) {
+      return false;
+    }
+    if (this.host.isHeld()) {
+      this.postNotice('warning', 'An external controller is rebooting the window; please wait a moment.');
+      return false;
+    }
+    const failure = node.status === 'error' ? lastFailureText(node) : undefined;
+    const message = failure ? buildFailureContinue(failure) : CONTINUE_MESSAGE;
+    const run = this.beginInjectedTurn(node);
+    if (!run) {
+      return false;
+    }
+    // The card shows the message the model actually got, as an inline harness
+    // block in this node's transcript (never a fabricated user bubble, and never
+    // the pinned prompt — that one still holds what the user asked for).
+    node.status = 'running';
+    run.items.push({ kind: 'harness', text: message });
+    this.post({ type: 'harnessNote', nodeId: node.id, text: message });
+    this.setBusy(true);
+    this.lastStatus = 'Thinking…';
+    this.post({ type: 'status', text: this.lastStatus });
+    // Patch just this card: the chip follows the run, and the ▶ button goes away
+    // for the duration (the webview hides it while the node has a live run).
+    this.post({ type: 'nodeUpdate', id: node.id, status: 'running', title: node.title, usage: nodeUsage(node) });
+    void run.agent.sendUserMessage(message);
+    return true;
   }
 
   /**

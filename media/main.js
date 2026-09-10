@@ -262,6 +262,24 @@
     return node;
   }
 
+  /**
+   * A message the *harness* wrote inside this node's own transcript — currently the
+   * ▶ Continue turn, which resumes the node in place instead of growing a new card
+   * (`SessionRuntime.continueFrom`). It is an inline block, not a user bubble (the
+   * user did not type it) and not the pinned prompt (that still holds what the user
+   * asked for); it shows the exact text the model received.
+   */
+  function addHarnessNote(text) {
+    if (!messagesEl) return;
+    const node = el('div', 'msg harness-note');
+    node.dataset.kind = 'harness';
+    node.appendChild(el('span', 'harness-badge', 'HARNESS'));
+    node.appendChild(el('span', 'harness-text', text));
+    messagesEl.appendChild(node);
+    followActive();
+    return node;
+  }
+
   function makeThinkingBlock(thinking) {
     const box = el('div', 'thinking');
     const head = el('div', 'thinking-head');
@@ -742,6 +760,8 @@
   function renderItemInto(item) {
     if (item.kind === 'user') {
       addUserPrompt(item.text, item.attachments);
+    } else if (item.kind === 'harness') {
+      addHarnessNote(item.text);
     } else if (item.kind === 'assistant') {
       addAssistant(item.text, item.error, item.thinking);
       if (item.usage) {
@@ -1049,6 +1069,60 @@
     if (treeNodes[msg.id]) {
       if (msg.status) treeNodes[msg.id].status = msg.status;
       if (msg.title) treeNodes[msg.id].title = msg.title;
+    }
+    if (card) syncContinueButton(card, treeNodes[msg.id] || { id: msg.id, status: msg.status, children: [] });
+  }
+
+  /**
+   * The ▶ Continue (or ↻ Retry) button on a card whose turn ended without an
+   * answer: interrupted by the user, or failed — an API error that outlived the
+   * client's transparent retries. Clicking it asks the harness to run a turn from
+   * that node with a message the harness writes itself, so the user never has to
+   * type "continue".
+   *
+   * Shown only where continuing makes sense: a conversational turn node (never a
+   * sidecar — a sub-agent window or job card has no conversation of its own here),
+   * not currently running, and a *tip* of its branch (a node that already has a
+   * turn child has been continued; the new failure, if any, shows on that child).
+   */
+  function syncContinueButton(card, meta) {
+    const id = meta && meta.id;
+    // `byClass`, not `querySelector`: a miss must be observable (the offline
+    // webview checker's DOM stub answers a plain-class miss with a shared stub).
+    const btn = byClass(card, 'node-continue');
+    const terminal = !!meta && (meta.status === 'interrupted' || meta.status === 'error');
+    const hasTurnChild = !!meta && (meta.children || []).some((c) => {
+      const child = treeNodes[c];
+      return child && !isSidecarKind(child.kind);
+    });
+    const label = meta && meta.status === 'error' ? '↻ Retry' : '▶ Continue';
+    const show = !!id && terminal && !hasTurnChild && !isSidecarKind(meta.kind) && !runningNodes.has(id);
+    if (!show) {
+      if (btn) btn.remove();
+      return;
+    }
+    if (btn) {
+      btn.textContent = label;
+      return;
+    }
+    const button = el('button', 'node-continue', label);
+    button.title =
+      meta.status === 'error'
+        ? 'Ask the harness to retry this turn (it sends the message for you)'
+        : 'Ask the harness to continue from here (it sends the message for you)';
+    button.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      vscode.postMessage({ type: 'continueTurn', id });
+    });
+    const head = byClass(card, 'node-head');
+    // Keep the delete button at the far right of the head.
+    const del = head ? byClass(head, 'node-del') : null;
+    if (!head) {
+      card.appendChild(button);
+    } else if (del && head.insertBefore) {
+      head.insertBefore(button, del);
+    } else {
+      head.appendChild(button);
     }
   }
 
@@ -1466,6 +1540,7 @@
       if (card) {
         const statusEl = card.querySelector('.node-status');
         if (statusEl) statusEl.textContent = n.status || '';
+        syncContinueButton(card, n);
       }
     }
     for (const id in nodeEls) {
@@ -2447,6 +2522,12 @@
         break;
       case 'user':
         addUserPrompt(msg.text, msg.attachments);
+        break;
+      case 'harnessNote':
+        // An in-place continue (`SessionRuntime.continueFrom`): the block belongs in
+        // the transcript of *that* node, so it is routed explicitly (the view focus
+        // does not move for an injected turn).
+        routeTo(msg.nodeId, () => addHarnessNote(msg.text));
         break;
       case 'backgroundNotice':
         // Delivered at a tool boundary of a *running* turn, so the block lands in

@@ -26,7 +26,7 @@ export interface UserAttachment {
 
 /** One entry of the UI transcript, persisted so a session restores its view. */
 export interface DisplayItem {
-  kind: 'user' | 'assistant' | 'tool' | 'notice' | 'background';
+  kind: 'user' | 'assistant' | 'tool' | 'notice' | 'background' | 'harness';
   id?: string;
   text?: string;
   thinking?: string;

@@ -2142,6 +2142,12 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         return;
       case 'userMessage':
         return this.dispatchUserMessage(rt, String(message.text ?? ''), message.attachments ?? []);
+      case 'continueTurn':
+        // The ▶ button on a card whose turn was interrupted / failed: the harness
+        // writes the message (see `SessionRuntime.continueFrom`), so the reboot
+        // hold and the per-node "already running" refusal stay in that one place.
+        void rt.continueFrom(String(message.id ?? ''));
+        return;
       case 'checkout':
         rt.handleCheckout(String(message.id ?? ''));
         return;

@@ -1165,6 +1165,58 @@ button.icon-btn {
   font-size: 12px;
 }
 
+/* A message the *harness* wrote inside the transcript (the ▶ Continue turn, which
+   resumes the node in place): an inline block, not a bubble — the user did not
+   type it, and the card's pinned prompt still shows what the user asked for. */
+.msg.harness-note {
+  align-self: stretch;
+  display: block;
+  padding: 5px 8px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--text-dim);
+  background: var(--bg2);
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.msg.harness-note .harness-badge {
+  display: inline-block;
+  margin-right: 6px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  vertical-align: middle;
+  background: var(--accent-dim);
+  color: var(--bg);
+}
+
+/* ▶ Continue / ↻ Retry: the per-card "run it again for me" button. Only rendered
+   while the node is a terminal tip (see `syncContinueButton` in main.js), so it is
+   always an actionable affordance rather than decoration. */
+.node-continue {
+  flex: 0 0 auto;
+  margin-left: 6px;
+  padding: 1px 6px;
+  font-size: 10px;
+  line-height: 16px;
+  color: var(--text);
+  background: var(--bg3);
+  border: 1px solid var(--accent-dim);
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.node-continue:hover {
+  background: var(--accent-dim);
+  border-color: var(--accent-dim);
+  color: var(--bg);
+}
+
 /* Manual scroll-lock light: sits in the strip the scroll container reserves
    below itself (`margin-bottom`), docked in the bottom-right corner of the
    transcript area. On by default; click it to release the auto-scroll and hand

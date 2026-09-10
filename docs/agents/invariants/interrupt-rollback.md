@@ -26,4 +26,7 @@
 - `Agent.sanitizeMessages` (applied on session restore) treats an assistant
   message without `tool_calls` as valid, so a preserved checkpoint message
   followed by a `user` message is safe on resume.
+- A turn that ended in `interrupted` (or `error`) also offers the ▶ Continue
+  button on its card, which runs exactly the "continue" turn for the user — see
+  `api-retries.md` (`SessionRuntime.continueFrom`).
 
