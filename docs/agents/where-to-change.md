@@ -1,10 +1,15 @@
 # Where to look when changing
 
-- **Add/change a tool** → `src/tools/index.ts` (define `AgentTool`, register in
-  `ToolRegistry`), the tool description string is handed to the model (keep it
-  accurate), and optionally update `media/main.js` rendering.
-- **Change the agent prompt/behavior** → `src/agent/agent.ts` (`CORE_PROMPT`,
-  `buildSystemPrompt`, `identityLines`, `maxTurns`).
+- **Add/change a tool** → the tool's own file: `src/tools/<name>.ts` for a
+  registry tool (schema + implementation together; register it in
+  `buildTools()` in `src/tools/index.ts`, where the shared helpers also live), or
+  `src/agent/tools/<name>.ts` for an intercepted/provider-orchestrated tool (add
+  its `requires` capability tag and, if it is intercepted, its execution branch in
+  `Agent.executeToolCall`). The description string is handed to the model — keep
+  it accurate; optionally update `media/main.js` rendering.
+- **Change the agent prompt** → `src/agent/prompt.ts` only (templates +
+  placeholders); the loop, tool interception and `maxTurns` are in
+  `src/agent/agent.ts`. See `docs/agents/invariants/system-prompt.md`.
 - **Add a setting** → `package.json` `contributes.configuration` +
   `ChatViewProvider.getConfig()` / `buildAgent()`.
 - **Change the UI** → `media/main.js` (behavior) and/or `media/style.css`

@@ -81,6 +81,10 @@
       {
         "command": "agentHarness.clear",
         "title": "Agent Harness: Clear Conversation"
+      },
+      {
+        "command": "agentHarness.showSystemPrompt",
+        "title": "Agent Harness: Show System Prompt"
       }
     ],
     "menus": {
@@ -245,7 +249,8 @@
   "scripts": {
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "vscode:prepublish": "npm run compile"
+    "check:models": "node tools/check-models.js",
+    "vscode:prepublish": "npm run compile && npm run check:models"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

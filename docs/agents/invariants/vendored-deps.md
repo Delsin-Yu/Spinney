@@ -56,7 +56,7 @@ This is why the manual-drag/pin feature was reverted rather than extended.
 - Same algorithm as `d3-flextree` (van der Ploeg, *Drawing Non-layered Tidy Trees in
   Linear Time*) but **MIT** instead of WTFPL, zero runtime deps, 5.6 KB, no install
   scripts, and its npm tarball's `dist` + `src` are byte-identical to GitHub tag `v2.0.2`.
-- Measured (`.agent-harness/research/bench/nlttl-benchmark.md`): mean canvas area
+- Measured (`tools/research/bench/nlttl-benchmark.md`): mean canvas area
   **0.973×** the previous hand-written packer on 20 synthetic shapes (0.811× for a
   post-hoc packing variant) and **2.2× smaller** than it on every real agent-heavy
   session, **0 overlaps, 0 interpositions, 0 foreign connector crossings**, 0.16 ms at
@@ -84,9 +84,9 @@ The known cost is vertical: a node whose block is taller than its card pushes it
 children down by `blockH - cardH` (~10–20% more canvas area than the post-hoc packer,
 still ~2.2× smaller than the pre-vendoring packer).
 
-Enforced by `.agent-harness/research/bench/verify-tree.js` (geometry must match the
+Enforced by `tools/research/bench/verify-tree.js` (geometry must match the
 benchmarked candidate; 0 overlaps / 0 interpositions / 0 foreign crossings on every
-scenario) and by `.agent-harness/research/bench/analyze-interposition.js check ALL`
+scenario) and by `tools/research/bench/analyze-interposition.js check ALL`
 (real persisted sessions).
 
 
@@ -96,12 +96,17 @@ Exact version + full version history (dormancy/yank/ownership), maintainer ↔ G
 match, provenance/attestations, lifecycle scripts, static scan (`eval`, `Function`,
 `child_process`, network, base64), transitive deps + licenses, LICENSE vs SPDX,
 registry integrity + local sha256, `dist`/`src` vs GitHub tag byte comparison, typosquat
-probes, OSV advisories. Then re-run `.agent-harness/research/bench/verify-tree.js`
+probes, OSV advisories. Then re-run `tools/research/bench/verify-tree.js`
 (geometry must still match the benchmarked candidate) and
-`node .agent-harness/research/bench/nlttl-bench.js` (area ratios must not regress).
+`node tools/research/bench/nlttl-bench.js` (area ratios must not regress).
 
 ## Related
 
 - `media/vendor/non-layered-tidy-tree-layout/PROVENANCE.md` — pin record, hashes, audit summary.
+- `tools/research/` — the evidence behind this file, tracked (and excluded from the
+  `.vsix`): `audit/` (supply-chain audit + registry/OSV/attestation JSONs),
+  `bench/` (the enforcement and benchmark scripts above), `prior-art/`, `survey/`.
+  It used to live in the gitignored `.agent-harness/`, where a `git clean` could
+  have taken the audit trail with it — do not move it back into scratch space.
 - `docs/agents/invariants/sub-agents.md` — the recursive agent-window layout invariant.
 - `docs/agents/file-map.md` — where the files live.

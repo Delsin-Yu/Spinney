@@ -10,7 +10,7 @@
  * automatic namer never overwrites a name a human or the agent chose.
  *
  * Kept free of VS Code imports so it can be exercised outside the Extension
- * Host (see the scratch harness under `.agent-harness/`).
+ * Host by a plain node script (require the compiled `out/chat/sessionTitles.js`).
  */
 import { ChatMessage } from '../agent/types';
 import { AgentSession, TitleSource, TreeNode, messageText } from './tree';

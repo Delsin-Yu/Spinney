@@ -11,7 +11,7 @@
   `write:false` anyway. It resumes its own children with `send_readonly_agent_message` (again no
   `write` override; `handleSubAgentSendMessage` also enforces "target must be a direct child" and
   caps `write` at `caller.write && target.write`). Its system prompt
-  (`Agent.subAgentSystemPrompt`) nudges it to fan out when a task splits into
+  (`Agent.subAgentSystemPrompt`, the lean template in `src/agent/prompt.ts`) nudges it to fan out when a task splits into
   independent, reading-heavy parts — without the nudge, read-only sub-agents never
   volunteer to decompose. `mode:'sync'` blocks and returns `{ results }`;
   `mode:'async'` returns
@@ -21,8 +21,8 @@
   main agent's notice queue.
 - `send_agent_message({ id, message, write?, model?, mode })` resumes a **finished** sub-agent (the
   `id` from a prior `spawn_agents`) with a follow-up `message`. `sync` blocks and returns the resumed
-  result; `async` returns immediately and delivers the result as a notice. `model` is validated against
-  the `MODELS` whitelist (unknown → error). A still-running target returns `still running`.
+  result; `async` returns immediately and delivers the result as a notice. `model` is validated with
+  `isKnownModel` (unknown → error). A still-running target returns `still running`.
 - A sub-agent is a `kind:'agent'` node — a **display-only sidecar**: its own conversation is a separate
   history and `pathMessages` (in `tree.ts`) skips it, so it never leaks into the parent's API path. On
   finish the sub-agent's conversation (minus the synthesized system prompt) is stored in `node.messages`

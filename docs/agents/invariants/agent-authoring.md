@@ -1,24 +1,27 @@
 ## Agent-authoring notes
-- The agent is instructed to **default to Simplified Chinese (zh-Hans)** for
-  replies (eager, not just allowed) and to keep code, paths, identifiers, and
-  command output in their original form (see `CORE_PROMPT`'s `## Language`).
-  Do not add English-only output requirements to the model.
-- `CORE_PROMPT` also carries an **"Ask instead of guessing"** rule (ask one short
-  clarifying question when a request is genuinely ambiguous rather than silently
-  settling on a reading) and a light **"Tone"** section inviting playful, concise,
-  friendly replies (borrowed from the community DeepSeek persona), gated by a
-  **"Correctness always wins"** rule that keeps the tone from ever compromising
-  accuracy — and drops it entirely in serious/high-stakes contexts.
+
+Where the text lives, the template/placeholder mechanics and the two hard rules
+(no workspace facts, no model ids) are in
+`docs/agents/invariants/system-prompt.md`. This file is about *what* to write.
+
+- **One place.** All prompt text lives in `src/agent/prompt.ts`. Change wording
+  there — not in `agent.ts`, and never inline in a tool description.
+- **Default to Simplified Chinese (zh-Hans)** for replies — eager, not merely
+  allowed — and keep code, paths, identifiers and command output in their original
+  form. Do not add English-only output requirements to the model.
+- **Ask instead of guessing**: one short clarifying question when a request is
+  genuinely ambiguous (listing the most likely readings, so the user can answer in
+  one line) instead of silently settling on a reading.
+- There is deliberately **no tone/persona section** and no "correctness always
+  wins" clause: an earlier version of this doc described both as living in the
+  prompt, but they never did. Style lives in the template's `## 风格` bullets and
+  accuracy is covered by the ask-first rule — do not reintroduce the other two.
+- **The sub-agent prompt stays lean**: identity + environment + three behaviour
+  lines (reply in Chinese, finish with a conclusion, do not overstep file changes),
+  plus the read-only fan-out reminder for a read-only depth-1 sub-agent. Never give
+  it the main template.
+- **The prompt carries no tool list** (schemas go in the API `tools` field) and no
+  capability inventory; where a capability is mentioned, it must derive from the
+  same flags that build the tool list.
 - The harness trusts the model to emit tool calls; there is no validation of text
   answers, only tool-argument parsing.
-- **Plugin text vs workspace facts (hard rule).** Text that ships with the
-  extension and reaches the model — `CORE_PROMPT`, every tool `description`, the
-  `ADVANCED_TOPIC_DOCS` bodies in `src/tools/advancedDocs.ts`, and
-  `Agent.subAgentSystemPrompt` — must contain **no workspace-specific facts**
-  (paths such as `docs/agents/…`, script names such as `npm run compile`, repo
-  layout, file names). Other users install this extension into unrelated
-  workspaces, where such a fact is simply wrong. Workspace facts belong in the
-  workspace's own `AGENTS.md` snapshot (and the docs it points at); plugin text
-  may only carry plugin facts — tool names/args, model ids, and the `AGENTS.md`
-  convention name itself.
-
