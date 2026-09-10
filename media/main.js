@@ -28,7 +28,7 @@
   let busy = false;
   let pendingAttachments = [];
   let currentModel = 'deepseek-chat';
-  let currentEffort = 'none';
+  let currentEffort = 'medium';
   // Session currently rendered, mirrored into vscode.setState so a reloaded
   // window restores this tab bound to the same conversation.
   let persistedSessionId = '';
@@ -1775,18 +1775,21 @@
     }
   }
 
-  const MODELS = [
-    'deepseek-chat',
-    'deepseek-reasoner',
-    'deepseek-v4-flash',
-    'deepseek-v4-pro',
-    'deepseek-v4-flash-vision-exp',
-    'deepseek-v4.1-flash-expires-on-0910',
-  ];
+  // Filled from the provider's `config` message: the vendored model plus every
+  // model the user declared in `agentHarness.modelTable`. No catalog copy here.
+  let MODELS = [];
+  let VISION_MODELS = [];
 
   function renderModelSelect(model) {
     currentModel = model;
     modelSelect.innerHTML = '';
+    if (MODELS.length === 0) {
+      // Before the first config message: show the current model so the header is
+      // never empty (the dropdown is disabled while a turn runs anyway).
+      if (model) {
+        MODELS = [model];
+      }
+    }
     for (const m of MODELS) {
       const opt = document.createElement('option');
       opt.value = m;
@@ -1796,10 +1799,10 @@
     }
   }
 
-  const VISION_MODELS = ['deepseek-v4-flash-vision-exp', 'deepseek-v4.1-flash-expires-on-0910'];
   function hasVisionModel() {
     return VISION_MODELS.includes(currentModel);
   }
+
   function updateImageVisibility() {
     const hasVision = hasVisionModel();
     treeCanvas.classList.toggle('hide-images', !hasVision);
@@ -1973,7 +1976,11 @@
   // ---- Pending attachments ----
   function addPendingAttachment(dataUrl, name) {
     if (!hasVisionModel()) {
-      showAttachHint('Switch to a vision model (deepseek-v4-flash-vision-exp or deepseek-v4.1-flash-expires-on-0910) to attach an image.');
+      showAttachHint(
+        VISION_MODELS.length > 0
+          ? 'Switch to a vision model (' + VISION_MODELS.join(' / ') + ') to attach an image.'
+          : 'No image-capable model is configured — declare one in agentHarness.modelTable to attach an image.',
+      );
       return;
     }
     pendingAttachments.push({ dataUrl, name });
@@ -2068,6 +2075,10 @@
       case 'config': {
         const prevFoldToolCalls = foldToolCalls;
         const prevFoldThinking = foldThinking;
+        if (Array.isArray(msg.models) && msg.models.length > 0) {
+          MODELS = msg.models;
+        }
+        VISION_MODELS = Array.isArray(msg.visionModels) ? msg.visionModels : [];
         renderModelSelect(msg.model);
         renderEffortSelect(msg.thinkingEffort);
         foldToolCalls = msg.foldToolCalls !== false;

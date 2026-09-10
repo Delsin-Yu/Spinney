@@ -13,16 +13,29 @@
   own message objects by reference, so `sanitizeMessages` must not mutate them: the
   reasoning→content healing builds a `{ ...msg }` copy). `prefixLen` is measured on the
   sanitized path.
-- A turn's message slice is written **once**, in `finishTurn`, as
-  `node.messages = agent.getMessages().slice(turnPrefixLen)`; run `done` /
-  `interrupted` / `error` all end there. `turnPrefixLen` is therefore always an
-  index into **`agent.getMessages()`** (which includes the leading system message):
-  `beginTurn` uses `agent.getMessages().length` after `setMessages(buildPath(...))`,
-  and the injected async-notice turn in `drainSubAgentNotices` does the same (it
-  pins the history to the parent node with `buildPath` first). A queued notice whose
-  node is **not** in the active session is dropped, so a batch finishing after a
-  session switch never injects a turn into another session's agent. Using a node's own
-  `messages.length` as the basis re-includes ancestor history in that node.
+- A turn's message slice is written **once**, in `finishTurn`. `turnPrefixLen` is
+  always an index into **`agent.getMessages()`** (which includes the leading system
+  message), and it is recorded by `setAgentMessages()` — the single choke point that
+  swaps the agent's history (`beginTurn` → the parent's path, the injected
+  async-notice turn in `drainSubAgentNotices` → the parent node's path, `checkoutNode`
+  → the session / branch / hop-return / panel-restore path). Recording the basis and
+  the swap in the same helper is the point: a checkout can replace the history **while
+  a turn is streaming**, and an untouched numeric basis then slices from the wrong
+  offset, storing ancestor history inside the turn's node. That is how one session
+  reached `1,283,056` tokens — a single node had inherited ~1,100 duplicated messages,
+  so the next request sent the whole conversation twice while the header still read
+  `ctx 65%` (the *previous* turn's `usage.prompt_tokens`). `finishTurn` therefore
+  verifies the basis by **identity** (`turnPrefixLen > 0 && messages[turnPrefixLen - 1]
+  === turnPrefixTail`) and, when the history was swapped mid-turn, writes nothing and
+  logs `[slice]` instead. A queued notice whose node is **not** in the active session
+  is dropped, so a batch finishing after a session switch never injects a turn into
+  another session's agent. Using a node's own `messages.length` as the basis
+  re-includes ancestor history in that node.
+- Who owns the node: `beginTurn` creates a fresh node, so its turn **assigns**
+  (`node.messages = added`, `turnNodeFresh = true`). An injected turn (async sub-agent
+  notice / hop answer) continues a node that already holds the turn that spawned it, so
+  it **appends** (`node.messages = [...node.messages, ...added]`, `turnNodeFresh =
+  false`) — assigning there replaced the spawning turn's messages with the notice's.
 - Branching: every user message creates a new node under the checked-out node;
   sending on a node that already has children makes a sibling (a new branch).
   A branch switch costs only a prefix cache miss — the shared prefix stays cached.

@@ -26,11 +26,13 @@
 - `media/vendor/non-layered-tidy-tree-layout/` 是 vendored 且 hash 固定的布局引擎（@2.0.2）：不编辑、不升级、不写进 `package.json`。
 - 同一时刻只驱动一个会话；该会话有后台终端在跑时会被锁定（不能切换/删除/清空）。
 - `npm run check:models` 会让"在 `src/**` 里硬写模型 id"直接打包失败——模型名一律从 `src/agent/models.ts` 取。
+- `npm run check:webview` 会在打包前把 `media/main.js` 装进内存 DOM、重放 provider 的每种消息；webview 回调里的"引用已删标识符"在真界面里是静默的（UI 停在旧值），这道闸专治它。
 
 ## 目录（正文在 `docs/agents/`）
 
 - **这是什么 / 怎么跑**：`what-this-is` · `stack` · `commands` · `architecture` · `file-map`（找文件）· `where-to-change`（不知道改哪儿）
 - **提示词**：`invariants/system-prompt`（模板 + 规则）· `invariants/agent-authoring`（改提示词）· `invariants/agents-md-snapshot`
+- **模型能力**：`invariants/model-capabilities`（为什么只 vendor `deepseek-flash`、`agentHarness.modelTable` 表格式、为什么不做探测）
 - **工具**：`tools`（加/改工具、verbatim frame 语法）· `invariants/sub-agents`（spawn_* / send_*）· `invariants/background-terminals`（exec_command 与后台终端）· `invariants/transcripts`（search_transcripts）· `invariants/vision-images`（read_image）
 - **会话与持久化**：`invariants/conversation-validity` · `invariants/session-persistence`（持久化 + rename_session 的自动命名与锁定）· `invariants/chat-tree`（分支/签出）· `invariants/interrupt-rollback`
 - **控制平面 / 桌面**：`control-plane`（含 hop_session / list_nodes）· `computer-use`

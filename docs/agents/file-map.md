@@ -49,6 +49,10 @@
   and its accessors (`DEFAULT_MODEL`, `isVisionModel`, `contextWindowFor`,
   `visionModelsLabel`). The **only** place a model id may appear;
   `tools/check-models.js` enforces that on every package.
+- `tools/check-models.js` · `tools/check-webview.js` — the two packaging guards
+  (`npm run check:models` / `check:webview`, run by `vscode:prepublish`): model-id
+  drift, and "does the chat webview still survive every message the provider
+  posts". See `testing.md`.
 - `src/agent/tools/` — one file per intercepted tool (`readImage`, `spawnAgents`,
   `spawnReadonlyAgents`, `sendAgentMessage`, `sendReadonlyAgentMessage`,
   `hopSession`, `listNodes`, `renameSession`) plus the barrel that filters them.

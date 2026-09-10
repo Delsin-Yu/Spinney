@@ -1,10 +1,12 @@
 ## Config keys (`agentHarness.*`)
-`apiKey` (or `DEEPSEEK_API_KEY` env), `model`, `baseUrl`, `commandTimeout`
+`apiKey` (or `DEEPSEEK_API_KEY` env), `model`, `modelTable`, `baseUrl`, `commandTimeout`
 (seconds, default 600 = 10 minutes — the default for `exec_command` when the tool
 call does not pass its own `timeout`; a non-positive/absent value falls back to
 600), `maxTurns`
-(default 20), `contextWindow` (0 = auto), `thinkingEffort`
-(`none|low|medium|high`), `foldToolCalls` (default `true`),
+(default 20), `contextWindow` (0 = use the catalog's window; a `modelTable` row
+beats it), `thinkingEffort`
+(`none|low|medium|high`, default `medium` — `none` omits `reasoning_effort`),
+`foldToolCalls` (default `true`),
 `foldThinking` (default `true`), `maxConcurrentSubagents` (default 15),
 `maxLevel2Subagents` (default 2), `saveSubAgentTranscripts` (default `true`),
 `saveSessionTranscripts` (default `true` — dump each main-agent turn; the
@@ -22,13 +24,31 @@ tool result spills to `<agentRoot>/.agent-harness/tool-output/`). `SubAgentPool`
 to **≥ 1** (a non-positive limit would otherwise deadlock every sub-agent).
 `httpApi.enabled` (default `false` — the local control plane) and `httpApi.port`
 (default `0` = ephemeral).
-- Models: `deepseek-chat`, `deepseek-reasoner`, `deepseek-v4-flash`,
-  `deepseek-v4-pro`, `deepseek-v4-flash-vision-exp`,
-  `deepseek-v4.1-flash-expires-on-0910`.
-- Context windows: all default to `1_000_000` tokens (see `CONTEXT_WINDOWS` /
-  `DEFAULT_CONTEXT_WINDOW`); `agentHarness.contextWindow` overrides.
-- `deepseek-reasoner` may not support tool calling — use `deepseek-chat` for the
-  agentic loop.
+- Models: exactly one is vendored — `deepseek-flash` (DeepSeek-V4.1-Flash,
+  `contextWindow: 1_048_576`, `vision: true`). Everything else is the user's
+  `agentHarness.modelTable`, structured data (the setting's own UI is a read-only
+  preview plus a link into the JSON; the chat's **Models** panel is the editor):
+
+  ```json model-table
+  "agentHarness.modelTable": {
+    "deepseek-v4-pro": { "vision": false, "max_tokens": 1048576 },
+    "another-model":   { "vision": true,  "max_tokens": 200000 }
+  }
+  ```
+
+  An entry for `deepseek-flash` overrides the vendored entry; any other id is
+  added to the dropdown. A missing field keeps the vendored value for that id, or
+  non-vision / `1_048_576` for a new one. Entries that cannot be parsed are
+  skipped and logged to the output channel (`applyModelTable`). The setting's
+  description links straight into `settings.json`; see
+  `invariants/model-capabilities.md` for why the data is structured, why the
+  editor is the JSON itself, and why nothing is probed.
+- Context windows default to `DEFAULT_CONTEXT_WINDOW` (= the vendored model's
+  `1_048_576`); precedence is `modelTable` row → `agentHarness.contextWindow` →
+  catalog → default (`ChatViewProvider.getContextWindow`).
+- A model the catalog does not know is **not** used: `resolveModel` falls back to
+  `DEFAULT_MODEL` and says so in the output channel (a stale id must not silently
+  mis-size the indicator or hide images).
 - `thinkingEffort` sends `reasoning_effort` only when not `none`.
 
 ### When a change takes effect (no reload required)
@@ -43,6 +63,7 @@ no handling.
 | `apiKey`, `baseUrl` | next request (even mid-turn) | pulled into the shared `DeepSeekClient` via `configure()` — the main agent and every sub-agent hold that instance |
 | `maxTurns` | next tool round (main agent) / next `spawn_agents` (sub-agents) | pushed: `Agent.setMaxTurns`; sub-agents re-read it at spawn |
 | `contextWindow` | immediately | pushed: recompute + `postContext()` |
+| `modelTable` | immediately | pushed: `applyModelTable()` (re-parse + install) → `postConfig()` (dropdown + image affordances) → `getContextWindow`/`postContext` for the row's own model |
 | `maxConcurrentSubagents` | immediately (raising wakes queued tasks; lowering drains) | pushed: `SubAgentPool.setMaxConcurrent` |
 | `model`, `thinkingEffort` | immediately when *that key* changed, else the dropdown selection wins | pushed through `onSetModel` / `onSetThinkingEffort`; skipped while a turn is running, like the dropdowns |
 | `foldToolCalls`, `foldThinking` | immediately, incl. cards already on screen | pushed: `postConfig()` → the webview re-applies the default to existing cards |

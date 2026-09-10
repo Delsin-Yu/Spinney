@@ -1,6 +1,7 @@
 {
     "agentHarness.thinkingEffort": "medium",
-    "agentHarness.model": "deepseek-v4.1-flash-expires-on-0910",
+    "agentHarness.model": "deepseek-flash",
     "agentHarness.commandTimeout": 600,
-    "agentHarness.httpApi.enabled": true
+    "agentHarness.httpApi.enabled": true,
+    "agentHarness.modelTable": {}
 }
