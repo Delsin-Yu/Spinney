@@ -147,3 +147,71 @@ area — see `verify-tree.js`). Mean area 0.973× the pre-vendoring packer, wors
 0.78×; at n=2000 it is 4 ms with 0 interpositions. Reproduce:
 `node verify-tree.js` and `node analyze-interposition.js check ALL heights=heuristic engine=shipped`.
 
+
+---
+
+# REVISION 3 — the sidecar becomes a column-major lattice (design G)
+
+**Trigger:** heavy parallel work. Real sessions in this workspace reach 4–7 agent
+children on one parent, and a 12-way `spawn_agents` is a normal shape. Under design N
+every window of one parent stacked in *one* column, so a 12-way spawn became a 12-row
+ribbon (worst sidecar block measured: **11224 px**), and because a node's box is
+`max(cardH, blockH)` tall, every extra window pushed that node's own turn children
+further down.
+
+**Design G** (shipped in `media/tree.js`) keeps design N's reservation contract and
+changes only the block's *shape*:
+
+- the windows are packed **column-major into an aligned lattice**: at most
+  `agentMaxRows` (4) rows per column, and every further window opens a column to the
+  right — `X0Y0…X0Y3, X1Y0…X1Y3, X2Y0…`;
+- rows are aligned across columns and columns across rows: the lattice lines are
+  anchored on the window **cards**, each column/row reserving the largest card
+  overhang (a subtree box is the bbox of the whole branch and the engine centres a
+  card over its children, so anchoring on boxes would drift);
+- `agentTopPad` (16 px) opens a corridor above row 0, `agentColGap` (48 px) between
+  columns, `agentVGap` (24 px) between rows. `layoutTree()` returns those corridors
+  per window (the `cells` routing table), and `media/main.js drawEdges()` now routes
+  the parent→window connector as an **orthogonal elbow** through them instead of a
+  cubic spline. That is what REVISION 2's side-by-side trials were missing — their
+  connectors cut across the parent's own nearer windows (13/18 crossings).
+
+**Sweep** (`node grid-sweep.js`; synthetic profiles + all 7 persisted sessions with
+agent nodes; `legacy` = pre-grid single column; ratios are whole-corpus sums):
+
+| R | area | canvas height | worst sidecar block | defects (all kinds) | lattice violations |
+|---|---:|---:|---:|---:|---:|
+| legacy (one column) | 1.000 | 1.000 | **11224** | 0 | 0 |
+| 1 (one long row) | 1.098 | 0.753 | 4004 | 0 | 0 |
+| 2 | 1.036 | 0.880 | 5512 | 0 | 0 |
+| 3 | **0.969** | 0.924 | 6384 | 0 | 0 |
+| **4 (shipped)** | 0.976 | 0.947 | 6528 | 0 | 0 |
+| 6 | 0.996 | 0.976 | 7980 | 0 | 0 |
+| 8 | 0.995 | 0.984 | 8768 | 0 | 0 |
+
+R=3 and R=4 are within 1% of each other; R=4 ships because it matches the 4-row
+mental model and the real corpus (max 7 siblings → 1–2 columns). The area win over
+the single column is small (2.4%) because a tall turn spine usually dominates; the
+real win is the **bounded vertical push** (worst block 11224 → 6528) and the fact
+that a 12-way spawn fans out sideways instead of stretching the canvas downwards.
+
+**Evidence at R=4:**
+
+- `node verify-tree.js` — 24/24 scenarios (incl. the new `parallel` profile, up to 12
+  windows per parent): `maxDelta=0` against `layoutEngineReserveGrid`, 0 overlaps, 0
+  interpositions, 0 foreign **and** 0 own-group crossings, 0 lattice violations.
+- `node analyze-interposition.js check ALL heights=heuristic` — 7/7 real sessions
+  0/0. Sessions whose fan-out fits one column keep design N's geometry plus the
+  16 px top pad (e.g. `mtsu3t96x05m` 4984×31264 vs 4984×31152); the two with a 5–6-way
+  fan-out wrap and shrink (`mtu9u1lvlz7i` 1496×32696 vs 1496×35064;
+  `mtuimzc6vivr` 1128×3200 vs 760×5056).
+- `tools/research/bench/render-svg.js` renders any synthetic profile or persisted
+  session to SVG (`--r <rows>`), with the same cards and connectors the webview
+  draws — the visual check for a shape metrics cannot judge. Committed previews at
+  `--r 4`: `preview-parallel.svg` (synthetic `parallel` 60), `preview-7agents.svg`
+  (`mtu9u1lvlz7i`, 7-way fan-out), `preview-mtsu.svg` (`mtsu3t96x05msc`, 36 agents).
+
+**REVISION 2's rejection of side-by-side windows is therefore narrowed, not erased:**
+"wrap the windows and keep the old spline connector" is still rejected (that is what
+measured 13/18 own crossings). The shipped combination is *grid + corridor routing*,
+where the connector never leaves a card-free gap.

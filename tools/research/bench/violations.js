@@ -7,8 +7,10 @@
  *                   one of its agent windows (inside the window's y-band). This is
  *                   the reported defect: "Node B placed between Node A and its
  *                   sub-agents". The parent's OWN other windows do not count.
- *   crossing      — the parent->agent connector (the exact cubic bezier media/main.js
- *                   drawEdges emits) passes through some other card.
+ *   crossing      — the parent->agent connector (the exact path media/main.js
+ *                   drawEdges emits: the orthogonal corridor elbow from the layout's
+ *                   routing table, or the legacy cubic bezier when a layout result
+ *                   carries no `cells`) passes through some other card.
  *
  * rects come from metrics.rectsOf (same geometry the webview produces).
  */
@@ -34,6 +36,44 @@ function bezier(p0, p1, p2, p3, t) {
   };
 }
 const inRect = (p, r) => p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
+
+/**
+ * The parent → agent-window connector exactly as media/main.js drawEdges builds
+ * it: an orthogonal elbow through the card-free corridors named by the layout's
+ * routing table (`result.cells[childId]`), or the legacy spline without one.
+ */
+function connectorPoints(result, pid, aid, pr, w) {
+  const cell = result.cells && result.cells[aid];
+  if (!cell) {
+    const p0 = { x: pr.x + pr.w, y: pr.y + pr.h / 2 };
+    const p3 = { x: w.x, y: w.y + w.h / 2 };
+    const mx = (p0.x + p3.x) / 2;
+    const p1 = { x: mx, y: p0.y };
+    const p2 = { x: mx, y: p3.y };
+    const pts = [];
+    for (let i = 0; i <= 80; i++) pts.push(bezier(p0, p1, p2, p3, i / 80));
+    return pts;
+  }
+  const exitY = pr.y + (pr.h * (cell.index + 1)) / (cell.count + 1);
+  const midY = w.y + w.h / 2;
+  const way = [{ x: pr.x + pr.w, y: exitY }, { x: cell.busX, y: exitY }];
+  if (cell.col > 0) way.push({ x: cell.busX, y: cell.corrY }, { x: cell.chanX, y: cell.corrY });
+  way.push({ x: cell.chanX, y: midY }, { x: w.x, y: midY });
+  // Sample each segment (the webview rounds the corners with r=6; sampling the
+  // sharp polyline is the conservative reading).
+  const pts = [];
+  for (let i = 0; i < way.length - 1; i++) {
+    const a = way[i];
+    const b = way[i + 1];
+    const steps = Math.max(2, Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / 4));
+    for (let s = 0; s < steps; s++) {
+      const t = s / steps;
+      pts.push({ x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t });
+    }
+  }
+  pts.push(way[way.length - 1]);
+  return pts;
+}
 
 function violations(result, tree) {
   const { nodesById, heights, widths } = tree;
@@ -69,15 +109,9 @@ function violations(result, tree) {
         out.interpositions.push({ parent: pid, window: aid, between: band.map((c) => c.id) });
       }
 
-      // media/main.js drawEdges: parent right edge -> window left edge
-      const p0 = { x: pr.x + pr.w, y: pr.y + pr.h / 2 };
-      const p3 = { x: w.x, y: w.y + w.h / 2 };
-      const mx = (p0.x + p3.x) / 2;
-      const p1 = { x: mx, y: p0.y };
-      const p2 = { x: mx, y: p3.y };
+      const pts = connectorPoints(result, pid, aid, pr, w);
       const hit = new Set();
-      for (let i = 0; i <= 80; i++) {
-        const pt = bezier(p0, p1, p2, p3, i / 80);
+      for (const pt of pts) {
         for (const c of rects) {
           if (c.id === pid || own.has(c.id)) continue;
           if (inRect(pt, c)) hit.add(c.id);
@@ -89,4 +123,4 @@ function violations(result, tree) {
   return out;
 }
 
-module.exports = { violations, descendants };
+module.exports = { violations, descendants, connectorPoints };

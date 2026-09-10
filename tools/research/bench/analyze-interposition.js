@@ -8,10 +8,13 @@
  * "Interposition" = a card that sits horizontally between a parent card and one
  * of its agent windows (inside the window's y-band), i.e. the reported defect
  * "Node B placed between Node A and its sub-agents".
- * "Crossing" = the parent->agent bezier (same geometry as media/main.js
- * drawEdges) passing through some other card's rectangle.
+ * "Crossing" = the parent->agent connector (the same geometry as media/main.js
+ * drawEdges: the corridor elbow from the layout's routing table, or the legacy
+ * spline) passing through some other card's rectangle. Reported split into foreign
+ * cards and the parent's own other windows.
  */
 const { DatabaseSync } = require('node:sqlite');
+const { connectorPoints } = require('./violations');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
@@ -132,6 +135,8 @@ if (cmd === 'fields') {
 // ------------------------------------------------------------------ check mode
 const mode = (process.argv[4] || 'heights=heuristic').split('=')[1];
 const engineName = (process.argv[5] || 'engine=shipped').split('=')[1];
+// `rows=<n>` overrides the grid's rows-per-column (the shipped default when absent).
+const rowsArg = process.argv.slice(4).find((a) => a.startsWith('rows='));
 const sweep = process.argv[3] === 'ALL';
 
 function analyze(session, engineName, mode, verbose) {
@@ -141,7 +146,9 @@ const widths = {};
 for (const id in nodesById) widths[id] = 320;
 
 const layoutTree = engineFn(engineName);
-const res = layoutTree(nodesById, rootId, heights, { nodeW: 320, hGap: 48, vGap: 72, agentGap: 80, agentVGap: 24, widths });
+const opts = { nodeW: 320, hGap: 48, vGap: 72, agentGap: 80, agentVGap: 24, agentColGap: 48, agentTopPad: 16, widths };
+if (rowsArg) opts.agentMaxRows = Number(rowsArg.split('=')[1]);
+const res = layoutTree(nodesById, rootId, heights, opts);
 
 const rect = (id) => ({ id, x: res.pos[id].x, y: res.pos[id].y, w: widths[id], h: heights[id] });
 const cards = Object.keys(res.pos).map(rect);
@@ -156,18 +163,11 @@ const descendants = (id) => {
   return out;
 };
 
-// cubic bezier as drawn by main.js
-function bezier(p0, p1, p2, p3, t) {
-  const u = 1 - t;
-  return {
-    x: u * u * u * p0.x + 3 * u * u * t * p1.x + 3 * u * t * t * p2.x + t * t * t * p3.x,
-    y: u * u * u * p0.y + 3 * u * u * t * p1.y + 3 * u * t * t * p2.y + t * t * t * p3.y,
-  };
-}
 const inRect = (p, r) => p.x >= r.x && p.x <= r.x + r.w && p.y >= r.y && p.y <= r.y + r.h;
 
 let interpositions = 0;
-let crossings = 0;
+let crossingsForeign = 0;
+let crossingsOwn = 0;
 const details = [];
 
 for (const pid in nodesById) {
@@ -205,34 +205,36 @@ for (const pid in nodesById) {
           band.slice(0, 4).map((c) => `${c.id}(${nodesById[c.id].kind},${nodesById[c.id].title})x=${Math.round(c.x)}`).join(', '),
       );
     }
-    // connector crossing
-    const p0 = { x: pr.x + pr.w, y: pr.y + pr.h / 2 };
-    const p3 = { x: w.x, y: w.y + w.h / 2 };
-    const mx = (p0.x + p3.x) / 2;
-    const p1 = { x: mx, y: p0.y };
-    const p2 = { x: mx, y: p3.y };
+    // connector crossing: the elbow media/main.js draws (spline for engines whose
+    // result carries no routing table)
+    const pts = connectorPoints(res, pid, aid, pr, w);
     const hit = new Set();
-    for (let i = 0; i <= 60; i++) {
-      const pt = bezier(p0, p1, p2, p3, i / 60);
+    for (const pt of pts) {
       for (const c of cards) {
         if (c.id === pid || own.has(c.id)) continue;
         if (inRect(pt, c)) hit.add(c.id);
       }
     }
     if (hit.size) {
-      crossings++;
-      details.push(`CROSS parent=${pid}(${p.title}) window=${aid} crosses: ` + [...hit].slice(0, 4).join(', '));
+      const foreign = [...hit].some((x) => !siblingsOwn.has(x));
+      if (foreign) crossingsForeign++; else crossingsOwn++;
+      details.push(`${foreign ? 'CROSS' : 'CROSS-OWN'} parent=${pid}(${p.title}) window=${aid} crosses: ` + [...hit].slice(0, 4).join(', '));
     }
   }
 }
 
 if (verbose) {
   console.log(`session ${session.id} "${String(session.title || '').slice(0, 50)}" nodes=${Object.keys(nodesById).length} agents=${Object.values(nodesById).filter((n) => n.kind === 'agent').length} heights=${mode} engine=${engineName}`);
-  console.log(`canvas ${Math.round(res.width)}x${Math.round(res.height)}  interpositions=${interpositions}  connector-crossings=${crossings}`);
+  console.log(`canvas ${Math.round(res.width)}x${Math.round(res.height)}  interpositions=${interpositions}  ` +
+    `connector-crossings=${crossingsForeign + crossingsOwn} (foreign=${crossingsForeign}, own-windows=${crossingsOwn})`);
   for (const d of details.slice(0, 25)) console.log('  ' + d);
   if (details.length > 25) console.log(`  … ${details.length - 25} more`);
 }
-return { w: Math.round(res.width), h: Math.round(res.height), inter: interpositions, cross: crossings, nodes: Object.keys(nodesById).length };
+return {
+  w: Math.round(res.width), h: Math.round(res.height),
+  inter: interpositions, cross: crossingsForeign, crossOwn: crossingsOwn,
+  nodes: Object.keys(nodesById).length,
+};
 }
 
 if (sweep) {
