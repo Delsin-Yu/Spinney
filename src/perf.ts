@@ -13,6 +13,16 @@ export function setPerfSink(fn: PerfSink | null): void {
   sink = fn;
 }
 
+/**
+ * Write a plain line to the same channel as {@link perf}, without the `[perf]`
+ * prefix. Used for diagnostics that must reach the user (the prompt-template
+ * guard reports an unresolved placeholder here before throwing). A no-op when no
+ * sink is installed.
+ */
+export function harnessLog(line: string): void {
+  sink?.(line);
+}
+
 export function perf(line: string | (() => string)): void {
   // A thunk is only evaluated when a sink is installed, so an expensive line
   // (JSON sizes, byte counts) costs nothing when perf logging is off.

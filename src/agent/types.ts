@@ -26,17 +26,6 @@ export interface UploadedFile {
   bytes: number;
 }
 
-/** Models that accept image input. Only these may carry image content blocks. */
-export const VISION_MODELS: ReadonlySet<string> = new Set([
-  'deepseek-v4-flash-vision-exp',
-  'deepseek-v4.1-flash-expires-on-0910',
-]);
-
-/** True if the given model accepts image content blocks. */
-export function isVisionModel(model: string): boolean {
-  return VISION_MODELS.has(model);
-}
-
 /**
  * Detect the image MIME type from magic bytes. DeepSeek detects image format
  * from actual content (not the filename or declared MIME), so this is used only

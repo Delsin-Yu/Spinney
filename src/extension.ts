@@ -94,6 +94,9 @@ export function activate(context: vscode.ExtensionContext): void {
       void chatProvider?.deleteCheckedOutBranchInteractive();
     }),
     vscode.commands.registerCommand('agentHarness.clear', () => chatProvider?.clear()),
+    vscode.commands.registerCommand('agentHarness.showSystemPrompt', () => {
+      void chatProvider?.showSystemPrompt();
+    }),
   );
 }
 

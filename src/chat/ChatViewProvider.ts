@@ -4,7 +4,8 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { Agent } from '../agent/agent';
 import { DeepSeekClient, DeepSeekBalance } from '../agent/deepseek';
-import { AgentEvent, ChatMessage, ContentPart, ThinkingEffort, Usage, isVisionModel } from '../agent/types';
+import { AgentEvent, ChatMessage, ContentPart, ThinkingEffort, Usage } from '../agent/types';
+import { DEFAULT_MODEL, contextWindowFor, isKnownModel, isVisionModel, visionModelsLabel } from '../agent/models';
 import {
   AgentSession,
   DisplayItem,
@@ -56,18 +57,8 @@ import {
 import { ControlHost, ControlResult, ControlState, WaitForFinishOptions } from '../http/controlServer';
 import { perf, setPerfSink } from '../perf';
 
-/** Known context-window sizes (in tokens) per model, for the usage indicator. */
-const CONTEXT_WINDOWS: Record<string, number> = {
-  'deepseek-v4-flash': 1_000_000,
-  'deepseek-v4-pro': 1_000_000,
-  'deepseek-v4-flash-vision-exp': 1_000_000,
-  'deepseek-v4.1-flash-expires-on-0910': 1_000_000,
-  'deepseek-chat': 1_000_000,
-  'deepseek-reasoner': 1_000_000,
-};
-const DEFAULT_CONTEXT_WINDOW = 1_000_000;
-/** Models the harness recognizes (sub-agent model overrides are validated against this). */
-const MODELS: ReadonlySet<string> = new Set(Object.keys(CONTEXT_WINDOWS));
+// Model ids, context windows and image support all live in one place:
+// `src/agent/models.ts` (verified against `package.json` by tools/check-models.js).
 const STORAGE_KEY = 'agentHarness.state';
 /** One-shot marker for the historical-transcript backfill (see `backfillTranscripts`). */
 const TRANSCRIPT_BACKFILL_KEY = 'agentHarness.transcriptBackfill';
@@ -238,9 +229,9 @@ export class ChatViewProvider implements ControlHost {
   /** Cache-busting suffix for media URLs; changes per extension session. */
   private readonly mediaVersion: string;
   private readonly output: vscode.OutputChannel;
-  private model = 'deepseek-chat';
+  private model = DEFAULT_MODEL;
   private thinkingEffort: ThinkingEffort = 'none';
-  private contextWindow = DEFAULT_CONTEXT_WINDOW;
+  private contextWindow = contextWindowFor(DEFAULT_MODEL);
   private currentPromptTokens = 0;
   private sessions: AgentSession[] = [];
   private activeSessionId = '';
@@ -315,7 +306,7 @@ export class ChatViewProvider implements ControlHost {
   } {
     const cfg = vscode.workspace.getConfiguration('agentHarness');
     const apiKey = (cfg.get<string>('apiKey') ?? '').trim() || (process.env.DEEPSEEK_API_KEY ?? '').trim();
-    const model = cfg.get<string>('model') ?? 'deepseek-chat';
+    const model = cfg.get<string>('model') ?? DEFAULT_MODEL;
     const baseUrl = cfg.get<string>('baseUrl') ?? 'https://api.deepseek.com';
     const maxTurns = cfg.get<number>('maxTurns') ?? 20;
     const thinkingEffort = (cfg.get<string>('thinkingEffort') ?? 'none') as ThinkingEffort;
@@ -387,7 +378,7 @@ export class ChatViewProvider implements ControlHost {
     if (override && override > 0) {
       return override;
     }
-    return CONTEXT_WINDOWS[model] ?? DEFAULT_CONTEXT_WINDOW;
+    return contextWindowFor(model);
   }
 
   /** Prompt size of the checked-out branch, taken from its latest turn's usage. */
@@ -1166,7 +1157,7 @@ export class ChatViewProvider implements ControlHost {
 
   /** Tools a sub-agent may use, by `write` flag. */
   private subAgentTools(write: boolean): ToolRegistry {
-    const read = ['read_file', 'list_dir', 'search_files', 'search_transcripts', 'list_advanced_tool'];
+    const read = ['read_file', 'list_dir', 'search_files', 'search_transcripts'];
     const writeTools = ['write_file', 'replace_in_file', 'exec_command'];
     if (write) {
       return this.tools.subset([...read, ...writeTools]);
@@ -1471,7 +1462,7 @@ export class ChatViewProvider implements ControlHost {
     if (typeof value !== 'string' || !value) {
       return {};
     }
-    if (!MODELS.has(value)) {
+    if (!isKnownModel(value)) {
       return { error: `Error: unknown model "${value}".` };
     }
     return { model: value };
@@ -1604,7 +1595,7 @@ export class ChatViewProvider implements ControlHost {
       if (!instruction) {
         return 'Error: each agent spec requires an "instruction".';
       }
-      if (model && !MODELS.has(model)) {
+      if (model && !isKnownModel(model)) {
         return `Error: unknown model "${model}".`;
       }
       const node = createNode(newId(), parent.id, `子代理: ${instruction.slice(0, 32)}`, 'running');
@@ -1715,7 +1706,8 @@ export class ChatViewProvider implements ControlHost {
       // writable one gets `spawn_agents` (children may write); a read-only one
       // gets `spawn_readonly_agents` instead, whose args cannot express
       // `write:true` — so it keeps read-only parallelism without an escalation
-      // path. `setCanSpawn*` hides the tools from the model's list;
+      // path. `setCanSpawn*` decides which spawn/message tools are advertised to
+      // the model (see `Agent.getTools`);
       // `Agent.executeToolCall` returns a clear error if they are called anyway.
       const depth = job.node.agentDepth ?? 1;
       const canSpawn = depth < 2 && job.spec.write;
@@ -1731,7 +1723,7 @@ export class ChatViewProvider implements ControlHost {
       }
       const effectiveModel = job.spec.model || this.model;
       const system = Agent.subAgentSystemPrompt(effectiveModel, this.thinkingEffort, depth, job.spec.write);
-      // Lean system prompt (not the full CORE_PROMPT/AGENTS.md) + dispatched note.
+      // Lean system prompt (not the full main prompt/AGENTS.md) + dispatched note.
       // On a resume, prepend the stored conversation so the follow-up continues
       // where the sub-agent left off.
       sub.setMessages(
@@ -2263,6 +2255,19 @@ export class ChatViewProvider implements ControlHost {
       return;
     }
     this.ensurePanel(session.id);
+  }
+
+  /**
+   * Open the fully-rendered system prompt in an editor tab
+   * (agentHarness.showSystemPrompt). The content is rendered from the *current*
+   * session state — the active model, the reasoning effort and the AGENTS.md
+   * snapshot taken when the session started — so it is exactly what the model
+   * would receive on the next turn.
+   */
+  async showSystemPrompt(): Promise<void> {
+    const content = Agent.systemPrompt(this.model, this.thinkingEffort);
+    const doc = await vscode.workspace.openTextDocument({ content, language: 'markdown' });
+    await vscode.window.showTextDocument(doc, { preview: false });
   }
 
   /** Open (or rebind) the panel to a session and check it out. */
@@ -2930,15 +2935,19 @@ export class ChatViewProvider implements ControlHost {
     }
     const userText = text.trim();
 
-    // Only the vision model accepts image blocks; on a text-only model DeepSeek
-    // returns a 400. Drop the attachments, send the text alone, and tell the
-    // user to switch models rather than failing the request.
+    // Only models that accept image input may carry image blocks; on a text-only
+    // model DeepSeek returns a 400. Drop the attachments, send the text alone,
+    // and tell the user to switch models rather than failing the request.
     if (attachments.length > 0 && !isVisionModel(this.model)) {
+      const vision = visionModelsLabel();
       this.postNotice(
         'warning',
         'Images are not supported by the current model (' +
-          (this.model || 'deepseek-chat') +
-          '). Switch to a vision model (deepseek-v4-flash-vision-exp or deepseek-v4.1-flash-expires-on-0910) to attach or paste an image.',
+          (this.model || DEFAULT_MODEL) +
+          '). ' +
+          (vision
+            ? `Switch to a vision model (${vision}) to attach or paste an image.`
+            : 'No vision model is configured for this harness.'),
       );
       attachments = [];
     }

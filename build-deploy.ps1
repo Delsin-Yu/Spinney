@@ -7,6 +7,12 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $root
 
+Write-Host '== Cleaning out/ ==' -ForegroundColor Cyan
+# tsc only adds/overwrites — it never prunes. Without this, the compiled output of
+# a deleted module keeps shipping inside the .vsix (that is how a removed feature's
+# code survived here before).
+if (Test-Path 'out') { Remove-Item -Recurse -Force 'out' }
+
 Write-Host '== Compiling ==' -ForegroundColor Cyan
 & npm run compile
 if ($LASTEXITCODE -ne 0) { throw 'Compile failed.' }

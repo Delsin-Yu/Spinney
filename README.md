@@ -54,7 +54,7 @@ The send pane is the active node's **input dock**: it sits at the bottom of the 
 Multiple **sessions** are listed in the **Activity Bar sidebar** (title, node count, busy). Each session is a tree of turns with persistent branch history; everything is stored in workspace storage and restored on reload. Delete/clear a session from the sidebar (right-click → Delete).
 
 ### 7. Workspace instructions (AGENTS.md)
-If the workspace root contains an **`AGENTS.md`** file, its contents are read **once at session start** and appended to the agent's system prompt under a `## Workspace AGENTS.md (project instructions)` heading. The snapshot is fixed for the session — later edits to `AGENTS.md` do **not** propagate to the prompt until a new session is started.
+If the workspace root contains an **`AGENTS.md`** file, its contents are read **once when the extension host starts** and appended to the agent's system prompt under a `## 工作区 AGENTS.md（项目说明）` heading. Later edits to `AGENTS.md` do **not** reach a running window (the snapshot is not re-read when you merely start a new session) — reload the window to pick them up. Run **`Agent Harness: Show System Prompt`** from the command palette to read the exact prompt the model is receiving.
 
 ---
 

@@ -11,45 +11,11 @@ import {
   ToolDefinition,
   Usage,
   detectImageMime,
-  isVisionModel,
 } from './types';
+import { DEFAULT_MODEL, isVisionModel, visionModelsLabel } from './models';
+import * as prompt from './prompt';
+import { ToolCapabilities, interceptedDefinitions } from './tools';
 import { perf } from '../perf';
-
-const CORE_PROMPT = [
-  '你是一个自主、全能的代理，运行在 Visual Studio Code 工作区里，帮用户处理各类任务：日常沟通、创作型写作、调研、数据处理、编程、跑命令、自动化工作流等。',
-  '',
-  '## 语言',
-  '- 默认简体中文（zh-Hans），主动用中文答；用户用其他语言也保持中文，除非用户明确要求用别的语言。',
-  '- 代码、文件路径、命令输出、标识符保持原样，不翻译。',
-  '',
-  '## 该问就问',
-  '- 请求真的含糊（多种理解、缺关键细节、选择会改变结果）时，先问一个短澄清问题，列出最可能的选项，让用户一句话能答；意图清楚就直接做，别瞎猜。',
-  '',
-  '## 工具',
-  '基础工具（schema 里已列，直接调用）：read_file / write_file / replace_in_file / list_dir / search_files / exec_command / list_advanced_tool',
-  '折叠工具（schema 里不展开，但可直接调用；参数不确定先 list_advanced_tool("<topic>") 取接口；更详细的说明见工作区 AGENTS.md 指向的文档）：',
-  '- background-terminal — check_background_terminal / kill_background / join_background：管理 exec_command 后台模式起的长期任务',
-  '- sub-agents — spawn_agents / send_agent_message：并行派子代理、恢复它们继续干',
-  '- transcripts — search_transcripts：检索历史会话和子代理的完整记录',
-  '- vision — read_image：让视觉模型看磁盘上的图片',
-  '- file-verbatim-frame — frame:true + RAW 标记：写大段多行内容免转义（write_file / replace_in_file 的参数）',
-  '- session-hop — hop_session / list_nodes：把任务交给新会话并在跑完后跳回；列出当前会话的对话树',
-  '- session-title — rename_session：给会话改名（会话标题默认由 harness 自动命名，显式改名会锁定它）',
-  '',
-  '## 调用规范',
-  '- 参数给完整合法 JSON；编辑文件前先读，用 read_file 输出原样作 oldText。',
-  '- 命令失败读报错，修深层原因（最小修复）；工具返回后看结果再决定下一步。',
-  '- 有依赖的步骤等上一步结果，别并行瞎发；任务做完直接回一句话，不再调工具。',
-  '',
-  '## 写内容不转义',
-  '- 大段/多行内容用 verbatim frame 免转义：JSON 头（path 等）放前，内容包在 `<<<RAW:字段名>>>`…`<<<END_RAW:字段名>>>` 里，JSON 头里设 frame:true；字段名必须精确匹配（content/oldText/newText）。',
-  '- 细节和完整示例见折叠工具 `file-verbatim-frame`（list_advanced_tool("file-verbatim-frame")）。',
-  '',
-  '## 风格',
-  '- 在用户工作区干活，路径可绝对或相对根；回复简洁，解释放回复不放文件。',
-  '- 没被要求就不改东西；改多个文件一次一个。',
-  '- 用户能看到你的思路和推理，别把推理当隐私藏着。',
-].join('\n');
 
 /**
  * Injected as an extra user message before a follow-up prompt when the previous
@@ -173,274 +139,6 @@ class InterruptedError extends Error {
   }
 }
 
-/**
- * Tool the vision model can call to look at an image file on disk. Unlike the
- * text tools, the actual image is handed to the model through an injected
- * `user` message — a `tool` message cannot carry an image content block. The
- * image is uploaded to the DeepSeek Files API so the request references the
- * returned `file_id` rather than inlining base64 into the body.
- */
-const READ_IMAGE_TOOL: ToolDefinition = {
-  type: 'function',
-  function: {
-    name: 'read_image',
-    description:
-      'Read an image file from disk and make it visible to the vision model. Path may be absolute or relative to the workspace root. Use this when you need to see or analyze an image file. The image is uploaded to the DeepSeek Files API and referenced by file_id. Only supported by the vision models (deepseek-v4-flash-vision-exp, deepseek-v4.1-flash-expires-on-0910).',
-    parameters: {
-      type: 'object',
-      properties: {
-        path: { type: 'string', description: 'Path to the image file.' },
-      },
-      required: ['path'],
-    },
-  },
-};
-
-/**
- * The main agent can spawn sub-agents. Each spec carries a required `write` flag
- * (true ⇒ the sub-agent may write files and run commands; false ⇒ read-only),
- * an `instruction`, and an optional `model`. `mode` is "sync" (block and return
- * all summaries) or "async" (return immediately, results delivered as notices).
- */
-const SPAWN_AGENTS_TOOL: ToolDefinition = {
-  type: 'function',
-  function: {
-    name: 'spawn_agents',
-    description:
-      'Spawn one or more sub-agents as parallel worker branches. Each agent runs its own conversation with a lean prompt and returns a summary. `agents` is an array of { instruction (the task), write (REQUIRED boolean: true allows the sub-agent to write_file / replace_in_file / exec_command; false is read-only: read_file / list_dir / search_files), model (optional; only set a different model when the user explicitly asked you to) }. `mode` is "sync" (default: block until all finish, return every summary) or "async" (return immediately with the agent ids; results are delivered to you as a notice when each finishes). Every finished sub-agent also gets `stats` (its `toolCalls` / `deniedToolCalls` counts and token usage) and `transcript`: the absolute path of a JSONL dump of its full conversation (line 1 = meta, then one API message per line — read it with read_file when the summary is not enough, e.g. to audit exactly which tools it called).',
-    parameters: {
-      type: 'object',
-      properties: {
-        agents: {
-          type: 'array',
-          items: {
-            type: 'object',
-            properties: {
-              instruction: { type: 'string', description: 'The task for this sub-agent.' },
-              write: { type: 'boolean', description: 'REQUIRED. true = may write files and run commands; false = read-only.' },
-              model: { type: 'string', description: 'Optional different model id. Only set it when the user explicitly asked you to use another model.' },
-            },
-            required: ['instruction', 'write'],
-          },
-        },
-        mode: { type: 'string', enum: ['sync', 'async'], description: 'sync (default) or async.' },
-      },
-      required: ['agents'],
-    },
-  },
-};
-
-/**
- * Read-only sub-agents may not call `spawn_agents` (a child could be created with
- * `write:true`, bypassing their own restriction), so they get this variant
- * instead: same orchestration, but the `write` flag does not exist — every child
- * is read-only by construction. `Agent.executeToolCall` additionally forces
- * `write:false` on each spec, so stuffing a `write` key into the arguments cannot
- * escalate either.
- */
-const SPAWN_READONLY_AGENTS_TOOL: ToolDefinition = {
-  type: 'function',
-  function: {
-    name: 'spawn_readonly_agents',
-    description:
-      'Spawn one or more **read-only** sub-agents as parallel worker branches (they can read_file / list_dir / search_files but cannot write files or run commands). `agents` is an array of { instruction (the task), model (optional; only set a different model when the user explicitly asked you to) }. `mode` is "sync" (default: block until all finish, return every summary) or "async" (return immediately with the agent ids; results are delivered to you as a notice when each finishes). Every finished sub-agent also gets `stats` (its `toolCalls` / `deniedToolCalls` counts and token usage) and `transcript`: the absolute path of a JSONL dump of its full conversation.',
-    parameters: {
-      type: 'object',
-      properties: {
-        agents: {
-          type: 'array',
-          items: {
-            type: 'object',
-            properties: {
-              instruction: { type: 'string', description: 'The task for this sub-agent.' },
-              model: { type: 'string', description: 'Optional different model id. Only set it when the user explicitly asked you to use another model.' },
-            },
-            required: ['instruction'],
-          },
-        },
-        mode: { type: 'string', enum: ['sync', 'async'], description: 'sync (default) or async.' },
-      },
-      required: ['agents'],
-    },
-  },
-};
-
-/**
- * Read-only variant of `send_agent_message` (exposed to a read-only depth-1
- * sub-agent instead of it): resumes one of its own finished read-only children.
- * There is no `write` override, and `Agent.executeToolCall` pins `write:false`
- * anyway, so a read-only parent cannot escalate a child.
- */
-const SEND_READONLY_AGENT_MESSAGE_TOOL: ToolDefinition = {
-  type: 'function',
-  function: {
-    name: 'send_readonly_agent_message',
-    description:
-      'Send a follow-up message to a previously spawned (now finished) read-only sub-agent so it resumes and continues its task, then return the result. `id` is the agent node id from a prior spawn_readonly_agents result; only a sub-agent **you** spawned can be messaged. There is no `write` override — the resumed run stays read-only. `model` (optional) overrides the model. `mode` is "sync" (default: block and return the result) or "async" (return immediately with the id; the result is delivered as a notice). The result carries `stats` and `transcript`: the path of that sub-agent\'s JSONL conversation dump, rewritten with the follow-up included.',
-    parameters: {
-      type: 'object',
-      properties: {
-        id: { type: 'string', description: 'The agent node id from a prior spawn_readonly_agents result.' },
-        message: { type: 'string', description: 'The follow-up instruction for this sub-agent.' },
-        model: { type: 'string', description: 'Optional different model id. Only set it when the user explicitly asked you to use another model.' },
-        mode: { type: 'string', enum: ['sync', 'async'], description: 'sync (default) or async.' },
-      },
-      required: ['id', 'message'],
-    },
-  },
-};
-
-/**
- * The main agent (or a depth-1 sub-agent) can message an already-finished
- * sub-agent to make it continue: `send_agent_message` appends a follow-up
- * instruction to that sub-agent's own history and re-runs it. `id` is the agent
- * node id returned by a previous `spawn_agents`. `write`/`model` optionally
- * override the run's permission/model (model only for one the user explicitly
- * asked for). `mode` is "sync" (default: block and return the result) or
- * "async" (return immediately; the result is delivered as a notice).
- */
-const SEND_AGENT_MESSAGE_TOOL: ToolDefinition = {
-  type: 'function',
-  function: {
-    name: 'send_agent_message',
-    description:
-      'Send a follow-up message to a previously spawned (now finished) sub-agent so it resumes and continues its task, then return the result. `id` is the agent node id from a prior spawn_agents result. `message` is the follow-up instruction. `write` (optional) overrides this run\'s write permission (defaults to the sub-agent\'s original). `model` (optional) overrides the model — only set it when the user explicitly asked for a different model. `mode` is "sync" (default: block and return the result) or "async" (return immediately with the id; the result is delivered as a notice). The result carries `stats` (updated `toolCalls` / `deniedToolCalls` counts) and `transcript`: the path of that sub-agent\'s JSONL conversation dump, rewritten with the follow-up included.',
-    parameters: {
-      type: 'object',
-      properties: {
-        id: {
-          type: 'string',
-          description: 'The agent node id from a prior spawn_agents result.',
-        },
-        message: {
-          type: 'string',
-          description: 'The follow-up instruction for the sub-agent.',
-        },
-        write: {
-          type: 'boolean',
-          description: 'Optional. Override this run\'s write permission.',
-        },
-        model: {
-          type: 'string',
-          description: "Optional. Override the model. Only set it when the user explicitly asked for a different model.",
-        },
-        mode: {
-          type: 'string',
-          enum: ['sync', 'async'],
-          description: 'sync (default) or async.',
-        },
-      },
-      required: ['id', 'message'],
-    },
-  },
-};
-
-/**
- * Hand a self-contained task to a **fresh session** and get its answer back.
- * Orchestrated by the provider: the hop is queued (the current turn has to end
- * first), a new session runs `prompt` as its first message, and when that turn
- * finishes the harness switches back here and delivers the new session's final
- * answer as a user message. Only the main agent sees this tool.
- */
-const HOP_SESSION_TOOL: ToolDefinition = {
-  type: 'function',
-  function: {
-    name: 'hop_session',
-    description:
-      'Hand a self-contained task to a **fresh conversation** and get its final answer back. The hop is queued and returns immediately — your current turn ends. A new session is created, `prompt` runs there as its first message, and when that turn finishes the harness switches back to this session and delivers the new session\'s final answer to you as a user message (you resume in a new turn). Use it for a long, self-contained job that benefits from a clean context, or to try something in a fresh session without polluting this conversation. The new session cannot see this conversation, so `prompt` must be self-contained. `returnNodeId` (see `list_nodes`) makes the answer come back as a **new branch** off that node instead of continuing the checked-out node — use it to keep the result out of the current line of conversation. One hop at a time; do not use it for work you can finish here.',
-    parameters: {
-      type: 'object',
-      properties: {
-        prompt: {
-          type: 'string',
-          description: 'The full, self-contained task for the new session (it cannot see this conversation).',
-        },
-        title: { type: 'string', description: 'Optional short title for the new session.' },
-        returnNodeId: {
-          type: 'string',
-          description:
-            'Optional node id in THIS session to branch from when the answer comes back (see list_nodes). Omit to continue the checked-out node.',
-        },
-      },
-      required: ['prompt'],
-    },
-  },
-};
-
-/**
- * Read-only view of the active session's chat tree, so the agent can name a
- * node (e.g. as `hop_session`\'s `returnNodeId`) instead of guessing. Node ids
- * are otherwise invisible to the model: they live in the persisted tree, not in
- * the prompt.
- */
-const LIST_NODES_TOOL: ToolDefinition = {
-  type: 'function',
-  function: {
-    name: 'list_nodes',
-    description:
-      'List the chat tree of the active session: one line per node with its id, status, parent and title, plus which node is currently checked out. Use it to pick a `returnNodeId` for hop_session, or to understand how the conversation branched.',
-    parameters: { type: 'object', properties: {}, required: [] },
-  },
-};
-
-/**
- * Rename a session. The harness names sessions automatically (from the
- * conversation); a rename here is explicit, so it locks the title and the
- * automatic namer stops touching it.
- */
-const RENAME_SESSION_TOOL: ToolDefinition = {
-  type: 'function',
-  function: {
-    name: 'rename_session',
-    description:
-      'Rename a session (the whole conversation, not a node). Use it when the title no longer describes the work. The harness also names sessions automatically from the conversation; an explicit rename locks the title, so automatic naming never overwrites it again. `sessionId` defaults to the active session (other session ids are not discoverable, so normally omit it). Returns the new title.',
-    parameters: {
-      type: 'object',
-      properties: {
-        title: {
-          type: 'string',
-          description: 'The new session title: short (≤ 20 chars), one line, no trailing punctuation.',
-        },
-        sessionId: {
-          type: 'string',
-          description: 'Optional session id; defaults to the active session.',
-        },
-      },
-      required: ['title'],
-    },
-  },
-};
-
-/** The identity lines shared by the leading system prompt. */
-function identityLines(model: string, effort: ThinkingEffort): string[] {
-  const lines: string[] = [
-    '你是「Minimal Agent Harness」（agentHarness）——一个自主、全能的代理。',
-    '你当前运行在「' + (model || 'deepseek-chat') + '」模型上。',
-  ];
-  if (effort && effort !== 'none') {
-    lines.push('你的推理努力当前设为「' + effort + '」。');
-  }
-  return lines;
-}
-
-/** Snapshot of the workspace AGENTS.md appended to the system prompt. Set once per session. */
-let agentsMdSnapshot: string | null = null;
-
-/**
- * Build the leading system prompt: the agent's identity (model + reasoning
- * effort) followed by the core instructions and, if present, the workspace
- * AGENTS.md snapshot. This is the first message and, on a model/effort switch,
- * it is rewritten in place to keep the identity authoritative.
- */
-function buildSystemPrompt(model: string, effort: ThinkingEffort): string {
-  const base = identityLines(model, effort).join('\n') + '\n\n' + CORE_PROMPT;
-  const agentsMd = agentsMdSnapshot?.trim();
-  if (agentsMd) {
-    return base + '\n\n## 工作区 AGENTS.md（项目说明）\n' + agentsMd;
-  }
-  return base;
-}
-
 export class Agent {
   /**
    * Set a snapshot of the workspace AGENTS.md to be appended to the system
@@ -449,17 +147,17 @@ export class Agent {
    * prompt. Pass null (or omit the call) when no AGENTS.md is present.
    */
   static setAgentsMd(content: string | null): void {
-    agentsMdSnapshot = content;
+    prompt.setAgentsMd(content);
   }
 
   /** Fresh conversation history consisting of just the system prompt. */
   static initialMessages(model = '', effort: ThinkingEffort = 'none'): ChatMessage[] {
-    return [{ role: 'system', content: buildSystemPrompt(model, effort) }];
+    return [{ role: 'system', content: prompt.systemPrompt(model, effort) }];
   }
 
   /** The current system prompt (used to refresh persisted sessions). */
   static systemPrompt(model = '', effort: ThinkingEffort = 'none'): string {
-    return buildSystemPrompt(model, effort);
+    return prompt.systemPrompt(model, effort);
   }
 
   /**
@@ -635,14 +333,14 @@ export class Agent {
 
   /**
    * Rewrite the leading system prompt to the current identity (model + effort).
-   * The core instructions (CORE_PROMPT) are identical every time, so only the
-   * identity line is updated; the rest of the conversation history is preserved.
+   * The instructions are identical every time, so only the identity/environment
+   * lines are updated; the rest of the conversation history is preserved.
    * Switching is applied in place because it invalidates the prompt cache anyway
    * and the first message is the most authoritative identity signal.
    */
   private refreshSystemIdentity(): void {
     if (this.messages[0]?.role === 'system') {
-      this.messages[0].content = buildSystemPrompt(this.model, this.thinkingEffort);
+      this.messages[0].content = prompt.systemPrompt(this.model, this.thinkingEffort);
     }
   }
 
@@ -653,39 +351,37 @@ export class Agent {
 
   /**
    * Lean system prompt for a sub-agent: a compact worker identity instead of the
-   * full CORE_PROMPT + AGENTS.md (saves tokens), followed by a note that it was
-   * dispatched by the main agent.
+   * full main prompt + AGENTS.md (saves tokens), followed by a note that it was
+   * dispatched by the main agent. The template lives in `prompt.ts` next to the
+   * main one.
    */
   static subAgentSystemPrompt(model = '', effort: ThinkingEffort = 'none', depth = 1, write = false): string {
-    const id = identityLines(model, effort);
-    const mode = write
-      ? 'you may read, search, write files, and run commands.'
-      : 'you are read-only: you may read and search files, but may NOT write files or run commands.';
-    return (
-      id.join('\n') +
-      '\n\n你是「子代理」——由主 agent 派遣的一个独立工作单元' +
-      (depth === 2 ? '（子-子代理）' : '') +
-      '。你的目标是把分配给你的任务做完并给出简洁结论；' +
-      mode +
-      '\n- 用中文回答；保持简洁，把结论写清楚。' +
-      '\n- 你只对派发你的 agent 汇报，不要主动越权改别的文件。' +
-      (depth < 2 && !write
-        ? '\n- 如果任务可以拆成若干**互不依赖**、各自需要大量阅读的部分（例如逐个文件/逐个模块审查），' +
-          '用 spawn_readonly_agents（它的 schema 已折叠，参数不确定先 list_advanced_tool("sub-agents")）' +
-          '并行派只读子代理，再汇总它们的结论；' +
-          '单点查询、几个文件就能答完的任务不要派。'
-        : '')
-    );
+    return prompt.subAgentSystemPrompt(model, effort, depth, write);
+  }
+
+  /** The capabilities that decide which intercepted tools this agent sees. */
+  private toolCapabilities(): ToolCapabilities {
+    return {
+      vision: isVisionModel(this.model),
+      canSpawn: this.canSpawn,
+      canSpawnReadOnly: this.canSpawnReadOnly,
+      canHop: this.canHop,
+    };
   }
 
   /**
-   * Tool definitions exposed to the model. Advanced tools (read_image, spawn_*,
-   * send_*, hop_session, list_nodes) and the folded registry tools are no longer
-   * advertised: the model reads their interface via `list_advanced_tool` and can
-   * still call them (execution is unchanged).
+   * Tool definitions exposed to the model: everything the registry holds (the
+   * file tools, `exec_command` + the background tools, `search_files`,
+   * `search_transcripts`) plus the tools the provider orchestrates and the Agent
+   * intercepts: `read_image` (vision models only), the `spawn_*` / `send_*` pair
+   * matching this agent's capabilities, and — main agent only — `hop_session` /
+   * `list_nodes` / `rename_session`. Every tool is advertised with its full
+   * schema; there is no folded "gradual reveal" tier. The intercepted set comes
+   * from the same capability flags the system prompt's `## 分工` guidance
+   * assumes, so the two can never disagree.
    */
   private getTools(): ToolDefinition[] {
-    return [...this.tools.definitions];
+    return [...this.tools.definitions, ...interceptedDefinitions(this.toolCapabilities())];
   }
 
   /**
@@ -1126,9 +822,12 @@ export class Agent {
   /** Read + validate an image file and upload it, or return a friendly error. */
   private async tryReadImage(filePath: string, signal?: AbortSignal): Promise<string> {
     if (!isVisionModel(this.model)) {
+      const vision = visionModelsLabel();
       return (
-        `Error: the current model (${this.model || 'default'}) does not support images. ` +
-        'Switch to a vision model (deepseek-v4-flash-vision-exp or deepseek-v4.1-flash-expires-on-0910) to read image files.'
+        `Error: the current model (${this.model || DEFAULT_MODEL}) does not support images. ` +
+        (vision
+          ? `Switch to a vision model (${vision}) to read image files.`
+          : 'No vision model is configured for this harness.')
       );
     }
     if (!filePath) {

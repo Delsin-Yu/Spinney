@@ -35,9 +35,25 @@
   plane & the `hvsc` supervisor".
 - `tools/hyper-vscode/` — the `hvsc` supervisor (CLI + daemon + `serve.ps1`),
   **not** shipped in the `.vsix`.
-- `src/agent/agent.ts` — the agent loop, the **system prompt** (`CORE_PROMPT`,
-  `identityLines`, `buildSystemPrompt`), message sanitizing, interrupt/rollback,
-  `AGENTS.md` snapshot (static `agentsMdSnapshot`), model/effort switching.
+- `src/agent/agent.ts` — the agent loop: message sanitizing, interrupt/rollback,
+  model/effort switching, and the interception of the provider-orchestrated tools
+  (`spawn_*` / `send_*` / `hop_session` / `list_nodes` / `rename_session` /
+  `read_image`). The prompt text is **not** here — see `prompt.ts`.
+- `src/agent/prompt.ts` — **the system prompt**: both templates, the
+  `{{placeholder}}` renderer (plus the unresolved-placeholder guard) and the
+  `AGENTS.md` snapshot. One file to read top-to-bottom to see what the model gets.
+- `src/agent/profile.ts` — `describeAgent(profile, registryTools, facts?)`: the
+  prompt **and** the tools array for one (role, model, effort, capabilities)
+  profile — the public entry point for "what does the model actually receive".
+- `src/agent/models.ts` — the model catalog (id / context window / accepts images)
+  and its accessors (`DEFAULT_MODEL`, `isVisionModel`, `contextWindowFor`,
+  `visionModelsLabel`). The **only** place a model id may appear;
+  `tools/check-models.js` enforces that on every package.
+- `src/agent/tools/` — one file per intercepted tool (`readImage`, `spawnAgents`,
+  `spawnReadonlyAgents`, `sendAgentMessage`, `sendReadonlyAgentMessage`,
+  `hopSession`, `listNodes`, `renameSession`) plus the barrel that filters them.
+  Each declares its `requires` capability tag, so the advertised tools and the
+  prompt's capability wording cannot drift apart.
 - `src/agent/deepseek.ts` — `DeepSeekClient` (stream SSE over `fetch`,
   `DeepSeekError`), builds `stream: true`, `stream_options.include_usage`,
   `reasoning_effort`. The read loop flushes the `TextDecoder` and parses a final
@@ -45,13 +61,17 @@
 - `src/agent/types.ts` — shared types (`Role`, `ThinkingEffort`, `ContentPart`,
   `ChatMessage`, `ToolCall`, `ToolDefinition`, `Usage`, `StreamChunk`,
   `AgentEvent`, `AgentTool`).
-- `src/tools/index.ts` — `ToolRegistry` + the tools; path resolution, line-ending
-  helpers, argument parsing (strict JSON **or** verbatim frame), `exec_command`
-  runner (foreground + background behaviors), and the three background tools.
-- `src/tools/advancedDocs.ts` — the folded ("advanced") tool docs: `ADVANCED_TOPIC_DOCS`
-  (7 topics), `ADVANCED_TOOL_NAMES` (the registry tools kept registered but hidden from
-  the tool list) and the `list_advanced_tool` definition + executor the model uses to pull
-  an interface on demand.
+- `src/tools/index.ts` — `ToolRegistry` + the helpers every tool shares (path
+  resolution, line-ending helpers, `globToRegex`, `SKIP_DIRS`, `limitInline`,
+  argument parsing for strict JSON **or** the verbatim frame). The tools
+  themselves live one per file next to it; they import those helpers back from
+  this module (safe: every use is inside `execute()`, i.e. call time).
+- `src/tools/readFile.ts` · `writeFile.ts` · `replaceInFile.ts` · `listDir.ts` ·
+  `searchFiles.ts` · `searchTranscripts.ts` · `execCommand.ts` — the registry
+  tools, each with its schema and its implementation in the same file.
+- `src/tools/backgroundTools.ts` — `check_background_terminal` /
+  `kill_background` / `join_background`, grouped because they all read the same
+  `BackgroundRegistry`.
 - `src/tools/background.ts` — `BackgroundRegistry` + `BackgroundTask`,
   `CommandHandle`/`spawnShellCommand` (live output capture, process-tree kill),
   per-session lifecycle.
@@ -62,6 +82,8 @@
 - `src/perf.ts` — tiny `[perf]` logger (sink = the Agent Harness output channel).
   `perf()` takes a string **or a thunk**; a thunk is only evaluated when a sink is
   installed, so an expensive line (JSON sizes, byte counts) costs nothing when off.
+  `harnessLog()` writes a line to the same channel without the `[perf]` prefix
+  (used by the prompt-template guard).
 - `media/main.js` — webview client (tree rendering, pan/zoom, streaming into the
   active node, composer, streaming meter, live tool drafts, drag-to-resize cards).
   The composer is the
