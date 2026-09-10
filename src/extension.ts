@@ -88,6 +88,16 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       chatProvider?.deleteSession(id);
     }),
+    vscode.commands.registerCommand('agentHarness.copySessionId', async (arg) => {
+      // Right-clicking a session in the sidebar passes the tree item; from the
+      // palette there is no arg, so fall back to the active session.
+      const id = toSessionId(arg) || chatProvider?.currentSessionId || '';
+      if (!id) {
+        return;
+      }
+      await vscode.env.clipboard.writeText(id);
+      vscode.window.setStatusBarMessage(`Copied session id: ${id}`, 2000);
+    }),
     vscode.commands.registerCommand('agentHarness.deleteBranch', () => {
       // Deletes the branch rooted at the checked-out turn; the provider asks for
       // a modal confirmation before anything is removed.

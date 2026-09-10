@@ -69,6 +69,11 @@
         "icon": "$(refresh)"
       },
       {
+        "command": "agentHarness.copySessionId",
+        "title": "Copy Session ID",
+        "icon": "$(copy)"
+      },
+      {
         "command": "agentHarness.deleteSession",
         "title": "Delete Session",
         "icon": "$(trash)"
@@ -120,6 +125,11 @@
           "command": "agentHarness.autoRenameSession",
           "when": "view == agentHarness.sessions",
           "group": "1_modification@2"
+        },
+        {
+          "command": "agentHarness.copySessionId",
+          "when": "view == agentHarness.sessions",
+          "group": "2_copy"
         }
       ]
     },
