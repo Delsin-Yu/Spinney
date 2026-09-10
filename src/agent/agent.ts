@@ -471,6 +471,35 @@ export class Agent {
     this.lastInterruptedTools = [];
   }
 
+  /**
+   * Record that this agent's last turn was interrupted, optionally naming the
+   * tool call(s) that were in progress. The pending notice is emitted at the
+   * start of the next `sendUserMessage` and cleared there. P3 keys the
+   * bookkeeping per node, so two concurrent branches never clobber each other's
+   * notice.
+   */
+  markInterrupted(tools: InterruptedToolCall[] = []): void {
+    this.lastTurnInterrupted = true;
+    this.lastInterruptedTools = tools;
+  }
+
+  /**
+   * Hand this agent's pending interruption notice to `other`. P3 uses it when a
+   * run starts on node M whose parent P was the interrupted node: M is bound to a
+   * *different* node worker, so its agent has to inherit P's notice. The source
+   * no longer holds it afterwards — the notice is delivered exactly once, the
+   * same as the single session-wide agent the pre-P3 code reused. A no-op when
+   * `other` has no pending notice, so a fresh continuation of an already-answered
+   * interruption does not re-notify.
+   */
+  transferInterruptTo(other: Agent): void {
+    if (!other.lastTurnInterrupted) {
+      return;
+    }
+    this.markInterrupted(other.lastInterruptedTools);
+    other.resetInterruptState();
+  }
+
   /** A turn is considered stopped if the stream signal was aborted or Stop was called. */
   private isStopped(signal: AbortSignal): boolean {
     return signal.aborted || this.cancelled;
@@ -612,8 +641,7 @@ export class Agent {
       if (interrupted) {
         // Remember the tool call(s) that were in progress so the per-tool
         // interruption notice can name exactly what was stopped.
-        this.lastTurnInterrupted = true;
-        this.lastInterruptedTools = this.captureInterruptedToolCalls(err);
+        this.markInterrupted(this.captureInterruptedToolCalls(err));
         // Preserve any partial output/reasoning streamed up to the interruption
         // as a checkpoint, so the next turn can see where the model cut off and
         // decide (with the interruption notice) whether to continue or restart.

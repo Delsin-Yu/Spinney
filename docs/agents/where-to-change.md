@@ -14,16 +14,36 @@
   `ChatViewProvider.getConfig()`. A setting must take effect **without a window
   reload**: read it at its point of use (the preferred shape), or, if some live
   owner caches it, push it from `ChatViewProvider.onConfigurationChanged()`
-  (wired in `extension.ts` from `onDidChangeConfiguration`). `buildAgent()` runs
-  once per activation, so a value read only there is a bug. Extend the table in
+  (wired in `extension.ts` from `onDidChangeConfiguration`), which pushes it to the
+  live owners (`SessionRuntime.applyDefaultModel` / `applyDefaultEffort` /
+  `setMaxTurns`); a value read only once at activation is a bug. Extend the table in
   `docs/agents/invariants/config-keys.md` with the new key.
 - **Change the UI** → `media/main.js` (behavior) and/or `media/style.css`
   (styling); the HTML shell is in `getHtml()` in `ChatViewProvider.ts`.
   `style.css` maps every colour token in `:root` to a `--vscode-*` theme variable
   (the hex values are fallbacks only) so the panel follows light/dark/HC themes —
   keep any new colour theme-driven rather than hardcoded.
-- **Change session persistence** → `loadSessions`/`persist`/`activateSession` in
-  `ChatViewProvider.ts` and the `StorageKey`s.
+- **Change session persistence** → `loadSessions`/`persist`/`runtimeFor` in
+  `ChatViewProvider.ts` and the `StorageKey`s; a session's shape (including the P4
+  `model`/`effort` fields) is in `src/chat/tree.ts` (`normalizeTreeSession` keeps old
+  state loadable — no `StoredState` version bump).
+- **Change the multi-session / branch model** → `docs/agents/multi-session.md` is the
+  frozen contract; the implementation is `src/chat/runtime.ts` (`SessionRuntime`,
+  `TurnRun`, `runs`, `workerFor`) plus `src/chat/panels.ts` (`PanelManager`, one tab per
+  session) and the per-panel routing in `ChatViewProvider.handlePanelMessage` / `postTo`.
+- **Background terminals** → `src/chat/backgroundHub.ts` (the `(session, node)`
+  registries + session-local ids), the `// ---- Background terminals ----` section of
+  `src/chat/runtime.ts` (notice injection, `postBackgrounds`), the tools in
+  `src/tools/background.ts` / `backgroundTools.ts` / `execCommand.ts`, and each card's
+  in-card dock in `media/main.js` (there is no `#bg-panel`).
+- **Per-session model / effort** → the `model` / `effort` (and `modelFromSettings` /
+  `effortFromSettings`) fields on `AgentSession` in `src/chat/tree.ts`, their resolution
+  in `ChatViewProvider.effectiveModel` / `effectiveEffort`, and the write path
+  `SessionRuntime.setModel` / `setThinkingEffort` (`applyDefaultModel` /
+  `applyDefaultEffort` for a settings change).
+- **Verify a phase (P1–P4)** → `node tools/harness-test.mjs <suite...|all>` drives the
+  live control plane; the suites and what each proves are in
+  `docs/agents/multi-session.md` §5.1.
 - **Delete a branch / node** → `branchIds` + `detachBranch` in `src/chat/tree.ts`
   (pure data), the `Branch deletion` block in `ChatViewProvider.ts`
   (`deleteBranchInteractive` → modal confirm → `deleteBranch`), the per-node

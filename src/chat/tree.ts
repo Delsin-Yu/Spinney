@@ -14,7 +14,7 @@
  *  - the assembled path must go through `Agent.sanitizeMessages` before use, and
  *    the sanitized copy must never be written back into the nodes.
  */
-import { ChatMessage, Usage } from '../agent/types';
+import { ChatMessage, ThinkingEffort, Usage } from '../agent/types';
 
 export type TurnStatus = 'pending' | 'running' | 'done' | 'interrupted' | 'error';
 
@@ -100,6 +100,23 @@ export interface AgentSession {
   activeNodeId: string | null;
   /** Transcript entries that belong to no turn (e.g. a notice on an empty session). */
   orphanItems: DisplayItem[];
+  /**
+   * The session's own model / thinking-effort pick (P4): each tab owns its
+   * selection, so it lives here, persisted with the session. Absent ⇒ the session
+   * follows the global defaults — the persisted `agentHarness.runtimeConfig`
+   * record, then the `agentHarness.model` / `agentHarness.thinkingEffort`
+   * settings. A pick is additionally anchored to the setting value it was made
+   * under (`*FromSettings`), so editing that setting retires the pick: the
+   * setting wins once it changes, exactly like the global record's rule (see
+   * `ChatViewProvider.loadRuntimeConfig`). Both fields are optional and were
+   * never stored before P4, so old state loads unchanged (no version bump).
+   */
+  model?: string;
+  effort?: ThinkingEffort;
+  /** `agentHarness.model` in force when `model` was picked (retirement anchor). */
+  modelFromSettings?: string;
+  /** `agentHarness.thinkingEffort` in force when `effort` was picked. */
+  effortFromSettings?: string;
 }
 
 export interface StoredState {
@@ -148,6 +165,40 @@ export function messageText(content: ChatMessage['content']): string {
     .map((part) => (part.type === 'text' ? part.text : ''))
     .filter(Boolean)
     .join(' ');
+}
+
+/** Every accepted effort, mirroring `ThinkingEffort` (used to heal stored state). */
+const THINKING_EFFORTS: readonly ThinkingEffort[] = ['none', 'low', 'medium', 'high'];
+
+/** A stored thinking-effort value, or undefined when it is absent/garbage. */
+function asThinkingEffort(value: unknown): ThinkingEffort | undefined {
+  return THINKING_EFFORTS.includes(value as ThinkingEffort) ? (value as ThinkingEffort) : undefined;
+}
+
+/**
+ * The session's own model pick, or `undefined` when it must follow the defaults
+ * (P4). A pick only counts while it still shadows the setting it was made under:
+ * editing `agentHarness.model` is an explicit choice too, so it retires a pick
+ * made before the edit — the same rule `loadRuntimeConfig` applies to the global
+ * record, here applied per session.
+ */
+export function sessionModelPick(session: AgentSession, settingModel: string): string | undefined {
+  if (!session.model) {
+    return undefined;
+  }
+  return session.modelFromSettings === undefined || session.modelFromSettings === settingModel
+    ? session.model
+    : undefined;
+}
+
+/** `sessionModelPick` for the thinking-effort setting. */
+export function sessionEffortPick(session: AgentSession, settingEffort: string): ThinkingEffort | undefined {
+  if (!session.effort) {
+    return undefined;
+  }
+  return session.effortFromSettings === undefined || session.effortFromSettings === settingEffort
+    ? session.effort
+    : undefined;
 }
 
 export function createNode(
@@ -427,6 +478,15 @@ function normalizeTreeSession(raw: AgentSession): AgentSession {
     activeNodeId: raw.activeNodeId ?? null,
     orphanItems: Array.isArray(raw.orphanItems) ? raw.orphanItems : [],
   };
+  // P4 per-session selection: absent in every state stored before it existed, so
+  // an old session simply follows the global defaults (no version bump needed).
+  // Anything unreadable is dropped instead of being trusted.
+  session.model = typeof raw.model === 'string' && raw.model ? raw.model : undefined;
+  session.effort = asThinkingEffort(raw.effort);
+  session.modelFromSettings =
+    typeof raw.modelFromSettings === 'string' ? raw.modelFromSettings : undefined;
+  session.effortFromSettings =
+    typeof raw.effortFromSettings === 'string' ? raw.effortFromSettings : undefined;
   for (const [id, node] of Object.entries(raw.nodes ?? {})) {
     const n: TreeNode = {
       id,
@@ -455,6 +515,9 @@ function normalizeTreeSession(raw: AgentSession): AgentSession {
 }
 
 function fromLegacySession(raw: LegacySession): AgentSession {
+  // A pre-tree session has no per-session pick either: `model` / `effort` stay
+  // absent, so the migrated session follows the global defaults (P4) exactly like
+  // a session that never touched the dropdown.
   const session: AgentSession = {
     id: raw.id || newId(),
     title: raw.title || 'New session',

@@ -1,6 +1,7 @@
 ## Streaming / long-session performance
-- SSE tokens are **not** forwarded 1:1. `ChatViewProvider` coalesces `streamDelta` /
-  `reasoningDelta` / `toolCallDelta` (~50ms) and only then `postMessage`s to the webview.
+- SSE tokens are **not** forwarded 1:1. `SessionRuntime.scheduleStreamFlush` coalesces a
+  run's `streamDelta` / `reasoningDelta` / `toolCallDelta` (~50ms) and only then
+  `postMessage`s to the webview; every such message carries the run's explicit `nodeId`.
 - The webview paints a streaming answer as a plain `Text` node (`appendData`);
   markdown-it runs **once** when the answer is finalized (`done` / `toolStart` /
   `interrupted` / `error`). Re-parsing the whole reply on every token is what used

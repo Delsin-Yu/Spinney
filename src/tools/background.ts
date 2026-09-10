@@ -169,11 +169,15 @@ export class BackgroundRegistry {
     this.onUpdated = cb;
   }
 
-  /** Register a (still-running) spawned command as a background terminal. */
-  register(handle: CommandHandle, command: string, cwd: string, notifyAgent = true): number {
-    const id = ++this.counter;
+  /**
+   * Register a command as a background terminal. `id` is normally minted by the
+   * caller (`BackgroundHub`, which needs session-local ids that are unique across
+   * every node of a session); without it the registry's own counter is used.
+   */
+  register(handle: CommandHandle, command: string, cwd: string, notifyAgent = true, id?: number): number {
+    const taskId = id ?? ++this.counter;
     const task: BackgroundTask = {
-      id,
+      id: taskId,
       command,
       cwd,
       startedAt: Date.now(),
@@ -186,13 +190,13 @@ export class BackgroundRegistry {
       delivered: false,
       waiters: [],
     };
-    this.tasks.set(id, task);
+    this.tasks.set(taskId, task);
 
     handle.child.on('close', (code) => this.complete(task, code));
     handle.child.on('error', () => this.complete(task, null));
 
     this.onUpdated?.();
-    return id;
+    return taskId;
   }
 
   /**

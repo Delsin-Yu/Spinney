@@ -3,7 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { AgentTool, ToolDefinition } from '../agent/types';
-import { BackgroundRegistry } from './background';
+import type { BackgroundAccess } from '../chat/backgroundHub';
 import { makeCheckBackgroundTool, makeJoinBackgroundTool, makeKillBackgroundTool } from './backgroundTools';
 import { makeExecCommandTool } from './execCommand';
 import { listDirTool } from './listDir';
@@ -382,7 +382,12 @@ export class ToolRegistry {
   private readonly tools = new Map<string, AgentTool>();
   /** Tools kept registered (so a call still hits their guard) but not advertised. */
   private hidden = new Set<string>();
-  private backgroundRegistry: BackgroundRegistry | null = null;
+  /**
+   * The background-terminal access of the session this registry belongs to: the
+   * tools mint jobs under `currentOwner()` (the live run's node, else the view
+   * focus) and resolve session-local ids through the shared hub.
+   */
+  private backgroundAccess: BackgroundAccess | null = null;
   /**
    * Transcript roots for `search_transcripts`, resolved at call time (they
    * depend on `agentHarness.subAgentTranscriptDir` and the global-storage path,
@@ -394,10 +399,10 @@ export class ToolRegistry {
     this.buildTools();
   }
 
-  /** (Re)build the tool set, wiring the background-aware tools to the active registry. */
+  /** (Re)build the tool set, wiring the background-aware tools to this session. */
   private buildTools(): void {
     this.tools.clear();
-    const getRegistry = () => this.backgroundRegistry;
+    const getAccess = () => this.backgroundAccess;
     for (const tool of [
       readFileTool,
       writeFileTool,
@@ -405,22 +410,22 @@ export class ToolRegistry {
       listDirTool,
       searchFilesTool,
       makeSearchTranscriptsTool(() => this.transcriptRoots?.() ?? []),
-      makeExecCommandTool(getRegistry),
-      makeCheckBackgroundTool(getRegistry),
-      makeKillBackgroundTool(getRegistry),
-      makeJoinBackgroundTool(getRegistry),
+      makeExecCommandTool(getAccess),
+      makeCheckBackgroundTool(getAccess),
+      makeKillBackgroundTool(getAccess),
+      makeJoinBackgroundTool(getAccess),
     ]) {
       this.tools.set(tool.definition.function.name, tool);
     }
   }
 
   /**
-   * Point the background-aware tools at a session's registry (one per session).
-   * Called on session activation so exec_command and the background tools read
-   * the active session's registry.
+   * Point the background-aware tools at this session's access object (one per
+   * session runtime). Registries are per (session, node) inside the hub, so a job
+   * belongs to the branch that spawned it.
    */
-  setBackgroundRegistry(registry: BackgroundRegistry | null): void {
-    this.backgroundRegistry = registry;
+  setBackgroundAccess(access: BackgroundAccess | null): void {
+    this.backgroundAccess = access;
     this.buildTools();
   }
 
@@ -444,8 +449,9 @@ export class ToolRegistry {
         sub.tools.set(name, tool);
       }
     }
-    // Background-aware sub-agents share the same session registry as the parent.
-    sub.backgroundRegistry = this.backgroundRegistry;
+    // Background-aware sub-agents share the parent's session access: a job a
+    // sub-agent spawns belongs to the node whose turn is running.
+    sub.backgroundAccess = this.backgroundAccess;
     sub.hidden = new Set(this.hidden);
     return sub;
   }
@@ -496,7 +502,7 @@ export class ToolRegistry {
         });
       }
     }
-    sub.backgroundRegistry = this.backgroundRegistry;
+    sub.backgroundAccess = this.backgroundAccess;
     return sub;
   }
 

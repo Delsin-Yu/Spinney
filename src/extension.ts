@@ -57,6 +57,10 @@ export function activate(context: vscode.ExtensionContext): void {
   const sessionsTree = vscode.window.createTreeView('agentHarness.sessions', {
     treeDataProvider: sessionsProvider,
     showCollapseAll: false,
+    // Multi-select powers "Delete Selected Sessions…" (Ctrl/Shift-click in the
+    // list). VS Code shows that command only while several items are selected
+    // (`listMultiSelection`) and hands it the selection.
+    canSelectMany: true,
   });
 
   context.subscriptions.push(
@@ -94,6 +98,18 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand('agentHarness.deleteSession', async (arg) => {
       const explicit = toSessionId(arg);
+      // The inline bucket is the only delete entry, and the only sensible batch
+      // one: right-clicking the list drops the selection, so a context-menu item
+      // could never act on it. When the clicked item is part of a multi-selection
+      // (hover + click keeps the selection), the bucket deletes the WHOLE
+      // selection behind one confirmation; otherwise it is a plain single delete.
+      const selection = sessionsTree.selection
+        .map((item) => String((item as { id?: unknown }).id ?? ''))
+        .filter((id) => !!id);
+      if (explicit && selection.length > 1 && selection.includes(explicit)) {
+        await chatProvider?.deleteSessionsInteractive(selection);
+        return;
+      }
       const id = explicit || chatProvider?.currentSessionId || '';
       if (!id) {
         return;

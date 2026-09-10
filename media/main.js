@@ -19,13 +19,18 @@
   const tpsMeter = document.getElementById('tps-meter');
   const tpsValue = document.getElementById('tps-value');
   const statBalanceEl = document.getElementById('stat-balance');
-  const bgPanel = document.getElementById('bg-panel');
-  const bgList = document.getElementById('bg-list');
-  const bgCount = document.getElementById('bg-count');
+  // Background terminals have no panel of their own any more: each node's jobs
+  // render into a dock at the bottom of *that node's* card (see renderBackgrounds).
   const branchBanner = document.getElementById('branch-banner');
   const composerEl = document.getElementById('composer');
 
+  // Session-level: any run in this session is live (status dot, tps meter, the
+  // model/effort selects). It says nothing about the *view focus* node.
   let busy = false;
+  // Per-node: the nodes that currently have a live run (spec §3.1 `state`). The
+  // Send/Stop pair is a property of the view focus node, not of the session, so
+  // this — and never `busy` — decides which of the two buttons is on screen.
+  let runningNodes = new Set();
   let pendingAttachments = [];
   let currentModel = 'deepseek-chat';
   let currentEffort = 'medium';
@@ -52,6 +57,9 @@
   // Set while routing a sub-agent's streaming deltas into its own card, so the
   // main tree's camera/relayout is not driven by every sub-agent token.
   let routingSubAgent = false;
+  // The node a routed streaming call is currently writing into (null while writing
+  // into the view focus container). Keeps each node's live tool cards separate.
+  let routingNodeId = null;
   // User-configurable folding (set via the `config` message).
   let foldToolCalls = true;
   let foldThinking = true;
@@ -490,7 +498,29 @@
     return node;
   }
 
+  // Live (still-streaming) tool cards, bucketed per owning node. Each bucket maps
+  // a tool *index* to its card — a node's tool stream is index-scoped — so two
+  // nodes streaming at once cannot collide on index 0. The '' bucket is the view
+  // focus container, i.e. the legacy stream that carries no nodeId.
   const liveTools = Object.create(null);
+
+  /**
+   * Bucket key for `owner`: an explicit node id, or — when `owner` is undefined —
+   * the node the current routed call writes into, else the view focus node (a
+   * legacy, unrouted call writes into that node's card too). '' is the
+   * unattributed container (no node at all).
+   */
+  function liveOwnerKey(owner) {
+    if (owner !== undefined) return owner || '';
+    return routingNodeId || treeActiveId || '';
+  }
+
+  function liveBucket(owner, create) {
+    const key = liveOwnerKey(owner);
+    let bucket = liveTools[key];
+    if (!bucket && create) bucket = liveTools[key] = Object.create(null);
+    return bucket;
+  }
 
   function addLiveTool(index, id, name, args) {
     if (!messagesEl) return;
@@ -529,13 +559,14 @@
     node._chevEl = chev;
 
     messagesEl.appendChild(node);
-    liveTools[index] = node;
+    liveBucket(undefined, true)[index] = node;
     followActive();
     return node;
   }
 
   function appendLiveTool(index, id, nameDelta, argsDelta) {
-    let node = liveTools[index];
+    const bucket = liveBucket(undefined, true);
+    let node = bucket[index];
     if (!node) {
       node = addLiveTool(index, id, '', '');
     }
@@ -550,14 +581,16 @@
 
   function finalizeLiveTool(index, id, name, args) {
     if (!messagesEl) return;
-    let node = index !== undefined && index !== null ? liveTools[index] : null;
+    const bucket = liveBucket(undefined, false);
+    const indexed = index !== undefined && index !== null;
+    let node = indexed && bucket ? bucket[index] : null;
     if (!node && id) {
       node = messagesEl.querySelector('.msg.tool.live[data-id="' + id + '"]');
     }
     if (!node) {
       return addTool(name, args, id);
     }
-    if (index !== undefined && index !== null) delete liveTools[index];
+    if (indexed && bucket) delete bucket[index];
     if (id) node.dataset.id = id;
     delete node.dataset.index;
     node.classList.remove('live');
@@ -576,12 +609,22 @@
     return node;
   }
 
-  function clearLiveTools() {
-    for (const key in liveTools) {
-      const node = liveTools[key];
-      if (node && node.parentNode) node.parentNode.removeChild(node);
+  /**
+   * Drop live tool cards. With no owner (the legacy shape: the message carried no
+   * nodeId) every live card goes, exactly as before; with one, only that node's
+   * cards are cleared so a run finishing on another node keeps its own.
+   */
+  function clearLiveTools(owner) {
+    const keys = owner === undefined ? Object.keys(liveTools) : [liveOwnerKey(owner)];
+    for (const key of keys) {
+      const bucket = liveTools[key];
+      if (!bucket) continue;
+      for (const index in bucket) {
+        const node = bucket[index];
+        if (node && node.parentNode) node.parentNode.removeChild(node);
+      }
+      delete liveTools[key];
     }
-    for (const k in liveTools) delete liveTools[k];
   }
 
   function updateTool(id, content) {
@@ -694,61 +737,190 @@
     }
   }
 
-  // ---- Background terminals panel ----
+  // ---- Background terminals: a dock at the bottom of the owning node's card ----
+  // There is no standalone panel any more (spec §1): a job belongs to the node
+  // whose turn spawned it, so the flat `backgrounds` snapshot is grouped by
+  // `nodeId` and each group renders inside that node's own card. A job is shown
+  // while it runs and until its completion notice reaches the agent; a delivered
+  // job drops out of the snapshot.
   function shortCommand(cmd) {
     const s = String(cmd || '');
     return s.length > 60 ? s.slice(0, 60) + '…' : s;
   }
 
-  function renderBackgrounds(tasks) {
-    if (!bgPanel || !bgList || !bgCount) return;
-    bgList.innerHTML = '';
-    const list = tasks || [];
-    bgPanel.classList.toggle('hidden', list.length === 0);
-    if (list.length === 0) {
-      bgCount.textContent = '';
-      bgPanel.classList.add('hidden');
-      return;
-    }
-    for (const t of list) {
-      const item = el('div', 'bg-item ' + (t.status === 'running' ? 'running' : 'finished'));
-      const head = el('div', 'bg-item-head');
-      head.appendChild(el('span', 'bg-id', '#' + t.id));
-      head.appendChild(el('span', 'bg-cmd', shortCommand(t.command)));
-      const pending = t.status === 'finished' && t.pendingDelivery;
-      const statusText =
-        t.status === 'running'
-          ? 'running'
-          : t.pendingDelivery
-            ? 'pending delivery'
-            : t.killed
-              ? 'killed'
-              : 'exit ' + (t.exitCode ?? '?');
-      head.appendChild(el('span', 'bg-status' + (pending ? ' pending' : ''), statusText));
-      const chev = el('span', 'chev', '▶');
-      head.appendChild(chev);
-      item.appendChild(head);
+  function dockedTask(task) {
+    return task.status === 'running' || (task.status === 'finished' && task.pendingDelivery === true);
+  }
 
-      const body = el('div', 'bg-body hidden');
-      if (t.outputTail) body.appendChild(el('pre', 'bg-output', t.outputTail));
-      head.addEventListener('click', () => {
-        body.classList.toggle('hidden');
-        chev.classList.toggle('open');
-      });
-      item.appendChild(body);
+  function statusTextFor(task) {
+    if (task.status === 'running') return 'running';
+    if (task.pendingDelivery) return 'pending delivery';
+    if (task.killed) return 'killed';
+    return 'exit ' + (task.exitCode ?? '?');
+  }
 
-      if (t.status === 'running') {
-        const killBtn = el('button', 'bg-kill', 'kill');
-        killBtn.title = 'Kill background terminal ' + t.id;
-        killBtn.addEventListener('click', (ev) => {
-          ev.stopPropagation();
-          vscode.postMessage({ type: 'killBackground', id: t.id });
-        });
-        head.appendChild(killBtn);
+  function killBackgroundButton(id) {
+    const kill = el('button', 'bg-kill', 'kill');
+    kill.title = 'Kill background terminal ' + id;
+    kill.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      // The id is session-local; the host resolves it inside this panel's session.
+      vscode.postMessage({ type: 'killBackground', id });
+    });
+    return kill;
+  }
+
+  // One `.bg-item` (head + collapsible output + kill). Items are patched in place
+  // on every snapshot, so a refresh never collapses an output the user opened.
+  function createBgItem(task) {
+    const item = el('div', 'bg-item');
+    const head = el('div', 'bg-item-head');
+    head.appendChild(el('span', 'bg-id', '#' + task.id));
+    head.appendChild(el('span', 'bg-cmd', shortCommand(task.command)));
+    const status = el('span', 'bg-status');
+    head.appendChild(status);
+    const chev = el('span', 'chev', '▶');
+    head.appendChild(chev);
+    const body = el('div', 'bg-body hidden');
+    head.addEventListener('click', () => {
+      body.classList.toggle('hidden');
+      chev.classList.toggle('open');
+    });
+    item.appendChild(head);
+    item.appendChild(body);
+    item._refs = { head, status, body, output: null, kill: null };
+    updateBgItem(item, task);
+    return item;
+  }
+
+  function updateBgItem(item, task) {
+    const refs = item._refs;
+    const running = task.status === 'running';
+    item.classList.toggle('running', running);
+    item.classList.toggle('finished', !running);
+    refs.status.textContent = statusTextFor(task);
+    refs.status.classList.toggle('pending', task.status === 'finished' && !!task.pendingDelivery);
+    if (task.outputTail) {
+      if (!refs.output) {
+        refs.output = el('pre', 'bg-output');
+        refs.body.appendChild(refs.output);
       }
-      bgList.appendChild(item);
+      refs.output.textContent = task.outputTail;
     }
-    bgCount.textContent = list.length + ' task' + (list.length === 1 ? '' : 's');
+    // Only a live job can be killed.
+    if (running && !refs.kill) {
+      refs.kill = killBackgroundButton(task.id);
+      refs.head.appendChild(refs.kill);
+    }
+  }
+
+  /**
+   * The dock of `card`, created on first use and cached on the card. It is the
+   * card's last child — except on the card that hosts the composer pane, where
+   * the pane stays at the very bottom and the dock sits directly above it. Either
+   * way the transcript keeps its own scroll area: the dock is `flex: 0 0 auto`
+   * while `.node-body` keeps `flex: 1 1 auto`.
+   */
+  function ensureDock(card) {
+    if (!card) return null;
+    if (card._bgDock) return card._bgDock;
+    const dock = el('div', 'node-bg hidden');
+    const head = el('div', 'bg-dock-head');
+    // The count doubles as the title ("2 background tasks · 1 running"), so the
+    // one-line summary needs no extra label — it must stay readable in a 320px
+    // collapsed card next to the kill buttons.
+    const count = el('span', 'bg-dock-count', '');
+    head.appendChild(count);
+    const kills = el('span', 'bg-dock-kills');
+    head.appendChild(kills);
+    const list = el('div', 'bg-dock-list');
+    dock.appendChild(head);
+    dock.appendChild(list);
+    dock._list = list;
+    dock._count = count;
+    dock._kills = kills;
+    dock._items = new Map();        // task id -> .bg-item (kept across snapshots)
+    dock._killButtons = new Map();  // task id -> compact kill button
+    if (composerEl.parentElement === card) card.insertBefore(dock, composerEl);
+    else card.appendChild(dock);
+    card._bgDock = dock;
+    return dock;
+  }
+
+  /** A collapsed card keeps its dock, but only as the one-line summary. */
+  function syncDockMode(card) {
+    const dock = card && card._bgDock;
+    if (dock) dock.classList.toggle('collapsed', !card.classList.contains('expanded'));
+  }
+
+  /** Render one node's own tasks into its own dock (hidden when it owns none). */
+  function renderNodeDock(card, tasks) {
+    const dock = ensureDock(card);
+    if (!dock) return;
+    const shown = new Set(tasks.map((t) => t.id));
+    for (const [id, item] of dock._items) {
+      if (shown.has(id)) continue;
+      item.remove();              // delivered / gone: the row leaves the dock
+      dock._items.delete(id);
+    }
+    for (const task of tasks) {
+      let item = dock._items.get(task.id);
+      if (!item) {
+        item = createBgItem(task);
+        dock._items.set(task.id, item);
+        dock._list.appendChild(item);
+      } else {
+        updateBgItem(item, task);
+      }
+    }
+    // Compact line for a collapsed card: the counts + one kill button per live job.
+    const running = tasks.filter((t) => t.status === 'running');
+    dock._count.textContent =
+      tasks.length + ' background task' + (tasks.length === 1 ? '' : 's') + ' · ' + running.length + ' running';
+    const live = new Set(running.map((t) => t.id));
+    for (const [id, kill] of dock._killButtons) {
+      if (live.has(id)) continue;
+      kill.remove();
+      dock._killButtons.delete(id);
+    }
+    for (const task of running) {
+      if (dock._killButtons.has(task.id)) continue;
+      const kill = killBackgroundButton(task.id);
+      kill.textContent = 'kill #' + task.id;
+      kill.classList.add('bg-dock-kill');
+      dock._killButtons.set(task.id, kill);
+      dock._kills.appendChild(kill);
+    }
+    dock.classList.toggle('hidden', tasks.length === 0);
+    syncDockMode(card);
+  }
+
+  /**
+   * `backgrounds` (P2): one flat snapshot of the session's jobs, each tagged with
+   * the node that owns it. Group by owner and render each group into that node's
+   * card. Every card of the snapshot gets its dock (even one that owns nothing:
+   * a hidden dock keeps its height stable when a job starts or is killed).
+   * The legacy `background` shape carries no owner — those jobs belong to the
+   * view focus node, the only node an older one-run host could spawn them from.
+   */
+  function renderBackgrounds(tasks, legacy) {
+    const byNode = new Map();
+    for (const task of tasks || []) {
+      if (!dockedTask(task)) continue;
+      const nodeId = task.nodeId || (legacy ? treeActiveId : null);
+      if (!nodeId) continue;
+      if (!byNode.has(nodeId)) byNode.set(nodeId, []);
+      byNode.get(nodeId).push(task);
+    }
+    let touched = false;
+    for (const id in nodeEls) {
+      renderNodeDock(nodeEls[id], byNode.get(id) || []);
+      touched = true;
+    }
+    // The dock is part of the card's height, so the tree must re-place the cards
+    // — the same way a growing `.node-items` does (debounced: the host coalesces
+    // snapshots, so a burst must not relayout per message).
+    if (touched) scheduleLayout();
   }
 
   // ---- Tree rendering ----
@@ -848,6 +1020,7 @@
       itemsEl.scrollTop = itemsEl.scrollHeight;
     }
     card._needsBottomScroll = false;
+    syncDockMode(card);
   }
 
   function collapsedCard(id, meta) {
@@ -860,6 +1033,9 @@
     promptElCard.classList.add('hidden');
     itemsEl.classList.add('hidden');
     excerptEl.classList.remove('hidden');
+    // The dock stays (a job must remain visible from the collapsed card) but
+    // shrinks to its one-line summary.
+    syncDockMode(card);
   }
 
   function setActiveLeaf(id) {
@@ -947,30 +1123,37 @@
     });
   }
 
-  // Route a streaming callback to a specific node's items container (sub-agents
-  // stream in parallel, so deltas must target their own card). A missing nodeId
-  // means the MAIN agent's turn → uses the current active-node container. After
-  // writing, the target card's transcript follows to the bottom (respects lock).
+  // Route a streaming callback to a specific node's items container: every
+  // streaming message carries the `nodeId` it belongs to (spec §2.1), so the
+  // target is explicit and never inferred from the view — a node that streams
+  // while the view sits elsewhere still gets its deltas in its own (collapsed)
+  // card. A *missing* nodeId is the legacy shape (the main agent's turn before
+  // P1): the callback then writes into the current view-focus container, exactly
+  // as it always did. After writing, the target card's transcript follows to the
+  // bottom (respects that card's scroll lock).
   function routeTo(nodeId, fn) {
     if (!nodeId) {
       fn();
       return;
     }
     const card = nodeEls[nodeId];
-    const el = card ? card.querySelector('.node-items') : null;
-    if (!el) return;
+    const itemsEl = card ? card.querySelector('.node-items') : null;
+    if (!itemsEl) return;
     const prevMsg = messagesEl;
     const prevPrompt = promptEl;
     const prevRouting = routingSubAgent;
-    messagesEl = el;
+    const prevNode = routingNodeId;
+    messagesEl = itemsEl;
     promptEl = card.querySelector('.node-prompt');
     routingSubAgent = true;
+    routingNodeId = nodeId;
     try {
       fn();
     } finally {
       messagesEl = prevMsg;
       promptEl = prevPrompt;
       routingSubAgent = prevRouting;
+      routingNodeId = prevNode;
     }
     if (card && card._itemScroll) card._itemScroll.scrollToBottom();
     scheduleSubAgentRelayout();
@@ -1219,7 +1402,10 @@
     treeNodes = Object.create(null);
     for (const n of tree.nodes || []) treeNodes[n.id] = n;
     treeRootId = tree.rootId ?? null;
-    treeActiveId = tree.activeId ?? null;
+    // The view focus is independent of the stream target (spec §2.2): the tree
+    // expands / docks on `viewId`, while `activeId` (the node currently streaming)
+    // is only there for hosts that predate the split.
+    treeActiveId = tree.viewId ?? tree.activeId ?? null;
     activePathSet = new Set(pathIdsFromTree(treeNodes, treeActiveId));
 
     for (const id in treeNodes) {
@@ -1253,6 +1439,7 @@
     if (follow) keepActiveInView();
     updateFollowButton();
     updateBranchBanner();
+    updateComposerButtons();
   }
 
   // The active path's items (checkout / session switch / panel reopen). This is
@@ -1261,6 +1448,8 @@
   function renderPath(path) {
     pathNodes = Object.create(null);
     for (const n of path.nodes || []) pathNodes[n.id] = n;
+    // The path is the *view* path (spec §2.2): its last id is the view focus, i.e.
+    // the node the composer docks in — not necessarily the node that is streaming.
     treeActiveId = path.ids && path.ids.length ? path.ids[path.ids.length - 1] : null;
     activePathSet = new Set(path.ids || []);
     for (const id of path.ids || []) {
@@ -1305,6 +1494,7 @@
     relayout();
     if (follow) keepActiveInView();
     updateBranchBanner();
+    updateComposerButtons();
   }
 
   // ---- No-node mode: a bare node card that holds only the input ----
@@ -1756,22 +1946,49 @@
   }
 
   // ---- State ----
+  // Session-level only: the status dot, the tps meter and the model/effort selects
+  // belong to the session (they say "something is streaming somewhere in this
+  // tab"). The Send/Stop pair does not — see updateComposerButtons().
   function setBusy(value) {
     busy = value;
     modelSelect.disabled = value;
     effortSelect.disabled = value;
     if (value) {
-      // A response is starting: re-engage the follow light for the live turn.
-      setActiveScrollLock(true);
+      // A response is starting on the node the user is looking at: re-engage the
+      // follow light for it. A run that starts on *another* node must not touch
+      // this card's lock (the user may be reading a finished branch there).
+      if (focusIsRunning()) setActiveScrollLock(true);
       startTps();
-      stopBtn.classList.remove('hidden');
-      sendBtn.classList.add('hidden');
       statusDot.className = 'dot busy';
     } else {
       stopTps();
+      statusDot.className = 'dot idle';
+    }
+    updateComposerButtons();
+  }
+
+  /**
+   * Whether the *view focus* node has a live run. You cannot send into a node that
+   * is already streaming (no queueing), while a run on another node/branch leaves
+   * this composer fully usable (spec §1).
+   */
+  function focusIsRunning() {
+    return !!treeActiveId && runningNodes.has(treeActiveId);
+  }
+
+  /**
+   * The composer shows Stop and hides Send iff the view focus node is running, and
+   * the reverse otherwise. Driven by the per-node running set — never by the
+   * session-level `busy` flag. Called whenever `state`, the tree, the focused path
+   * or the running set changes.
+   */
+  function updateComposerButtons() {
+    if (focusIsRunning()) {
+      stopBtn.classList.remove('hidden');
+      sendBtn.classList.add('hidden');
+    } else {
       stopBtn.classList.add('hidden');
       sendBtn.classList.remove('hidden');
-      statusDot.className = 'dot idle';
     }
   }
 
@@ -2032,7 +2249,10 @@
   // ---- Messaging ----
   function send() {
     const text = inputEl.value.trim();
-    if ((!text && pendingAttachments.length === 0) || busy) return;
+    // Sending targets the view focus node, so only *that* node being live blocks it
+    // (the button is hidden in that case anyway); a run elsewhere in the session is
+    // exactly the "start a new concurrent run here" case (spec §1).
+    if ((!text && pendingAttachments.length === 0) || focusIsRunning()) return;
     setFollow(true);
     vscode.postMessage({ type: 'userMessage', text, attachments: pendingAttachments });
     pendingAttachments = [];
@@ -2055,6 +2275,39 @@
     if (!sessionId || sessionId === persistedSessionId) return;
     persistedSessionId = sessionId;
     vscode.setState({ ...(vscode.getState() || {}), sessionId });
+  }
+
+  /**
+   * A run ended (`done` / `interrupted` / `error`). In the P1 shape the message
+   * names the node it belongs to, so:
+   *   - the finalize (and, for an error, the error message) is routed into *that*
+   *     node's card — a run finishing on another branch must not write into the
+   *     transcript on screen;
+   *   - that node's live tool cards go (another node's stay);
+   *   - the follow light is released only when the node the user is looking at is
+   *     the one that finished, so a background branch finishing never yanks the
+   *     scroll of the focused node.
+   * Without a nodeId the legacy shape is replayed verbatim: the view focus
+   * container, all live tool cards, and the session-level busy flag.
+   */
+  function endRun(msg, extra) {
+    const nodeId = msg.nodeId;
+    if (nodeId) {
+      routeTo(nodeId, () => finalizeStreamingAnswer());
+      clearLiveTools(nodeId);
+      if (extra) routeTo(nodeId, extra);
+      runningNodes.delete(nodeId);
+      // The session is only idle once *every* run is gone; a fresh `state` from the
+      // host follows and stays authoritative.
+      if (runningNodes.size === 0) setBusy(false);
+    } else {
+      finalizeStreamingAnswer();
+      clearLiveTools();
+      if (extra) extra();
+      setBusy(false);
+    }
+    updateComposerButtons();
+    if (!nodeId || nodeId === treeActiveId) setActiveScrollLock(false);
   }
 
   window.addEventListener('message', (event) => {
@@ -2096,12 +2349,26 @@
         break;
       }
       case 'state':
+        // `runningNodes` is authoritative for the Send/Stop pair; `busy` only
+        // drives the session chrome (dot, tps, selects). A host that predates the
+        // per-node shape sends no `runningNodes`: derive it from `busy` + the view
+        // focus, which reproduces the old one-run-at-a-time behaviour exactly.
+        runningNodes = Array.isArray(msg.runningNodes)
+          ? new Set(msg.runningNodes)
+          : msg.busy ? new Set([treeActiveId]) : new Set();
         setBusy(msg.busy);
         setStatus(msg.status);
         rememberSession(msg.sessionId);
         break;
       case 'background':
-        renderBackgrounds(msg.tasks);
+        // Legacy shape (an older host sends an untagged list): no owner is named,
+        // so those jobs render into the view focus node's dock.
+        renderBackgrounds(msg.tasks, true);
+        break;
+      // P2 shape: one flat list, every task tagged with its owning node. Each
+      // group renders into the dock at the bottom of that node's own card.
+      case 'backgrounds':
+        renderBackgrounds(msg.tasks, false);
         break;
       case 'context':
         setContext(msg.used, msg.total);
@@ -2119,7 +2386,7 @@
         addUserPrompt(msg.text, msg.attachments);
         break;
       case 'backgroundNotice':
-        addBackgroundNotice(msg.item);
+        routeTo(msg.nodeId, () => addBackgroundNotice(msg.item));
         break;
       case 'imagePicked':
         addPendingAttachment(msg.dataUrl, msg.name);
@@ -2152,25 +2419,15 @@
         onAgentDone(msg);
         break;
       case 'done':
-        finalizeStreamingAnswer();
-        clearLiveTools();
-        setBusy(false);
-        setActiveScrollLock(false);
+        endRun(msg);
         break;
       case 'interrupted':
-        finalizeStreamingAnswer();
-        clearLiveTools();
-        setBusy(false);
+        endRun(msg);
         setStatus('Interrupted');
-        setActiveScrollLock(false);
         break;
       case 'error':
-        finalizeStreamingAnswer();
-        clearLiveTools();
-        addAssistant('⚠️ ' + msg.message, true);
-        setBusy(false);
+        endRun(msg, () => addAssistant('⚠️ ' + msg.message, true));
         setStatus('Error');
-        setActiveScrollLock(false);
         break;
       case 'notice':
         addNotice(msg.kind, msg.text);
@@ -2184,6 +2441,7 @@
         treeRootId = null;
         treeActiveId = null;
         activePathSet = new Set();
+        runningNodes = new Set();
         messagesEl = null;
         renderTree({ nodes: [], rootId: null, activeId: null });
         break;
@@ -2259,7 +2517,9 @@
   sendBtn.addEventListener('click', send);
   stopBtn.addEventListener('click', () => {
     setStatus('Stopping…');
-    vscode.postMessage({ type: 'stop' });
+    // Stop only the view focus node's run (spec §3.2): other nodes stay running.
+    // A null focus (no node) means "stop everything in this session".
+    vscode.postMessage({ type: 'stop', nodeId: treeActiveId });
   });
   attachBtn.addEventListener('click', () => {
     vscode.postMessage({ type: 'pickImage' });

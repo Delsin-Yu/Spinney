@@ -3,32 +3,26 @@ import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { Agent } from '../agent/agent';
-import { DeepSeekClient, DeepSeekBalance } from '../agent/deepseek';
-import { AgentEvent, ChatMessage, ContentPart, ThinkingEffort, Usage } from '../agent/types';
+import { DeepSeekClient } from '../agent/deepseek';
+import { ThinkingEffort } from '../agent/types';
 import {
   DEFAULT_MODEL,
   contextWindowFor,
   isKnownModel,
   isTableModel,
-  isVisionModel,
   modelIds,
   parseModelTable,
   setModelOverrides,
-  visionModelIds,
-  visionModelsLabel,
 } from '../agent/models';
 import {
   AgentSession,
-  DisplayItem,
   StoredState,
   STORED_STATE_VERSION,
   TitleSource,
   TreeNode,
   TurnStatus,
   UserAttachment,
-  attachNode,
   branchIds,
-  createNode,
   detachBranch,
   migrateState,
   messageText,
@@ -36,7 +30,8 @@ import {
   nodeUsage,
   pathIds,
   pathMessages,
-  titleFromPrompt,
+  sessionEffortPick,
+  sessionModelPick,
 } from './tree';
 import {
   TITLE_BATCH_MAX_TOKENS,
@@ -51,17 +46,24 @@ import {
   shouldAutoTitle,
   turnCount,
 } from './sessionTitles';
-import { agentRootInfo, getWorkspaceRoot, resolvePath, ToolRegistry } from '../tools';
-import { BackgroundRegistry, BackgroundTask } from '../tools/background';
+import { agentRootInfo, getWorkspaceRoot, resolvePath } from '../tools';
+import { BackgroundHub } from './backgroundHub';
 import { ChatPanel } from './ChatPanel';
+import { PanelManager } from './panels';
+import {
+  HarnessConfig,
+  RuntimeHost,
+  SessionRuntime,
+  SubAgentJob,
+  clipDisplayItem,
+  clipMessageForStorage,
+} from './runtime';
 import { SessionTreeItem } from './SessionsProvider';
-import { SubAgentPool } from './SubAgentPool';
 import {
   removeTranscriptDir,
   removeTranscriptFile,
   removeTranscripts,
   sumUsage,
-  summarizeTranscript,
   writeSessionTranscript,
   writeSubAgentTranscript,
 } from './transcript';
@@ -84,45 +86,6 @@ const TITLE_BACKFILL_DEADLINE_MS = 10 * 60 * 1000;
 /** One-shot copy of the pre-tree (v1) state, written before the first migration. */
 const STORAGE_BACKUP_KEY = 'agentHarness.state.v1backup';
 const CONFIG_KEY = 'agentHarness.runtimeConfig';
-/** Cap tool output stored/shown in the webview so a 16 MiB command dump cannot freeze the UI. */
-const UI_TOOL_CONTENT_CAP = 32 * 1024;
-
-function clipForUi(text: string, cap = UI_TOOL_CONTENT_CAP): string {
-  if (text.length <= cap) {
-    return text;
-  }
-  return `${text.slice(0, cap)}\n…[truncated ${text.length - cap} chars for UI]`;
-}
-
-/** Shrink tool cards in the UI transcript; agent `messages` keep the full tool payload. */
-function clipDisplayItem(item: DisplayItem): DisplayItem {
-  if (item.kind === 'tool') {
-    const args = item.args ? clipForUi(item.args, 8 * 1024) : item.args;
-    const content = item.content ? clipForUi(item.content) : item.content;
-    if (args === item.args && content === item.content) {
-      return item;
-    }
-    return { ...item, args, content };
-  }
-  if (item.kind === 'assistant' && item.thinking && item.thinking.length > 64 * 1024) {
-    return { ...item, thinking: clipForUi(item.thinking, 64 * 1024) };
-  }
-  return item;
-}
-
-/**
- * Cap a single message's content in the *persisted* copy. The in-memory history
- * keeps the full payload; only what goes into `vscode.Memento` is bounded, so one
- * huge tool result cannot make every `persist()` write tens of MiB.
- */
-const STORAGE_MESSAGE_CAP = 64 * 1024;
-
-function clipMessageForStorage(msg: ChatMessage): ChatMessage {
-  if (typeof msg.content === 'string' && msg.content.length > STORAGE_MESSAGE_CAP) {
-    return { ...msg, content: clipForUi(msg.content, STORAGE_MESSAGE_CAP) };
-  }
-  return msg;
-}
 
 /**
  * The last assistant text a finished turn produced (used to carry a hopped
@@ -160,87 +123,42 @@ interface RuntimeConfig {
   effortFromSettings?: string;
 }
 
-/** One sub-agent run: its dispatch spec plus the tree node that owns it. */
-interface SubAgentJob {
-  spec: { instruction: string; write: boolean; model?: string };
-  node: TreeNode;
-  resume?: boolean;
-  /** Session the node belongs to (for the transcript folder; falls back to active). */
-  sessionId?: string;
-}
-
-/** A background terminal summarized for the webview UI. */
-interface BackgroundInfo {
-  id: number;
-  command: string;
-  status: 'running' | 'finished';
-  exitCode: number | null;
-  killed: boolean;
-  elapsed: number;
-  truncated: boolean;
-  outputTail: string;
-  /** True when the job finished but the agent has not yet been notified. */
-  pendingDelivery: boolean;
-}
-
-/** A queued background-completion notification waiting for the agent to go idle. */
-interface BackgroundNotice {
-  sessionId: string;
-  text: string;
-  /** The background-terminal id, used to drop a notice the agent already handled via join/kill. */
-  taskId: number;
-  /** Card fields: task id, command, status phrase, and output tail. */
-  id: number;
-  cmd: string;
-  doneText: string;
-  output: string;
-}
-
-/** Decode the base64 payload of a `data:<mime>;base64,<data>` URL into bytes. */
-function dataUrlBytes(dataUrl: string): Buffer {
-  const comma = dataUrl.indexOf(',');
-  const base64 = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
-  return Buffer.from(base64, 'base64');
-}
-
-export class ChatViewProvider implements ControlHost {
-  /** The chat is rendered in an editor panel (P1). A single panel for now; the
-   * multi-panel mouth is a list of ChatPanel keyed by sessionId. */
-  private panel: ChatPanel | null = null;
+/**
+ * The coordinator. P1 split every per-session / per-turn concern out into
+ * `SessionRuntime` (see `src/chat/runtime.ts`) and every editor tab out into
+ * `PanelManager` (see `src/chat/panels.ts`); this class owns what is genuinely
+ * global:
+ *
+ *  - sessions and their persistence (`agentHarness.state`);
+ *  - the `sessionId → SessionRuntime` map (`runtimes`);
+ *  - tabs (`panels`), titles, transcripts, config, the control plane;
+ *  - the global hop bookkeeping (`hopReturn` / `pendingSessionStart`).
+ *
+ * `activeSessionId` is only "the last focused tab" (persisted); every piece of
+ * work is routed through an explicit session id, never "the active session".
+ */
+export class ChatViewProvider implements ControlHost, RuntimeHost {
   /** Fired when the sidebar's session list should re-read its items. */
   onStateChanged?: () => void;
 
-  private agent!: Agent;
-  private client!: DeepSeekClient;
-  private tools!: ToolRegistry;
+  /** The chat is rendered in editor tabs: one `ChatPanel` per session. */
+  private readonly panels: PanelManager;
+  /**
+   * The one background hub of this window. Registries live per (session, node)
+   * inside it, so a job belongs to the node whose turn spawned it; the hub's
+   * hooks route an update/finish back to the runtime that owns the session.
+   */
+  private readonly backgroundHub = new BackgroundHub();
+  /** One runtime per session, created on demand (see `runtimeFor`). */
+  private readonly runtimes = new Map<string, SessionRuntime>();
+  /** Shared DeepSeek client; every runtime's agent + sub-agents use it. */
+  private readonly client: DeepSeekClient;
   /** Last `storage.update` write; the control plane awaits it before a reboot. */
   private lastPersist: Promise<void> = Promise.resolve();
   /** While `Date.now() < controlHoldUntil` an external controller is rebooting. */
   private controlHoldUntil = 0;
-  private displayItems: DisplayItem[] = [];
-  /** The turn node currently being produced (null while the agent is idle). */
-  private activeTurnNode: TreeNode | null = null;
-  /** Length of the flat path before the current turn; the turn's messages are sliced from it. */
-  private turnPrefixLen = 0;
-  /**
-   * The message that sat at `turnPrefixLen - 1` when the turn started. Identity,
-   * not equality: if the agent's history was swapped mid-turn this no longer
-   * matches, and `finishTurn` refuses to write the slice (see `setAgentMessages`).
-   */
-  private turnPrefixTail: ChatMessage | null = null;
-  /** True while the running turn created its own node (`beginTurn`) instead of continuing one. */
-  private turnNodeFresh = false;
-  /** Node whose turn was interrupted last; a branch switch drops the pending notice. */
-  private lastInterruptedNodeId: string | null = null;
-  private busy = false;
-  /** Per-session background-terminal registries (one per conversation). */
-  private sessionRegistries = new Map<string, BackgroundRegistry>();
-  /** Background-completion notifications waiting for the agent to go idle. */
-  private backgroundNotifQueue: BackgroundNotice[] = [];
   /** Set when the provider is being torn down; suppresses background notifications. */
-  private disposed = false;
-  /** Aborts an in-flight image upload (attachment path) when the user stops. */
-  private uploadController: AbortController | null = null;
+  disposed = false;
   /** A queued `POST /session/start` waiting for the current turn to end. */
   private pendingSessionStart: { title?: string; prompt?: string; sessionId?: string; nodeId?: string } | null = null;
   /**
@@ -251,38 +169,20 @@ export class ChatViewProvider implements ControlHost {
    * and clears this.
    */
   private hopReturn: { originSessionId: string; armedAt: number; returnNodeId?: string } | null = null;
-  private lastStatus = '';
   /** Cache-busting suffix for media URLs; changes per extension session. */
   private readonly mediaVersion: string;
-  private readonly output: vscode.OutputChannel;
-  private model = DEFAULT_MODEL;
-  private thinkingEffort: ThinkingEffort = 'medium';
-  private contextWindow = contextWindowFor(DEFAULT_MODEL);
-  private currentPromptTokens = 0;
+  readonly output: vscode.OutputChannel;
+  /**
+   * The persisted **default** model/effort selection, used to seed a session that
+   * has no pick of its own (P4: each session's own selection lives on
+   * `session.model` / `session.effort`). Kept in step with the settings by
+   * `onConfigurationChanged`, and updated by `persistRuntimeConfig` whenever a tab
+   * picks a value explicitly.
+   */
+  private defaultModel = DEFAULT_MODEL;
+  private defaultThinkingEffort: ThinkingEffort = 'medium';
   private sessions: AgentSession[] = [];
   private activeSessionId = '';
-  /** Coalesced stream fragments waiting to be posted to the webview. */
-  private pendingTextDelta = '';
-  private pendingThinkingDelta = '';
-  private pendingToolDeltas = new Map<number, { id?: string; name: string; args: string }>();
-  private streamFlushTimer: ReturnType<typeof setTimeout> | null = null;
-  private bgFlushTimer: ReturnType<typeof setTimeout> | null = null;
-  /** Coalesces idle background-notice delivery so a burst of finishes batches into one turn. */
-  private backgroundDrainTimer: ReturnType<typeof setTimeout> | null = null;
-  private streamFlushCount = 0;
-  private streamFlushBytes = 0;
-  private streamFlushWindow = 0;
-  /** Concurrency pool for the main agent's level-1 sub-agents (set per session). */
-  private subAgentPool: SubAgentPool | null = null;
-  /** Per-parent count of level-2 sub-agents spawned (budgeted by maxLevel2Subagents). */
-  private level2Counts = new Map<string, number>();
-  /** Running sub-agents: agentNodeId -> { agent, abort } for individual kill. */
-  private runningSubAgents = new Map<string, { agent: Agent; abort: AbortController }>();
-  /** Sub-agent completion notifications queued for the parent (async mode). */
-  private subAgentNoticeQueue: Array<{ nodeId: string; summary: string; status: string; count?: number }> = [];
-  /** Async depth-2 results queued for a still-running sub-agent parent, resumed on its finish. */
-  private subAgentChildNotices = new Map<string, Array<{ message: string }>>();
-  private lastSubAgentDrain: ReturnType<typeof setTimeout> | null = null;
   /** The one in-flight automatic-title request (a session switch does not cancel it). */
   private titleJob: { sessionId: string; controller: AbortController } | null = null;
   /** Sessions waiting for an automatic-title pass, drained one at a time. */
@@ -303,36 +203,42 @@ export class ChatViewProvider implements ControlHost {
     // Resolve the active model/effort before loading sessions so the restored
     // system prompt carries the correct identity.
     const runtime = this.loadRuntimeConfig();
-    this.model = runtime.model;
-    this.thinkingEffort = runtime.thinkingEffort;
-    // Snapshot AGENTS.md before building the prompt so the workspace
+    this.defaultModel = runtime.model;
+    this.defaultThinkingEffort = runtime.thinkingEffort;
+    // Snapshot AGENTS.md before building the prompts so the workspace
     // instructions are fixed for the whole session.
     this.loadAgentsMd();
+    // The shared client must exist before any runtime builds its agent.
+    const cfg = this.getConfig();
+    this.client = new DeepSeekClient({ apiKey: cfg.apiKey, baseUrl: cfg.baseUrl, model: this.defaultModel });
+    // The panel manager needs only callbacks, so it can be built before the
+    // sessions (runtimes post into it lazily).
+    this.panels = new PanelManager({
+      extensionUri: this.extensionUri,
+      titleFor: (sessionId) => this.panelTitle(sessionId),
+      getHtml: (webview) => this.getHtml(webview),
+      onMessage: (panel, message) => this.handlePanelMessage(panel, message),
+      onFocusChange: (sessionId) => this.onPanelFocus(sessionId),
+      onClosed: (sessionId) => this.onPanelClosed(sessionId),
+    });
     this.loadSessions();
-    this.buildAgent();
-    const active = this.getActiveSession();
-    if (active) {
-      this.activateSession(active);
-    }
+    // Every background terminal belongs to a (session, node); the hub routes an
+    // update/finish to the runtime that owns the session (an absent runtime
+    // means the session is not loaded — nothing to repaint).
+    this.backgroundHub.setHooks({
+      onUpdated: (owner) => this.runtimes.get(owner.sessionId)?.refreshBackgrounds(),
+      onFinish: (owner, task) => this.runtimes.get(owner.sessionId)?.onBackgroundFinished(owner, task),
+    });
+    // Runtimes are created on demand (`runtimeFor`), NOT for every stored
+    // session: a runtime builds its own agent history when it is constructed, and
+    // a profile can hold dozens of sessions — rebuilding every history at
+    // activation would cost startup time and memory for conversations nobody is
+    // looking at. An absent runtime is simply an idle session (nothing running).
     this.scheduleTranscriptBackfill();
     this.scheduleTitleBackfill();
   }
 
-  private getConfig(): {
-    apiKey: string;
-    model: string;
-    baseUrl: string;
-    maxTurns: number;
-    thinkingEffort: ThinkingEffort;
-    foldToolCalls: boolean;
-    foldThinking: boolean;
-    maxConcurrentSubagents: number;
-    maxLevel2Subagents: number;
-    saveSubAgentTranscripts: boolean;
-    saveSessionTranscripts: boolean;
-    subAgentTranscriptDir: string;
-    autoSessionTitles: boolean;
-  } {
+  getConfig(): HarnessConfig {
     const cfg = vscode.workspace.getConfiguration('agentHarness');
     const apiKey = (cfg.get<string>('apiKey') ?? '').trim() || (process.env.DEEPSEEK_API_KEY ?? '').trim();
     const model = cfg.get<string>('model') ?? DEFAULT_MODEL;
@@ -397,12 +303,14 @@ export class ChatViewProvider implements ControlHost {
    *   on the very next request. This is deliberately applied even while a turn is
    *   running: the options are read when each request is built.
    * - **`maxTurns`**, the **context window** and the **sub-agent pool limit** are
-   *   pushed to their live owners.
+   *   pushed to their live owners (every runtime).
    * - **`model`** / **`thinkingEffort`** are applied only when those two keys
-   *   actually changed: they are also set from the chat's dropdowns (via
-   *   `onSetModel` / `onSetThinkingEffort`), and an unrelated settings edit must
-   *   not clobber a dropdown selection. Like the dropdowns, they are skipped
-   *   while a turn is running.
+   *   actually changed, and then only to sessions that have **no pick of their
+   *   own**: P4 makes the selection per session, so a tab's explicit dropdown pick
+   *   wins over the setting (exactly like the old "dropdown pick shadows the
+   *   setting" rule, read per session — a pick anchored to the *previous* setting
+   *   value is retired, see `loadRuntimeConfig`). Like the dropdowns, the value is
+   *   skipped while that session is running.
    *
    * Every other `agentHarness.*` key is already read lazily at its point of use
    * — `autoSessionTitles`, `maxLevel2Subagents`, `saveSessionTranscripts`,
@@ -415,64 +323,57 @@ export class ChatViewProvider implements ControlHost {
     // context window and every image capability derived below.
     this.applyModelTable();
     this.client.configure({ apiKey: cfg.apiKey, baseUrl: cfg.baseUrl });
-    this.agent.setMaxTurns(cfg.maxTurns);
-    const contextWindow = this.getContextWindow(this.model);
-    if (contextWindow !== this.contextWindow) {
-      this.contextWindow = contextWindow;
-      this.postContext();
-    }
-    this.subAgentPool?.setMaxConcurrent(cfg.maxConcurrentSubagents);
     const modelChanged = !event || event.affectsConfiguration('agentHarness.model');
     const effortChanged = !event || event.affectsConfiguration('agentHarness.thinkingEffort');
-    if (modelChanged) {
-      this.onSetModel(cfg.model);
+    if (modelChanged || effortChanged) {
+      // A settings edit also moves the default for sessions created from now on
+      // (and retires a persisted record made against an older setting value).
+      // Recompute it *before* the loop below, so the sessions without a pick adopt
+      // exactly what a session created right now would start from.
+      const defaults = this.loadRuntimeConfig();
+      this.defaultModel = defaults.model;
+      this.defaultThinkingEffort = defaults.thinkingEffort;
     }
-    if (effortChanged) {
-      this.onSetThinkingEffort(cfg.thinkingEffort);
+    let skippedBusy = false;
+    for (const rt of this.runtimes.values()) {
+      rt.setMaxTurns(cfg.maxTurns);
+      rt.setSubAgentPoolLimit(cfg.maxConcurrentSubagents);
+      rt.recheckContextWindow();
+      if (modelChanged) {
+        if (rt.busy) {
+          skippedBusy = true;
+        } else {
+          // The runtime applies it only when this session has no effective pick.
+          rt.applyDefaultModel(this.defaultModel);
+        }
+      }
+      if (effortChanged) {
+        if (rt.busy) {
+          skippedBusy = true;
+        } else {
+          // Same rule as the model: an explicit per-tab effort wins.
+          rt.applyDefaultEffort(this.defaultThinkingEffort);
+        }
+      }
+      // Repaint the dropdowns and the fold defaults (the webview re-applies the
+      // latter to the cards already on screen).
+      rt.postConfig();
     }
-    if (this.busy && (modelChanged || effortChanged)) {
+    if (skippedBusy) {
       this.output.appendLine('[config] model/thinkingEffort change skipped: a turn is running');
     }
-    // Repaint the dropdowns and the fold defaults (the webview re-applies the
-    // latter to the cards already on screen).
-    this.postConfig();
     if (!event || event.affectsConfiguration('agentHarness.apiKey') || event.affectsConfiguration('agentHarness.baseUrl')) {
       // The credentials may be exactly what was missing: refresh the credit line.
-      void this.refreshBalance();
+      for (const rt of this.runtimes.values()) {
+        void rt.refreshBalance();
+      }
     }
     this.output.appendLine(
       `[config] settings changed live: key=${cfg.apiKey ? 'set' : 'missing'} baseUrl=${cfg.baseUrl} maxTurns=${cfg.maxTurns} maxSubagents=${cfg.maxConcurrentSubagents}`,
     );
   }
 
-  private buildAgent(): void {
-    const { apiKey, baseUrl, maxTurns } = this.getConfig();
-    // Model and effort were already resolved (incl. runtime persistence) in the
-    // constructor; apply them here so the client and agent are in sync.
-    this.contextWindow = this.getContextWindow(this.model);
-    this.client = new DeepSeekClient({ apiKey, baseUrl, model: this.model });
-    this.tools = new ToolRegistry();
-    // `search_transcripts` reads the harness's own transcript dumps; the roots
-    // depend on config + global storage, so hand it a live resolver.
-    this.tools.setTranscriptRoots(() => [this.transcriptRoot()]);
-    this.agent = new Agent(this.client, this.tools, (event) => this.handleAgentEvent(event), maxTurns);
-    this.agent.setModel(this.model);
-    this.agent.setThinkingEffort(this.thinkingEffort);
-    // The main agent can spawn sub-agents: hand it the provider's orchestrator.
-    this.agent.setSpawnHandler((args, signal) => this.handleSpawnAgents(args, signal));
-    // And it can resume a finished sub-agent with a follow-up message.
-    this.agent.setSendMessageHandler((args, signal) => this.handleSendAgentMessage(args, signal));
-    // And it can hand a self-contained task to a fresh session, which reports
-    // its answer back here (only the main agent may do this).
-    this.agent.setCanHop(true);
-    this.agent.setHopHandler((args) => Promise.resolve(this.handleHopSession(args)));
-    this.agent.setListNodeHandler(() => Promise.resolve(this.handleListNodes()));
-    // And it can rename the session (an explicit rename locks the title, so the
-    // automatic namer leaves it alone).
-    this.agent.setRenameSessionHandler((args) => Promise.resolve(this.handleRenameSession(args)));
-  }
-
-  private getContextWindow(model: string): number {
+  getContextWindow(model: string): number {
     // A row in `agentHarness.modelTable` is the most specific answer there is —
     // the user asked for that model explicitly, so it beats the global fallback.
     if (!isTableModel(model)) {
@@ -514,7 +415,7 @@ export class ChatViewProvider implements ControlHost {
    * knows it; anything else falls back to the default and says so. A stale id in
    * settings must not silently hide images or mis-size the context indicator.
    */
-  private resolveModel(candidate: string): string {
+  resolveModel(candidate: string): string {
     if (!candidate || isKnownModel(candidate)) {
       return candidate || DEFAULT_MODEL;
     }
@@ -524,105 +425,18 @@ export class ChatViewProvider implements ControlHost {
     return DEFAULT_MODEL;
   }
 
-  /**
-   * Install a new API history for the agent and re-baseline the turn slice in the
-   * same breath.
-   *
-   * `finishTurn` stores `agent.getMessages().slice(turnPrefixLen)`, so the basis
-   * and the array it is applied to must never drift apart. Every swap goes
-   * through here: a checkout (session switch, branch click, hop return, panel
-   * restore) can replace the history while a turn is streaming, and an unchecked
-   * numeric basis then slices from the wrong offset — storing ancestor history in
-   * the turn's node (the real session that produced the "1,283,056 tokens at 65%"
-   * 400: a node ended up with ~1,100 duplicated messages).
-   */
-  private setAgentMessages(messages: ChatMessage[]): void {
-    this.agent.setMessages(messages);
-    this.turnPrefixLen = messages.length;
-    this.turnPrefixTail = messages[messages.length - 1] ?? null;
-  }
-
-  /** Prompt size of the checked-out branch, taken from its latest turn's usage. */
-  private getLatestPromptTokens(): number {
-    const items = this.activePathItems();
-    for (let i = items.length - 1; i >= 0; i--) {
-      const item = items[i];
-      if (item.usage && typeof item.usage.prompt_tokens === 'number') {
-        return item.usage.prompt_tokens;
-      }
-    }
-    return 0;
-  }
-
-  private postContext(): void {
-    this.post({
-      type: 'context',
-      used: this.currentPromptTokens,
-      total: this.contextWindow,
-      model: this.model,
-    });
-  }
-
-  /** Token totals for the checked-out branch, derived from each turn's usage. */
-  private computeSessionStats(): {
-    totalTokens: number;
-    cacheHit: number;
-    cacheMiss: number;
-    cacheHitRate: number;
-    cacheKnown: boolean;
-  } {
-    let totalTokens = 0;
-    let cacheHit = 0;
-    let cacheMiss = 0;
-    for (const item of this.activePathItems()) {
-      if (!item.usage) continue;
-      totalTokens += item.usage.total_tokens || 0;
-      cacheHit += item.usage.prompt_cache_hit_tokens || 0;
-      cacheMiss += item.usage.prompt_cache_miss_tokens || 0;
-    }
-    const denom = cacheHit + cacheMiss;
-    const cacheKnown = denom > 0;
-    const cacheHitRate = cacheKnown ? (cacheHit / denom) * 100 : 0;
-    return { totalTokens, cacheHit, cacheMiss, cacheHitRate, cacheKnown };
-  }
-
-  private postSessionStats(): void {
-    this.post({ type: 'sessionStats', stats: this.computeSessionStats() });
+  /** The system prompt the active (last-focused) session would send next. */
+  systemPrompt(): string {
+    const rt = this.runtimes.get(this.activeSessionId);
+    return rt ? rt.systemPromptText() : Agent.systemPrompt(this.defaultModel, this.defaultThinkingEffort);
   }
 
   /**
-   * Fetch the account's wallet balance and push it to the webview. Best-effort:
-   * on failure (no key / network / off-API scope) we log to the output channel
-   * and leave whatever balance the UI already shows (falling back to "–"). This
-   * is account-level, so it is the same across sessions and is refreshed at the
-   * start and after each turn so the displayed credit stays current.
+   * The **default** model/effort: the persisted `agentHarness.runtimeConfig`
+   * record falling back to the settings. A session's own pick is layered on top
+   * of this by `effectiveModel` / `effectiveEffort` (P4) — this method only
+   * answers "what would a session with no pick start from?".
    */
-  private async refreshBalance(): Promise<void> {
-    try {
-      const balance: DeepSeekBalance = await this.client.getBalance();
-      this.post({ type: 'balance', balance });
-    } catch (err) {
-      this.output.appendLine(`[balance] ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
-
-  private postConfig(): void {
-    const cfg = this.getConfig();
-    this.post({
-      type: 'config',
-      model: this.model,
-      // The dropdown offers the vendored model plus whatever the user added in
-      // `agentHarness.modelTable`, and the image affordances follow the same
-      // list — no second copy of the catalog in the webview.
-      models: modelIds(),
-      visionModels: visionModelIds(),
-      thinkingEffort: this.thinkingEffort,
-      foldToolCalls: cfg.foldToolCalls,
-      foldThinking: cfg.foldThinking,
-    });
-  }
-
-  /** Effective model/effort = persisted runtime selection, falling back to settings. */
   private loadRuntimeConfig(): RuntimeConfig {
     const defaults = this.getConfig();
     const stored = this.storage.get<Partial<RuntimeConfig>>(CONFIG_KEY) ?? {};
@@ -644,38 +458,62 @@ export class ChatViewProvider implements ControlHost {
     return { model, thinkingEffort };
   }
 
-  private persistRuntimeConfig(): void {
+  /**
+   * The model/effort a session runs with (P4): its own pick when that pick still
+   * shadows the setting it was made under (`sessionModelPick`), else the persisted
+   * default above — which itself falls back to the `agentHarness.model` /
+   * `agentHarness.thinkingEffort` settings. Resolved here, once, and handed to the
+   * runtime at construction; the runtime keeps the live value from then on and
+   * writes a change back onto the session (`setModel` / `setThinkingEffort`).
+   */
+  private effectiveModel(session: AgentSession): string {
+    const pick = sessionModelPick(session, this.getConfig().model);
+    return pick ? this.resolveModel(pick) : this.defaultModel;
+  }
+
+  private effectiveEffort(session: AgentSession): ThinkingEffort {
+    return sessionEffortPick(session, this.getConfig().thinkingEffort) ?? this.defaultThinkingEffort;
+  }
+
+  /**
+   * Remember an explicit per-tab pick as the **default for future sessions**. P4
+   * moved the live selection onto the session itself (a runtime writes
+   * `session.model` / `session.effort` and persists that with the session), so
+   * this memento write is only the seed for sessions created later — it never
+   * touches an existing session's own choice.
+   */
+  persistRuntimeConfig(model: string, thinkingEffort: ThinkingEffort): void {
+    this.defaultModel = model;
+    this.defaultThinkingEffort = thinkingEffort;
     const cfg = this.getConfig();
     void this.storage.update(CONFIG_KEY, {
-      model: this.model,
-      thinkingEffort: this.thinkingEffort,
+      model,
+      thinkingEffort,
       modelFromSettings: cfg.model,
       effortFromSettings: cfg.thinkingEffort,
     } satisfies RuntimeConfig);
   }
 
-  /** True if the checked-out branch has any conversation beyond the system prompt. */
-  private hasHistory(): boolean {
-    return this.activePathItems().length > 0;
-  }
-
-  /** True if the checked-out branch's history carries any image content blocks. */
-  private activeSessionHasImages(): boolean {
-    const session = this.getActiveSession();
-    if (!session) {
-      return false;
+  /**
+   * The runtime for a session, created on demand and cached. Replaces the old
+   * `activateSession`: there is no "active session's agent" any more, every
+   * session keeps its own runtime for the whole window.
+   */
+  private runtimeFor(session: AgentSession): SessionRuntime {
+    let rt = this.runtimes.get(session.id);
+    if (!rt) {
+      rt = new SessionRuntime(
+        this,
+        session,
+        this.client,
+        this.effectiveModel(session),
+        this.effectiveEffort(session),
+        this.backgroundHub,
+      );
+      this.runtimes.set(session.id, rt);
+      this.onStateChanged?.();
     }
-    return pathMessages(session, session.activeNodeId).some(
-      (m) =>
-        m.role === 'user' &&
-        Array.isArray(m.content) &&
-        m.content.some((p) => p.type === 'image_url' || p.type === 'file'),
-    );
-  }
-
-  private postNotice(kind: 'warning' | 'info', text: string): void {
-    this.pushItem({ kind: 'notice', noticeKind: kind, text });
-    this.post({ type: 'notice', kind, text });
+    return rt;
   }
 
   // ---- Session management ----
@@ -699,10 +537,6 @@ export class ChatViewProvider implements ControlHost {
     }
     const active = this.sessions.find((s) => s.id === activeSessionId);
     this.activeSessionId = active ? active.id : this.sessions[0].id;
-    // Ensure a background-terminal registry exists for every session.
-    for (const s of this.sessions) {
-      this.createRegistryForSession(s.id);
-    }
     const nodes = this.sessions.reduce((n, s) => n + Object.keys(s.nodes).length, 0);
     perf(
       () =>
@@ -713,7 +547,7 @@ export class ChatViewProvider implements ControlHost {
     this.persist();
   }
 
-  private persist(): void {
+  persist(): void {
     const t0 = Date.now();
     const payload: StoredState = {
       version: STORED_STATE_VERSION,
@@ -736,8 +570,13 @@ export class ChatViewProvider implements ControlHost {
     const session = this.getActiveSession();
     const nodeCount = session ? Object.keys(session.nodes).length : 0;
     const msgCount = session ? pathMessages(session, session.activeNodeId).length : 0;
+    const items = session
+      ? session.activeNodeId
+        ? session.nodes[session.activeNodeId]?.displayItems.length ?? 0
+        : session.orphanItems.length
+      : 0;
     const extra =
-      `sessions=${this.sessions.length} nodes=${nodeCount} items=${this.displayItems.length} msgs=${msgCount}`;
+      `sessions=${this.sessions.length} nodes=${nodeCount} items=${items} msgs=${msgCount}`;
     const pending = this.storage.update(STORAGE_KEY, payload);
     // The control plane awaits this before handing over to a reboot, so a kill
     // right after a turn cannot lose the last write.
@@ -753,7 +592,7 @@ export class ChatViewProvider implements ControlHost {
     );
   }
 
-  /** The session currently shown in the (single) panel. */
+  /** The last focused tab's session id (persisted active session). */
   get currentSessionId(): string {
     return this.activeSessionId;
   }
@@ -762,19 +601,24 @@ export class ChatViewProvider implements ControlHost {
     return this.sessions.find((s) => s.id === this.activeSessionId);
   }
 
+  /** Notify the host (the sidebar) that some state it renders has changed. */
+  stateChanged(): void {
+    this.onStateChanged?.();
+  }
+
   /** Sidebar rows: one per session, newest update first. */
   getSessionTreeItems(): SessionTreeItem[] {
     return this.sessions
       .map((s) => {
-        const reg = this.sessionRegistries.get(s.id);
-        const runningBg = reg ? reg.runningCount() > 0 : false;
+        const rt = this.runtimes.get(s.id);
+        const runningBg = rt ? rt.hasRunningBackground() : false;
         return {
           id: s.id,
           title: s.title,
           updatedAt: s.updatedAt,
           nodeCount: Object.keys(s.nodes).length,
           active: s.id === this.activeSessionId,
-          busy: (s.id === this.activeSessionId ? this.busy : false) || runningBg,
+          busy: (rt ? rt.isRunning() : false) || runningBg,
         };
       })
       .sort((a, b) => b.updatedAt - a.updatedAt);
@@ -792,204 +636,8 @@ export class ChatViewProvider implements ControlHost {
       orphanItems: [],
     };
     this.sessions.push(session);
-    this.createRegistryForSession(session.id);
     this.activeSessionId = session.id;
     return session;
-  }
-
-  /**
-   * Create (or return the existing) background-terminal registry for a session,
-   * wiring the UI-refresh and completion-notification callbacks.
-   */
-  private createRegistryForSession(sessionId: string): BackgroundRegistry {
-    const existing = this.sessionRegistries.get(sessionId);
-    if (existing) {
-      return existing;
-    }
-    const reg = new BackgroundRegistry();
-    reg.setOnUpdated(() => {
-      if (sessionId === this.activeSessionId) {
-        this.postBackgrounds();
-      }
-    });
-    reg.setOnFinish((task) => this.onBackgroundFinished(sessionId, task));
-    this.sessionRegistries.set(sessionId, reg);
-    return reg;
-  }
-
-  private activateSession(session: AgentSession): void {
-    this.activeSessionId = session.id;
-    this.uploadController = null;
-    this.activeTurnNode = null;
-    this.turnPrefixLen = 0;
-    // A different conversation: any pending interruption notice belongs to the
-    // session we just left.
-    this.lastInterruptedNodeId = null;
-    this.agent.resetInterruptState();
-    // A fresh sub-agent pool + budget for the newly active session.
-    this.subAgentPool = new SubAgentPool(this.getConfig().maxConcurrentSubagents);
-    this.level2Counts.clear();
-    this.subAgentNoticeQueue.length = 0;
-    this.subAgentChildNotices.clear();
-    // Point the agent history and the transcript pointer at the checked-out node.
-    this.checkoutNode(session, session.activeNodeId);
-    // Point the tool registry at this session's background registry so
-    // exec_command and the background tools read the right one.
-    this.tools.setBackgroundRegistry(this.createRegistryForSession(session.id));
-    this.currentPromptTokens = this.getLatestPromptTokens();
-    this.setBusy(false);
-    this.lastStatus = '';
-    // The webview is repainted by the caller (postAllState) once the panel is
-    // ensured; here we only refresh the sidebar.
-    this.onStateChanged?.();
-    // Deliver any background-completion notice queued for this session (e.g. it
-    // finished while the agent was busy and the user switched away before the
-    // drain ran).
-    this.drainBackgroundQueue();
-  }
-
-  /**
-   * Check out a node: the agent's history becomes root→node and the transcript
-   * pointer moves to that node's items (or the session's orphan bucket when the
-   * session has no node yet). Callers are responsible for posting to the webview.
-   */
-  private checkoutNode(session: AgentSession, nodeId: string | null): void {
-    session.activeNodeId = nodeId;
-    this.setAgentMessages(this.buildPath(session, nodeId));
-    const node = nodeId ? session.nodes[nodeId] : undefined;
-    this.displayItems = node ? node.displayItems : session.orphanItems;
-  }
-
-  /** The flat API history of a branch: a fresh system prompt + the path messages. */
-  private buildPath(session: AgentSession, nodeId: string | null): ChatMessage[] {
-    const system: ChatMessage = {
-      role: 'system',
-      content: Agent.systemPrompt(this.model, this.thinkingEffort),
-    };
-    // sanitizeMessages returns a derived copy; it is never written back into the
-    // nodes, so the stored history keeps its original shape.
-    return Agent.sanitizeMessages([system, ...pathMessages(session, nodeId)]);
-  }
-
-  /** Every transcript item of the checked-out branch, in reading order. */
-  private activePathItems(): DisplayItem[] {
-    const session = this.getActiveSession();
-    if (!session) {
-      return [];
-    }
-    const items: DisplayItem[] = [...session.orphanItems];
-    for (const id of pathIds(session, session.activeNodeId)) {
-      const node = session.nodes[id];
-      if (node) {
-        items.push(...node.displayItems);
-      }
-    }
-    return items;
-  }
-
-  /**
-   * Check out another node (tree UI "click a block"). Blocked while the agent is
-   * busy or a background terminal is running, like every other session change.
-   */
-  private handleCheckout(nodeId: string): void {
-    if (this.busy || this.activeSessionHasRunningBackground()) {
-      this.postNotice(
-        'warning',
-        'Cannot switch branches while the agent or a background terminal is running.',
-      );
-      return;
-    }
-    const session = this.getActiveSession();
-    if (!session || !session.nodes[nodeId] || nodeId === session.activeNodeId) {
-      return;
-    }
-    this.checkoutNode(session, nodeId);
-    this.currentPromptTokens = this.getLatestPromptTokens();
-    // No `reset`/`tree`: the structure is unchanged, so the webview just repaints
-    // the active path in place (no tear-down → no blink), then pans to it.
-    this.postPath();
-    this.post({ type: 'panTo', id: nodeId });
-    this.postContext();
-    this.postSessionStats();
-  }
-
-  /** The node that owns the main agent's streaming: the active turn node while a
-   * turn runs, else the checked-out node. Sub-agents route their own events by
-   * `nodeId`, so this is the ONLY target for `nodeId`-less (main) deltas — it must
-   * never be a sub-agent sidecar, or the main reply would be drawn into it. */
-  private mainStreamNodeId(session: AgentSession | null | undefined): string | null {
-    return this.activeTurnNode?.id ?? session?.activeNodeId ?? null;
-  }
-
-  /** Structural summary of the session tree (no transcript items). */
-  /** The checked-out branch's transcript, grouped by node (for the tree view). */
-  private postPath(): void {
-    const session = this.getActiveSession();
-    if (!session) {
-      this.post({ type: 'path', ids: [], nodes: [] });
-      return;
-    }
-    const ids = pathIds(session, this.mainStreamNodeId(session));
-    const nodes = ids.map((id) => {
-      const node = session.nodes[id];
-      return {
-        id,
-        status: node.status,
-        items: node.displayItems.map(clipDisplayItem),
-      };
-    });
-    this.post({ type: 'path', ids, nodes });
-  }
-  private postTree(): void {
-    const session = this.getActiveSession();
-    const nodes = session
-      ? Object.values(session.nodes).map((node) => ({
-          id: node.id,
-          parentId: node.parentId,
-          children: node.children.slice(),
-          title: node.title,
-          status: node.status,
-          createdAt: node.createdAt,
-          preview: this.nodePreview(node),
-          usage: nodeUsage(node),
-          size: node.customSize ?? null,
-          kind: node.kind,
-          agentDepth: node.agentDepth,
-          agentStatus: node.agentStatus,
-          agentModel: node.agentModel,
-          agentWrite: node.agentWrite,
-          // Agent nodes carry their own transcript so they re-render after reload.
-          items: node.kind === 'agent' ? node.displayItems.map(clipDisplayItem) : undefined,
-        }))
-      : [];
-    this.post({
-      type: 'tree',
-      activeId: this.mainStreamNodeId(session),
-      rootId: session?.rootId ?? null,
-      nodes,
-    });
-  }
-
-  /** First line of the turn's answer, used as a collapsed card preview. */
-  private nodePreview(node: TreeNode): string {
-    for (let i = node.displayItems.length - 1; i >= 0; i--) {
-      const item = node.displayItems[i];
-      if (item.kind === 'assistant' && item.text) {
-        return item.text.split('\n')[0].trim().slice(0, 120);
-      }
-    }
-    return node.title.slice(0, 80);
-  }
-
-  /** Persist a user-resized card's bounds onto a node (drag-resize finished). */
-  private onSetNodeSize(id: string, w: number, h: number): void {
-    const session = this.getActiveSession();
-    const node = session?.nodes[id];
-    if (!node || !Number.isFinite(w) || !Number.isFinite(h) || w <= 0 || h <= 0) {
-      return;
-    }
-    node.customSize = { w, h };
-    this.persist();
   }
 
   // ---- Session titles (automatic + explicit) ----
@@ -1022,9 +670,7 @@ export class ChatViewProvider implements ControlHost {
       return; // bookkeeping only (same title, refreshed cooldown)
     }
     this.onStateChanged?.();
-    if (this.panel && this.panel.sessionId === session.id) {
-      this.panel.setTitle(this.panelTitle(session.id));
-    }
+    this.panels.setTitle(session.id, this.panelTitle(session.id));
   }
 
   /**
@@ -1046,7 +692,7 @@ export class ChatViewProvider implements ControlHost {
   }
 
   /** `rename_session` tool: an explicit, locking rename (main agent only). */
-  private handleRenameSession(args: Record<string, unknown>): string {
+  handleRenameSession(args: Record<string, unknown>): string {
     const title = typeof args.title === 'string' ? args.title.trim() : '';
     if (!title) {
       return 'Error: "title" is required.';
@@ -1113,7 +759,7 @@ export class ChatViewProvider implements ControlHost {
   }
 
   /** Queue a session for an automatic (re)title, if the gates allow it. */
-  private requestAutoTitle(session: AgentSession): void {
+  requestAutoTitle(session: AgentSession): void {
     if (!this.getConfig().autoSessionTitles) {
       return;
     }
@@ -1188,14 +834,14 @@ export class ChatViewProvider implements ControlHost {
     try {
       const { text, usage } = await this.client.complete({
         messages: buildTitleMessages(digest, session.title),
-        model: this.model,
+        model: this.defaultModel,
         maxTokens: TITLE_MAX_TOKENS,
         temperature: 0.3,
         signal: controller.signal,
       });
       title = sanitizeTitle(text, '');
       if (usage) {
-        this.outputLog(`[title] ${session.id} model=${this.model} tokens=${usage.total_tokens}`);
+        this.outputLog(`[title] ${session.id} model=${this.defaultModel} tokens=${usage.total_tokens}`);
       }
     } catch (err) {
       how = 'heuristic';
@@ -1295,7 +941,7 @@ export class ChatViewProvider implements ControlHost {
     try {
       const { text, usage } = await this.client.complete({
         messages: buildBatchTitleMessages(entries),
-        model: this.model,
+        model: this.defaultModel,
         maxTokens: TITLE_BATCH_MAX_TOKENS,
         temperature: 0.3,
         signal: controller.signal,
@@ -1334,20 +980,7 @@ export class ChatViewProvider implements ControlHost {
     return { renamed, ok: true };
   }
 
-  // ---- Sub-agents ----
-
-  /** Tools a sub-agent may use, by `write` flag. */
-  private subAgentTools(write: boolean): ToolRegistry {
-    const read = ['read_file', 'list_dir', 'search_files', 'search_transcripts'];
-    const writeTools = ['write_file', 'replace_in_file', 'exec_command'];
-    if (write) {
-      return this.tools.subset([...read, ...writeTools]);
-    }
-    // Read-only sub-agents: the write tools stay registered with a rejecting
-    // executor (defense-in-depth) but are hidden from the model's tool list, so
-    // it does not spend a round proposing a tool it can never use.
-    return this.tools.subset([...read, ...writeTools]).withBlocked(writeTools).withHidden(writeTools);
-  }
+  // ---- Transcripts ----
 
   /**
    * Root folder holding every session's transcript dumps (`<root>/<sessionId>/`).
@@ -1356,7 +989,7 @@ export class ChatViewProvider implements ControlHost {
    * resolving against the harness root (the workspace folder, or the scratch
    * folder when no folder is open).
    */
-  private transcriptRoot(): string {
+  transcriptRoot(): string {
     const configured = this.getConfig().subAgentTranscriptDir;
     if (configured) {
       return resolvePath(configured);
@@ -1368,13 +1001,8 @@ export class ChatViewProvider implements ControlHost {
   }
 
   /** One session's transcript folder (main-agent turns + sub-agent runs). */
-  private transcriptDir(sessionId: string): string {
+  transcriptDir(sessionId: string): string {
     return path.join(this.transcriptRoot(), sessionId);
-  }
-
-  /** " · transcript: <path>" suffix for a sub-agent completion note ('' when off). */
-  private transcriptNote(node: TreeNode): string {
-    return node.agentTranscript ? ` · transcript: ${node.agentTranscript}` : '';
   }
 
   /**
@@ -1384,7 +1012,7 @@ export class ChatViewProvider implements ControlHost {
    * conversation. Mirrors the node: a turn that a later injected notice turn
    * reuses is rewritten. Never throws into the agent loop.
    */
-  private dumpSessionTranscript(node: TreeNode, session: AgentSession, status: TurnStatus): void {
+  dumpSessionTranscript(node: TreeNode, session: AgentSession, status: TurnStatus): void {
     if (!this.getConfig().saveSessionTranscripts || node.kind === 'agent') {
       return;
     }
@@ -1403,10 +1031,10 @@ export class ChatViewProvider implements ControlHost {
         parentId: node.parentId,
         pathIds: pathIds(session, node.id),
         title: node.title,
-        model: this.model,
+        model: this.runtimes.get(session.id)?.model ?? this.defaultModel,
         status,
         prompt,
-        summary: this.nodePreview(node),
+        summary: this.summaryPreview(node),
         startedAt: node.createdAt,
         endedAt: Date.now(),
         messages,
@@ -1488,11 +1116,11 @@ export class ChatViewProvider implements ControlHost {
         sessionId: session.id,
         depth: node.agentDepth ?? 1,
         write: !!node.agentWrite,
-        model: node.agentModel || this.model,
+        model: node.agentModel || this.runtimes.get(session.id)?.model || this.defaultModel,
         status: node.agentStatus ?? node.status,
         resumed: false,
         instruction: node.title,
-        summary: node.agentSummary ?? this.nodePreview(node),
+        summary: node.agentSummary ?? this.summaryPreview(node),
         // Both timestamps are the node's creation time (only that survives in
         // the tree); `backfilled: true` marks the dump as reconstructed.
         startedAt: node.createdAt,
@@ -1512,10 +1140,10 @@ export class ChatViewProvider implements ControlHost {
       parentId: node.parentId,
       pathIds: pathIds(session, node.id),
       title: node.title,
-      model: this.model,
+      model: this.runtimes.get(session.id)?.model ?? this.defaultModel,
       status: node.status,
       prompt,
-      summary: this.nodePreview(node),
+      summary: this.summaryPreview(node),
       startedAt: node.createdAt,
       endedAt: node.createdAt,
       messages: node.messages,
@@ -1530,7 +1158,7 @@ export class ChatViewProvider implements ControlHost {
    * Never throws into the agent loop: a failure just leaves the node without a
    * transcript path.
    */
-  private writeSubAgentTranscript(
+  writeSubAgentTranscript(
     job: SubAgentJob,
     subAgent: Agent,
     status: string,
@@ -1544,7 +1172,7 @@ export class ChatViewProvider implements ControlHost {
     const first = all[0];
     const systemPrompt =
       first && first.role === 'system' && typeof first.content === 'string' ? first.content : '';
-    const sessionId = job.sessionId ?? this.getActiveSession()?.id ?? 'unknown';
+    const sessionId = job.sessionId ?? this.activeSessionId ?? 'unknown';
     try {
       const ref = writeSubAgentTranscript({
         dir: this.transcriptDir(sessionId),
@@ -1552,7 +1180,7 @@ export class ChatViewProvider implements ControlHost {
         sessionId,
         depth: job.node.agentDepth ?? 1,
         write: job.spec.write,
-        model: job.spec.model || this.model,
+        model: job.spec.model || job.node.agentModel || this.runtimes.get(sessionId)?.model || this.defaultModel,
         status,
         resumed: !!job.resume,
         instruction: job.spec.instruction,
@@ -1571,749 +1199,29 @@ export class ChatViewProvider implements ControlHost {
     }
   }
 
-  /** The main agent spawned sub-agents: delegates to the shared orchestrator. */
-  private handleSpawnAgents(args: Record<string, unknown>, signal: AbortSignal): Promise<string> {
-    // Prefer the running turn's node; fall back to the checked-out node so a
-    // provider-injected turn (e.g. an async batch notice) can still spawn.
-    const parent =
-      this.activeTurnNode ?? (this.getActiveSession()?.nodes[this.getActiveSession()!.activeNodeId ?? ''] ?? null);
-    if (!parent) {
-      return Promise.resolve('Error: no active turn to attach sub-agents to.');
-    }
-    return this.spawnChildren(parent, args, signal);
-  }
-
-  /** A sub-agent spawned its own (level-2) sub-agents. */
-  private handleSubAgentSpawn(parent: TreeNode, args: Record<string, unknown>, signal: AbortSignal): Promise<string> {
-    return this.spawnChildren(parent, args, signal);
-  }
-
-  /** The main agent resumed a finished sub-agent via `send_agent_message`
-   * (trusted: it may raise or lower the target's `write`). */
-  private handleSendAgentMessage(args: Record<string, unknown>, signal: AbortSignal): Promise<string> {
-    const session = this.getActiveSession();
-    if (!session) {
-      return Promise.resolve('Error: no active session.');
-    }
-    const id = String(args.id ?? '');
-    const node = session.nodes[id];
-    if (!node || node.kind !== 'agent') {
-      return Promise.resolve(`Error: no sub-agent with id "${id}".`);
-    }
-    let write = node.agentWrite ?? false;
-    if (typeof args.write === 'boolean') {
-      write = args.write;
-    }
-    const override = this.parseModelOverride(args.model);
-    if (override.error) {
-      return Promise.resolve(override.error);
-    }
-    return this.resumeSubAgent(session, node, String(args.message ?? ''), String(args.mode ?? 'sync'), write, override.model, signal);
-  }
-
-  /**
-   * A depth-1 sub-agent resumed one of its own finished sub-agents
-   * (`send_agent_message` for a writable worker, `send_readonly_agent_message`
-   * for a read-only one). Least privilege: the target must be a **direct child**
-   * of the caller, and the resumed run's `write` is the AND of the caller's and
-   * the target's — a sub-agent can never raise a child's permission.
-   */
-  private handleSubAgentSendMessage(parent: TreeNode, args: Record<string, unknown>, signal: AbortSignal): Promise<string> {
-    const session = this.getActiveSession();
-    const id = String(args.id ?? '');
-    const node = session?.nodes[id];
-    if (!session || !node || node.kind !== 'agent') {
-      return Promise.resolve(`Error: no sub-agent with id "${id}".`);
-    }
-    if (node.parentId !== parent.id) {
-      return Promise.resolve('Error: you may only message a sub-agent that you spawned yourself.');
-    }
-    const override = this.parseModelOverride(args.model);
-    if (override.error) {
-      return Promise.resolve(override.error);
-    }
-    const write = parent.agentWrite === true && node.agentWrite === true;
-    return this.resumeSubAgent(session, node, String(args.message ?? ''), String(args.mode ?? 'sync'), write, override.model, signal);
-  }
-
-  /** Validate an optional `model` override; returns `{ model }` or `{ error }`. */
-  private parseModelOverride(value: unknown): { model?: string; error?: string } {
-    if (typeof value !== 'string' || !value) {
-      return {};
-    }
-    if (!isKnownModel(value)) {
-      return { error: `Error: unknown model "${value}".` };
-    }
-    return { model: value };
-  }
-
-  /** Shared resume path for `send_agent_message` / `send_readonly_agent_message`. */
-  private resumeSubAgent(
-    session: AgentSession,
-    node: TreeNode,
-    message: string,
-    mode: string,
-    write: boolean,
-    model: string | undefined,
-    signal: AbortSignal,
-  ): Promise<string> {
-    if (!message) {
-      return Promise.resolve('Error: a follow-up "message" is required.');
-    }
-    if (mode !== 'sync' && mode !== 'async') {
-      return Promise.resolve(`Error: invalid mode "${mode}". Use "sync" or "async".`);
-    }
-    if (this.runningSubAgents.has(node.id)) {
-      return Promise.resolve(
-        'Error: that sub-agent is still running. Wait for it to finish (or kill it) before sending a follow-up.',
-      );
-    }
-    const effectiveModel = model ?? node.agentModel ?? this.model;
-    node.agentWrite = write;
-    node.agentModel = effectiveModel;
-    const job: SubAgentJob = {
-      node,
-      spec: { instruction: message, write, model: effectiveModel !== this.model ? effectiveModel : undefined },
-      resume: true,
-      sessionId: session.id,
-    };
-    if (mode === 'async') {
-      void this.runSubAgent(job, signal).then((r) => this.deliverResumeAsync(node, r), () => {});
-      return Promise.resolve(JSON.stringify({ resumed: true, id: node.id, async: true }));
-    }
-    return this.runSubAgent(job, signal).then((r) =>
-      JSON.stringify({
-        resumed: true,
-        id: node.id,
-        ok: r.ok,
-        summary: r.summary,
-        model: r.model,
-        transcript: node.agentTranscript,
-        stats: summarizeTranscript(node.messages),
-      }),
-    );
-  }
-
-  /** Async resume: deliver the resumed sub-agent's outcome to whoever owns it —
-   * the main agent (a card + one notice) or a sub-agent parent (queued/auto-resumed). */
-  private deliverResumeAsync(node: TreeNode, result: { ok: boolean; summary: string; model?: string }): void {
-    const parent = this.getActiveSession()?.nodes[node.parentId ?? ''] ?? null;
-    if (!parent) {
-      return;
-    }
-    const cardText = `子代理 #${node.id.slice(-6)} ${result.ok ? '完成' : '失败'}: ${result.summary || '(no summary)'}${this.transcriptNote(node)}`;
-    parent.displayItems.push({
-      kind: 'background',
-      id: `sub-msg-${node.id}`,
-      name: '子代理完成',
-      content: cardText,
-      doneText: '子代理完成',
-    });
-    this.post({
-      type: 'backgroundNotice',
-      item: { id: `sub-msg-${node.id}`, name: '子代理完成', doneText: '子代理完成', content: cardText },
-    });
-    if (parent.kind === 'agent') {
-      // The owner is a sub-agent: hand it the result the same way an async child
-      // batch is handed over (queued for its next finish, or auto-resumed), so the
-      // notice is never injected as a main-agent turn bound to a sub-agent node.
-      this.queueSubAgentChildNotice(parent, [{ ok: result.ok, summary: result.summary, node }]);
-    } else {
-      this.subAgentNoticeQueue.push({ nodeId: parent.id, summary: cardText, status: 'done', count: 1 });
-      this.scheduleSubAgentDrain();
-    }
-    this.persist();
-  }
-
-  /**
-   * Create agent child nodes under `parent`, run them (in parallel, pool-limited
-   * for level-1), and return the spawn result. `sync` blocks and returns the
-   * summaries; `async` returns immediately and delivers per-job results as an
-   * injected notification to the parent when idle.
-   */
-  private async spawnChildren(parent: TreeNode, args: Record<string, unknown>, signal: AbortSignal): Promise<string> {
-    const session = this.getActiveSession();
-    if (!session) {
-      return 'Error: no active session.';
-    }
-    // Capture the checked-out node BEFORE attachNode below mutates it, so a spawn
-    // can restore it even when the spawn's `parent` is itself a sub-agent.
-    const prevActive = session.activeNodeId;
-    const rawAgents = Array.isArray(args.agents) ? args.agents : [];
-    if (rawAgents.length === 0) {
-      return 'Error: spawn_agents requires a non-empty "agents" array.';
-    }
-    const mode = String(args.mode ?? 'sync');
-    if (mode !== 'sync' && mode !== 'async') {
-      return `Error: invalid mode "${mode}". Use "sync" or "async".`;
-    }
-    const childDepth = (parent.agentDepth ?? 0) + 1;
-    // Defense-in-depth: a read-only sub-agent must never create a writable child,
-    // even if a spawn call somehow reaches the provider.
-    const parentReadOnly = parent.kind === 'agent' && parent.agentWrite === false;
-    if (childDepth > 2) {
-      return 'Error: a sub-sub-sub-agent is not allowed (max sub-agent depth is 2).';
-    }
-    // Level-2 budget: per-parent count.
-    if (childDepth === 2) {
-      const used = this.level2Counts.get(parent.id) ?? 0;
-      const budget = this.getConfig().maxLevel2Subagents;
-      if (rawAgents.length > Math.max(0, budget - used)) {
-        return `Error: this sub-agent may start at most ${budget} sub-sub-agents (${used} already started).`;
-      }
-      this.level2Counts.set(parent.id, used + rawAgents.length);
-    }
-
-    // Build a node + spec per task.
-    const jobs: SubAgentJob[] = [];
-    for (const raw of rawAgents) {
-      const spec = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
-      const instruction = String(spec.instruction ?? '');
-      const write = parentReadOnly ? false : spec.write === true;
-      const model = typeof spec.model === 'string' ? spec.model : undefined;
-      if (!instruction) {
-        return 'Error: each agent spec requires an "instruction".';
-      }
-      if (model && !isKnownModel(model)) {
-        return `Error: unknown model "${model}".`;
-      }
-      const node = createNode(newId(), parent.id, `子代理: ${instruction.slice(0, 32)}`, 'running');
-      node.kind = 'agent';
-      node.agentDepth = childDepth;
-      node.agentStatus = 'running';
-      node.agentModel = model || this.model;
-      node.agentWrite = write;
-      node.children = [];
-      node.displayItems.push({ kind: 'user', text: instruction });
-      attachNode(session, node);
-      jobs.push({ spec: { instruction, write, model }, node, sessionId: session.id });
-    }
-    // Restore the checked-out node BEFORE repainting the tree: attachNode moved it
-    // to the last agent child, and postTree derives activeId from it. The active
-    // node must always be a real conversational node — the main turn node while a
-    // turn runs, otherwise the user's checkout — NEVER a sub-agent sidecar.
-    // Restoring to `parent.id` broke nested spawns (where parent is itself a
-    // sub-agent), which pinned messagesEl to that sub-agent card and let the main
-    // agent's reply leak into the sub-agent's window.
-    const streamTarget = this.activeTurnNode?.id ?? prevActive ?? parent.id;
-    if (session.activeNodeId !== streamTarget) {
-      session.activeNodeId = streamTarget;
-    }
-    this.postTree();
-
-    if (mode === 'async') {
-      const mainParent = parent.id === this.activeTurnNode?.id;
-      const tasks = jobs.map((job) => {
-        const run = () => this.runSubAgent(job, signal);
-        return (childDepth === 1 && this.subAgentPool ? this.subAgentPool.withSlot(run) : run()).then((result) => ({ job, result }));
-      });
-      // Notify the parent once the whole batch settles, so it reacts a single time.
-      void Promise.allSettled(tasks).then((settled) => {
-        const list = settled.map((s, i) =>
-          s.status === 'fulfilled' ? s.value : { job: jobs[i], result: { ok: false, summary: 'cancelled' } },
-        );
-        this.onAsyncBatchDone(mainParent, parent, list.map((l) => ({ ...l.result, node: l.job.node })));
-      });
-      return JSON.stringify({
-        spawned: jobs.length,
-        async: true,
-        ids: jobs.map((j) => j.node.id),
-        transcriptDir: this.transcriptDir(session.id),
-      });
-    }
-
-    const runAll = async () => {
-      const results = await Promise.all(
-        jobs.map((job) => (childDepth === 1 && this.subAgentPool ? this.subAgentPool.withSlot(() => this.runSubAgent(job, signal)) : this.runSubAgent(job, signal))),
-      );
-      return {
-        results: results.map((r, i) => ({
-          agentNodeId: jobs[i].node.id,
-          transcript: jobs[i].node.agentTranscript,
-          stats: summarizeTranscript(jobs[i].node.messages),
-          ...r,
-        })),
-      };
-    };
-    return JSON.stringify(await runAll());
-  }
-
-  /** Run one sub-agent to completion and resolve its result. When `resume` is set,
-   * the sub-agent's stored conversation is prepended so a follow-up continues it. */
-  private runSubAgent(
-    job: SubAgentJob,
-    signal: AbortSignal,
-  ): Promise<{ ok: boolean; summary: string; model?: string }> {
-    return new Promise((resolve) => {
-      const abort = new AbortController();
-      const onAbort = () => abort.abort();
-      signal.addEventListener('abort', onAbort, { once: true });
-
-      const startedAt = Date.now();
-      const subTools = this.subAgentTools(job.spec.write);
-      let finished = false;
-      let subAgent: Agent | null = null;
-      const finish = (status: 'done' | 'killed' | 'error', summary: string) => {
-        if (finished) return;
-        finished = true;
-        signal.removeEventListener('abort', onAbort);
-        this.runningSubAgents.delete(job.node.id);
-        job.node.agentStatus = status;
-        job.node.status = status === 'done' ? 'done' : status === 'error' ? 'error' : 'interrupted';
-        job.node.agentSummary = summary;
-        // Persist the sub-agent's conversation (minus the synthesized system prompt)
-        // so a later send_agent_message (or an async child-notice resume) can
-        // continue it, even across an extension-host restart.
-        if (subAgent) {
-          job.node.messages = subAgent.getMessages().filter((m) => m.role !== 'system');
-          // …and dump the same conversation to disk (JSONL) so the *caller* can
-          // read the full tool-call history it cannot see in the summary.
-          job.node.agentTranscript = this.writeSubAgentTranscript(job, subAgent, status, summary, startedAt);
-        }
-        this.post({ type: 'agentDone', id: job.node.id, status, summary });
-        this.persist();
-        // This sub-agent (depth-1) may have async depth-2 results queued while it ran.
-        this.flushSubAgentChildNotices(job.node);
-        resolve({ ok: status === 'done', summary, model: job.spec.model || this.model });
-      };
-
-      const sub = new Agent(this.client, subTools, (event) => this.handleSubAgentEvent(job.node, event, finish), this.getConfig().maxTurns);
-      subAgent = sub;
-      sub.setModel(job.spec.model || this.model);
-      sub.setThinkingEffort(this.thinkingEffort);
-      // Depth is hard-capped at 2, so only a depth-1 sub-agent may fan out. A
-      // writable one gets `spawn_agents` (children may write); a read-only one
-      // gets `spawn_readonly_agents` instead, whose args cannot express
-      // `write:true` — so it keeps read-only parallelism without an escalation
-      // path. `setCanSpawn*` decides which spawn/message tools are advertised to
-      // the model (see `Agent.getTools`);
-      // `Agent.executeToolCall` returns a clear error if they are called anyway.
-      const depth = job.node.agentDepth ?? 1;
-      const canSpawn = depth < 2 && job.spec.write;
-      const canSpawnReadOnly = depth < 2 && !job.spec.write;
-      sub.setCanSpawn(canSpawn);
-      sub.setCanSpawnReadOnly(canSpawnReadOnly);
-      if (canSpawn || canSpawnReadOnly) {
-        sub.setSpawnHandler((args2, sig2) => this.handleSubAgentSpawn(job.node, args2, sig2));
-        // Resume of its own children. The provider's sub-agent path enforces
-        // least privilege: target must be a direct child, and its write
-        // permission is capped by the caller's.
-        sub.setSendMessageHandler((args2, sig2) => this.handleSubAgentSendMessage(job.node, args2, sig2));
-      }
-      const effectiveModel = job.spec.model || this.model;
-      const system = Agent.subAgentSystemPrompt(effectiveModel, this.thinkingEffort, depth, job.spec.write);
-      // Lean system prompt (not the full main prompt/AGENTS.md) + dispatched note.
-      // On a resume, prepend the stored conversation so the follow-up continues
-      // where the sub-agent left off.
-      sub.setMessages(
-        job.resume
-          ? Agent.sanitizeMessages([{ role: 'system', content: system }, ...(job.node.messages ?? [])])
-          : [{ role: 'system', content: system }],
-      );
-      job.node.agentStatus = 'running';
-      job.node.status = 'running';
-      if (job.resume) {
-        // The follow-up becomes a new user card in this sub-agent's transcript.
-        job.node.displayItems.push({ kind: 'user', text: job.spec.instruction });
-      }
-      this.runningSubAgents.set(job.node.id, { agent: sub, abort });
-      this.post({ type: 'agentStart', id: job.node.id, depth, model: effectiveModel, write: job.spec.write });
-      void sub.sendUserMessage(job.spec.instruction);
-    });
-  }
-
-  /**
-   * Async mode: the depth-1 sub-agent's own (depth-2) sub-agents finished while
-   * it was still running. If the parent is done we resume it with the notification
-   * so it can react; if it is still running we leave the notice queued and deliver
-   * it at the parent's next finish. This is the "parent receives its own children's
-   * results" counterpart to the main agent's async delivery.
-   */
-  private queueSubAgentChildNotice(parent: TreeNode, results: Array<{ ok: boolean; summary: string; node: TreeNode }>): void {
-    const lines = results.map(
-      (r) => `子代理 #${r.node.id.slice(-6)} ${r.ok ? '完成' : '失败'}: ${r.summary || '(no summary)'}${this.transcriptNote(r.node)}`,
-    );
-    const notice = `[子代理批次] ${results.length} 个子代理完成\n${lines.join('\n')}`;
-    if (this.runningSubAgents.has(parent.id)) {
-      // Parent still working: deliver when it reaches a rest point (its finish).
-      const q = this.subAgentChildNotices.get(parent.id) ?? [];
-      q.push({ message: notice });
-      this.subAgentChildNotices.set(parent.id, q);
-      return;
-    }
-    // Parent already finished: resume it so it can react to its children.
-    const abort = new AbortController();
-    void this.runSubAgent(
-      { node: parent, spec: { instruction: notice, write: parent.agentWrite ?? false, model: undefined }, resume: true, sessionId: this.getActiveSession()?.id },
-      abort.signal,
-    );
-  }
-
-  /** Deliver queued async child results to a sub-agent that just finished. */
-  private flushSubAgentChildNotices(node: TreeNode): void {
-    const queued = this.subAgentChildNotices.get(node.id);
-    if (!queued || queued.length === 0) {
-      return;
-    }
-    const notice = queued.shift()!;
-    if (queued.length === 0) {
-      this.subAgentChildNotices.delete(node.id);
-    }
-    if (this.runningSubAgents.has(node.id)) {
-      // A newer run already owns this node; leave the notice for it.
-      return;
-    }
-    const abort = new AbortController();
-    void this.runSubAgent(
-      { node, spec: { instruction: notice.message, write: node.agentWrite ?? false, model: undefined }, resume: true, sessionId: this.getActiveSession()?.id },
-      abort.signal,
-    );
-  }
-
-  /** Route a sub-agent's events to its own node (streaming carries a nodeId). */
-  private handleSubAgentEvent(node: TreeNode, event: AgentEvent, finish: (status: 'done' | 'killed' | 'error', summary: string) => void): void {
-    const id = node.id;
-    const items = node.displayItems;
-    switch (event.type) {
-      case 'streamDelta':
-        this.commitSubText(items, event.content);
-        this.post({ type: 'delta', text: event.content, nodeId: id });
-        break;
-      case 'reasoningDelta':
-        this.commitSubThinking(items, event.content);
-        this.post({ type: 'thinkingDelta', text: event.content, nodeId: id });
-        break;
-      case 'toolStart':
-        this.commitSubTool(items, event.id, event.name, event.args);
-        this.post({ type: 'toolStart', id: event.id, name: event.name, args: clipForUi(event.args, 8 * 1024), index: event.index, nodeId: id });
-        break;
-      case 'toolEnd':
-        this.commitSubToolResult(items, event.id, event.content);
-        this.post({ type: 'toolEnd', id: event.id, name: event.name, content: clipForUi(event.content), nodeId: id });
-        break;
-      case 'usage':
-        this.commitSubUsage(items, event.usage);
-        this.post({ type: 'usage', usage: event.usage, nodeId: id });
-        break;
-      case 'status':
-        break;
-      case 'done':
-        finish('done', this.subAgentSummary(items));
-        break;
-      case 'interrupted':
-        finish('killed', 'interrupted');
-        break;
-      case 'error':
-        finish('error', event.message);
-        break;
-      default:
-        break;
-    }
-  }
-
-  // ---- Sub-agent displayItems commits (kept in sync with the main handler) ----
-  /** Prefer the last substantial assistant answer for the sub-agent summary. */
-  private subAgentSummary(items: DisplayItem[]): string {
-    for (let i = items.length - 1; i >= 0; i--) {
-      const item = items[i];
-      if (item.kind === 'assistant' && item.text && item.text.trim().length > 10) {
-        return item.text.trim();
+  /** First line of a turn's answer, used as a collapsed-card / transcript summary. */
+  private summaryPreview(node: TreeNode): string {
+    for (let i = node.displayItems.length - 1; i >= 0; i--) {
+      const item = node.displayItems[i];
+      if (item.kind === 'assistant' && item.text) {
+        return item.text.split('\n')[0].trim().slice(0, 120);
       }
     }
-    const last = items[items.length - 1];
-    return last && last.kind === 'assistant' && last.text ? last.text.trim() : 'done';
+    return node.title.slice(0, 80);
   }
 
-  private commitSubText(items: DisplayItem[], text: string): void {
-    const last = items[items.length - 1];
-    if (last && last.kind === 'assistant' && !last.error) {
-      last.text = (last.text ?? '') + text;
-    } else {
-      items.push({ kind: 'assistant', text });
-    }
-  }
-
-  private commitSubThinking(items: DisplayItem[], text: string): void {
-    const last = items[items.length - 1];
-    if (last && last.kind === 'assistant' && !last.error) {
-      last.thinking = (last.thinking ?? '') + text;
-    } else {
-      items.push({ kind: 'assistant', thinking: text });
-    }
-  }
-
-  private commitSubTool(items: DisplayItem[], id: string, name: string, args: string): void {
-    items.push({ kind: 'tool', id, name, args: clipForUi(args, 8 * 1024), status: 'running' });
-  }
-
-  private commitSubToolResult(items: DisplayItem[], id: string, content: string): void {
-    const item = items.find((it) => it.kind === 'tool' && it.id === id);
-    if (item) {
-      item.status = 'done';
-      item.content = clipForUi(content);
-    }
-  }
-
-  private commitSubUsage(items: DisplayItem[], usage: Usage): void {
-    const last = items[items.length - 1];
-    if (last && (last.kind === 'assistant' || last.kind === 'tool') && !last.error) {
-      last.usage = usage;
-    }
-  }
-
-  /** Individual kill of a running sub-agent (from the webview Kill button). */
-  private onKillAgent(id: string): void {
-    const entry = this.runningSubAgents.get(id);
-    if (!entry) {
-      return;
-    }
-    entry.abort.abort();
-    entry.agent.cancel();
-  }
-
-  /** Clean up a finished/killed sub-agent (no-op guard for stale kills). */
-  private onSubAgentDone(node: TreeNode, result: { ok: boolean; summary: string }): void {
-    if (node.agentStatus === 'running') {
-      node.agentStatus = result.ok ? 'done' : 'killed';
-      node.agentSummary = result.summary;
-      this.post({ type: 'agentDone', id: node.id, status: node.agentStatus, summary: result.summary });
-      this.persist();
-    }
-  }
-
-  /** Dump a layout diagnostic (overlapping cards + tree connections) to the log. */
-  private logLayoutDiagnostic(nodes: unknown, overlaps: unknown, connections: unknown, force: unknown): void {
-    const out = this.output;
-    out.appendLine(force ? '[layout] manual diagnostic:' : '[layout] overlaps detected (auto):');
-    if (Array.isArray(overlaps)) {
-      for (const o of overlaps) {
-        if (o && typeof o === 'object') {
-          const oo = o as { a?: string; b?: string; ta?: string; tb?: string; over?: number };
-          out.appendLine(`[layout] OVERLAP ${oo.a}("${oo.ta}") × ${oo.b}("${oo.tb}") area=${oo.over}`);
-        }
-      }
-    }
-    if (Array.isArray(nodes)) {
-      for (const n of nodes) {
-        if (n && typeof n === 'object') {
-          const nn = n as { id?: string; kind?: string; parent?: string; title?: string; x?: number; y?: number; w?: number; h?: number };
-          out.appendLine(`[layout] NODE ${nn.id} kind=${nn.kind} parent=${nn.parent} "${nn.title}" x=${nn.x} y=${nn.y} ${nn.w}x${nn.h}`);
-        }
-      }
-    }
-    if (Array.isArray(connections)) {
-      for (const c of connections) {
-        if (c && typeof c === 'object') {
-          const cc = c as { parent?: string; child?: string };
-          out.appendLine(`[layout] EDGE ${cc.parent} -> ${cc.child}`);
-        }
-      }
-    }
-  }
-
-  /**
-   * Async mode, all sub-agents of the batch settled: push one clearly-separated
-   * completion card into the parent node (like a background terminal card) and
-   * deliver one combined notice so the main agent reacts a single time. All
-   * still belongs to the single parent node.
-   */
-  private onAsyncBatchDone(mainParent: boolean, parent: TreeNode, results: Array<{ ok: boolean; summary: string; node: TreeNode }>): void {
-    if (!mainParent) {
-      // The parent is a sub-agent: deliver its children's completion to it so it
-      // can react (S2). It may still be running; queue or resume accordingly.
-      this.queueSubAgentChildNotice(parent, results);
-      return;
-    }
-    const lines = results.map((r) => `子代理 #${r.node.id.slice(-6)} ${r.ok ? '完成' : '失败'}: ${r.summary || '(no summary)'}${this.transcriptNote(r.node)}`);
-    const cardText = lines.join('\n');
-    const doneText = `${results.length} 个子代理完成`;
-    // 1. A dedicated card at the end of the main node (visual separation).
-    parent.displayItems.push({ kind: 'background', id: `sub-aware-${parent.id}`, name: '子代理完成', content: cardText, doneText });
-    this.post({ type: 'backgroundNotice', item: { id: `sub-${parent.id}`, name: '子代理完成', doneText, content: cardText } });
-    // 2. One combined notice → the main agent answers once.
-    this.subAgentNoticeQueue.push({ nodeId: parent.id, summary: cardText, status: 'done', count: results.length });
-    this.scheduleSubAgentDrain();
-    this.persist();
-  }
-
-  private scheduleSubAgentDrain(): void {
-    if (this.busy) {
-      return;
-    }
-    if (this.lastSubAgentDrain != null) {
-      return;
-    }
-    this.lastSubAgentDrain = setTimeout(() => {
-      this.lastSubAgentDrain = null;
-      this.drainSubAgentNotices();
-    }, 75);
-  }
-
-  /** When the main agent is idle, deliver queued async sub-agent results. */
-  private drainSubAgentNotices(): void {
-    if (this.disposed || this.busy) {
-      return;
-    }
-    // The agent's `finally` hasn't reset `isRunning` yet when this is called from
-    // the `done` callback — sendUserMessage would drop the notice. Defer a tick.
-    if (this.agent.running) {
-      setTimeout(() => this.drainSubAgentNotices(), 0);
-      return;
-    }
-    const session = this.getActiveSession();
-    // Drop notices whose node belongs to a session that is no longer active: the
-    // sub-agent's card is already in that session's tree, and injecting the turn
-    // into whatever session is now active would pollute its history (the parent
-    // node would not even resolve there).
-    const notices = this.subAgentNoticeQueue.splice(0).filter((n) => session?.nodes[n.nodeId] !== undefined);
-    if (notices.length === 0) {
-      return;
-    }
-    // Bind this injected turn to the parent node: it bypasses beginTurn, so
-    // activeTurnNode is null — but the reply (and any further spawn) must belong
-    // to that node. Set the context so events route there and spawn works.
-    const parentId = notices[0].nodeId;
-    const parent = session!.nodes[parentId];
-    // Continue from the parent node's path: an injected turn bypasses beginTurn,
-    // so pin the agent's history to this node explicitly (the user may have
-    // checked out another branch while the async batch was running).
-    if (parent && session) {
-      this.setAgentMessages(this.buildPath(session, parent.id));
-    }
-    this.activeTurnNode = parent ?? null;
-    this.displayItems = parent ? parent.displayItems : this.displayItems;
-    // The slice basis must match `finishTurn`'s array — `agent.getMessages()`,
-    // which includes the leading system message (`setAgentMessages` just set both).
-    // An injected turn does **not** own its node: the parent already has messages
-    // from the turn that spawned the batch, so `finishTurn` appends instead of
-    // assigning (`turnNodeFresh = false`).
-    this.turnNodeFresh = false;
-    this.lastStatus = '子代理完成';
-    this.setBusy(true);
-    this.post({ type: 'status', text: this.lastStatus });
-    // Re-affirm the active node in the webview BEFORE the resumed turn streams: a
-    // nested sub-agent spawn may have left messagesEl pinned to a sub-agent card,
-    // and this injected turn has no `path`/`tree` round-trip of its own. postPath
-    // uses mainStreamNodeId (= this turn's parent), so setActiveLeaf re-pins
-    // messagesEl to the main node and the reply cannot leak into a sub-agent card.
-    this.postPath();
-    // One clean combined message: per batch, a header + the per-sub-agent lines.
-    const parts = notices.map((n) => {
-      const count = n.count ?? 1;
-      const head = n.status === 'done' ? `${count} 个子代理完成` : `${count} 个子代理完成（含失败/中断）`;
-      return `[子代理批次] ${head}\n${n.summary || '(no summary)'}`;
-    });
-    this.agent.sendUserMessage(`子代理通知：\n${parts.join('\n\n')}`);
-  }
-
-  private cleanupSubAgents(): void {
-    for (const [, entry] of this.runningSubAgents) {
-      entry.abort.abort();
-      entry.agent.cancel();
-    }
-    this.runningSubAgents.clear();
-  }
-
-  /**
-   * Create this turn's node, check it out, and record where its message slice
-   * starts. The caller pushes the turn's display items and then sends the
-   * prompt to the agent.
-   */
-  private beginTurn(title: string): TreeNode | null {
-    const session = this.getActiveSession();
-    if (!session) {
-      return null;
-    }
-    const parentId = session.activeNodeId;
-    // The interruption notice only makes sense when this turn continues from the
-    // turn that was actually interrupted.
-    if (parentId !== this.lastInterruptedNodeId) {
-      this.agent.resetInterruptState();
-    }
-    const node = createNode(newId(), parentId, title, 'running');
-    attachNode(session, node);
-    this.activeTurnNode = node;
-    this.displayItems = node.displayItems;
-    // The new node contributes no messages yet, so this is the parent's path;
-    // `setAgentMessages` records the slice basis together with the array.
-    this.setAgentMessages(this.buildPath(session, node.id));
-    // A user turn owns a node it just created: `finishTurn` replaces its messages.
-    this.turnNodeFresh = true;
-    this.postTree();
-    this.post({ type: 'panTo', id: node.id });
-    return node;
-  }
-
-  /**
-   * Close out the running turn: store exactly the messages the agent appended
-   * during it (the interrupt checkpoint and the error rollback both land here),
-   * then persist, and patch just this card instead of resending the whole tree.
-   *
-   * The slice is *verified* before it is written. `turnPrefixLen` /
-   * `turnPrefixTail` describe the history this turn started from; if the agent's
-   * array was swapped since (`setAgentMessages` re-baselines, but a turn already
-   * in flight cannot be replayed), the offset no longer means "the turn's own
-   * messages" and slicing it would store ancestor history in the node. Losing a
-   * turn's messages to a log line beats silently duplicating ~1M tokens.
-   */
-  private finishTurn(status: TurnStatus): void {
-    const node = this.activeTurnNode;
-    this.activeTurnNode = null;
-    const session = this.getActiveSession();
-    if (node && session && session.nodes[node.id]) {
-      const messages = this.agent.getMessages();
-      const start = this.turnPrefixLen;
-      const intact =
-        start > 0 && start <= messages.length && messages[start - 1] === this.turnPrefixTail;
-      if (intact) {
-        const added = messages.slice(start);
-        // An injected (sub-agent notice / hop answer) turn continues a node that
-        // already holds the turn that spawned it — appending keeps both; a user
-        // turn owns the node `beginTurn` just created for it, so it assigns.
-        node.messages = this.turnNodeFresh ? added : [...node.messages, ...added];
-      } else {
-        this.output.appendLine(
-          `[slice] ${node.id}: skipped storing this turn's messages — the agent history was ` +
-            `replaced mid-turn (basis ${start}, tail ${this.turnPrefixTail ? 'set' : 'unset'}, ` +
-            `${messages.length} messages now; kept ${node.messages.length})`,
-        );
-      }
-      node.status = status;
-      session.updatedAt = Date.now();
-      // Mirror the finished turn to disk so it stays searchable later.
-      this.dumpSessionTranscript(node, session, status);
-      // A finished turn is the moment to (re)name the session. An interrupted
-      // turn has no reliable content yet, so it is skipped.
-      if (status !== 'interrupted') {
-        this.requestAutoTitle(session);
-      }
-    }
-    this.persist();
-    if (node && session?.nodes[node.id]) {
-      this.post({
-        type: 'nodeUpdate',
-        id: node.id,
-        status: node.status,
-        title: node.title,
-        usage: nodeUsage(node),
-      });
-    }
-    // A hopped session's turn just ended: queue the trip back to the session
-    // that dispatched it, carrying this turn's final answer. The queued start
-    // below picks it up once the agent is idle.
-    this.queueHopReturn(node, session, status);
-    // A queued `POST /session/start` (the agent handing a task to a fresh
-    // session) runs once this turn is fully closed out.
-    this.runPendingSessionStart();
-  }
+  // ---- Session hop (global bookkeeping) ----
 
   /**
    * The agent handed a task to a fresh session via `hop_session`: queue it with a
    * return address. The hop itself can only start once this turn ends, so the
    * provider's session-start queue does the work; the armed `hopReturn` then
-   * routes the hopped session's answer back here.
+   * routes the hopped session's answer back here. `node` is the caller's own node
+   * (P3 binds the handler per node); the hop contract is session-wide, so it does
+   * not change the behaviour — it just makes the caller explicit.
    */
-  private handleHopSession(args: Record<string, unknown>): string {
+  handleHopSession(rt: SessionRuntime, node: TreeNode, args: Record<string, unknown>): string {
+    void node;
     const prompt = typeof args.prompt === 'string' ? args.prompt.trim() : '';
     if (!prompt) {
       return 'Error: "prompt" is required.';
@@ -2324,11 +1232,8 @@ export class ChatViewProvider implements ControlHost {
     if (this.pendingSessionStart) {
       return 'Error: a session start is already queued.';
     }
-    const session = this.getActiveSession();
-    if (!session) {
-      return 'Error: no active session.';
-    }
-    if (this.activeSessionHasRunningBackground()) {
+    const session = rt.session;
+    if (rt.hasRunningBackground()) {
       return 'Error: a background terminal is still running in this session; finish or kill it before hopping.';
     }
     const returnNodeId = typeof args.returnNodeId === 'string' ? args.returnNodeId.trim() : '';
@@ -2351,37 +1256,16 @@ export class ChatViewProvider implements ControlHost {
   }
 
   /**
-   * `list_nodes` tool: render the active session's tree (id, status, parent,
-   * title) so the agent can name a node — e.g. as `hop_session`'s
-   * `returnNodeId`. Node ids otherwise live only in the persisted tree.
+   * A turn just finished in a runtime: if a hop is armed and that turn belongs to
+   * the hopped session, queue its final answer back to the origin session, then
+   * kick any queued `POST /session/start` (the handoff runs once the agent is
+   * idle). Folding the kick in here keeps `finishTurn` on the narrow host API.
    */
-  private handleListNodes(): string {
-    const session = this.getActiveSession();
-    if (!session) {
-      return 'Error: no active session.';
-    }
-    const depthOf = (node: TreeNode): number => {
-      let depth = 0;
-      let parent = node.parentId ? session.nodes[node.parentId] : undefined;
-      while (parent && depth < 64) {
-        depth++;
-        parent = parent.parentId ? session.nodes[parent.parentId] : undefined;
-      }
-      return depth;
-    };
-    const ordered = Object.values(session.nodes).sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
-    const lines = ordered.map((node) => {
-      const marks = [node.kind === 'agent' ? 'agent' : 'turn', node.kind === 'agent' ? node.agentStatus ?? node.status : node.status];
-      if (node.id === session.activeNodeId) {
-        marks.push('checked out');
-      }
-      const parent = node.parentId ? ` parent=${node.parentId}` : '';
-      return `${'  '.repeat(depthOf(node))}- ${node.id}  [${marks.join(', ')}]${parent}  ${node.title}`;
-    });
-    return [
-      `session ${session.id} "${session.title}" — ${ordered.length} nodes, checked out: ${session.activeNodeId ?? '(none)'}`,
-      ...lines,
-    ].join('\n');
+  queueHopReturn(rt: SessionRuntime, node: TreeNode | null, status: TurnStatus): void {
+    this.maybeDeliverHopReturn(rt, node, status);
+    // A queued `POST /session/start` (the agent handing a task to a fresh
+    // session) runs once this turn is fully closed out.
+    this.runPendingSessionStart();
   }
 
   /**
@@ -2389,9 +1273,10 @@ export class ChatViewProvider implements ControlHost {
    * session (a session created after the hop was queued), deliver that session's
    * final answer back to the origin session as a queued start.
    */
-  private queueHopReturn(node: TreeNode | null, session: AgentSession | null | undefined, status: TurnStatus): void {
+  private maybeDeliverHopReturn(rt: SessionRuntime, node: TreeNode | null, status: TurnStatus): void {
     const hop = this.hopReturn;
-    if (!hop || !session || session.id === hop.originSessionId) {
+    const session = rt.session;
+    if (!hop || session.id === hop.originSessionId) {
       return;
     }
     // Only the freshly created target session counts — a manual session switch
@@ -2431,7 +1316,7 @@ export class ChatViewProvider implements ControlHost {
     if (!pending) {
       return;
     }
-    if (this.disposed || this.busy || this.agent.running || this.activeSessionHasRunningBackground()) {
+    if (this.disposed || !this.globallyIdle()) {
       setTimeout(() => this.runPendingSessionStart(), 50);
       return;
     }
@@ -2452,7 +1337,112 @@ export class ChatViewProvider implements ControlHost {
     );
   }
 
-  // ---- Public command entry points ----
+  /** True when no session has a run, a sub-agent or a background terminal live. */
+  private globallyIdle(): boolean {
+    for (const rt of this.runtimes.values()) {
+      if (rt.isRunning() || rt.runningSubAgentCount() > 0 || rt.hasRunningBackground()) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  private anyRunningTurn(): boolean {
+    for (const rt of this.runtimes.values()) {
+      if (rt.isRunning()) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private anyRunningBackground(): boolean {
+    for (const rt of this.runtimes.values()) {
+      if (rt.hasRunningBackground()) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private anyRunningSubAgents(): boolean {
+    for (const rt of this.runtimes.values()) {
+      if (rt.runningSubAgentCount() > 0) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  // ---- Panel lifecycle ----
+
+  private panelTitle(sessionId: string): string {
+    const session = this.sessions.find((s) => s.id === sessionId);
+    return `Agent Chat Tree — ${session ? session.title : 'Session'}`;
+  }
+
+  /** A tab became the focused one: `activeSessionId` is exactly that. */
+  private onPanelFocus(sessionId: string): void {
+    this.setActiveSession(sessionId);
+  }
+
+  /**
+   * Mark a session as the active one (sidebar highlight, palette fallbacks, and
+   * the control plane's `sessionId`/`nodeId` readout — `hvsc` carries those into
+   * its `/continue`). Called when a tab gains focus *and* whenever a caller
+   * explicitly shows a session (`openSession`, `POST /navigate`): a window that is
+   * not focused may never deliver `onDidChangeViewState`, and the carry must not
+   * depend on it.
+   */
+  private setActiveSession(sessionId: string): void {
+    if (this.activeSessionId === sessionId) {
+      return;
+    }
+    this.activeSessionId = sessionId;
+    this.persist();
+    this.onStateChanged?.();
+  }
+
+  private onPanelClosed(sessionId: string): void {
+    // Closing a tab does NOT delete the session (its runtime keeps running).
+    this.output.appendLine(`[panel] closed chat tab for session ${sessionId}`);
+  }
+
+  /** Route a message to the panel's session's runtime. */
+  postTo(sessionId: string, message: unknown): void {
+    this.panels.get(sessionId)?.post(message);
+  }
+
+  /**
+   * Window recovery: VS Code recreated this webview panel from the editor state
+   * it serialized at shutdown (`registerWebviewPanelSerializer`, wired in
+   * extension.ts). Adopt the panel, bind it to the session it was showing and
+   * let its `ready` repaint it. Without this the chat tab silently disappears on
+   * every reload.
+   */
+  restorePanel(panel: vscode.WebviewPanel, state: unknown): void {
+    if (this.disposed) {
+      panel.dispose();
+      return;
+    }
+    // The session to show is the one the webview remembered via setState before
+    // the reload; fall back to the persisted active session when it is missing
+    // (older build) or no longer exists (deleted meanwhile).
+    const remembered = (state as { sessionId?: unknown } | undefined)?.sessionId;
+    const rememberedSession =
+      typeof remembered === 'string' ? this.sessions.find((s) => s.id === remembered) : undefined;
+    const session = rememberedSession ?? this.getActiveSession();
+    if (!session) {
+      panel.dispose();
+      return;
+    }
+    const adopted = this.panels.adopt(panel, session.id);
+    adopted.setTitle(this.panelTitle(session.id));
+    this.output.appendLine(`[panel] restored chat tab for session ${session.id}`);
+    // The webview posts 'ready' once its script loads; that repaints it.
+  }
+
+  // ---- Commands ----
 
   /** Open the chat panel for the active session (agentHarness.openChat / focus). */
   openChat(): void {
@@ -2460,7 +1450,7 @@ export class ChatViewProvider implements ControlHost {
     if (!session) {
       return;
     }
-    this.ensurePanel(session.id);
+    this.panels.ensure(session.id);
   }
 
   /**
@@ -2471,137 +1461,229 @@ export class ChatViewProvider implements ControlHost {
    * would receive on the next turn.
    */
   async showSystemPrompt(): Promise<void> {
-    const content = Agent.systemPrompt(this.model, this.thinkingEffort);
+    const content = this.systemPrompt();
     const doc = await vscode.workspace.openTextDocument({ content, language: 'markdown' });
     await vscode.window.showTextDocument(doc, { preview: false });
   }
 
-  /** Open (or rebind) the panel to a session and check it out. */
+  /**
+   * Open (or focus) a session's tab. Opening a session never activates, stops or
+   * otherwise touches another session — they can all run at once.
+   */
   openSession(id: string): void {
     const session = this.sessions.find((s) => s.id === id);
     if (!session) {
       return;
     }
-    if (id === this.activeSessionId) {
-      // Already checked out; just bring the panel forward (allowed even while the
-      // session runs a background job).
-      this.ensurePanel(id);
-      return;
-    }
-    if (this.busy || this.activeSessionHasRunningBackground()) {
-      this.postNotice(
-        'warning',
-        'Cannot switch session while background terminals are running. Wait for them to finish or kill them from the Background panel first.',
-      );
-      return;
-    }
-    this.activateSession(session);
-    this.ensurePanel(session.id);
+    this.panels.ensure(session.id);
+    this.setActiveSession(session.id);
   }
 
   newSession(): void {
-    if (this.busy || this.activeSessionHasRunningBackground()) {
-      this.postNotice(
-        'warning',
-        'Cannot start a new session while background terminals are running. Wait for them to finish or kill them from the Background panel first.',
-      );
-      return;
-    }
     const session = this.createSessionInMemory();
-    this.activateSession(session);
     this.persist();
-    this.ensurePanel(session.id);
+    this.panels.ensure(session.id);
   }
 
-  deleteSession(id: string): void {
-    if (this.busy || this.activeSessionHasRunningBackground()) {
-      this.postNotice(
+  /**
+   * The one confirmation gate for "this action kills running background
+   * terminals". Deleting a session, clearing a conversation and deleting a
+   * branch all funnel through it, so no path silently tears down a process the
+   * user is still watching.
+   */
+  private async confirmKillBackgrounds(detail: string, action: string): Promise<boolean> {
+    const pick = await vscode.window.showWarningMessage(
+      'Background terminals are still running.',
+      { modal: true, detail },
+      action,
+    );
+    return pick === action;
+  }
+
+  deleteSession(id: string, confirmedKill = false): void {
+    const session = this.sessions.find((s) => s.id === id);
+    if (!session) {
+      return;
+    }
+    const rt = this.runtimes.get(id);
+    // Refuse while a turn streams (its node would vanish under it). Running
+    // background jobs are only killed after a modal confirmation.
+    if (rt && rt.isRunning()) {
+      rt.postNotice(
         'warning',
-        'Cannot delete a session while background terminals are running. Wait for them to finish or kill them from the Background panel first.',
+        'Cannot delete a session while a turn is running. Wait for it to finish (or stop it) first.',
       );
       return;
     }
+    const jobs = rt ? rt.runningBackgroundCount() : 0;
+    if (jobs > 0 && !confirmedKill) {
+      void this.confirmKillBackgrounds(
+        `${jobs} background terminal(s) of this session are still running. Deleting the session kills them ` +
+          '(their processes are torn down).',
+        'Delete session and kill',
+      ).then((ok) => {
+        if (ok) {
+          this.deleteSession(id, true);
+        }
+      });
+      return;
+    }
+    this.deleteSessionNow(id);
+  }
+
+  /**
+   * Delete every selected session at once (sidebar multi-select →
+   * `agentHarness.deleteSessions`). ONE modal confirmation covers the batch: it
+   * names the sessions, the turn cards and the transcript dumps that go, and the
+   * running background terminals that will be killed. A session with a live
+   * *turn* is skipped rather than silently dropped — its node would vanish under
+   * the running agent — and reported afterwards.
+   */
+  async deleteSessionsInteractive(ids: string[]): Promise<void> {
+    const known = ids.filter((id) => this.sessions.some((s) => s.id === id));
+    if (known.length === 0) {
+      void vscode.window.showInformationMessage('No sessions are selected.');
+      return;
+    }
+    if (known.length === 1) {
+      // A single selection keeps the single-session path and its wording.
+      this.deleteSession(known[0]);
+      return;
+    }
+    const busy = known.filter((id) => this.runtimes.get(id)?.isRunning() === true);
+    const doomed = known.filter((id) => !busy.includes(id));
+    if (doomed.length === 0) {
+      void vscode.window.showWarningMessage(
+        'Every selected session is running a turn. Stop them (or wait for them) and try again.',
+      );
+      return;
+    }
+    const turns = doomed.reduce(
+      (n, id) => n + Object.keys(this.sessions.find((s) => s.id === id)?.nodes ?? {}).length,
+      0,
+    );
+    const jobs = doomed.reduce((n, id) => n + (this.runtimes.get(id)?.runningBackgroundCount() ?? 0), 0);
+    const detail = [
+      `${doomed.length} session(s) and ${turns} turn card(s) are removed from this window.`,
+      'Their transcript dumps are deleted from disk, so search_transcripts will no longer find them.',
+      jobs > 0 ? `${jobs} running background terminal(s) will be killed.` : '',
+      busy.length > 0 ? `Skipped (a turn is running): ${busy.length} session(s).` : '',
+      'This cannot be undone.',
+    ]
+      .filter(Boolean)
+      .join('\n');
+    const label = `Delete ${doomed.length} Sessions`;
+    const pick = await vscode.window.showWarningMessage(
+      `Delete ${doomed.length} sessions?`,
+      { modal: true, detail },
+      label,
+    );
+    if (pick !== label) {
+      return;
+    }
+    // One teardown per session, one bookkeeping pass at the end: a batch must not
+    // grow a replacement session after each removal.
+    for (const id of doomed) {
+      this.deleteSessionNow(id, true);
+    }
+    this.finishDeletions();
+    if (busy.length > 0) {
+      void vscode.window.showInformationMessage(
+        `${busy.length} session(s) were left running and not deleted.`,
+      );
+    }
+    this.outputLog(
+      `[sessions] deleted ${doomed.length} session(s)` +
+        `${busy.length > 0 ? `, skipped ${busy.length} running` : ''}`,
+    );
+  }
+
+  /**
+   * Tear one session down: its runtime (killing the background terminals it owns),
+   * its tab, its transcript dumps and any session-start/hop record that points at
+   * it. `deferFinish` skips the shared tail (keep at least one session, move the
+   * active pointer, persist, refresh) so a batch can do it once at the end.
+   */
+  private deleteSessionNow(id: string, deferFinish = false): boolean {
     const idx = this.sessions.findIndex((s) => s.id === id);
     if (idx === -1) {
-      return;
+      return false;
     }
-    // Tear down any background terminals owned by the session being removed.
-    const deletedReg = this.sessionRegistries.get(id);
-    if (deletedReg) {
-      deletedReg.killAll();
-      this.sessionRegistries.delete(id);
+    const rt = this.runtimes.get(id);
+    if (rt) {
+      rt.dispose();
+      this.runtimes.delete(id);
     }
-    // Drop any queued completion notice still waiting for that session.
-    this.backgroundNotifQueue = this.backgroundNotifQueue.filter((q) => q.sessionId !== id);
+    this.panels.close(id);
     // Drop the session's transcript dumps too (turns + sub-agent runs).
     removeTranscriptDir(this.transcriptDir(id));
-    this.sessions.splice(idx, 1);
-    if (this.sessions.length === 0) {
-      this.createSessionInMemory();
+    // A queued start / armed hop that targets this session can never land.
+    if (this.pendingSessionStart?.sessionId === id) {
+      this.pendingSessionStart = null;
     }
-    this.activeSessionId = this.sessions.some((s) => s.id === this.activeSessionId)
-      ? this.activeSessionId
-      : this.sessions[0].id;
-    this.activateSession(this.getActiveSession()!);
-    this.persist();
-    // If the deleted session owned the open panel, rebind it to the new active one.
-    this.ensurePanel(this.getActiveSession()!.id);
+    if (this.hopReturn?.originSessionId === id) {
+      this.hopReturn = null;
+    }
+    this.sessions.splice(idx, 1);
+    if (!deferFinish) {
+      this.finishDeletions();
+    }
+    return true;
   }
 
-  clear(): void {
-    if (this.busy || this.activeSessionHasRunningBackground()) {
-      this.postNotice(
+  /** Post-deletion bookkeeping, shared by the single and the batch path. */
+  private finishDeletions(): void {
+    if (this.sessions.length === 0) {
+      // A window always has one session, so the chat is never left with nothing.
+      this.createSessionInMemory();
+    }
+    if (!this.sessions.some((s) => s.id === this.activeSessionId)) {
+      this.activeSessionId = this.sessions[0].id;
+    }
+    this.persist();
+    this.onStateChanged?.();
+  }
+
+  /** Clear one session's conversation (the panel that invoked `clear`). */
+  clear(sessionId?: string, confirmedKill = false): void {
+    const id = sessionId ?? this.activeSessionId;
+    const session = this.sessions.find((s) => s.id === id);
+    if (!session) {
+      return;
+    }
+    const rt = this.runtimeFor(session);
+    if (rt.isRunning()) {
+      rt.postNotice(
         'warning',
-        'Cannot clear the conversation while background terminals are running. Wait for them to finish or kill them from the Background panel first.',
+        'Cannot clear the conversation while a turn is running. Wait for it to finish (or stop it) first.',
       );
       return;
     }
-    this.agent.reset();
-    this.agent.resetInterruptState();
-    this.lastInterruptedNodeId = null;
-    this.activeTurnNode = null;
-    this.turnPrefixLen = 0;
-    this.uploadController = null;
-    const session = this.getActiveSession();
-    if (session) {
-      // A cleared conversation keeps its identity but loses the whole tree.
-      session.nodes = {};
-      session.rootId = null;
-      session.activeNodeId = null;
-      session.orphanItems.length = 0;
-      session.updatedAt = Date.now();
-      // ...and its automatic title: the next turn names the fresh conversation.
-      delete session.titleAutoAt;
-      delete session.titleAutoNodes;
-      if (!session.titleLocked) {
-        session.title = 'New session';
-        session.titleSource = 'provisional';
-        this.onStateChanged?.();
-      }
-      this.displayItems = session.orphanItems;
+    const jobs = rt.runningBackgroundCount();
+    if (jobs > 0 && !confirmedKill) {
+      void this.confirmKillBackgrounds(
+        `${jobs} background terminal(s) of this session are still running. Clearing the conversation kills them ` +
+          '(their processes are torn down).',
+        'Clear and kill',
+      ).then((ok) => {
+        if (ok) {
+          this.clear(id, true);
+        }
+      });
+      return;
     }
-    this.setBusy(false);
-    this.lastStatus = '';
-    this.currentPromptTokens = 0;
-    // A cleared conversation drops its background-terminal history too (it is
-    // blocked while any are still running, so these are all finished).
-    this.sessionRegistries.get(this.activeSessionId)?.clearAll();
-    this.backgroundNotifQueue = this.backgroundNotifQueue.filter(
-      (q) => q.sessionId !== this.activeSessionId,
-    );
-    this.subAgentNoticeQueue.length = 0;
-    this.subAgentChildNotices.clear();
+    // Reset the runtime: agent history, tree, queued notices, background history.
+    rt.clearConversation();
+    // ...and its automatic title: the next turn names the fresh conversation.
+    delete session.titleAutoAt;
+    delete session.titleAutoNodes;
+    if (!session.titleLocked) {
+      session.title = 'New session';
+      session.titleSource = 'provisional';
+      this.onStateChanged?.();
+    }
     // The cleared conversation's transcript dumps are stale now.
-    removeTranscriptDir(this.transcriptDir(this.activeSessionId));
-    if (this.backgroundDrainTimer != null) {
-      clearTimeout(this.backgroundDrainTimer);
-      this.backgroundDrainTimer = null;
-    }
-    this.post({ type: 'reset' });
-    this.postBackgrounds();
-    this.postContext();
-    this.postSessionStats();
-    this.postTree();
+    removeTranscriptDir(this.transcriptDir(session.id));
     this.persist();
   }
 
@@ -2613,26 +1695,35 @@ export class ChatViewProvider implements ControlHost {
    * the matching transcript dumps on disk — so it always goes through a modal
    * confirmation, never a single click. Returns true when something was removed.
    */
-  async deleteBranchInteractive(nodeId: string): Promise<boolean> {
-    const session = this.getActiveSession();
+  async deleteBranchInteractive(sessionId: string, nodeId: string): Promise<boolean> {
+    const session = this.sessions.find((s) => s.id === sessionId);
     const node = session?.nodes[nodeId];
     if (!session || !node) {
       return false;
     }
-    const blocked = this.branchDeletionBlocked(session, nodeId);
+    const rt = this.runtimeFor(session);
+    const blocked = this.branchDeletionBlocked(session, rt, nodeId);
     if (blocked) {
-      this.postNotice('warning', blocked);
+      rt.postNotice('warning', blocked);
       return false;
     }
     const ids = branchIds(session, nodeId);
     const turns = ids.filter((id) => session.nodes[id]?.kind !== 'agent').length;
     const agents = ids.length - turns;
+    // A branch owns its background jobs: deleting it kills whatever it spawned,
+    // so the confirmation says so before anything is torn down.
+    const jobs = rt.runningBackgroundsForNodes(ids);
     const detail = [
       `History: ${turns} turn(s)${agents > 0 ? ` and ${agents} sub-agent card(s)` : ''} are removed from this conversation.`,
       'Transcripts: their JSONL dumps are deleted from disk, so search_transcripts will no longer find them.',
+      jobs > 0
+        ? `Background: ${jobs} running terminal(s) owned by this branch will be killed.`
+        : '',
       'The checked-out node moves to the parent of the deleted branch.',
       'This cannot be undone.',
-    ].join('\n');
+    ]
+      .filter(Boolean)
+      .join('\n');
     const pick = await vscode.window.showWarningMessage(
       `Delete this branch — "${node.title || 'untitled'}" and everything below it?`,
       { modal: true, detail },
@@ -2641,10 +1732,10 @@ export class ChatViewProvider implements ControlHost {
     if (pick !== 'Delete Branch') {
       return false;
     }
-    return this.deleteBranch(nodeId);
+    return this.deleteBranch(session.id, nodeId);
   }
 
-  /** Palette command: delete the branch rooted at the checked-out node. */
+  /** Palette command: delete the branch rooted at the active session's checkout. */
   async deleteCheckedOutBranchInteractive(): Promise<boolean> {
     const session = this.getActiveSession();
     const nodeId = session?.activeNodeId;
@@ -2652,7 +1743,7 @@ export class ChatViewProvider implements ControlHost {
       void vscode.window.showInformationMessage('There is no checked-out turn to delete.');
       return false;
     }
-    return this.deleteBranchInteractive(nodeId);
+    return this.deleteBranchInteractive(session.id, nodeId);
   }
 
   /**
@@ -2660,35 +1751,36 @@ export class ChatViewProvider implements ControlHost {
    * or sub-agent) that is still running must never lose the node it is writing
    * into.
    */
-  private branchDeletionBlocked(session: AgentSession, nodeId: string): string {
-    if (this.busy || this.agent.running) {
+  private branchDeletionBlocked(session: AgentSession, rt: SessionRuntime, nodeId: string): string {
+    if (rt.isRunning() || rt.agentRunning()) {
       return 'Cannot delete a branch while the agent is running. Wait for the turn to finish.';
     }
-    if (branchIds(session, nodeId).some((id) => this.runningSubAgents.has(id))) {
+    if (branchIds(session, nodeId).some((id) => rt.hasRunningSubAgent(id))) {
       return 'Cannot delete a branch that contains a running sub-agent. Kill it first.';
     }
     return '';
   }
 
   /**
-   * Apply a confirmed branch deletion to the active session: drop the subtree
-   * from the tree, delete the matching transcript dumps (a node's dump is
+   * Apply a confirmed branch deletion to a session: drop the subtree from the
+   * tree, delete the matching transcript dumps (a node's dump is
    * `<transcriptDir>/<nodeId>.jsonl` for both main turns and sub-agent runs, plus
    * any absolute path a sub-agent recorded under a different transcript root),
    * move the checkout off the removed subtree, and repaint. Returns false when
    * the node is unknown, belongs to another session, or a turn started while the
    * confirmation dialog was open.
    */
-  deleteBranch(nodeId: string): boolean {
-    const session = this.getActiveSession();
+  deleteBranch(sessionId: string, nodeId: string): boolean {
+    const session = this.sessions.find((s) => s.id === sessionId);
     if (!session || !session.nodes[nodeId]) {
       return false;
     }
+    const rt = this.runtimeFor(session);
     // Re-checked here too: an async sub-agent batch can inject a turn while the
     // modal dialog is open, and that turn's node must not be deleted under it.
-    const blocked = this.branchDeletionBlocked(session, nodeId);
+    const blocked = this.branchDeletionBlocked(session, rt, nodeId);
     if (blocked) {
-      this.postNotice('warning', blocked);
+      rt.postNotice('warning', blocked);
       return false;
     }
     const ids = branchIds(session, nodeId);
@@ -2704,10 +1796,8 @@ export class ChatViewProvider implements ControlHost {
         dropped++;
       }
     }
-    if (this.lastInterruptedNodeId && ids.includes(this.lastInterruptedNodeId)) {
-      // The turn whose interruption notice was pending no longer exists.
-      this.lastInterruptedNodeId = null;
-    }
+    // Drop anything the removed nodes still queued, re-check out the survivor and repaint.
+    rt.afterBranchDetach(ids);
     if (Object.keys(session.nodes).length === 0) {
       // The whole tree went (the deleted branch was the root): mirror `clear()`
       // so the next turn names the now-empty conversation again.
@@ -2717,23 +1807,8 @@ export class ChatViewProvider implements ControlHost {
         session.title = 'New session';
         session.titleSource = 'provisional';
       }
-      this.panel?.setTitle(this.panelTitle(session.id));
+      this.panels.setTitle(session.id, this.panelTitle(session.id));
     }
-    // Depth-2 results queued for a removed (finished) sub-agent can never be
-    // delivered; a queued main-agent notice for a removed node is dropped by
-    // drainSubAgentNotices itself (it filters on the node still existing).
-    for (const id of ids) {
-      this.subAgentChildNotices.delete(id);
-    }
-    this.checkoutNode(session, session.activeNodeId);
-    this.currentPromptTokens = this.getLatestPromptTokens();
-    this.postTree();
-    this.postPath();
-    if (session.activeNodeId) {
-      this.post({ type: 'panTo', id: session.activeNodeId });
-    }
-    this.postContext();
-    this.postSessionStats();
     this.persist();
     // The sidebar row shows the node count + "time ago", both of which moved.
     this.onStateChanged?.();
@@ -2752,43 +1827,63 @@ export class ChatViewProvider implements ControlHost {
 
   controlState(): ControlState {
     const session = this.getActiveSession();
+    const activeRt = session ? this.runtimes.get(session.id) : undefined;
     return {
-      busy: this.busy || this.agent.running,
+      busy: this.anyRunningTurn(),
       sessionId: session?.id ?? null,
       activeNodeId: session?.activeNodeId ?? null,
-      runningSubAgents: this.runningSubAgents.size,
-      runningBackgrounds: this.activeSessionHasRunningBackground(),
-      sessions: this.sessions.map((s) => ({
-        id: s.id,
-        title: s.title,
-        nodes: Object.keys(s.nodes).length,
-        active: s.id === this.activeSessionId,
-        titleSource: s.titleSource,
-        titleLocked: s.titleLocked === true ? true : undefined,
-      })),
+      runningSubAgents: activeRt ? activeRt.runningSubAgentCount() : 0,
+      runningBackgrounds: activeRt ? activeRt.hasRunningBackground() : false,
+      sessions: this.sessions.map((s) => {
+        const rt = this.runtimes.get(s.id);
+        return {
+          id: s.id,
+          title: s.title,
+          nodes: Object.keys(s.nodes).length,
+          active: s.id === this.activeSessionId,
+          titleSource: s.titleSource,
+          titleLocked: s.titleLocked === true ? true : undefined,
+          running: rt ? rt.isRunning() : false,
+          runningNodes: rt ? rt.runningNodes() : [],
+          runningBackgrounds: rt ? rt.hasRunningBackground() : false,
+          // Which branch owns each running job: a controller can verify that a job
+          // stayed with the node that spawned it while the view moved elsewhere.
+          backgroundNodes: rt ? rt.backgroundNodes() : [],
+          // P4: the per-session model/effort, straight off the session's runtime
+          // (an unloaded session reports the selection it would start from).
+          model: rt ? rt.model : this.effectiveModel(s),
+          effort: rt ? rt.thinkingEffort : this.effectiveEffort(s),
+        };
+      }),
     };
   }
 
   /**
-   * Block until the agent is idle. `scope:'all'` also waits for sub-agents and
-   * background terminals. The last `persist()` write is awaited before returning
-   * so the caller may kill the process immediately after. Never interrupts a
-   * turn unless `interrupt` is set.
+   * Block until the agent is idle. `scope:'turn'` (default) waits for the active
+   * (last-focused) session's in-flight turn; `scope:'all'` waits until no run, no
+   * sub-agent and no background job exists anywhere. The last `persist()` write is
+   * awaited before returning so the caller may kill the process immediately
+   * after. Never interrupts a turn unless `interrupt` is set. The returned
+   * `sessionId` / `nodeId` are the active session's (`hvsc` carries them into its
+   * `/continue`).
    */
   async controlWaitForFinish(opts: WaitForFinishOptions): Promise<ControlResult> {
     const scope = opts.scope === 'all' ? 'all' : 'turn';
     const timeoutMs = Number.isFinite(opts.timeoutMs) ? Math.max(0, Math.min(opts.timeoutMs ?? 0, 600000)) : 30000;
+    const activeSession = this.getActiveSession();
+    const activeRt = activeSession ? this.runtimes.get(activeSession.id) : undefined;
     const idle = (): boolean => {
-      if (this.busy || this.agent.running) {
-        return false;
+      if (scope === 'all') {
+        return this.globallyIdle();
       }
-      if (scope === 'all' && (this.runningSubAgents.size > 0 || this.activeSessionHasRunningBackground())) {
-        return false;
-      }
-      return true;
+      return activeRt ? !activeRt.isRunning() : !this.anyRunningTurn();
     };
     if (opts.interrupt && !idle()) {
-      this.onStop();
+      for (const rt of this.runtimes.values()) {
+        if (rt.isRunning()) {
+          rt.onStop();
+        }
+      }
     }
     const deadline = Date.now() + timeoutMs;
     while (!idle()) {
@@ -2816,20 +1911,19 @@ export class ChatViewProvider implements ControlHost {
     return { ok: true, idle: true, busy: false, sessionId: state.sessionId, nodeId: state.activeNodeId };
   }
 
-  /** Check out a node (switching session first when needed) and show the panel. */
+  /** Check out a node in an explicitly-named (or the active) session and show it. */
   async controlNavigate(opts: { sessionId?: string; nodeId: string }): Promise<ControlResult> {
     const session = opts.sessionId ? this.sessions.find((s) => s.id === opts.sessionId) : this.getActiveSession();
     if (!session) {
       return { ok: false, error: `no such session: ${opts.sessionId ?? '(active)'}` };
     }
-    if (session.id !== this.activeSessionId) {
-      this.openSession(session.id);
-    }
     if (!session.nodes[opts.nodeId]) {
       return { ok: false, error: `no such node: ${opts.nodeId}` };
     }
-    this.handleCheckout(opts.nodeId);
-    this.ensurePanel(session.id);
+    const rt = this.runtimeFor(session);
+    this.panels.ensure(session.id);
+    this.setActiveSession(session.id);
+    rt.handleCheckout(opts.nodeId);
     return { ok: true, sessionId: session.id, nodeId: opts.nodeId };
   }
 
@@ -2839,37 +1933,57 @@ export class ChatViewProvider implements ControlHost {
     if (!message) {
       return { ok: false, error: 'message is required' };
     }
-    if (this.busy || this.agent.running) {
-      return { ok: false, error: 'the agent is busy; wait for it to finish first' };
-    }
     const session = opts.sessionId ? this.sessions.find((s) => s.id === opts.sessionId) : this.getActiveSession();
     if (!session) {
       return { ok: false, error: `no such session: ${opts.sessionId ?? '(active)'}` };
     }
-    if (session.id !== this.activeSessionId) {
-      this.openSession(session.id);
-    }
+    const rt = this.runtimeFor(session);
     const nodeId = opts.nodeId ?? session.activeNodeId ?? session.rootId;
+    // P3: node-scoped. This refuses only when the *basis node* — the node the new
+    // turn would continue from — is itself streaming (the composer's Stop-not-Send
+    // rule); a run on another branch of the same session must not block it.
+    if (nodeId && rt.runningNodes().includes(nodeId)) {
+      return { ok: false, error: 'the agent is busy; wait for it to finish first' };
+    }
+    this.panels.ensure(session.id);
     if (nodeId) {
       if (!session.nodes[nodeId]) {
         return { ok: false, error: `no such node: ${nodeId}` };
       }
-      this.handleCheckout(nodeId);
+      rt.handleCheckout(nodeId);
     }
-    this.ensurePanel(session.id);
-    await this.onUserMessage(message);
+    await this.dispatchUserMessage(rt, message, []);
     return { ok: true, sessionId: session.id, nodeId: session.activeNodeId };
   }
 
   /**
+   * Stop runs (`POST /stop`): `nodeId`'s run only when given, otherwise every run
+   * of the session (`sessionId`, else the active session). Returns how many agents
+   * were cancelled — `stopped: 0` when nothing was running is still `ok`. An
+   * unknown session is refused (409). Deliberately does not touch the reload hold.
+   */
+  async controlStop(opts: { sessionId?: string; nodeId?: string }): Promise<ControlResult> {
+    const session = opts.sessionId ? this.sessions.find((s) => s.id === opts.sessionId) : this.getActiveSession();
+    if (!session) {
+      return { ok: false, error: `no such session: ${opts.sessionId ?? '(active)'}` };
+    }
+    const rt = this.runtimeFor(session);
+    const stopped = rt.stop(opts.nodeId);
+    return { ok: true, sessionId: session.id, nodeId: opts.nodeId ?? session.activeNodeId, stopped };
+  }
+
+  /**
    * Create a fresh session (or jump to an existing one) and optionally send a
-   * caller-supplied prompt as its first turn. The harness drives one session at
-   * a time, so this refuses while the active session is busy — unless the caller
-   * asks for a fresh session with a prompt, which is queued instead. With
-   * `returnTo` the hopped session's final answer is delivered back to the
-   * session that was active when the hop was queued (the `hop_session` path),
-   * branching off `returnNodeId` when that is given. `nodeId` checks out a node
-   * in the target session before the prompt is sent.
+   * caller-supplied prompt as its first turn. With `sessionId` the target session
+   * is resolved explicitly and refused only while the **target node** (the
+   * `nodeId` given, else the view focus) has a live run — P3, so a session that is
+   * streaming on another branch may still be started here. Without `sessionId` a
+   * fresh session is created immediately when another turn is running; only a hop
+   * (`returnTo`) queues, since its return trip needs the origin idle. With
+   * `returnTo` the hopped session's final answer is delivered back to the session
+   * that was active when the hop was queued, branching off `returnNodeId` when
+   * that is given. `nodeId` checks out a node in the target session before the
+   * prompt is sent.
    */
   async controlStartSession(opts: {
     sessionId?: string;
@@ -2879,19 +1993,54 @@ export class ChatViewProvider implements ControlHost {
     returnTo?: boolean;
     returnNodeId?: string;
   }): Promise<ControlResult> {
-    if (this.busy || this.agent.running || this.activeSessionHasRunningBackground()) {
-      // The agent calling this is *by definition* mid-turn. Queue a fresh
-      // session + prompt so the handoff runs the moment this turn ends.
-      if (!opts.sessionId && (opts.prompt ?? '').trim()) {
+    const prompt = (opts.prompt ?? '').trim();
+    if (opts.sessionId) {
+      const session = this.sessions.find((s) => s.id === opts.sessionId);
+      if (!session) {
+        return { ok: false, error: `no such session: ${opts.sessionId}` };
+      }
+      const rt = this.runtimeFor(session);
+      // P3: node-scoped — the session may be streaming on another branch while the
+      // target node is free. Only a live run on the target node refuses.
+      const targetNode = opts.nodeId ?? session.activeNodeId ?? session.rootId;
+      if (targetNode && rt.runningNodes().includes(targetNode)) {
+        return { ok: false, error: 'the agent is busy; wait for it to finish first', busy: true };
+      }
+      if (opts.nodeId) {
+        if (!session.nodes[opts.nodeId]) {
+          return { ok: false, error: `no such node: ${opts.nodeId}` };
+        }
+        rt.handleCheckout(opts.nodeId);
+      }
+      this.panels.ensure(session.id);
+      this.setActiveSession(session.id);
+      if (!prompt) {
+        return { ok: true, sessionId: session.id, nodeId: session.activeNodeId, prompted: false };
+      }
+      // onUserMessage names a fresh session from its first message when no title
+      // was supplied, so a caller-supplied title wins and a bare prompt titles it.
+      await this.dispatchUserMessage(rt, prompt, []);
+      return { ok: true, sessionId: session.id, nodeId: session.activeNodeId, prompted: true };
+    }
+    if (this.anyRunningTurn() || this.anyRunningBackground()) {
+      // A *different* session is running. The single-agent design had to queue here
+      // (only one turn could exist at a time); sessions are independent now, so a
+      // fresh session starts right away — that is the concurrency this phase adds.
+      if (prompt && !opts.returnTo) {
+        return this.startFreshSession({ title: opts.title, prompt });
+      }
+      // A hop (`returnTo`) still queues: its contract is "your turn is over, the
+      // fresh session reports back", and the return trip needs the origin idle.
+      if (prompt) {
         if (this.pendingSessionStart) {
           return { ok: false, error: 'a session start is already queued', busy: true };
         }
-        if (opts.returnTo && this.hopReturn) {
+        if (this.hopReturn) {
           return { ok: false, error: 'a session hop is already in progress', busy: true };
         }
         const origin = this.getActiveSession();
         this.pendingSessionStart = { title: opts.title, prompt: opts.prompt };
-        if (opts.returnTo && origin) {
+        if (origin) {
           this.hopReturn = {
             originSessionId: origin.id,
             armedAt: Date.now(),
@@ -2903,39 +2052,35 @@ export class ChatViewProvider implements ControlHost {
       }
       return { ok: false, error: 'the agent is busy; wait for it to finish first', busy: true };
     }
-    let session: AgentSession | undefined;
-    if (opts.sessionId) {
-      session = this.sessions.find((s) => s.id === opts.sessionId);
-      if (!session) {
-        return { ok: false, error: `no such session: ${opts.sessionId}` };
-      }
-      if (session.id !== this.activeSessionId) {
-        this.activateSession(session);
-      }
-    } else {
-      session = this.createSessionInMemory();
+    if (!prompt) {
+      const session = this.createSessionInMemory();
       if (opts.title?.trim()) {
-        // A caller-supplied title is explicit: lock it so automatic naming
-        // never overwrites what the dispatcher asked for.
         this.applySessionTitle(session, opts.title.trim(), 'manual');
       }
-      this.activateSession(session);
+      this.runtimeFor(session);
       this.persist();
-    }
-    if (opts.nodeId) {
-      if (!session.nodes[opts.nodeId]) {
-        return { ok: false, error: `no such node: ${opts.nodeId}` };
-      }
-      this.handleCheckout(opts.nodeId);
-    }
-    this.ensurePanel(session.id);
-    const prompt = (opts.prompt ?? '').trim();
-    if (!prompt) {
+      this.panels.ensure(session.id);
       return { ok: true, sessionId: session.id, nodeId: session.activeNodeId, prompted: false };
     }
-    // onUserMessage names a fresh session from its first message when no title
-    // was supplied, so a caller-supplied title wins and a bare prompt titles it.
-    await this.onUserMessage(prompt);
+    return this.startFreshSession({ title: opts.title, prompt });
+  }
+
+  /**
+   * Create a session, title it, open its tab and send `prompt` as its first turn.
+   * Shared by the idle path and the "another session is running" path — the latter
+   * is what makes sessions genuinely concurrent (P1).
+   */
+  private async startFreshSession(opts: { title?: string; prompt: string }): Promise<ControlResult> {
+    const session = this.createSessionInMemory();
+    if (opts.title?.trim()) {
+      // A caller-supplied title is explicit: lock it so automatic naming never
+      // overwrites what the dispatcher asked for.
+      this.applySessionTitle(session, opts.title.trim(), 'manual');
+    }
+    const rt = this.runtimeFor(session);
+    this.persist();
+    this.panels.ensure(session.id);
+    await this.dispatchUserMessage(rt, opts.prompt, []);
     return { ok: true, sessionId: session.id, nodeId: session.activeNodeId, prompted: true };
   }
 
@@ -2945,10 +2090,10 @@ export class ChatViewProvider implements ControlHost {
    * this process — the caller can only observe it as a *new* instance.
    */
   controlReloadWindow(): ControlResult {
-    if (this.busy || this.agent.running) {
+    if (this.anyRunningTurn()) {
       return { ok: false, error: 'the agent is busy; wait for it to finish first', busy: true };
     }
-    if (this.runningSubAgents.size > 0 || this.activeSessionHasRunningBackground()) {
+    if (this.anyRunningSubAgents() || this.anyRunningBackground()) {
       return { ok: false, error: 'sub-agents or background terminals are still running', busy: true };
     }
     void this.lastPersist.finally(() => {
@@ -2959,153 +2104,70 @@ export class ChatViewProvider implements ControlHost {
     return { ok: true };
   }
 
-  // ---- Panel lifecycle ----
+  // ---- Webview routing ----
 
-  private panelTitle(sessionId: string): string {
-    const session = this.sessions.find((s) => s.id === sessionId);
-    return `Agent Chat Tree — ${session ? session.title : 'Session'}`;
-  }
-
-  private createPanel(sessionId: string): ChatPanel {
-    let created!: ChatPanel;
-    created = ChatPanel.create({
-      sessionId,
-      title: this.panelTitle(sessionId),
-      extensionUri: this.extensionUri,
-      getHtml: (webview) => this.getHtml(webview),
-      onMessage: (message) => this.handlePanelMessage(message),
-      onDispose: () => {
-        // The webview is gone; state stays in this provider so it can be reopened.
-        if (this.panel === created) {
-          this.panel = null;
-        }
-      },
-    });
-    return created;
+  /**
+   * Send a user message into a runtime. The reboot hold is the one provider-level
+   * gate that must still apply to every webview-originated send.
+   */
+  private async dispatchUserMessage(rt: SessionRuntime, text: string, attachments: UserAttachment[]): Promise<void> {
+    if (this.isHeld()) {
+      rt.postNotice('warning', 'An external controller is rebooting the window; please wait a moment.');
+      return;
+    }
+    await rt.onUserMessage(text, attachments);
   }
 
   /**
-   * Window recovery: VS Code recreated this webview panel from the editor state
-   * it serialized at shutdown (`registerWebviewPanelSerializer`, wired in
-   * extension.ts). Adopt the panel, bind it to the session it was showing and
-   * repaint it. Without this the chat tab silently disappears on every reload.
+   * True while an external controller is reloading the window. The runtimes check
+   * this before starting *any* turn, so the reload cannot be raced by an injected
+   * background/sub-agent notice turn.
    */
-  restorePanel(panel: vscode.WebviewPanel, state: unknown): void {
-    if (this.disposed || this.panel) {
-      // Shutting down, or a chat tab is already bound (never expected with a
-      // single panel): drop the extra one so the user does not get two tabs.
-      panel.dispose();
-      return;
-    }
-    // The session to show is the one the webview remembered via setState before
-    // the reload; fall back to the persisted active session when it is missing
-    // (older build) or no longer exists (deleted meanwhile).
-    const remembered = (state as { sessionId?: unknown } | undefined)?.sessionId;
-    const rememberedSession =
-      typeof remembered === 'string' ? this.sessions.find((s) => s.id === remembered) : undefined;
-    const session = rememberedSession ?? this.getActiveSession();
+  isHeld(): boolean {
+    return Date.now() < this.controlHoldUntil;
+  }
+
+  /** Messages from a panel's webview, resolved in that panel's session. */
+  private handlePanelMessage(panel: ChatPanel, message: any): void | Promise<void> {
+    const session = this.sessions.find((s) => s.id === panel.sessionId);
     if (!session) {
-      panel.dispose();
       return;
     }
-    if (session.id !== this.activeSessionId) {
-      // Show the panel's session as the active one so tree, agent history and
-      // composer all agree with what is on screen.
-      this.activateSession(session);
-    }
-    let restored!: ChatPanel;
-    restored = ChatPanel.revive({
-      sessionId: session.id,
-      panel,
-      getHtml: (webview) => this.getHtml(webview),
-      onMessage: (message) => this.handlePanelMessage(message),
-      onDispose: () => {
-        if (this.panel === restored) {
-          this.panel = null;
-        }
-      },
-    });
-    this.panel = restored;
-    restored.setTitle(this.panelTitle(session.id));
-    this.output.appendLine(`[panel] restored chat tab for session ${session.id}`);
-    // The webview posts 'ready' once its script loads; that repaints it.
-  }
-
-  /**
-   * Bring a panel for `sessionId` to the foreground. A single panel is reused for
-   * v1 — switching sessions rebinds the open webview to the new session. (The
-   * mouth for several parallel chats is to keep a list of ChatPanel keyed by
-   * sessionId and create a new one here instead of rebinding.)
-   */
-  private ensurePanel(sessionId: string): void {
-    if (this.disposed) {
-      return;
-    }
-    if (this.panel && this.panel.sessionId === sessionId) {
-      this.panel.focus();
-      return;
-    }
-    if (this.panel) {
-      this.panel.sessionId = sessionId;
-      this.panel.setTitle(this.panelTitle(sessionId));
-      this.panel.focus();
-      // The webview is already loaded; repaint it for the new session.
-      this.postAllState();
-      return;
-    }
-    this.panel = this.createPanel(sessionId);
-    this.panel.focus();
-    // A fresh panel posts 'ready' once its script loads, and we repaint then.
-  }
-
-  /** Full repaint of the open panel (used on session switch / panel rerender). */
-  private postAllState(): void {
-    this.currentPromptTokens = this.getLatestPromptTokens();
-    this.post({ type: 'reset' });
-    this.postState();
-    this.postTree();
-    this.postPath();
-    this.postConfig();
-    this.postContext();
-    this.postSessionStats();
-    this.postBackgrounds();
-    void this.refreshBalance();
-  }
-
-  /** Messages from the webview, routed to the active session's handler. */
-  private handlePanelMessage(message: any): void | Promise<void> {
+    const rt = this.runtimeFor(session);
     switch (message?.type) {
       case 'ready':
-        this.postAllState();
+        rt.postAllState();
         return;
       case 'userMessage':
-        return this.onUserMessage(String(message.text ?? ''), message.attachments ?? []);
+        return this.dispatchUserMessage(rt, String(message.text ?? ''), message.attachments ?? []);
       case 'checkout':
-        this.handleCheckout(String(message.id ?? ''));
+        rt.handleCheckout(String(message.id ?? ''));
         return;
       case 'setNodeSize':
-        this.onSetNodeSize(String(message.id ?? ''), Math.round(Number(message.w)), Math.round(Number(message.h)));
+        rt.onSetNodeSize(String(message.id ?? ''), Math.round(Number(message.w)), Math.round(Number(message.h)));
         return;
       case 'killAgent':
-        this.onKillAgent(String(message.id ?? ''));
+        rt.onKillAgent(String(message.id ?? ''));
         return;
       case 'deleteBranch':
-        void this.deleteBranchInteractive(String(message.id ?? ''));
+        void this.deleteBranchInteractive(session.id, String(message.id ?? ''));
         return;
       case 'layoutDiagnostic':
-        this.logLayoutDiagnostic(message.nodes, message.overlaps, message.connections, message.force);
+        rt.logLayoutDiagnostic(message.nodes, message.overlaps, message.connections, message.force);
         return;
       case 'pickImage':
-        void this.handlePickImage();
+        void rt.handlePickImage();
         return;
       case 'stop':
-        this.onStop();
+        // P3: `stop {nodeId}` cancels that node's run only; an omitted `nodeId`
+        // cancels every run of this session (the pre-P3 behaviour).
+        rt.stop(typeof message.nodeId === 'string' && message.nodeId ? message.nodeId : undefined);
         return;
       case 'setModel':
-        this.onSetModel(String(message.model ?? ''));
+        rt.setModel(String(message.model ?? ''));
         return;
       case 'setThinkingEffort':
-        this.onSetThinkingEffort(String(message.effort ?? 'none') as ThinkingEffort);
+        rt.setThinkingEffort(String(message.effort ?? 'none') as ThinkingEffort);
         return;
       case 'openExternal': {
         const url = String(message.url ?? '');
@@ -3121,501 +2183,19 @@ export class ChatViewProvider implements ControlHost {
         return;
       }
       case 'killBackground':
-        this.onKillBackground(Number(message.id));
+        rt.onKillBackground(Number(message.id));
         return;
       case 'clear':
-        this.clear();
+        this.clear(session.id);
         return;
       default:
         return;
     }
   }
 
-  private async onUserMessage(text: string, attachments: UserAttachment[] = []): Promise<void> {
-    if (this.busy) {
-      return;
-    }
-    if (Date.now() < this.controlHoldUntil) {
-      this.postNotice('warning', 'An external controller is rebooting the window; please wait a moment.');
-      return;
-    }
-    const userText = text.trim();
-
-    // Only models declared image-capable (catalog + `agentHarness.modelTable`) may
-    // carry image blocks. A model that is not would not 400 — DeepSeek silently
-    // swaps the image for an "[Unsupported Image]" text part and the model then
-    // invents what it cannot see — so drop the attachments, send the text alone,
-    // and tell the user to switch models.
-    if (attachments.length > 0 && !isVisionModel(this.model)) {
-      const vision = visionModelsLabel();
-      this.postNotice(
-        'warning',
-        'Images are not supported by the current model (' +
-          (this.model || DEFAULT_MODEL) +
-          '). ' +
-          (vision
-            ? `Switch to a vision model (${vision}) to attach or paste an image.`
-            : 'No vision model is configured for this harness.'),
-      );
-      attachments = [];
-    }
-
-    // Upload any attached images to the DeepSeek Files API and reference them by
-    // file_id via a `file` content block, instead of inlining base64. This keeps
-    // the request body under the 48 MiB inline limit and lets each image be up to
-    // 64 MiB. Image blocks are only allowed in user messages.
-    let content: string | ContentPart[];
-    if (attachments.length > 0) {
-      this.setBusy(true);
-      this.lastStatus = 'Uploading images…';
-      this.post({ type: 'status', text: this.lastStatus });
-      this.uploadController = new AbortController();
-      const uploadSignal = this.uploadController.signal;
-      const parts: ContentPart[] = [];
-      if (userText) {
-        parts.push({ type: 'text', text: userText });
-      }
-      const failed: string[] = [];
-      for (const att of attachments) {
-        try {
-          const bytes = dataUrlBytes(att.dataUrl);
-          const uploaded = await this.client.uploadFile(bytes, att.name || 'image', uploadSignal);
-          parts.push({ type: 'file', file_id: uploaded.id });
-        } catch (err) {
-          if (uploadSignal.aborted) {
-            // The user pressed Stop during upload: reset and do not send.
-            this.uploadController = null;
-            this.setBusy(false);
-            this.lastStatus = 'Interrupted';
-            this.post({ type: 'status', text: 'Interrupted' });
-            this.post({ type: 'interrupted' });
-            return;
-          }
-          failed.push(att.name || 'image');
-          this.output.appendLine(`[image] upload failed: ${err instanceof Error ? err.message : String(err)}`);
-        }
-      }
-      this.uploadController = null;
-      if (failed.length > 0) {
-        this.postNotice('warning', 'Could not upload: ' + failed.join(', ') + '. Those images were omitted.');
-      }
-      if (parts.length === 0) {
-        // Nothing to send (no text and every upload failed).
-        this.setBusy(false);
-        this.lastStatus = '';
-        this.post({ type: 'status', text: '' });
-        return;
-      }
-      content = parts;
-    } else {
-      content = userText;
-    }
-
-    if (typeof content === 'string' && !content) {
-      return;
-    }
-    if (Array.isArray(content) && content.length === 0) {
-      return;
-    }
-
-    // Name a fresh session from its first user message (provisional: the
-    // automatic namer replaces it with a model-generated title once the turn
-    // finishes).
-    const session = this.getActiveSession();
-    if (session) {
-      if (session.title === 'New session' && (userText || attachments.length > 0)) {
-        session.title = (userText || 'New session').slice(0, 40);
-        session.titleSource = 'provisional';
-        this.onStateChanged?.();
-      }
-      session.updatedAt = Date.now();
-    }
-
-    // This turn becomes a new node, checked out as a child of the currently
-    // selected node — a branch when that node already had children.
-    const node = this.beginTurn(titleFromPrompt(userText || attachments[0]?.name || ''));
-    if (!node) {
-      return;
-    }
-    this.pushItem({ kind: 'user', text: userText, attachments });
-    this.post({ type: 'user', text: userText, attachments });
-    this.setBusy(true);
-    this.lastStatus = 'Thinking…';
-    this.post({ type: 'status', text: this.lastStatus });
-    void this.agent.sendUserMessage(content);
-  }
-
-  private onSetModel(model: string): void {
-    if (this.busy) {
-      return;
-    }
-    // A stale id (settings left over from an older catalog) resolves to the
-    // default rather than silently mis-sizing the indicator or hiding images.
-    const next = this.resolveModel(model);
-    if (!next || next === this.model) {
-      return;
-    }
-    this.model = next;
-    this.agent.setModel(next);
-    this.contextWindow = this.getContextWindow(next);
-    this.persistRuntimeConfig();
-    this.postConfig();
-    this.postContext();
-    if (this.hasHistory()) {
-      let notice =
-        'Model changed to ' + next + '. Existing conversation history was produced under a different model, so the next request may miss the prompt cache and reprocess the full context.';
-      if (!isVisionModel(next) && this.activeSessionHasImages()) {
-        notice +=
-          ' Image blocks are hidden for this text-only model (the image data is kept) and will be restored when you switch back to a vision model.';
-      }
-      this.postNotice('warning', notice);
-    }
-    this.output.appendLine(`[config] model=${next}`);
-  }
-
-  private onSetThinkingEffort(effort: ThinkingEffort): void {
-    if (this.busy) {
-      return;
-    }
-    if (effort === this.thinkingEffort) {
-      return;
-    }
-    this.thinkingEffort = effort;
-    this.agent.setThinkingEffort(effort);
-    this.persistRuntimeConfig();
-    this.postConfig();
-    if (this.hasHistory()) {
-      this.postNotice(
-        'warning',
-        'Thinking effort changed to "' + effort + '". This affects the next request; the prompt cache may be missed.',
-      );
-    }
-    this.output.appendLine(`[config] thinkingEffort=${effort}`);
-  }
-
-  /** Open a file picker, read the chosen image, and send a base64 data URL back. */
-  private async handlePickImage(): Promise<void> {
-    const result = await vscode.window.showOpenDialog({
-      canSelectMany: false,
-      filters: { Images: ['png', 'jpg', 'jpeg', 'gif', 'webp'] },
-      openLabel: 'Attach Image',
-    });
-    if (!result || result.length === 0) {
-      return;
-    }
-    const filePath = result[0].fsPath;
-    try {
-      const buffer = await fs.promises.readFile(filePath);
-      const ext = path.extname(filePath).toLowerCase();
-      const mime =
-        ext === '.png' ? 'image/png' : ext === '.gif' ? 'image/gif' : ext === '.webp' ? 'image/webp' : 'image/jpeg';
-      const dataUrl = `data:${mime};base64,${buffer.toString('base64')}`;
-      this.post({ type: 'imagePicked', dataUrl, name: path.basename(filePath) });
-    } catch (err) {
-      this.post({
-        type: 'error',
-        message: `Could not read image: ${err instanceof Error ? err.message : String(err)}`,
-      });
-    }
-  }
-
-  private onStop(): void {
-    // Abort an in-flight image upload, then stop the agent turn if one is running.
-    this.uploadController?.abort();
-    this.agent.cancel();
-  }
-
-  private setBusy(busy: boolean): void {
-    this.busy = busy;
-    this.postState();
-    this.onStateChanged?.();
-  }
-
-  /**
-   * Push the busy/status state plus whether the session is locked (busy OR any
-   * background terminal still running). The webview disables session switching
-   * while locked so a session with running background jobs cannot be left.
-   */
-  private postState(): void {
-    const reg = this.sessionRegistries.get(this.activeSessionId);
-    const runningBg = reg ? reg.runningCount() > 0 : false;
-    const sessionLocked = this.busy || runningBg;
-    // `sessionId` lets the webview remember which session it shows (vscode.setState),
-    // so a reloaded window can restore the tab bound to the same conversation.
-    this.post({
-      type: 'state',
-      busy: this.busy,
-      status: this.lastStatus,
-      sessionLocked,
-      sessionId: this.activeSessionId,
-    });
-  }
-
-  // ---- Background terminal management ----
-
-  /** True when the active session has at least one still-running background terminal. */
-  private activeSessionHasRunningBackground(): boolean {
-    const reg = this.sessionRegistries.get(this.activeSessionId);
-    return reg ? reg.runningCount() > 0 : false;
-  }
-
-  private toBackgroundInfo(task: BackgroundTask): BackgroundInfo {
-    const out = task.handle.getOutput().trim();
-    const outputTail = out.length > 800 ? '…' + out.slice(-800) : out;
-    return {
-      id: task.id,
-      command: task.command,
-      status: task.status,
-      exitCode: task.exitCode,
-      killed: task.killed,
-      elapsed: Math.round((Date.now() - task.startedAt) / 1000),
-      truncated: task.truncated,
-      outputTail,
-      pendingDelivery: task.status === 'finished' && !task.delivered,
-    };
-  }
-
-  private postBackgrounds(): void {
-    // Background output can fire onUpdated many times per second. Coalesce UI
-    // refreshes so a chatty process cannot freeze the webview.
-    if (this.bgFlushTimer != null) {
-      return;
-    }
-    this.bgFlushTimer = setTimeout(() => {
-      this.bgFlushTimer = null;
-      this.postBackgroundsNow();
-    }, 200);
-  }
-
-  private postBackgroundsNow(): void {
-    const t0 = Date.now();
-    const reg = this.sessionRegistries.get(this.activeSessionId);
-    // Show running jobs plus finished ones still awaiting delivery (their notice
-    // has not reached the agent yet). Delivered jobs drop out, so the list never
-    // accumulates stale entries.
-    const tasks = reg
-      ? reg
-          .list()
-          .filter((t) => t.status === 'running' || (t.status === 'finished' && !t.delivered))
-          .map((t) => this.toBackgroundInfo(t))
-      : [];
-    this.post({ type: 'background', tasks });
-    this.postState();
-    perf(() => `backgrounds ${Date.now() - t0}ms tasks=${tasks.length}`);
-  }
-
-  /** Mark a task's completion notice as delivered so it leaves the pending panel. */
-  private markDelivered(sessionId: string, taskId: number): void {
-    const reg = this.sessionRegistries.get(sessionId);
-    const task = reg?.get(taskId);
-    if (task) {
-      task.delivered = true;
-    }
-  }
-
-  /**
-   * Called when a background terminal transitions to finished (naturally or via
-   * kill). Builds the notice, queues it, and drains immediately — delivering now
-   * if the agent is idle, or waiting for the current turn to finish otherwise.
-   */
-  private onBackgroundFinished(sessionId: string, task: BackgroundTask): void {
-    if (this.disposed) {
-      return;
-    }
-    if (task.notifyAgent !== true) {
-      // Tool-initiated kill/join already informed the agent via the tool result, so
-      // the task is considered delivered and leaves the pending panel state.
-      task.delivered = true;
-      this.postBackgrounds();
-      return;
-    }
-    const notice = this.buildBackgroundNotice(task);
-    if (sessionId !== this.activeSessionId) {
-      // Defensive: a background task for a non-active session finished. The
-      // session lock normally prevents this; fall back to a UI-only notice.
-      this.postNotice('info', notice.text);
-      return;
-    }
-    this.backgroundNotifQueue.push({ ...notice, sessionId });
-    this.scheduleBackgroundDrain();
-  }
-
-  /**
-   * Coalesce idle background-notice delivery: several jobs finishing in quick
-   * succession while the agent is idle are batched into a single turn instead of
-   * one turn each. While the agent is busy the notices simply stay queued and are
-   * drained when the current turn ends.
-   */
-  private scheduleBackgroundDrain(): void {
-    if (this.busy) {
-      return;
-    }
-    if (this.backgroundDrainTimer != null) {
-      return;
-    }
-    this.backgroundDrainTimer = setTimeout(() => {
-      this.backgroundDrainTimer = null;
-      this.drainBackgroundQueue();
-    }, 75);
-  }
-
-  private buildBackgroundNotice(task: BackgroundTask): Omit<BackgroundNotice, 'sessionId'> {
-    const cmd = this.truncateField(task.command, 100);
-    const doneText = task.killed
-      ? 'was killed by the user'
-      : `finished with exit code ${task.exitCode ?? 'unknown'}`;
-    const output = this.truncateField(task.handle.getOutput().trim(), 1200);
-    const text = `Background command \`${cmd}\` (id ${task.id}) ${doneText}.${output ? `\nOutput:\n${output}` : ''}`;
-    return { taskId: task.id, id: task.id, cmd, doneText, output, text };
-  }
-
-  private truncateField(value: string, limit: number): string {
-    return value.length > limit ? value.slice(0, limit) + '…' : value;
-  }
-
-  /** Combine several queued notices into one agent-facing message. */
-  private combineNotices(notices: BackgroundNotice[]): string {
-    if (notices.length === 1) {
-      return notices[0].text;
-    }
-    const lines = notices.map((n) => `- ${n.text}`);
-    return `[Background terminal notice] ${notices.length} background tasks finished:\n${lines.join('\n')}`;
-  }
-
-  /**
-   * Deliver a batch of background-completion notices: render one card per notice
-   * in the webview, then start a single turn with a combined message so the
-   * agent reacts once (instead of one auto-turn per finished job). Re-queues if
-   * the agent became busy in the meantime.
-   */
-  private injectBackgroundNotices(notices: BackgroundNotice[]): void {
-    if (this.disposed) {
-      return;
-    }
-    if (notices.length === 0) {
-      return;
-    }
-    if (this.busy) {
-      this.backgroundNotifQueue.push(...notices);
-      return;
-    }
-    // The notice turn is a new node, checked out under the currently selected
-    // node, so the cards and the agent's reply land in their own block.
-    const title =
-      notices.length === 1
-        ? `Background #${notices[0].id}: ${notices[0].cmd}`
-        : `Background: ${notices.length} tasks finished`;
-    if (!this.beginTurn(titleFromPrompt(title))) {
-      this.backgroundNotifQueue.push(...notices);
-      return;
-    }
-    for (const n of notices) {
-      // The notice is now reaching the agent, so the task leaves the pending panel.
-      this.markDelivered(n.sessionId, n.taskId);
-      this.pushItem({ kind: 'background', id: String(n.id), name: n.cmd, doneText: n.doneText, content: n.output });
-      this.post({
-        type: 'backgroundNotice',
-        item: { id: n.id, name: n.cmd, doneText: n.doneText, content: n.output },
-      });
-    }
-    // Refresh the panel so the just-delivered jobs drop out of the pending list.
-    this.postBackgrounds();
-    this.lastStatus = 'Background terminal finished';
-    this.setBusy(true);
-    this.post({ type: 'status', text: this.lastStatus });
-    this.agent.sendUserMessage(this.combineNotices(notices));
-  }
-
-  /** True when the task was later joined or killed via a tool (or no longer exists). */
-  private taskAlreadyHandled(sessionId: string, taskId: number): boolean {
-    const reg = this.sessionRegistries.get(sessionId);
-    const task = reg?.get(taskId);
-    if (!task) {
-      // The task was removed (cleared session / deleted); its notice is stale.
-      return true;
-    }
-    return task.notifyAgent !== true;
-  }
-
-  /**
-   * After a turn ends, deliver any background-completion notifications queued
-   * while it was running. Deferred a tick so the previous turn's finally block
-   * has reset agent.running to false (otherwise sendUserMessage rejects). Drops
-   * notices for tasks already handled by a join/kill instead of delivering them.
-   */
-  private drainBackgroundQueue(): void {
-    if (this.busy) {
-      return;
-    }
-    const queue = this.backgroundNotifQueue;
-    // Collect every real (not already handled) notice for the active session so
-    // they can be delivered together in one turn rather than one per turn.
-    const real: BackgroundNotice[] = [];
-    let i = 0;
-    while (i < queue.length) {
-      const q = queue[i];
-      if (q.sessionId !== this.activeSessionId) {
-        i++;
-        continue;
-      }
-      if (this.taskAlreadyHandled(q.sessionId, q.taskId)) {
-        // The agent already handled this task via join/kill (or it was removed):
-        // drop the stale notice and treat the job as delivered so it also leaves
-        // the pending panel.
-        this.markDelivered(q.sessionId, q.taskId);
-        queue.splice(i, 1);
-        continue;
-      }
-      real.push(queue.splice(i, 1)[0]);
-    }
-    if (real.length === 0) {
-      // Only stale notices were dropped; refresh so those jobs leave the pending panel.
-      this.postBackgrounds();
-      return;
-    }
-    setTimeout(() => {
-      if (this.busy) {
-        this.backgroundNotifQueue.push(...real);
-        return;
-      }
-      this.injectBackgroundNotices(real);
-    }, 0);
-  }
-
-  /** Kill a background terminal from the UI's Background panel. */
-  private onKillBackground(id: number): void {
-    const reg = this.sessionRegistries.get(this.activeSessionId);
-    if (!reg) {
-      return;
-    }
-    const task = reg.get(id);
-    if (!task) {
-      return;
-    }
-    if (task.status !== 'running') {
-      this.postNotice('info', `Background terminal ${id} is not running.`);
-      return;
-    }
-    // User-initiated kill: notify the agent (queue if busy, deliver if idle).
-    reg.kill(id, { notifyAgent: true });
-    this.postBackgrounds();
-  }
-
   /** Kill every running background terminal (session delete / extension dispose). */
   dispose(): void {
     this.disposed = true;
-    if (this.streamFlushTimer != null) {
-      clearTimeout(this.streamFlushTimer);
-      this.streamFlushTimer = null;
-    }
-    if (this.bgFlushTimer != null) {
-      clearTimeout(this.bgFlushTimer);
-      this.bgFlushTimer = null;
-    }
-    if (this.backgroundDrainTimer != null) {
-      clearTimeout(this.backgroundDrainTimer);
-      this.backgroundDrainTimer = null;
-    }
     if (this.titleDrainTimer != null) {
       clearTimeout(this.titleDrainTimer);
       this.titleDrainTimer = null;
@@ -3624,260 +2204,18 @@ export class ChatViewProvider implements ControlHost {
     this.titleJob = null;
     this.titlePending.clear();
     setPerfSink(null);
-    for (const reg of this.sessionRegistries.values()) {
-      reg.killAll();
+    for (const rt of this.runtimes.values()) {
+      rt.dispose();
     }
-    this.cleanupSubAgents();
-    // Deliberately NOT disposing the webview panel: disposing closes the editor
-    // tab, and the tab must outlive the extension host so VS Code can hand it
+    this.runtimes.clear();
+    // Nothing may outlive the provider: every registry the hub still holds is
+    // torn down with its process tree.
+    this.backgroundHub.killAll();
+    // Deliberately NOT disposing the webview panels: disposing closes the editor
+    // tabs, and a tab must outlive the extension host so VS Code can hand it
     // back through the webview panel serializer on the next activation
-    // (restorePanel). VS Code tears the webview down with the extension host.
-    this.panel = null;
+    // (restorePanel). VS Code tears the webviews down with the extension host.
     this.output.dispose();
-  }
-
-  private logUsage(usage: Usage): void {
-    this.output.appendLine(
-      `[usage] total=${usage.total_tokens} prompt=${usage.prompt_tokens} ` +
-        `completion=${usage.completion_tokens} ` +
-        `cache_hit=${usage.prompt_cache_hit_tokens ?? 0} ` +
-        `cache_miss=${usage.prompt_cache_miss_tokens ?? 0}`,
-    );
-  }
-
-  private handleAgentEvent(event: AgentEvent): void {
-    switch (event.type) {
-      case 'status':
-        this.lastStatus = event.text;
-        this.post({ type: 'status', text: event.text });
-        break;
-      case 'streamDelta':
-        this.appendDelta(event.content);
-        break;
-      case 'reasoningDelta':
-        this.appendThinkingDelta(event.content);
-        break;
-      case 'assistantDone':
-        this.flushStreamDeltas();
-        break;
-      case 'usage':
-        this.flushStreamDeltas();
-        this.logUsage(event.usage);
-        this.currentPromptTokens = event.usage.prompt_tokens;
-        this.postContext();
-        {
-          // The turn's usage belongs on the turn's window: the assistant bubble
-          // for a text answer, or the tool call card for a tool-call turn. Attach
-          // it to whichever item concluded the turn (the last item) so the token
-          // count shows in place and is never hoisted into an empty message bubble.
-          const last = this.displayItems[this.displayItems.length - 1];
-          if (last && (last.kind === 'assistant' || last.kind === 'tool') && !last.error) {
-            last.usage = event.usage;
-          }
-          this.post({ type: 'usage', usage: event.usage });
-        }
-        // Recompute the session totals after this turn's usage is attached to the
-        // display items, so the cumulative counters include the turn just finished.
-        this.postSessionStats();
-        break;
-      case 'toolCallDelta':
-        this.queueToolCallDelta(event.index, event.id, event.name, event.args);
-        break;
-      case 'toolStart':
-        this.flushStreamDeltas();
-        // Once a tool call starts running, reflect it in the header instead of
-        // the generic "Thinking…".
-        if (event.name) {
-          this.lastStatus = `Calling ${event.name}…`;
-          this.post({ type: 'status', text: this.lastStatus });
-        }
-        this.pushItem({
-          kind: 'tool',
-          id: event.id,
-          name: event.name,
-          args: clipForUi(event.args, 8 * 1024),
-          status: 'running',
-        });
-        this.post({
-          type: 'toolStart',
-          id: event.id,
-          name: event.name,
-          args: clipForUi(event.args, 8 * 1024),
-          index: event.index,
-        });
-        break;
-      case 'toolEnd':
-        this.updateToolItem(event.id, event.content);
-        this.post({
-          type: 'toolEnd',
-          id: event.id,
-          name: event.name,
-          content: clipForUi(event.content),
-        });
-        break;
-      case 'done':
-        this.flushStreamDeltas();
-        this.setBusy(false);
-        // Preserve an informative final status (e.g. loop-limit note) if one was
-        // set; otherwise fall back to a simple "Done".
-        if (!this.lastStatus || this.lastStatus === 'Thinking…') {
-          this.lastStatus = 'Done';
-        }
-        this.post({ type: 'status', text: this.lastStatus });
-        this.post({ type: 'done' });
-        this.finishTurn('done');
-        void this.refreshBalance();
-        this.drainBackgroundQueue();
-        this.drainSubAgentNotices();
-        break;
-      case 'interrupted':
-        this.flushStreamDeltas();
-        this.lastStatus = 'Interrupted';
-        this.setBusy(false);
-        this.post({ type: 'interrupted' });
-        // Remember where the stop landed so a turn that continues from this same
-        // node still gets the interruption notice.
-        this.lastInterruptedNodeId = this.activeTurnNode?.id ?? null;
-        this.finishTurn('interrupted');
-        void this.refreshBalance();
-        this.drainBackgroundQueue();
-        this.drainSubAgentNotices();
-        break;
-      case 'error':
-        this.flushStreamDeltas();
-        this.lastStatus = 'Error';
-        this.pushItem({ kind: 'assistant', text: `⚠️ ${event.message}`, error: true });
-        this.post({ type: 'error', message: event.message });
-        this.setBusy(false);
-        this.finishTurn('error');
-        void this.refreshBalance();
-        this.drainBackgroundQueue();
-        this.drainSubAgentNotices();
-        break;
-      default:
-        break;
-    }
-  }
-
-  private pushItem(item: DisplayItem): void {
-    this.displayItems.push(item);
-  }
-
-  private appendDelta(text: string): void {
-    this.pendingTextDelta += text;
-    this.scheduleStreamFlush();
-  }
-
-  private appendThinkingDelta(text: string): void {
-    this.pendingThinkingDelta += text;
-    this.scheduleStreamFlush();
-  }
-
-  private commitTextDelta(text: string): void {
-    const last = this.displayItems[this.displayItems.length - 1];
-    if (last && last.kind === 'assistant' && !last.error) {
-      last.text = (last.text ?? '') + text;
-    } else {
-      this.displayItems.push({ kind: 'assistant', text });
-    }
-  }
-
-  private commitThinkingDelta(text: string): void {
-    const last = this.displayItems[this.displayItems.length - 1];
-    if (last && last.kind === 'assistant' && !last.error) {
-      last.thinking = (last.thinking ?? '') + text;
-    } else {
-      this.displayItems.push({ kind: 'assistant', thinking: text });
-    }
-  }
-
-  private queueToolCallDelta(index: number, id?: string, name?: string, args?: string): void {
-    const existing = this.pendingToolDeltas.get(index) ?? { id, name: '', args: '' };
-    if (id) {
-      existing.id = id;
-    }
-    if (name) {
-      existing.name += name;
-    }
-    if (args) {
-      existing.args += args;
-    }
-    this.pendingToolDeltas.set(index, existing);
-    this.scheduleStreamFlush();
-  }
-
-  private scheduleStreamFlush(): void {
-    if (this.streamFlushTimer != null) {
-      return;
-    }
-    this.streamFlushTimer = setTimeout(() => {
-      this.streamFlushTimer = null;
-      this.flushStreamDeltas();
-    }, 50);
-  }
-
-  private flushStreamDeltas(): void {
-    if (this.streamFlushTimer != null) {
-      clearTimeout(this.streamFlushTimer);
-      this.streamFlushTimer = null;
-    }
-    const text = this.pendingTextDelta;
-    const thinking = this.pendingThinkingDelta;
-    const tools = this.pendingToolDeltas.size;
-    if (!text && !thinking && tools === 0) {
-      return;
-    }
-    this.pendingTextDelta = '';
-    this.pendingThinkingDelta = '';
-    const bytes = text.length + thinking.length;
-    this.streamFlushCount++;
-    this.streamFlushBytes += bytes;
-    const now = Date.now();
-    if (this.streamFlushWindow === 0) {
-      this.streamFlushWindow = now;
-    }
-    if (text) {
-      this.commitTextDelta(text);
-      this.post({ type: 'delta', text });
-    }
-    if (thinking) {
-      this.commitThinkingDelta(thinking);
-      this.post({ type: 'thinkingDelta', text: thinking });
-    }
-    if (tools > 0) {
-      for (const [index, draft] of this.pendingToolDeltas) {
-        this.post({
-          type: 'toolCallDelta',
-          index,
-          id: draft.id,
-          name: draft.name,
-          args: clipForUi(draft.args, 8 * 1024),
-        });
-      }
-      this.pendingToolDeltas.clear();
-    }
-    if (now - this.streamFlushWindow >= 2000) {
-      perf(
-        () =>
-          `stream-flush n=${this.streamFlushCount} bytes=${this.streamFlushBytes} ` +
-          `window=${now - this.streamFlushWindow}ms items=${this.displayItems.length}`,
-      );
-      this.streamFlushCount = 0;
-      this.streamFlushBytes = 0;
-      this.streamFlushWindow = now;
-    }
-  }
-
-  private updateToolItem(id: string, content: string): void {
-    const item = this.displayItems.find((it) => it.kind === 'tool' && it.id === id);
-    if (item) {
-      item.status = 'done';
-      item.content = clipForUi(content);
-    }
-  }
-
-  private post(message: unknown): void {
-    this.panel?.post(message);
   }
 
   private getHtml(webview: vscode.Webview): string {
@@ -3912,13 +2250,6 @@ export class ChatViewProvider implements ControlHost {
     <div id="tree-canvas">
       <svg id="tree-edges"></svg>
     </div>
-  </div>
-  <div id="bg-panel" class="hidden">
-    <div id="bg-head">
-      <span class="bg-title">Background</span>
-      <span id="bg-count" class="bg-count"></span>
-    </div>
-    <div id="bg-list"></div>
   </div>
   <div id="composer">
     <div id="branch-banner" class="hidden"></div>

@@ -674,49 +674,72 @@ button.icon-btn {
   overflow: auto;
 }
 
-/* ---- Background terminals panel ---- */
-#bg-panel {
-  position: absolute;
-  right: 14px;
-  bottom: 176px;
-  width: min(360px, calc(100% - 28px));
-  max-height: 36%;
-  overflow-y: auto;
-  z-index: 15;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  background: var(--bg2);
-  padding: 6px 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.3);
-}
-
-#bg-head {
-  display: flex;
-  align-items: center;
-  gap: 8px;
+/* ---- Background terminals: per-node dock (bottom of the owning card) ----
+   There is no standalone panel: each node's jobs render into its own card's dock.
+   The dock is a flex item of the card (`flex: 0 0 auto`) while `.node-body` keeps
+   `flex: 1 1 auto` — so the dock adds height to the card and never eats into the
+   transcript's own scroll area. `.node-resize` is absolutely positioned, so
+   appending the dock last does not disturb it (main.js keeps it above the
+   composer pane on the card that hosts the input). */
+.node-bg {
   flex: 0 0 auto;
-}
-
-.bg-title {
-  color: var(--accent);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-}
-
-.bg-count {
-  color: var(--text-dim);
-  font-size: 10px;
-  font-family: "Consolas", "Courier New", monospace;
-}
-
-#bg-list {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  padding: 5px 8px;
+  border-top: 1px solid var(--border);
+  background: var(--bg2);
+}
+
+.node-bg.hidden {
+  display: none;
+}
+
+.bg-dock-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.bg-dock-count {
+  color: var(--text-dim);
+  font-size: 10px;
+  font-family: "Consolas", "Courier New", monospace;
+  white-space: nowrap;
+  /* Shrinks (and ellipsises) before the kill buttons, which must stay clickable. */
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.bg-dock-kills {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  flex: 0 0 auto;
+}
+
+.bg-dock-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 170px;
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+/* A collapsed card has no room for the per-task rows (heads and their collapsible
+   output bodies), so the dock collapses to its one-line summary — the counts plus
+   one kill button per live job. Re-expanding restores the full list, which stayed
+   in the DOM all along. */
+.node-bg.collapsed .bg-dock-list {
+  display: none;
+}
+
+.node-bg:not(.collapsed) .bg-dock-head {
+  display: none;
 }
 
 .bg-item {
@@ -1033,7 +1056,12 @@ button.icon-btn {
 .usage-line,
 .thinking-body,
 .bgnotify-output,
-.bgnotify-cmd {
+.bgnotify-cmd,
+/* The background dock lives inside #tree-canvas (user-select: none), so its
+   output must opt back in to stay copyable like the old panel's. */
+.bg-cmd,
+.bg-output,
+.bg-dock-count {
   user-select: text;
   -webkit-user-select: text;
 }
