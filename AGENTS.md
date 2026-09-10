@@ -24,7 +24,12 @@
 - 提示词里**不写工具清单**：schema 走 API 的 `tools` 字段。每个工具的 schema、执行代码和能力门槛（`vision` / `spawn` / `spawnReadOnly` / `hop`）都在同一个文件里。
 - 行尾不要凭记忆：`read_file` 返回 LF，`write_file`/`replace_in_file` 保留磁盘 EOL。见 `docs/agents/invariants/line-endings.md`。
 - `media/vendor/non-layered-tidy-tree-layout/` 是 vendored 且 hash 固定的布局引擎（@2.0.2）：不编辑、不升级、不写进 `package.json`。
-- 同一时刻只驱动一个会话；该会话有后台终端在跑时会被锁定（不能切换/删除/清空）。
+- 每个会话恰好一个标签页（`PanelManager.ensure`）：重开会聚焦已有页签；关页签不删会话。
+- 视图焦点（`session.activeNodeId`）与正在跑的回合基准（`run.nodeId`）相互独立，所以切换节点/分支/页签随时允许；流式消息一律带显式 `nodeId`，webview 不推断流的目标。
+- 会话真并发；同一会话里不同节点也可同时跑。只有对**同一节点**再发才被拒（`runs: Map<nodeId, TurnRun>`），此时 composer 显示 Stop（`state.runningNodes`）而非 Send。
+- 后台终端归生成它的那个节点（`BackgroundHub` 按 `(session,node)` 记账），不锁其他分支/会话；删除分支/会话或清空时仍有任务在跑，先弹模态确认、确认后连进程一起杀（`confirmKillBackgrounds`）。
+- model/thinking-effort 按会话（每个 `SessionRuntime` 一份；缺省取全局记录/设置）。
+- `host.isHeld()` 拦**每一次**回合启动（`/wait-for-finish` 的 hold，含注入的后台/子代理通知回合）：自驱动 reload 靠它赢竞态，**不要削弱**。
 - `npm run check:models` 会让"在 `src/**` 里硬写模型 id"直接打包失败——模型名一律从 `src/agent/models.ts` 取。
 - `npm run check:webview` 会在打包前把 `media/main.js` 装进内存 DOM、重放 provider 的每种消息；webview 回调里的"引用已删标识符"在真界面里是静默的（UI 停在旧值），这道闸专治它。
 
@@ -35,6 +40,7 @@
 - **模型能力**：`invariants/model-capabilities`（为什么只 vendor `deepseek-flash`、`agentHarness.modelTable` 表格式、为什么不做探测）
 - **工具**：`tools`（加/改工具、verbatim frame 语法）· `invariants/sub-agents`（spawn_* / send_*）· `invariants/background-terminals`（exec_command 与后台终端）· `invariants/transcripts`（search_transcripts）· `invariants/vision-images`（read_image）
 - **会话与持久化**：`invariants/conversation-validity` · `invariants/session-persistence`（持久化 + rename_session 的自动命名与锁定）· `invariants/chat-tree`（分支/签出）· `invariants/interrupt-rollback`
+- **多会话 / 并发**：`multi-session`（多标签 + 会话/分支并发，P1–P4 冻结契约）· 验收驱动 `tools/harness-test.mjs`（dev-only，不进 `.vsix`）
 - **控制平面 / 桌面**：`control-plane`（含 hop_session / list_nodes）· `computer-use`
 - **其余不变量**：`invariants/line-endings` · `invariants/config-keys` · `invariants/streaming-perf` · `invariants/vendored-deps`
 - **无工作区模式（没打开文件夹）**：`no-repo-mode`（根、会话存储、行为差异）

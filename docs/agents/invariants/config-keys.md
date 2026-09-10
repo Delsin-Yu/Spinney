@@ -65,19 +65,22 @@ no handling.
 | `contextWindow` | immediately | pushed: recompute + `postContext()` |
 | `modelTable` | immediately | pushed: `applyModelTable()` (re-parse + install) → `postConfig()` (dropdown + image affordances) → `getContextWindow`/`postContext` for the row's own model |
 | `maxConcurrentSubagents` | immediately (raising wakes queued tasks; lowering drains) | pushed: `SubAgentPool.setMaxConcurrent` |
-| `model`, `thinkingEffort` | immediately when *that key* changed, else the dropdown selection wins | pushed through `onSetModel` / `onSetThinkingEffort`; skipped while a turn is running, like the dropdowns |
+| `model`, `thinkingEffort` | immediately when *that key* changed, and only for sessions **without a pick of their own** (a per-tab dropdown pick wins) | pushed through `SessionRuntime.applyDefaultModel` / `applyDefaultEffort` (driven by `onConfigurationChanged`); a running session is skipped, like the dropdowns |
 | `foldToolCalls`, `foldThinking` | immediately, incl. cards already on screen | pushed: `postConfig()` → the webview re-applies the default to existing cards |
 | `httpApi.enabled`, `httpApi.port` | immediately | pushed: `ControlServer.restart()` (rebind the listener; disabling just leaves `start()` a no-op) |
 | `commandTimeout`, `maxInlineToolOutput`, `maxLevel2Subagents`, `saveSessionTranscripts`, `saveSubAgentTranscripts`, `subAgentTranscriptDir`, `autoSessionTitles` | immediately | pulled at the point of use (they already were — no listener needed) |
 
-- **`model` / `thinkingEffort` arbitration:** the chat dropdowns persist their
-  pick in the `agentHarness.runtimeConfig` Memento. The pick shadows the setting
-  only while the setting is unchanged: `persistRuntimeConfig` also stores the
-  setting values in force (`modelFromSettings` / `effortFromSettings`), and
-  `loadRuntimeConfig` falls back to the setting when they differ. So editing the
-  setting (live or while VS Code is closed) wins over an older pick; a pick made
-  after the edit keeps winning. A record without those fields predates the rule
-  and is trusted.
+- **`model` / `thinkingEffort` arbitration (P4):** each tab's dropdown writes its pick
+  **onto its session** (`session.model` / `session.effort` + `modelFromSettings` /
+  `effortFromSettings` — see `invariants/session-persistence.md`), so a pick is per
+  session and survives a reload with it. It shadows the setting only while that setting is
+  unchanged: `sessionModelPick` / `sessionEffortPick` ignore a pick whose anchor no longer
+  matches, so editing the setting wins over an older pick and a pick made after the edit
+  keeps winning. The *global* `agentHarness.runtimeConfig` Memento is now only the
+  **default for sessions with no pick** (`effectiveModel` / `effectiveEffort` →
+  `loadRuntimeConfig` → the setting) and the seed for sessions created later
+  (`persistRuntimeConfig`). A stored record without the anchor fields predates the rule and
+  is trusted.
 - **Not a setting:** the `AGENTS.md` snapshot is taken once per activation
   (`loadAgentsMd`), so that one still needs a window reload — see
   `invariants/agents-md-snapshot.md`.

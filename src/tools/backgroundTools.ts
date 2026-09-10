@@ -1,8 +1,8 @@
 import { AgentTool } from '../agent/types';
-import { BackgroundRegistry } from './background';
+import type { BackgroundAccess } from '../chat/backgroundHub';
 import { limitInline } from './index';
 
-export function makeCheckBackgroundTool(getRegistry: () => BackgroundRegistry | null): AgentTool {
+export function makeCheckBackgroundTool(getAccess: () => BackgroundAccess | null): AgentTool {
   return {
     definition: {
       type: 'function',
@@ -20,15 +20,18 @@ export function makeCheckBackgroundTool(getRegistry: () => BackgroundRegistry | 
       },
     },
     async execute(args, signal) {
-      const registry = getRegistry();
-      if (!registry) {
+      const access = getAccess();
+      const sessionId = access?.currentOwner()?.sessionId ?? null;
+      if (!access || !sessionId) {
         return 'Error: background terminals are not available in this session.';
       }
       const id = Number(args.pid);
       if (!Number.isFinite(id)) {
         return 'Error: check_background_terminal requires a numeric pid.';
       }
-      const task = registry.get(id);
+      // Ids are session-local, so a job spawned from another branch of the same
+      // session still resolves: the hub maps the id back to its owning node.
+      const task = access.hub.lookup(sessionId, id)?.task;
       if (!task) {
         return `Error: no background terminal with id ${id}.`;
       }
@@ -45,7 +48,7 @@ export function makeCheckBackgroundTool(getRegistry: () => BackgroundRegistry | 
   };
 }
 
-export function makeKillBackgroundTool(getRegistry: () => BackgroundRegistry | null): AgentTool {
+export function makeKillBackgroundTool(getAccess: () => BackgroundAccess | null): AgentTool {
   return {
     definition: {
       type: 'function',
@@ -63,28 +66,31 @@ export function makeKillBackgroundTool(getRegistry: () => BackgroundRegistry | n
       },
     },
     async execute(args, signal) {
-      const registry = getRegistry();
-      if (!registry) {
+      const access = getAccess();
+      const sessionId = access?.currentOwner()?.sessionId ?? null;
+      if (!access || !sessionId) {
         return 'Error: background terminals are not available in this session.';
       }
       const id = Number(args.pid);
       if (!Number.isFinite(id)) {
         return 'Error: kill_background requires a numeric pid.';
       }
-      const task = registry.get(id);
+      const task = access.hub.lookup(sessionId, id)?.task;
       if (!task) {
         return `Error: no background terminal with id ${id}.`;
       }
       if (task.status !== 'running') {
         return `Background terminal ${id} is not running (exit code ${task.exitCode ?? 'unknown'}).`;
       }
-      registry.kill(id, { notifyAgent: false });
+      // Tool-initiated kill: the tool result is the signal the agent sees, so the
+      // separate completion notice is suppressed (`notifyAgent: false`).
+      access.hub.kill(sessionId, id, { notifyAgent: false });
       return `Killed background terminal ${id} (command: ${task.command}).`;
     },
   };
 }
 
-export function makeJoinBackgroundTool(getRegistry: () => BackgroundRegistry | null): AgentTool {
+export function makeJoinBackgroundTool(getAccess: () => BackgroundAccess | null): AgentTool {
   return {
     definition: {
       type: 'function',
@@ -102,15 +108,16 @@ export function makeJoinBackgroundTool(getRegistry: () => BackgroundRegistry | n
       },
     },
     async execute(args, signal) {
-      const registry = getRegistry();
-      if (!registry) {
+      const access = getAccess();
+      const sessionId = access?.currentOwner()?.sessionId ?? null;
+      if (!access || !sessionId) {
         return 'Error: background terminals are not available in this session.';
       }
       const id = Number(args.pid);
       if (!Number.isFinite(id)) {
         return 'Error: join_background requires a numeric pid.';
       }
-      const task = registry.get(id);
+      const task = access.hub.lookup(sessionId, id)?.task;
       if (!task) {
         return `Error: no background terminal with id ${id}.`;
       }
@@ -119,7 +126,7 @@ export function makeJoinBackgroundTool(getRegistry: () => BackgroundRegistry | n
       // natural finish still notifies.
       task.notifyAgent = false;
       try {
-        await registry.waitFor(id, signal);
+        await access.hub.waitFor(sessionId, id, signal);
       } catch (err) {
         task.notifyAgent = true;
         if (signal?.aborted) {
@@ -127,7 +134,10 @@ export function makeJoinBackgroundTool(getRegistry: () => BackgroundRegistry | n
         }
         return `Error: ${err instanceof Error ? err.message : String(err)}`;
       }
-      const done = registry.get(id)!;
+      const done = access.hub.lookup(sessionId, id)?.task;
+      if (!done) {
+        return `Error: background terminal ${id} disappeared.`;
+      }
       const out = done.handle.getOutput().trim();
       const resultLine = done.killed
         ? `Background terminal ${id} was killed.`

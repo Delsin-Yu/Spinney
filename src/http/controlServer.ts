@@ -13,7 +13,8 @@
  *   5. `POST /continue`        send a user message that continues from a node
  *   6. `POST /session/start`   create (or jump to) a session and optionally send
  *                              a caller-supplied prompt as its first turn
- *   7. `POST /reload-window`   ask VS Code to reload this window (202; the reply
+ *   7. `POST /stop`            cancel a node's run (or every run of a session)
+ *   8. `POST /reload-window`   ask VS Code to reload this window (202; the reply
  *                              is observed as a *new* instance on the other side)
  *
  * Bound to 127.0.0.1 and gated by a bearer token generated per process; the
@@ -41,6 +42,21 @@ export interface ControlSessionInfo {
   titleSource?: string;
   /** A manual rename locked the title, so automatic naming leaves it alone. */
   titleLocked?: boolean;
+  /** True while this session has an in-flight turn (or an image upload). */
+  running: boolean;
+  /** Node ids of the session's live turn runs (empty when idle). */
+  runningNodes: string[];
+  /** True while this session owns at least one running background terminal. */
+  runningBackgrounds: boolean;
+  /** Node ids that own at least one still-running background terminal (P2). */
+  backgroundNodes: string[];
+  /**
+   * The model / thinking effort this session runs with (P4: the selection is per
+   * session, so each tab may differ). Strings on purpose — the control plane is a
+   * wire readout and never validates a model id.
+   */
+  model?: string;
+  effort?: string;
 }
 
 export interface ControlState {
@@ -65,6 +81,8 @@ export interface ControlResult {
   prompted?: boolean;
   /** `POST /session/start`: the start was queued to run when the turn ends. */
   queued?: boolean;
+  /** `POST /stop`: how many agents (one per run) were cancelled. */
+  stopped?: number;
 }
 
 export interface WaitForFinishOptions {
@@ -83,6 +101,12 @@ export interface ControlHost {
   controlWaitForFinish(opts: WaitForFinishOptions): Promise<ControlResult>;
   controlNavigate(opts: { sessionId?: string; nodeId: string }): Promise<ControlResult>;
   controlContinueFrom(opts: { sessionId?: string; nodeId?: string; message: string }): Promise<ControlResult>;
+  /**
+   * Stop runs: `nodeId`'s run only when given, otherwise every run of the session
+   * (`sessionId`, else the active session). Never weakens the reload hold. A
+   * session that is unknown is refused (409); nothing running is `stopped: 0`.
+   */
+  controlStop(opts: { sessionId?: string; nodeId?: string }): Promise<ControlResult>;
   /**
    * Start a session and optionally send a caller-supplied prompt as its first
    * turn. Without `sessionId` a fresh session is created (and titled from the
@@ -279,6 +303,15 @@ export class ControlServer implements vscode.Disposable {
           sessionId: typeof body.sessionId === 'string' ? body.sessionId : undefined,
           nodeId: typeof body.nodeId === 'string' ? body.nodeId : undefined,
           message: body.message,
+        });
+        send(result.ok ? 200 : 409, result);
+        return;
+      }
+      if (route === 'POST /stop') {
+        const body = await this.readBody(req);
+        const result = await this.host.controlStop({
+          sessionId: typeof body.sessionId === 'string' ? body.sessionId : undefined,
+          nodeId: typeof body.nodeId === 'string' ? body.nodeId : undefined,
         });
         send(result.ok ? 200 : 409, result);
         return;

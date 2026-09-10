@@ -44,14 +44,17 @@
 - A sub-agent branch is checked-out as **read-only** and the composer pane is **hidden** while such a node
   is focused (`setComposerVisible(false)` in `setActiveLeaf`); only the parent drives it via
   `spawn_agents` / `send_agent_message`. `onKillAgent` aborts a running sub-agent from its card's ✕.
-- **Stream routing invariant:** the webview streams `nodeId`-less (main-agent) deltas into `messagesEl`,
-  which the provider pins via `mainStreamNodeId()` = `activeTurnNode?.id ?? session.activeNodeId`. That target
-  must **never** be a sub-agent sidecar. `spawnChildren` therefore restores `session.activeNodeId` to
-  `activeTurnNode?.id ?? prevActive` (captured before `attachNode`) instead of `parent.id` — restoring to
-  `parent.id` broke **nested** spawns (where the parent is itself a sub-agent), pinning `messagesEl` to a
-  sub-agent card and letting the main agent's reply leak into that window. `drainSubAgentNotices` also calls
-  `postPath()` before the injected resume turn streams, re-pinning the target. Keep this invariant; the data
-  lives on the parent node regardless (only the live DOM target was wrong).
+- **Stream routing invariant:** every streaming message now carries an explicit `nodeId` (P1); there is no
+  `nodeId`-less "main agent" stream and no `mainStreamNodeId()` any more. The webview routes each delta to the
+  card of the node named in the message, and `tree.activeId`/`activeStreamNodeId()` is only a hint. So a
+  sub-agent's own deltas stream into its **own** card, and the main agent's reply can never leak into a
+  sub-agent window just because the view moved. A sub-agent node is a `kind:'agent'` sidecar (`pathMessages`
+  skips it, so it never enters the parent's API path), but it still owns its card, its run key and its worker.
+- **A sub-agent's tools/handlers are bound to the sub-agent's own node:** `subAgentTools(job.node, write)`
+  builds from `workerFor(job.node).tools`, so its `BackgroundAccess.currentOwner()` is that node — an
+  `exec_command` a sub-agent backgrounds registers under the **sub-agent's** node, not the parent's — and its
+  `spawn_agents` / `send_agent_message` handlers close over the same node instead of consulting "the active
+  turn" (ambiguous once two branches run at once, P3).
 - **Layout invariant (`media/tree.js`):** agent windows must be laid out **recursively** — `layoutSub(a)`
   (not just `pos[a] = {x,y}`), so an agent node's own children (a depth-2 sub-agent spawned by a depth-1
   sub-agent) get their own positions and connectors. Otherwise its card collapses onto the origin and its

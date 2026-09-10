@@ -1,14 +1,31 @@
 # File map
 
 - `src/extension.ts` — activation; registers the webview provider + commands.
-- `src/chat/ChatViewProvider.ts` — session/persistence, config, image attachment,
-  message routing, event→UI mapping, HTML shell, and the editor `WebviewPanel`
-  lifecycle (`ensurePanel` / `createPanel` / `restorePanel` / `postAllState`).
-- `src/chat/ChatPanel.ts` — a thin wrapper around a `WebviewPanel` (the chat
-  surface in the editor area). Single panel in v1; holds a `sessionId` so several
-  panels can live side by side later. `ChatPanel.create` makes a new panel,
-  `ChatPanel.revive` adopts one VS Code restored from serialization (window
-  reload) — both share the same HTML/event wiring.
+- `src/chat/ChatViewProvider.ts` — the window coordinator: session/persistence,
+  config, image attachment, titles, transcripts, the global hop bookkeeping, the
+  control-plane host, the HTML shell, and webview message routing. It owns the
+  `runtimes: Map<sessionId, SessionRuntime>` and a `PanelManager` (tabs); the editor
+  `WebviewPanel` lifecycle is `restorePanel` (serializer) + `postAllState`.
+- `src/chat/ChatPanel.ts` — a thin wrapper around a `WebviewPanel` (one chat tab).
+  It carries its `sessionId`; `PanelManager` keeps one per session. `ChatPanel.create`
+  makes a new panel, `ChatPanel.revive` adopts one VS Code restored from serialization
+  (window reload) — both share the same HTML/event wiring.
+- `src/chat/panels.ts` — `PanelManager`: the `sessionId → ChatPanel` map. `ensure`
+  returns/focuses a session's tab (creating it on first open), `adopt` takes over a
+  serializer-restored panel (disposing a duplicate — a session has exactly one tab),
+  `close` unmaps one without deleting the session. `activeSessionId` is just "the last
+  focused tab".
+- `src/chat/runtime.ts` — `SessionRuntime`: all per-session state and the in-flight
+  turns. Splits the view focus (`session.activeNodeId`) from a turn's basis
+  (`run.nodeId`), keys runs by node (`runs: Map<nodeId, TurnRun>`), keeps one node
+  worker (its own `Agent` + `ToolRegistry`) per node (`workerFor`), puts an explicit
+  `nodeId` on every streaming message, bookkeeps interrupts per node, holds the
+  per-session model/effort, and injects background-completion notices. Reaches the
+  provider through the narrow `RuntimeHost`.
+- `src/chat/backgroundHub.ts` — `BackgroundHub` (one per window): background terminals
+  keyed by `(session, node)`, session-local task ids, an `id → owner` index, and the
+  removal lifecycles (`removeNode` / `removeSession` / `killAll`); exposes the
+  `BackgroundAccess` the tools register through. Pure module, no `vscode`.
 - `src/chat/SessionsProvider.ts` — the native sidebar `TreeDataProvider` listing
   session titles; it re-reads items from `ChatViewProvider` on every refresh.
 - `src/chat/tree.ts` — the Chat Tree data model: `TreeNode` / `AgentSession`,
@@ -30,11 +47,17 @@
   for the dumps of deleted nodes). Pure fs, no VS Code UI (so it is smoke-testable
   outside the Extension Host).
 - `src/http/controlServer.ts` — the opt-in local HTTP control plane
-  (`/health`, `/state`, `/wait-for-finish`, `/navigate`, `/continue`,
-  `/reload-window`); token + discovery file, loopback only. See "External control
-  plane & the `hvsc` supervisor".
+  (`/health`, `/state`, `/wait-for-finish`, `/navigate`, `/continue`, `/stop`,
+  `/session/start`, `/reload-window`); token + discovery file, loopback only. See
+  "External control plane & the `hvsc` supervisor".
+- `docs/agents/multi-session.md` — the frozen multi-session / multi-branch contract
+  (P1–P4): view-focus vs turn-basis, the host⇄webview protocol, the tools-side
+  `BackgroundHub` API, and the acceptance evidence.
 - `tools/hyper-vscode/` — the `hvsc` supervisor (CLI + daemon + `serve.ps1`),
   **not** shipped in the `.vsix`.
+- `tools/harness-test.mjs` — the control-plane acceptance harness for P1–P4 (suites
+  `health`, `sessions`, `concurrency`, `navigation`, `background`, `branch`,
+  `selftest`). Dev tooling: `.vscodeignore` excludes `tools/**`, so it is never shipped.
 - `src/agent/agent.ts` — the agent loop: message sanitizing, interrupt/rollback,
   model/effort switching, and the interception of the provider-orchestrated tools
   (`spawn_*` / `send_*` / `hop_session` / `list_nodes` / `rename_session` /

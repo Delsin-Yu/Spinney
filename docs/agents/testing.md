@@ -1,9 +1,14 @@
 # Testing convention
 
-There is no automated test suite. Verification is manual: run in the Extension
-Development Host (F5) and exercise read/write/exec against a scratch file
-(`_e2e.txt` is a leftover scratch fixture, safe to ignore or delete). Before a
-release, confirm `npm run compile` is clean and `build-deploy.ps1` succeeds.
+There is no unit-test suite: behaviour is verified against a **live** window. Two layers
+exist — the manual F5 flow below, and `tools/harness-test.mjs`, a control-plane acceptance
+harness (dev tooling, never shipped) that drives the running extension over HTTP and asserts
+host behaviour: `node tools/harness-test.mjs <suite...|all>` (suites `health`, `sessions`,
+`concurrency`, `navigation`, `background`, `branch`, `selftest`; see
+`multi-session.md` §5.1). Manual F5 checks still cover what the harness cannot see — the F5
+flow exercises read/write/exec against a scratch file (`_e2e.txt` is a leftover scratch
+fixture, safe to ignore or delete). Before a release, confirm `npm run compile` is clean and
+`build-deploy.ps1` succeeds.
 
 Two build-time guards are the exception, both run by `vscode:prepublish` so a
 regression fails *packaging* instead of the user's session:
@@ -46,19 +51,20 @@ exactly the bug class. The method that does, with no real API key and no tokens:
    and base URL (A), again after a second key-only edit (B), and a real
    `POST /chat/completions` carrying the newest key, `stream: true` and the tool
    schemas (C).
-3. Checks A/B need nothing but the edit; C needs an idle host — drive it through
-   the control plane (`POST /session/start` with a throwaway title, then
-   `POST /session/start {sessionId}` to hand the UI back), and run the whole
-   thing **detached** if the agent is mid-turn (a harness background terminal
-   makes `/session/start` queue instead of run).
+3. Checks A/B need nothing but the edit; C needs a real request — drive it through
+   the control plane: `POST /session/start {title, prompt}` creates and starts a
+   fresh session **immediately**, even while this session is mid-turn (P1), so C no
+   longer needs an idle host or a detached run; `POST /session/start {sessionId}`
+   (no prompt) hands the UI back afterwards.
 
 Rules learned the hard way: back up `.vscode/settings.json` byte-for-byte and
 restore it in a `finally` (a failed run must never leave a mock base URL behind);
 space two edits more than a second apart (VS Code debounces external writes, and
 a coalesced event looks like a missing feature); pass an explicit `timeout` on
 the command that edits the file, or you end up measuring the tool's own default
-instead of the setting under test. A build that only reads config in
-`buildAgent()` fails A/B/C — that is what a regression here looks like.
+instead of the setting under test. A build that reads the config once at
+activation (and never re-reads or pushes it) fails A/B/C — that is what a regression
+here looks like.
 
 The implementation used while fixing this was deliberately thrown away
 (`.agent-harness/live-config-test/`, gitignored scratch). If it is wanted as a

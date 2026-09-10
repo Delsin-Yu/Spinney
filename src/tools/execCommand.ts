@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { AgentTool } from '../agent/types';
-import { BackgroundRegistry, CommandHandle, OUTPUT_CAP, spawnShellCommand } from './background';
+import type { BackgroundAccess } from '../chat/backgroundHub';
+import { CommandHandle, OUTPUT_CAP, spawnShellCommand } from './background';
 import { getAgentRoot, limitInline, resolvePath } from './index';
 import { getShell } from './shell';
 
@@ -22,9 +23,10 @@ function defaultCommandTimeoutSec(): number {
 /**
  * Run a command in the foreground and resolve with a human-readable result
  * (mirroring the original exec_command contract). When `moveOnTimeout` is set
- * and the command is still running at `timeoutMs`, it is promoted to a
- * background terminal (registered in `registry`) instead of being killed, and
- * the resolved message tells the agent the background id to manage it with.
+ * and the command is still running at `timeoutMs`, it is promoted to a background
+ * terminal via `promote` (which registers it with the hub under its owning node)
+ * instead of being killed, and the resolved message tells the agent the
+ * background id to manage it with.
  */
 function runForeground(
   handle: CommandHandle,
@@ -33,7 +35,7 @@ function runForeground(
   timeoutMs: number,
   signal: AbortSignal | undefined,
   moveOnTimeout: boolean,
-  registry: BackgroundRegistry | null,
+  promote: (() => number) | null,
 ): Promise<string> {
   return new Promise((resolve) => {
     let settled = false;
@@ -76,10 +78,10 @@ function runForeground(
 
     timer = setTimeout(() => {
       if (settled) return;
-      if (moveOnTimeout && registry) {
+      if (moveOnTimeout && promote) {
         settled = true;
         cleanup();
-        const id = registry.register(handle, command, cwd);
+        const id = promote();
         const soFar = handle.getOutput().trim();
         const out = soFar ? `\nOutput so far:\n${soFar}` : '';
         resolve(
@@ -108,7 +110,7 @@ function runForeground(
   });
 }
 
-export function makeExecCommandTool(getRegistry: () => BackgroundRegistry | null): AgentTool {
+export function makeExecCommandTool(getAccess: () => BackgroundAccess | null): AgentTool {
   return {
     definition: {
       type: 'function',
@@ -152,14 +154,20 @@ export function makeExecCommandTool(getRegistry: () => BackgroundRegistry | null
           `Invalid timeout_behavior "${behavior}". Use "stop", "move_to_background", or "start_in_background".`,
         );
       }
-      const registry = getRegistry();
-      if ((behavior === 'move_to_background' || behavior === 'start_in_background') && !registry) {
+      const access = getAccess();
+      const owner = access?.currentOwner() ?? null;
+      const wantsBackground = behavior === 'move_to_background' || behavior === 'start_in_background';
+      if (wantsBackground && !(access && owner)) {
         throw new Error('Background terminals are not available in this session.');
       }
       const handle = spawnShellCommand(command, cwd, { killOnTruncate: behavior === 'stop' });
+      // A promoted job is registered under the node whose turn spawned it, so it
+      // renders in that node's dock and its completion notice returns to that
+      // branch even if the user has moved the view elsewhere meanwhile.
+      const promote = access && owner ? () => access.hub.register(owner, handle, command, cwd) : null;
 
       if (behavior === 'start_in_background') {
-        const id = registry!.register(handle, command, cwd);
+        const id = promote!();
         return (
           `[command started in background: id ${id}]\n` +
           `Command: ${command}\n` +
@@ -169,7 +177,7 @@ export function makeExecCommandTool(getRegistry: () => BackgroundRegistry | null
       }
 
       return limitInline(
-        await runForeground(handle, command, cwd, timeoutMs, signal, behavior === 'move_to_background', registry),
+        await runForeground(handle, command, cwd, timeoutMs, signal, behavior === 'move_to_background', promote),
         'exec_command',
       );
     },
