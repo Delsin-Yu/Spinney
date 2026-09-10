@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { DeepSeekClient, DeepSeekError } from './deepseek';
+import { DeepSeekClient, DeepSeekError, RetryInfo } from './deepseek';
 import { ToolRegistry, resolvePath } from '../tools';
 import {
   AgentEvent,
@@ -119,6 +119,16 @@ function buildInterruptNotice(tools: InterruptedToolCall[]): string {
     ? `[Interruption notice] The user stopped your previous ${context} before it was complete; its partial output was discarded. `
     : INTERRUPT_NOTICE_GENERIC;
   return lead + INTERRUPT_NOTICE_TAIL;
+}
+
+/**
+ * The status line shown while a failed model call is being retried. Deliberately
+ * short — the status bar is one line, and the exact reason is on the output
+ * channel (the client logs it) and in the final error if every attempt fails.
+ */
+function retryStatus(info: RetryInfo): string {
+  const seconds = info.delayMs >= 1_000 ? `${Math.round(info.delayMs / 1_000)}s` : `${info.delayMs}ms`;
+  return `Model call failed (${info.attempt}/${info.maxAttempts}); retrying in ${seconds}…`;
 }
 
 /**
@@ -949,6 +959,10 @@ export class Agent {
         signal,
         model: this.model || undefined,
         thinkingEffort: this.thinkingEffort,
+        // The client retries transient failures itself (network / 429 / 5xx);
+        // mirror each retry into the status line so a slow retry does not look
+        // like a hung turn.
+        onRetry: (info) => this.onEvent({ type: 'status', text: retryStatus(info) }),
       })) {
         if (this.isStopped(signal)) {
           throw new Error('interrupted');

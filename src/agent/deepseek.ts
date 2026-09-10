@@ -2,6 +2,56 @@ import * as path from 'path';
 import { ChatMessage, StreamChunk, ThinkingEffort, ToolDefinition, UploadedFile, Usage, detectImageMime, imageIntegrityError } from './types';
 import { perf } from '../perf';
 
+/**
+ * Transparent retry policy for one chat-completions request: the initial attempt
+ * plus up to `MAX_ATTEMPTS - 1` retries on a *transient* failure (network error,
+ * HTTP 408/429/5xx). Auth/validation failures (400/401/403/404…) are never
+ * retried — they cannot fix themselves, and retrying would only hide them.
+ * Backoff doubles from `RETRY_BASE_DELAY_MS` and is capped, so the worst case
+ * (10 attempts) is ~2.5 minutes; Stop interrupts a pending wait immediately.
+ */
+const MAX_ATTEMPTS = 10;
+const RETRY_BASE_DELAY_MS = 1_000;
+const RETRY_MAX_DELAY_MS = 30_000;
+
+/** A transient HTTP status worth another attempt; anything else is a refusal. */
+function isRetriableStatus(status: number): boolean {
+  return status === 408 || status === 429 || status >= 500;
+}
+
+/** Backoff before the next attempt (`attempt` is 1-based: the attempt that failed). */
+function retryDelay(attempt: number): number {
+  return Math.min(RETRY_BASE_DELAY_MS * 2 ** (attempt - 1), RETRY_MAX_DELAY_MS);
+}
+
+/**
+ * A retry about to be made. Reported so the UI can say "retrying (2/10)…"
+ * instead of looking hung, and so the output channel records what went wrong.
+ */
+export interface RetryInfo {
+  /** The attempt that failed (1-based): `2` means the second try failed. */
+  attempt: number;
+  /** Total attempts allowed before giving up. */
+  maxAttempts: number;
+  /** Milliseconds the client waits before that next attempt. */
+  delayMs: number;
+  /** One-line reason (HTTP error text / network message), clipped for display. */
+  reason: string;
+}
+
+export type RetryReporter = (info: RetryInfo) => void;
+
+/** Flatten an error body (which may be multi-line JSON/HTML) into one clipped line. */
+function clipReason(reason: string, max = 160): string {
+  const oneLine = reason.replace(/\s+/g, ' ').trim();
+  return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
+}
+
+/** Name the attempt count on an error — but only when retries actually happened. */
+function withAttempts(error: DeepSeekError, attempt: number): DeepSeekError {
+  return attempt > 1 ? new DeepSeekError(`${error.message} (after ${attempt} attempts)`, error.status) : error;
+}
+
 export interface DeepSeekOptions {
   apiKey: string;
   baseUrl: string;
@@ -20,6 +70,11 @@ export interface CompletionRequest {
   maxTokens?: number;
   /** Sampling temperature. Omitted when not a finite number. */
   temperature?: number;
+  /**
+   * Called before each transparent retry of a transient failure, so the caller
+   * can surface "retrying (2/10)…" while it waits out the backoff.
+   */
+  onRetry?: RetryReporter;
 }
 
 /** A single currency balance entry from DeepSeek's `/user/balance` endpoint. */
@@ -222,38 +277,51 @@ export class DeepSeekClient {
       body.temperature = request.temperature;
     }
 
-    let response: Response;
-    try {
-      const serStart = Date.now();
-      const payload = JSON.stringify(body);
-      perf(() => `request-json ${Date.now() - serStart}ms bytes=${payload.length} msgs=${messages.length}`);
-      const fetchStart = Date.now();
-      response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.options.apiKey}`,
-        },
-        body: payload,
-        signal,
-      });
-      perf(() => `request-headers ${Date.now() - fetchStart}ms status=${response.status}`);
-    } catch (err) {
-      if (signal?.aborted) {
-        throw new DeepSeekError('Request aborted.');
+    const payload = JSON.stringify(body);
+    perf(() => `request-json bytes=${payload.length} msgs=${messages.length}`);
+
+    // One attempt = open + read. A retry is only transparent while *nothing* has
+    // been yielded yet: after the first chunk the caller has already assembled
+    // output from it, so re-sending would duplicate what it was told. A failure
+    // after that point is therefore fatal, not retried.
+    let attempt = 1;
+    while (true) {
+      const opened = await this.postWithRetry(url, payload, { signal, onRetry: request.onRetry }, attempt);
+      attempt = opened.attempt;
+      let yielded = false;
+      let readError: DeepSeekError | undefined;
+      try {
+        for await (const chunk of this.readStream(opened.response, signal)) {
+          yielded = true;
+          yield chunk;
+        }
+      } catch (err) {
+        if (signal?.aborted) {
+          throw new DeepSeekError('Request aborted.');
+        }
+        const message = err instanceof Error ? err.message : String(err);
+        readError = new DeepSeekError(`Network error reading DeepSeek stream: ${message}`);
       }
-      const message = err instanceof Error ? err.message : String(err);
-      throw new DeepSeekError(`Network error calling DeepSeek: ${message}`);
+      if (!readError) {
+        return;
+      }
+      if (yielded || !(await this.retryLater(attempt, readError.message, request.onRetry, signal))) {
+        throw withAttempts(readError, attempt);
+      }
+      attempt += 1;
     }
+  }
 
-    if (!response.ok || !response.body) {
-      const text = await response.text().catch(() => '');
-      throw new DeepSeekError(
-        `DeepSeek API error ${response.status}: ${text || response.statusText}`,
-        response.status,
-      );
+  /**
+   * Read one SSE body, yielding parsed chunks. Cancellation is checked before
+   * every read **and** after every buffered line, so a Stop discards data that
+   * already arrived; the final `data:` line is flushed even when it came without
+   * a trailing newline.
+   */
+  private async *readStream(response: Response, signal?: AbortSignal): AsyncGenerator<StreamChunk> {
+    if (!response.body) {
+      throw new DeepSeekError('DeepSeek returned no response body.');
     }
-
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
@@ -315,6 +383,110 @@ export class DeepSeekClient {
   }
 
   /**
+   * POST a JSON body, transparently retrying transient failures (network error,
+   * HTTP 408/429/5xx) up to `MAX_ATTEMPTS` total attempts. Returns the successful
+   * response together with the attempt that produced it, so a caller that keeps
+   * retrying (the streaming reader) can carry the count forward instead of
+   * restarting it. Throws the `DeepSeekError` of the last failure — annotated
+   * with the attempt count when retries actually happened.
+   */
+  private async postWithRetry(
+    url: string,
+    payload: string,
+    opts: { signal?: AbortSignal; onRetry?: RetryReporter },
+    attemptStart = 1,
+  ): Promise<{ response: Response; attempt: number }> {
+    let last: DeepSeekError | undefined;
+    for (let attempt = attemptStart; attempt <= MAX_ATTEMPTS; attempt++) {
+      let response: Response;
+      const fetchStart = Date.now();
+      try {
+        response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${this.options.apiKey}`,
+          },
+          body: payload,
+          signal: opts.signal,
+        });
+      } catch (err) {
+        if (opts.signal?.aborted) {
+          throw new DeepSeekError('Request aborted.');
+        }
+        const message = err instanceof Error ? err.message : String(err);
+        last = new DeepSeekError(`Network error calling DeepSeek: ${message}`);
+        if (!(await this.retryLater(attempt, last.message, opts.onRetry, opts.signal))) {
+          throw withAttempts(last, attempt);
+        }
+        continue;
+      }
+      perf(() => `request-headers ${Date.now() - fetchStart}ms status=${response.status} attempt=${attempt}`);
+      if (response.ok && response.body) {
+        return { response, attempt };
+      }
+      if (!response.ok) {
+        const text = await response.text().catch(() => '');
+        last = new DeepSeekError(
+          `DeepSeek API error ${response.status}: ${text || response.statusText}`,
+          response.status,
+        );
+        if (
+          !isRetriableStatus(response.status) ||
+          !(await this.retryLater(attempt, last.message, opts.onRetry, opts.signal))
+        ) {
+          throw withAttempts(last, attempt);
+        }
+        continue;
+      }
+      // 200 without a body: nothing to read, so the attempt produced no answer.
+      last = new DeepSeekError('DeepSeek returned no response body.');
+      if (!(await this.retryLater(attempt, last.message, opts.onRetry, opts.signal))) {
+        throw withAttempts(last, attempt);
+      }
+    }
+    throw last ?? new DeepSeekError(`DeepSeek request failed after ${MAX_ATTEMPTS} attempts.`);
+  }
+
+  /**
+   * Announce one retry and wait out its backoff. Returns false when there is no
+   * next attempt to make (the attempt budget is spent, or the request was aborted
+   * during the wait), so the caller throws instead of looping.
+   */
+  private async retryLater(
+    attempt: number,
+    reason: string,
+    onRetry?: RetryReporter,
+    signal?: AbortSignal,
+  ): Promise<boolean> {
+    if (attempt >= MAX_ATTEMPTS || signal?.aborted) {
+      return false;
+    }
+    const delayMs = retryDelay(attempt);
+    onRetry?.({ attempt, maxAttempts: MAX_ATTEMPTS, delayMs, reason: clipReason(reason) });
+    perf(() => `[retry] attempt ${attempt + 1}/${MAX_ATTEMPTS} in ${delayMs}ms: ${clipReason(reason)}`);
+    return this.sleep(delayMs, signal);
+  }
+
+  /** Sleep `ms`, waking immediately (returning false) when the request is aborted. */
+  private sleep(ms: number, signal?: AbortSignal): Promise<boolean> {
+    if (signal?.aborted) {
+      return Promise.resolve(false);
+    }
+    return new Promise<boolean>((resolve) => {
+      const onAbort = () => {
+        clearTimeout(timer);
+        resolve(false);
+      };
+      const timer = setTimeout(() => {
+        signal?.removeEventListener('abort', onAbort);
+        resolve(true);
+      }, ms);
+      signal?.addEventListener('abort', onAbort, { once: true });
+    });
+  }
+
+  /**
    * Non-streaming completion (`stream: false`), for small side tasks that want a
    * single short answer and no SSE plumbing — e.g. generating a session title.
    * Returns the assistant text ('' when the API answered with nothing) and the
@@ -345,31 +517,11 @@ export class DeepSeekClient {
       body.temperature = request.temperature;
     }
 
-    let response: Response;
-    try {
-      response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.options.apiKey}`,
-        },
-        body: JSON.stringify(body),
-        signal: request.signal,
-      });
-    } catch (err) {
-      if (request.signal?.aborted) {
-        throw new DeepSeekError('Request aborted.');
-      }
-      const message = err instanceof Error ? err.message : String(err);
-      throw new DeepSeekError(`Network error calling DeepSeek: ${message}`);
-    }
-    if (!response.ok) {
-      const text = await response.text().catch(() => '');
-      throw new DeepSeekError(
-        `DeepSeek API error ${response.status}: ${text || response.statusText}`,
-        response.status,
-      );
-    }
+    // Same transparent retry policy as `stream` (transient failures only).
+    const { response } = await this.postWithRetry(url, JSON.stringify(body), {
+      signal: request.signal,
+      onRetry: request.onRetry,
+    });
     const data = (await response.json()) as {
       choices?: Array<{ message?: { content?: string | null } }>;
       usage?: Usage;

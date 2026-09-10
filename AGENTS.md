@@ -39,7 +39,7 @@
 - **提示词**：`invariants/system-prompt`（模板 + 规则）· `invariants/agent-authoring`（改提示词）· `invariants/agents-md-snapshot`
 - **模型能力**：`invariants/model-capabilities`（为什么只 vendor `deepseek-flash`、`agentHarness.modelTable` 表格式、为什么不做探测）
 - **工具**：`tools`（加/改工具、verbatim frame 语法）· `invariants/sub-agents`（spawn_* / send_*）· `invariants/background-terminals`（exec_command 与后台终端）· `invariants/transcripts`（search_transcripts）· `invariants/vision-images`（read_image）
-- **会话与持久化**：`invariants/conversation-validity` · `invariants/session-persistence`（持久化 + rename_session 的自动命名与锁定）· `invariants/chat-tree`（分支/签出）· `invariants/interrupt-rollback`
+- **会话与持久化**：`invariants/conversation-validity` · `invariants/session-persistence`（持久化 + rename_session 的自动命名与锁定）· `invariants/chat-tree`（分支/签出）· `invariants/interrupt-rollback` · `invariants/api-retries`（瞬时失败 10 次退避重试 + 卡片上的 ▶ Continue）
 - **多会话 / 并发**：`multi-session`（多标签 + 会话/分支并发，P1–P4 冻结契约）· 验收驱动 `tools/harness-test.mjs`（dev-only，不进 `.vsix`）
 - **控制平面 / 桌面**：`control-plane`（含 hop_session / list_nodes）· `computer-use`
 - **其余不变量**：`invariants/line-endings` · `invariants/config-keys` · `invariants/streaming-perf` · `invariants/vendored-deps`

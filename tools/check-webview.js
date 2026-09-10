@@ -120,6 +120,9 @@ const TURN_MESSAGES = [
   { type: 'agentDone', id: 'smoke-agent', status: 'done', summary: 'smoke summary' },
   { type: 'nodeUpdate', id: NODE_ID, status: 'done', title: 'smoke', usage: null },
   { type: 'panTo', id: NODE_ID },
+  // An in-place continue writes an inline harness block into that node's own
+  // transcript (see the ▶ section below).
+  { type: 'harnessNote', nodeId: NODE_ID, text: 'Continue from where you stopped.' },
   // End-of-run messages carry the node that finished, so the webview finalizes
   // *that* card and only releases the scroll lock when it is the focused one.
   { type: 'done', nodeId: NODE_ID },
@@ -135,6 +138,8 @@ const TURN_MESSAGES = [
 
 const listeners = {};
 const elements = new Map();
+/** Every message the webview posts to the host, so a button's wiring can be checked. */
+const posted = [];
 
 /**
  * Does `element` carry the class `name`? The webview writes `className` as a
@@ -356,7 +361,11 @@ const window = {
 const sandbox = {
   document,
   window,
-  acquireVsCodeApi: () => ({ postMessage() {}, getState: () => undefined, setState() {} }),
+  acquireVsCodeApi: () => ({
+    postMessage: (message) => posted.push(message),
+    getState: () => undefined,
+    setState() {},
+  }),
   console,
   setTimeout,
   clearTimeout,
@@ -677,6 +686,130 @@ if (contextLabel !== 'ctx 50%') {
     }
     if (cards.has('sub-notice')) {
       problems.push('the notification opened a card of its own — it must stay inside the owner node');
+    }
+  }
+}
+
+// --- The ▶ Continue / ↻ Retry button ------------------------------------------
+// A turn that ended without an answer — interrupted by the user, or failed on an
+// API error that outlived the client's retries — offers a button that asks the
+// harness to run a turn from that node with a message the harness writes itself,
+// so the user never has to type "continue". It may only appear where continuing
+// makes sense, and it must post the node it belongs to.
+{
+  const R = 'cont-node-root';
+  const A = 'cont-node-a';       // interrupted tip → ▶ Continue
+  const B = 'cont-node-b';       // failed tip → ↻ Retry
+  const C = 'cont-node-c';       // interrupted, but already continued → no button
+  const D = 'cont-node-d';       // the continuation of C (done)
+  const SUB = 'cont-node-sub';   // `kind:'agent'` sidecar, interrupted → no button
+  const node = (id, parentId, children, status, kind) =>
+    Object.assign(
+      {
+        id,
+        parentId,
+        children,
+        title: id,
+        status,
+        createdAt: 0,
+        preview: id,
+        usage: null,
+        size: null,
+      },
+      kind ? { kind } : {},
+    );
+  const tree = (aStatus) => ({
+    type: 'tree',
+    viewId: B,
+    activeId: null,
+    rootId: R,
+    nodes: [
+      node(R, null, [A, B, C, SUB], 'done'),
+      node(A, R, [], aStatus),
+      node(B, R, [], 'error'),
+      node(C, R, [D], 'interrupted'),
+      node(D, C, [], 'done'),
+      node(SUB, R, [], 'interrupted', 'agent'),
+    ],
+  });
+  const cards = new Map();
+  const refresh = () => {
+    cards.clear();
+    for (const child of elementById('tree-canvas').children) {
+      if (child.dataset && child.dataset.id) cards.set(child.dataset.id, child);
+    }
+  };
+  const buttonOf = (id) => {
+    const card = cards.get(id);
+    return card ? findByClass(card, 'node-continue') : null;
+  };
+
+  dispatch(tree('interrupted'));
+  refresh();
+
+  if (!buttonOf(A) || buttonOf(A).textContent !== '▶ Continue') {
+    problems.push('an interrupted tip node shows no ▶ Continue button');
+  }
+  if (!buttonOf(B) || buttonOf(B).textContent !== '↻ Retry') {
+    problems.push('a node whose turn failed shows no ↻ Retry button');
+  }
+  if (buttonOf(C)) {
+    problems.push('a node that was already continued still shows a Continue button (the continuation owns it now)');
+  }
+  if (buttonOf(SUB)) {
+    problems.push('a sub-agent sidecar card offers a Continue button (it has no conversation of its own here)');
+  }
+  // A run on the node hides it again.
+  dispatch({ type: 'state', busy: true, status: '', sessionId: 'smoke-session', runningNodes: [A] });
+  dispatch(tree('running'));
+  refresh();
+  if (buttonOf(A)) {
+    problems.push('a node that is streaming again still shows a Continue button');
+  }
+
+  // A turn that ends *after* the tree was drawn arrives as `nodeUpdate` (that is
+  // how `finishTurn` patches its card), so the button has to follow it too.
+  dispatch({ type: 'state', busy: false, status: '', sessionId: 'smoke-session', runningNodes: [] });
+  dispatch(tree('done'));
+  refresh();
+  if (buttonOf(A)) {
+    problems.push('a finished turn node shows a Continue button');
+  }
+  dispatch({ type: 'nodeUpdate', id: A, status: 'error', title: A, usage: null });
+  if (!buttonOf(A) || buttonOf(A).textContent !== '↻ Retry') {
+    problems.push('a turn that failed after the tree was drawn shows no ↻ Retry button');
+  }
+
+  // The harness message is written into *that* node's transcript as an inline
+  // block (never into the pinned prompt, and never as a bubble the user appears to
+  // have typed) — an in-place continue must not move the view focus.
+  dispatch({ type: 'harnessNote', nodeId: A, text: 'Continue from where you stopped.' });
+  const harnessBlock = findByClass(cards.get(A), 'harness-note');
+  if (!harnessBlock) {
+    problems.push('a harness continue message is not rendered in the continued node');
+  } else if (!findByClass(harnessBlock, 'harness-badge')) {
+    problems.push('a harness continue message carries no HARNESS badge');
+  }
+  if (findByClass(cards.get(A), 'node-prompt') && findByClass(findByClass(cards.get(A), 'node-prompt'), 'harness-note')) {
+    problems.push('a harness continue message overwrote the node\'s pinned user prompt');
+  }
+  if (findByClass(cards.get(B), 'harness-note')) {
+    problems.push('a harness continue message for another node leaked into a different card');
+  }
+
+  // Clicking the button must ask the host to continue *that* node.
+  const retry = buttonOf(B);
+  const clickOf = retry && retry._listeners && retry._listeners.click;
+  if (typeof clickOf !== 'function') {
+    problems.push('the Retry button has no click handler');
+  } else {
+    posted.length = 0;
+    clickOf({ stopPropagation() {} });
+    const sent = posted.find((message) => message && message.type === 'continueTurn');
+    if (!sent || sent.id !== B) {
+      problems.push(
+        `clicking Retry posted ${JSON.stringify(posted)}, expected { type: 'continueTurn', id: '${B}' }`,
+      );
     }
   }
 }
