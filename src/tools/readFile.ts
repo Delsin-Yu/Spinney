@@ -8,7 +8,7 @@ export const readFileTool: AgentTool = {
     function: {
       name: 'read_file',
       description:
-        'Read the contents of a text file. Path may be absolute or relative to the workspace root. Optionally read a specific 1-based line range. Content is returned with LF line endings. The header reports the total line count (wc -l convention: a trailing newline does not add a line) and the on-disk line ending (e.g. CRLF); read a one-line range (startLine 1, endLine 1) when you only need the count. Use read_file output verbatim as replace_in_file oldText.',
+        'Read the contents of a text file. Path may be absolute or relative to the harness root (the workspace folder, or the harness scratch folder when no folder is open). Optionally read a specific 1-based line range. Content is returned with LF line endings. The header reports the total line count (wc -l convention: a trailing newline does not add a line) and the on-disk line ending (e.g. CRLF); read a one-line range (startLine 1, endLine 1) when you only need the count. Use read_file output verbatim as replace_in_file oldText.',
       parameters: {
         type: 'object',
         properties: {

@@ -1,7 +1,12 @@
 ## AGENTS.md snapshot (this file)
 
 - `ChatViewProvider.loadAgentsMd()` reads `./AGENTS.md` **once per extension-host
-  activation** (in the provider's constructor) and calls `Agent.setAgentsMd(...)`.
+  activation** (in the provider's constructor), and again whenever
+  `vscode.workspace.onDidChangeWorkspaceFolders` fires (a folder opened or closed
+  in the same window → `ChatViewProvider.onWorkspaceFoldersChanged`), and calls
+  `Agent.setAgentsMd(...)`. With **no folder open** there is no `AGENTS.md` to
+  read: the snapshot is `null`, the log line records the agent root, and the
+  whole trailing section is dropped (see `docs/agents/no-repo-mode.md`).
 - The snapshot itself lives in `src/agent/prompt.ts` (module-level
   `agentsMdSnapshot`) and is injected into `{{agentsMd}}`, the template's last
   section, under the heading `## 工作区 AGENTS.md（项目说明）`.

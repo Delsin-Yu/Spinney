@@ -8,8 +8,8 @@
  * (`agentHarness.httpApi.enabled`), discovered through
  * `<globalStorage>/http/<instanceId>.json`.
  *
- *   hvsc serve   [--port 7777] [--start <workspace>] [--isolated]   # daemon (run outside VS Code)
- *   hvsc start   <workspace> [--isolated] [--arg <codeArg>]         # launch an instance
+ *   hvsc serve   [--port 7777] [--start <workspace>|--no-workspace] [--isolated]
+ *   hvsc start   [<workspace>|--no-workspace] [--isolated] [--arg <codeArg>]
  *   hvsc status                                        # list instances
  *   hvsc rm      <instanceId|--stale> [--kill]         # forget (optionally kill an isolated one)
  *   hvsc reboot  <instanceId|--all> --continue "<message>" [--reason "..."] [--wait]
@@ -22,10 +22,14 @@
  * running main process and our env vars do not reach the new window. `--isolated`
  * keeps the old behaviour (own profile, own main process → hard kill/relaunch).
  *
+ * "No-repo mode": `--no-workspace` (CLI) / `{ noWorkspace: true }` (API) launches
+ * a bare `code -n` with **no** workspace folder. The extension then publishes
+ * `workspace: null` in its discovery file and the record stores `null` too.
+ *
  * Daemon API (bearer token in .state/daemon.json):
  *   GET  /health
  *   GET  /instances
- *   POST /instances                { workspace, args?, isolated? }
+ *   POST /instances                { workspace|noWorkspace, args?, isolated? }
  *   POST /instances/:id/reboot     { reason?, continue?, timeoutMs?, scope?, wait? }
  *   GET  /jobs/:id
  *   DELETE /instances/:id          { kill? }  # forget a record (kill an isolated one)
@@ -91,6 +95,9 @@ function collectArgs(argv, name) {
   }
   return out;
 }
+
+/** Human-readable workspace for logs/CLI: a no-repo window has none. */
+const wsLabel = (workspace) => workspace ?? '(no workspace)';
 
 function readJson(file) {
   try {
@@ -282,10 +289,13 @@ function resolveCodeExe() {
  *
  * `isolated:true` keeps the old behaviour (own `--user-data-dir`, own main
  * process) which allows a hard kill/relaunch but has a separate chat state.
+ *
+ * `workspace` may be `null` (no-repo mode): then `code -n` opens a bare window
+ * with no folder instead of a workspace.
  */
 function launchCode(instanceId, workspace, extraArgs = [], opts = {}) {
   const isolated = opts.isolated === true;
-  const args = ['-n', workspace];
+  const args = workspace ? ['-n', workspace] : ['-n'];
   let userDataDir = null;
   if (isolated) {
     userDataDir = join(STATE_DIR, `ud-${instanceId}`);
@@ -341,6 +351,13 @@ function killWindow(extensionHostPid) {
 }
 
 function samePath(a, b) {
+  // Two "no workspace" values are the *same* workspace, not a non-match. A
+  // no-repo window publishes `workspace: null` (controlServer.ts) and its record
+  // stores `null` as well; if both-null returned false here, an instance whose
+  // extension host restarted (new discovery file + port, same window) could
+  // never be re-adopted by matchDiscovery, and `hvsc reboot` would fail with
+  // "no harness endpoint discovered". Empty strings count as "no workspace".
+  if (!a && !b) return true;
   if (!a || !b) return false;
   return resolve(a).replace(/[\\/]+/g, '/').toLowerCase() === resolve(b).replace(/[\\/]+/g, '/').toLowerCase();
 }
@@ -397,6 +414,7 @@ async function serve(argv) {
   installCrashGuards();
   const port = Number(argValue(argv, '--port', '7788'));
   const startWorkspace = argValue(argv, '--start');
+  const startNoWorkspace = hasFlag(argv, '--no-workspace');
   const startIsolated = hasFlag(argv, '--isolated');
   const token = randomBytes(24).toString('hex');
   mkdirSync(STATE_DIR, { recursive: true });
@@ -457,7 +475,9 @@ async function serve(argv) {
 
   async function startInstance(workspace, extraArgs = [], opts = {}) {
     const id = randomUUID().slice(0, 8);
-    const abs = resolve(workspace);
+    // A no-repo instance has no workspace to resolve: keep `null` (never call
+    // resolve(undefined), which throws).
+    const abs = workspace ? resolve(workspace) : null;
     const launched = launchCode(id, abs, extraArgs, opts);
     const record = {
       id,
@@ -595,9 +615,13 @@ async function serve(argv) {
           return send(200, { ok: true, instances: [...instances.values()] });
         }
         if (req.method === 'POST' && parts[0] === 'instances' && parts.length === 1) {
-          if (!body.workspace) return send(400, { ok: false, error: 'workspace is required' });
+          // No-repo mode: `{ workspace: null }` and `{ noWorkspace: true }` both
+          // mean "bare window, no folder". Only a body that names *neither* is an
+          // error (unchanged 400 for the truly-absent case).
+          const named = typeof body.workspace === 'string' && body.workspace.trim() !== '';
+          if (!named && body.noWorkspace !== true) return send(400, { ok: false, error: 'workspace is required' });
           const record = await startInstance(
-            String(body.workspace),
+            named ? String(body.workspace) : null,
             Array.isArray(body.args) ? body.args.map(String) : [],
             { isolated: body.isolated === true },
           );
@@ -674,9 +698,9 @@ async function serve(argv) {
   }
   writeFileSync(STATE_FILE, JSON.stringify({ port: actualPort, token, pid: process.pid, startedAt: Date.now() }, null, 2));
   log(`daemon on http://127.0.0.1:${actualPort} (token in ${STATE_FILE})`);
-  if (startWorkspace) {
-    void startInstance(startWorkspace, [], { isolated: startIsolated })
-      .then((r) => log(`started ${r.id} -> ${r.workspace}${r.harness ? ` (harness :${r.harness.port})` : ' (harness endpoint not found)'}`))
+  if (startWorkspace || startNoWorkspace) {
+    void startInstance(startNoWorkspace ? null : startWorkspace, [], { isolated: startIsolated })
+      .then((r) => log(`started ${r.id} -> ${wsLabel(r.workspace)}${r.harness ? ` (harness :${r.harness.port})` : ' (harness endpoint not found)'}`))
       .catch((e) => log(`start failed: ${e?.message ?? e}`));
   }
   const shutdown = () => {
@@ -730,7 +754,7 @@ async function main() {
     for (const i of json?.instances ?? []) {
       const stale = i.alive === false || i.harnessLive === false;
       console.log(
-        `${i.id}  ${i.workspace}  ${i.isolated ? 'isolated' : 'passthrough'}  ` +
+        `${i.id}  ${wsLabel(i.workspace)}  ${i.isolated ? 'isolated' : 'passthrough'}  ` +
           `harness=${i.harness ? `:${i.harness.port}` : 'not-found'}  ${stale ? 'STALE' : 'alive'}`,
       );
     }
@@ -738,12 +762,20 @@ async function main() {
     return;
   }
   if (cmd === 'start') {
-    const workspace = argv[0] && !argv[0].startsWith('--') ? argv[0] : process.cwd();
+    // `start --no-workspace` opens a bare window (no folder, `workspace: null`);
+    // a bare `start` keeps the historical `process.cwd()` fallback.
+    const noWorkspace = hasFlag(argv, '--no-workspace');
+    const positional = argv[0] && !argv[0].startsWith('--') ? argv[0] : null;
+    const workspace = noWorkspace ? null : positional ?? process.cwd();
     const { status, json } = await daemonFetch(rec, '/instances', {
       method: 'POST',
-      body: { workspace, args: collectArgs(argv, '--arg'), isolated: hasFlag(argv, '--isolated') },
+      body: { workspace, noWorkspace, args: collectArgs(argv, '--arg'), isolated: hasFlag(argv, '--isolated') },
     });
-    console.log(status === 201 ? `${json.instance.id}  ${json.instance.workspace}  harness=${json.instance.harness ? `:${json.instance.harness.port}` : 'not-found'}` : JSON.stringify(json));
+    console.log(
+      status === 201
+        ? `${json.instance.id}  ${wsLabel(json.instance.workspace)}  harness=${json.instance.harness ? `:${json.instance.harness.port}` : 'not-found'}`
+        : JSON.stringify(json),
+    );
     process.exitCode = status === 201 ? 0 : 1;
     return;
   }

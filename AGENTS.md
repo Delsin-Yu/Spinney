@@ -35,4 +35,5 @@
 - **会话与持久化**：`invariants/conversation-validity` · `invariants/session-persistence`（持久化 + rename_session 的自动命名与锁定）· `invariants/chat-tree`（分支/签出）· `invariants/interrupt-rollback`
 - **控制平面 / 桌面**：`control-plane`（含 hop_session / list_nodes）· `computer-use`
 - **其余不变量**：`invariants/line-endings` · `invariants/config-keys` · `invariants/streaming-perf` · `invariants/vendored-deps`
+- **无工作区模式（没打开文件夹）**：`no-repo-mode`（根、会话存储、行为差异）
 - **验收与产物**：`testing` · `scratch-space`

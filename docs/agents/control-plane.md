@@ -5,7 +5,9 @@ reload. So the reload lifecycle lives **outside** the extension:
 
 - `src/http/controlServer.ts` — an opt-in local HTTP control plane
   (`agentHarness.httpApi.enabled`, default **off**; loopback only; bearer token
-  written to `<globalStorage>/http/<instanceId>.json`, mode 0600).
+  written to `<globalStorage>/http/<instanceId>.json`, mode 0600). Its discovery
+  file's `workspace` field is the workspace folder path, or `null` when no folder
+  is open.
 - `tools/hyper-vscode/hvsc.mjs` + `serve.ps1` — a workspace-local supervisor
   (excluded from the `.vsix` via `.vscodeignore`) that launches/supervises `code`
   windows and drives the reboot. State lives in `tools/hyper-vscode/.state/`:
@@ -64,7 +66,10 @@ channel and drops the result — the child's transcript is still on disk.
 
 `hvsc` commands: `serve` / `start` / `status` / `rm` / `reboot` / `jobs`. The
 reboot flow is `wait-for-finish` → `reload-window` (shared profile) or kill +
-relaunch (`--isolated`) → poll `/health` → `continue`.
+relaunch (`--isolated`) → poll `/health` → `continue`. `hvsc start --no-workspace`
+launches a `code` window with no folder open (`workspace: null` is a first-class
+instance identity: matching treats two nulls as a match, so no workspace path is
+required).
 
 Operational rules:
 

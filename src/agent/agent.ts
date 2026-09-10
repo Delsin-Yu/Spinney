@@ -833,7 +833,12 @@ export class Agent {
     if (!filePath) {
       return 'Error: read_image requires a "path" argument.';
     }
-    const resolved = resolvePath(filePath);
+    let resolved: string;
+    try {
+      resolved = resolvePath(filePath);
+    } catch (err) {
+      return `Error: could not resolve image path ${filePath}: ${err instanceof Error ? err.message : String(err)}`;
+    }
     let buffer: Buffer;
     try {
       buffer = await fs.promises.readFile(resolved);

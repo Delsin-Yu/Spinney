@@ -40,7 +40,7 @@ import {
   shouldAutoTitle,
   turnCount,
 } from './sessionTitles';
-import { getWorkspaceRoot, resolvePath, ToolRegistry } from '../tools';
+import { agentRootInfo, getWorkspaceRoot, resolvePath, ToolRegistry } from '../tools';
 import { BackgroundRegistry, BackgroundTask } from '../tools/background';
 import { ChatPanel } from './ChatPanel';
 import { SessionTreeItem } from './SessionsProvider';
@@ -332,6 +332,7 @@ export class ChatViewProvider implements ControlHost {
       root = getWorkspaceRoot();
     } catch {
       Agent.setAgentsMd(null);
+      this.output.appendLine(`[agents.md] none (no workspace folder; agent root = ${agentRootInfo().root})`);
       return;
     }
     const agentsMdPath = path.join(root, 'AGENTS.md');
@@ -342,6 +343,19 @@ export class ChatViewProvider implements ControlHost {
     } catch {
       Agent.setAgentsMd(null);
     }
+  }
+
+  /**
+   * Called when the set of workspace folders changes (a folder was opened or
+   * closed): re-read AGENTS.md and log the new mode plus the agent root. No
+   * chat notice is posted — the conversation must stay clean. `transcriptRoot()`
+   * and the prompt's `{{environment}}` line are live (they re-read on each use),
+   * so they need no handling here.
+   */
+  public onWorkspaceFoldersChanged(): void {
+    this.loadAgentsMd();
+    const info = agentRootInfo();
+    this.output.appendLine(`[workspace] folders changed → ${info.kind} mode; agent root = ${info.root}`);
   }
 
   private buildAgent(): void {
@@ -1171,16 +1185,14 @@ export class ChatViewProvider implements ControlHost {
   /**
    * Root folder holding every session's transcript dumps (`<root>/<sessionId>/`).
    * Defaults to the extension's global storage (never the user's repo);
-   * `agentHarness.subAgentTranscriptDir` redirects it to a workspace-relative path.
+   * `agentHarness.subAgentTranscriptDir` redirects it, with a relative path
+   * resolving against the harness root (the workspace folder, or the scratch
+   * folder when no folder is open).
    */
   private transcriptRoot(): string {
     const configured = this.getConfig().subAgentTranscriptDir;
     if (configured) {
-      try {
-        return resolvePath(configured);
-      } catch {
-        // No workspace folder open — fall through to global storage.
-      }
+      return resolvePath(configured);
     }
     if (this.globalStorage) {
       return path.join(this.globalStorage.fsPath, 'transcripts');
