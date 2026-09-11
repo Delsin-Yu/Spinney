@@ -67,6 +67,34 @@ The JSON header holds small fields; each `<<<RAW:label>>>` block is captured
 verbatim and merged into `args`. Use it for `write_file`/`replace_in_file`
 content. See `parseArgs` in `src/tools/index.ts`.
 
+**The markers must stand outside the JSON** — and that is the whole contract:
+`parseArgs` is **JSON-first** (a successful `JSON.parse` wins, the frame branch
+then never runs), and nothing in the code reads the `frame` flag (it only
+*declares* intent). So the one shape agents keep producing —
+
+```
+write_file({"path": "a.ts", "frame": true, "content": "<<<RAW:content>>>\n...\n<<<END_RAW:content>>>"})
+```
+
+— is valid JSON, the markers frame nothing, and they land in the file verbatim.
+Measured on this machine's transcripts: 28 such calls out of 962 `frame: true`
+calls (~2%), ≥6 files polluted across 3 workspaces, one `.mjs` then dying with
+`SyntaxError: Unexpected token '<<'`. Failures were **silent** — the tool result
+still read `Wrote … (N lines)`.
+
+Both tools therefore reject that shape up front via `embeddedFrameError` (in
+`src/tools/index.ts`), with an error that names the cause and shows the correct
+form. The check is anchored on **both** boundaries: markers in the middle of a
+payload are legitimate file text (a fixture, or this very document), and only a
+payload *entirely* wrapped in `<<<RAW:key>>>…<<<END_RAW:key>>>` is the mistake.
+It errors rather than silently stripping — a rewrite would be unrecoverable
+(there is no way to tell the two apart at that point) and would mask the mistake
+instead of teaching the shape.
+
+The wording that carried the contract lives in the tool `description`s (the prompt
+carries no tool list, so a description is the only plugin-side place a model can
+learn the shape); see `docs/agents/invariants/agent-authoring.md`.
+
 Required arguments are validated **before** the tool body runs (`ToolRegistry.execute`
 against the schema it advertises), so an absent value never surfaces as the
 tool's own complaint about the symptom: `exec_command` called without `command`

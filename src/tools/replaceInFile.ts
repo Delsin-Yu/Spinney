@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import { AgentTool } from '../agent/types';
-import { applyEol, detectEol, ensureNotAborted, eolLabelOf, resolvePath, toLf } from './index';
+import { applyEol, detectEol, embeddedFrameError, ensureNotAborted, eolLabelOf, resolvePath, toLf } from './index';
 
 export const replaceInFileTool: AgentTool = {
   definition: {
@@ -8,14 +8,14 @@ export const replaceInFileTool: AgentTool = {
     function: {
       name: 'replace_in_file',
       description:
-        'Replace an exact substring in a file with new text. The oldText must appear exactly once, otherwise an error is returned. Use for surgical edits. Matching is done in normalized LF, so CRLF vs LF never breaks a match; the file is written back with its original line endings. Old and new text may be normal JSON strings or, for large/multi-line snippets, verbatim frames: set frame:true, put a JSON header for the path, then <<<RAW:oldText>>>...<<<END_RAW:oldText>>> and <<<RAW:newText>>>...<<<END_RAW:newText>>>.',
+        'Replace an exact substring in a file with new text. The oldText must appear exactly once, otherwise an error is returned. Use for surgical edits. Matching is done in normalized LF, so CRLF vs LF never breaks a match; the file is written back with its original line endings. Old and new text are either normal JSON strings or verbatim frames, whose RAW markers must stand OUTSIDE the JSON, on their own lines: a header line { "path": "a.ts" }, then <<<RAW:oldText>>>...<<<END_RAW:oldText>>> and <<<RAW:newText>>>...<<<END_RAW:newText>>>. A frame wrapped *inside* a JSON string value is not a frame: it is valid JSON, so the markers would land in the file, and the call is rejected with an error.',
       parameters: {
         type: 'object',
         properties: {
           path: { type: 'string', description: 'File path to edit.' },
           oldText: { type: 'string', description: 'Exact text to find.' },
           newText: { type: 'string', description: 'Replacement text.' },
-          frame: { type: 'boolean', description: 'Optional. Set true for large/multi-line oldText/newText; the harness treats them as verbatim frames (RAW markers) instead of escaped JSON strings.' },
+          frame: { type: 'boolean', description: 'Optional. Declares that the payload is a verbatim frame. Framing is decided by the argument text itself (markers outside the JSON), not by this flag.' },
         },
         required: ['path', 'oldText', 'newText'],
       },
@@ -26,6 +26,12 @@ export const replaceInFileTool: AgentTool = {
     const filePath = resolvePath(String(args.path ?? ''));
     const oldText = String(args.oldText ?? '');
     const newText = String(args.newText ?? '');
+    const frameError =
+      embeddedFrameError('replace_in_file', 'oldText', oldText) ??
+      embeddedFrameError('replace_in_file', 'newText', newText);
+    if (frameError) {
+      throw new Error(frameError);
+    }
     if (!oldText) {
       throw new Error('replace_in_file requires a non-empty "oldText".');
     }
