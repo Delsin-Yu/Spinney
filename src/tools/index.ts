@@ -272,6 +272,38 @@ function parseArgs(argsJson: string): Record<string, unknown> {
   return result;
 }
 
+/**
+ * Catch the one malformed shape the frame contract keeps producing: a payload
+ * whose RAW markers sit *inside* the JSON string, e.g.
+ * `{ "path": "a.ts", "content": "<<<RAW:content>>>…<<<END_RAW:content>>>" }`.
+ * That is **valid JSON**, so {@link parseArgs} returns it untouched and the
+ * markers would be written into the file verbatim — silently, because the tool
+ * result still reads "Wrote …". Two independent sweeps of this machine's
+ * transcripts found 28 such calls out of 962 `frame: true` calls (~2%), which
+ * polluted at least six files across three workspaces (one of them a `.mjs` that
+ * then died with `SyntaxError: Unexpected token '<<'`).
+ *
+ * The check is deliberately anchored on **both** boundaries: markers in the
+ * middle of a payload are legitimate file text (a fixture, or a document about
+ * this very syntax), and only a payload that is *entirely* wrapped in
+ * `<<<RAW:key>>>…<<<END_RAW:key>>>` can be nothing but the frame form gone wrong.
+ * Rejecting beats silently stripping the markers: a rewrite would be unrecoverable
+ * (there is no way to tell a mistake from an intended payload at that point) and
+ * would mask the mistake instead of teaching the correct shape.
+ */
+export function embeddedFrameError(tool: string, key: string, value: string): string | undefined {
+  const wrapped = new RegExp(`^\\s*<<<RAW:${key}>>>[\\s\\S]*<<<END_RAW:${key}>>>\\s*$`).test(value);
+  if (!wrapped) {
+    return undefined;
+  }
+  return (
+    `${tool}: "${key}" is wrapped in RAW markers *inside* the JSON string, so the markers ` +
+    `themselves would be written into the file. The frame form puts them outside the JSON — a ` +
+    `short header line holding the small fields, then the payload on its own lines:\n` +
+    `{ "path": "…" }\n<<<RAW:${key}>>>\n…verbatim text…\n<<<END_RAW:${key}>>>`
+  );
+}
+
 // ---- Tolerant parameter names + required-argument validation ----
 
 /**

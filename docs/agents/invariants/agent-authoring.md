@@ -6,6 +6,17 @@ Where the text lives, the template/placeholder mechanics and the two hard rules
 
 - **One place.** All prompt text lives in `src/agent/prompt.ts`. Change wording
   there — not in `agent.ts`, and never inline in a tool description.
+- **Syntax is not prompt text.** The line above is about behavioural text. A tool's
+  *contract* (argument shape, tolerances, error semantics) belongs in its
+  `description`, because the prompt carries no tool list and the API `tools` field
+  is the only channel the model reads it from. The verbatim-frame shape is the
+  worked example: the prompt once restated it, that restatement was dropped with
+  the tool list, and the description that remained ("set frame:true, put a short
+  JSON header…") was vague enough that agents wrapped the RAW markers inside the
+  JSON string ~2% of the time and wrote them into files. The description now spells
+  out the correct and the wrong shape, and `embeddedFrameError` rejects the wrong
+  one. When you remove a guide from the prompt, check the description left behind
+  can stand alone.
 - **Default to Simplified Chinese (zh-Hans)** for replies — eager, not merely
   allowed — and keep code, paths, identifiers and command output in their original
   form. Do not add English-only output requirements to the model.
