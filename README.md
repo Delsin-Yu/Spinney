@@ -8,13 +8,13 @@ Install Spinney from the [Visual Studio Marketplace](https://marketplace.visuals
 
 Spinney works with a folder open and with no folder open. With no folder, a relative path resolves against a scratch folder in the extension storage.
 
-## What you get
+## Features
 
-- Every turn is a node in a tree. Click a turn to check it out, then send a message to start a new branch there. The old chain stays in the tree, dimmed.
-- The agent reads and writes files, and it runs shell commands.
-- Sub-agents run in parallel and report to the caller.
-- A long command runs in a background terminal while the agent keeps working.
-- Press Stop at an active head any time to interrupt a turn.
+- The conversation is a history you can branch: every turn is a node. Click a turn to check it out, then send a message to branch from it.
+- The old line stays in the tree, dimmed, so an earlier turn is one click away.
+- The agent edits the working tree, runs shell commands, and can keep a long command in a background terminal while the turn continues.
+- Sub-agents run as parallel branches and report back to the parent that spawned them.
+- Press Stop to abort the turn at an active head.
 
 ## Tools
 
