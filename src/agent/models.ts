@@ -111,11 +111,11 @@ export function visionModelIds(): string[] {
 
 /**
  * The vision models as prose for a message to the user/model, e.g.
- * "deepseek-a 或 deepseek-b". Empty string when no vision model is configured —
+ * "deepseek-a or deepseek-b". Empty string when no vision model is configured —
  * callers must handle that (never print an empty parenthesis).
  */
 export function visionModelsLabel(): string {
-  return visionModelIds().join(' 或 ');
+  return visionModelIds().join(' or ');
 }
 
 export interface ModelTableParseResult {
@@ -130,9 +130,11 @@ const WINDOW_KEYS = new Set(['max_tokens', 'context', 'context_window', 'window'
 /**
  * Parse the `spinney.modelTable` setting. It is **structured data** — an
  * object of model id → fields — because that is what a hand-edited
- * `settings.json` should contain, and the setting's own UI is just a link to it
- * (VS Code can only render a two-column key/value table from a schema; the
- * three-column editor lives in the chat panel):
+ * `settings.json` should contain, and the setting's own UI is just a link into
+ * it (VS Code can only render a two-column key/value table from a schema).
+ * A three-column model/vision/window editor was tried as a chat-panel table and
+ * rejected: the data *is* the UI. See
+ * `docs/agents/invariants/model-capabilities.md`.
  *
  *     "spinney.modelTable": {
  *       "deepseek-v4-pro": { "vision": false, "max_tokens": 1048576 }

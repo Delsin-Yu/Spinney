@@ -1321,7 +1321,7 @@
       node && node.children && node.children.some((c) => treeNodes[c] && !isSidecarKind(treeNodes[c].kind))
     );
     if (isAgent) {
-      branchBanner.textContent = '子代理分支（只读）—— 由主 agent 通过 spawn_agents / send_agent_message 驱动';
+      branchBanner.textContent = 'Sub-agent branch (read-only) — driven by the main agent through spawn_agents / send_agent_message';
       branchBanner.classList.remove('hidden');
     } else if (hasTurnChildren) {
       branchBanner.textContent = '⤷ branching from ' + (node.title || '(no title)') + ' — your reply starts a new branch';
@@ -1403,7 +1403,7 @@
   // button, and expand it so the live run is visible.
   function onAgentStart(msg) {
     if (!nodeEls[msg.id]) {
-      createNodeCard(msg.id, treeNodes[msg.id] || { title: '子代理', status: 'running', kind: 'agent' });
+      createNodeCard(msg.id, treeNodes[msg.id] || { title: 'Sub-agent', status: 'running', kind: 'agent' });
     }
     const card = nodeEls[msg.id];
     if (!card) return;

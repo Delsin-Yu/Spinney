@@ -36,6 +36,8 @@ export function activate(context: vscode.ExtensionContext): void {
     storage,
     context.globalStorageUri,
     context.globalState,
+    // The API key's home: SecretStorage (never settings.json).
+    context.secrets,
   );
 
   // Window recovery: VS Code re-creates the webview panels it serialized at
@@ -92,6 +94,11 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
     vscode.commands.registerCommand('spinney.openChat', () => chatProvider?.openChat()),
     vscode.commands.registerCommand('spinney.focus', () => chatProvider?.openChat()),
+    // The API key lives in SecretStorage: these two commands are the only way it
+    // is read or written (`getConfig()` reports the live value). Both install the
+    // key into the shared client, so no reload is needed.
+    vscode.commands.registerCommand('spinney.setApiKey', () => void chatProvider?.setApiKeyInteractive()),
+    vscode.commands.registerCommand('spinney.clearApiKey', () => void chatProvider?.clearApiKey()),
     vscode.commands.registerCommand('spinney.openSession', (arg) => {
       const id = toSessionId(arg);
       if (id) {

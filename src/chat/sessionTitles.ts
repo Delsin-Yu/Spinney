@@ -29,18 +29,18 @@ export const TITLE_BATCH_MAX_TOKENS = 512;
 export const TITLE_BATCH_SIZE = 6;
 
 export const TITLE_SYSTEM_PROMPT = [
-  '你是一个会话命名助手。根据给出的对话摘要，为这个会话取一个简短标题。',
-  '要求：',
-  '- 只输出标题本身，不要解释、不要引号、不要句末标点、不要换行、不要 markdown。',
-  '- 中文优先，保留必要的英文技术名词。',
-  '- 6–20 个字符，概括会话的主题与当前进展（写「在做什么」，不是「用户怎么问的」）。',
+  'You name chat sessions. From the conversation digest you are given, produce a short title for the session.',
+  'Rules:',
+  '- Output the title alone: no explanation, no quotes, no trailing punctuation, no line breaks, no markdown.',
+  '- Use the language the conversation is mostly written in; keep technical terms (identifiers, file names, API names) as they are.',
+  '- Short — about 6–20 characters (a few words) — capturing the subject and where the work stands (what is being done, not how the user asked).',
 ].join('\n');
 
 export const TITLE_BATCH_SYSTEM_PROMPT = [
-  '你是一个会话命名助手。下面有若干个会话，每个会话有编号（S1、S2…）、当前标题和对话摘要。',
-  '为每个会话各输出一行，格式严格为：S编号|标题',
-  '标题要求：中文优先，6–20 个字符，单行，不要引号、句末标点、换行或 markdown，概括该会话的主题与当前进展。',
-  '只输出这些行，不要输出解释、不要小标题、不要空行。',
+  'You name chat sessions. Below are several sessions, each with an index (S1, S2, …), its current title and a digest of its conversation.',
+  'For each session output exactly one line, strictly in the form: S<index>|<title>',
+  'Title rules: use the language the conversation is mostly written in; about 6–20 characters; one line; no quotes, trailing punctuation, line breaks or markdown; capture the subject and where the work stands.',
+  'Output only those lines: no explanation, no headings, no blank lines.',
 ].join('\n');
 
 /** Main-agent turns that carry a conversation (sidecar cards excluded). */
@@ -148,20 +148,20 @@ export function buildTitleDigest(session: AgentSession, maxChars = 4000): string
   const lines: string[] = [];
   for (let i = 0; i < picked.length; i++) {
     if (i === 1 && picked.length < turns.length) {
-      lines.push(`…（中间省略 ${turns.length - picked.length} 个回合）`);
+      lines.push(`…(${turns.length - picked.length} turn(s) in between elided)`);
     }
     const node = picked[i];
     const prompt = clipLine(firstUserText(node), 240);
     if (prompt) {
-      lines.push(`- 用户：${prompt}`);
+      lines.push(`- User: ${prompt}`);
     }
     const answer = clipLine(lastAssistantText(node), 200);
     if (answer) {
-      lines.push(`  助手：${answer}`);
+      lines.push(`  Assistant: ${answer}`);
     }
     const tools = toolNames(node);
     if (tools.length > 0) {
-      lines.push(`  工具：${tools.join(', ')}`);
+      lines.push(`  Tools: ${tools.join(', ')}`);
     }
     if (lines.join('\n').length > maxChars) {
       break;
@@ -186,6 +186,11 @@ export function heuristicTitle(session: AgentSession): string {
  * line, quotes/emphasis/heading noise stripped, trailing punctuation dropped,
  * whitespace collapsed, clipped to `AUTO_TITLE_MAX_CHARS`. Returns `fallback`
  * when nothing usable is left.
+ *
+ * The noise classes spell their non-ASCII members as escapes: a title may still
+ * come back wrapped in the CJK quote pairs or ending on a full-width comma
+ * (`\u201c` `\u201d` `\u300a` `\u3002` …), and writing them this way keeps this
+ * file free of literal CJK characters.
  */
 export function sanitizeTitle(raw: string, fallback: string): string {
   const line = (raw || '')
@@ -198,11 +203,11 @@ export function sanitizeTitle(raw: string, fallback: string): string {
   }
   const cleaned = line
     .replace(/^[#>*\-\s]+/, '')
-    .replace(/^["'“”‘’《》「」【】\s]+/, '')
-    .replace(/["'“”‘’《》「」【】\s]+$/, '')
+    .replace(/^["'\u201c\u201d\u2018\u2019\u300a\u300b\u300c\u300d\u3010\u3011\s]+/, '')
+    .replace(/["'\u201c\u201d\u2018\u2019\u300a\u300b\u300c\u300d\u3010\u3011\s]+$/, '')
     .replace(/[*_`]+/g, '')
     .replace(/\s+/g, ' ')
-    .replace(/[。．.,，;；:：!！?？~～、|｜]+$/, '')
+    .replace(/[\u3002\uff0e.,\uff0c;\uff1b:\uff1a!\uff01?\uff1f~\uff5e\u3001|\uff5c]+$/, '')
     .trim();
   if (!cleaned) {
     return fallback;
@@ -217,8 +222,8 @@ export function buildTitleMessages(digest: string, currentTitle: string): ChatMe
     {
       role: 'user',
       content:
-        `当前标题（可参考，不必沿用）：${currentTitle || '(无)'}\n\n` +
-        `对话摘要：\n${digest}\n\n请输出标题：`,
+        `Current title (for reference, may be replaced): ${currentTitle || '(none)'}\n\n` +
+        `Conversation digest:\n${digest}\n\nOutput the title:`,
     },
   ];
 }
@@ -233,22 +238,25 @@ export interface BatchTitleEntry {
 /** Messages naming several sessions in one request (used by the backfill). */
 export function buildBatchTitleMessages(entries: BatchTitleEntry[]): ChatMessage[] {
   const blocks = entries.map(
-    (entry, i) => `S${i + 1}｜当前标题：${entry.currentTitle || '(无)'}\n摘要：\n${entry.digest}`,
+    (entry, i) => `S${i + 1}|Current title: ${entry.currentTitle || '(none)'}\nDigest:\n${entry.digest}`,
   );
   return [
     { role: 'system', content: TITLE_BATCH_SYSTEM_PROMPT },
-    { role: 'user', content: `${blocks.join('\n\n')}\n\n请为每个会话输出一行：` },
+    { role: 'user', content: `${blocks.join('\n\n')}\n\nOutput one line per session:` },
   ];
 }
 
 /**
- * Parse a batched reply (`S3|标题`, `3. 标题`, …) into one title per entry.
+ * Parse a batched reply (`S3|Title`, `3. Title`, …) into one title per entry.
  * Unparsed / unusable lines stay null so the caller can fall back per session.
  */
 export function parseBatchTitles(raw: string, count: number): Array<string | null> {
   const out: Array<string | null> = new Array(count).fill(null);
   for (const line of (raw || '').split('\n')) {
-    const match = line.trim().match(/^S?\s*(\d+)\s*[|｜:：.)、]\s*(.+)$/i);
+    // The separator class spans the ASCII and the full-width forms a model may
+    // still emit (`\uff5c` `\uff1a` `\u3001`) — written as escapes so this file
+    // carries no CJK characters.
+    const match = line.trim().match(/^S?\s*(\d+)\s*[|\uff5c:\uff1a.)\u3001]\s*(.+)$/i);
     if (!match) {
       continue;
     }

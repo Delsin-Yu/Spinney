@@ -106,6 +106,13 @@ const STORAGE_BACKUP_KEY = 'spinney.state.v1backup';
 /** Where {@link STORAGE_BACKUP_KEY}'s content is parked (see `moveV1BackupOut`). */
 const V1_BACKUP_FILE = 'state-v1-backup.json';
 const CONFIG_KEY = 'spinney.runtimeConfig';
+/**
+ * The SecretStorage entry holding the DeepSeek API key. It is **not** a setting:
+ * a key in `settings.json` is plain text in a file that gets synced, diffed and
+ * pasted around, so `spinney.apiKey` was retired in favour of
+ * `spinney.setApiKey` → `context.secrets.store(...)`.
+ */
+const API_KEY_SECRET = 'spinney.apiKey';
 
 /**
  * The last assistant text a finished turn produced (used to carry a hopped
@@ -210,6 +217,14 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    */
   private defaultModel = DEFAULT_MODEL;
   private defaultThinkingEffort: ThinkingEffort = 'medium';
+  /**
+   * The live DeepSeek API key: the SecretStorage value when one is stored, else
+   * `DEEPSEEK_API_KEY`, else ''. Written by {@link installApiKey} only, and read
+   * by `getConfig()` into the shared client.
+   */
+  private apiKey = '';
+  /** True once the "no API key" nudge was shown, so a send only nags once. */
+  private missingKeyNotified = false;
   private sessions: AgentSession[] = [];
   private activeSessionId = '';
   /** The one in-flight automatic-title request (a session switch does not cancel it). */
@@ -237,6 +252,14 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
      * small keys must not.
      */
     private readonly smallStorage?: vscode.Memento,
+    /**
+     * Where the API key lives. It is a **secret**, so it goes through
+     * `context.secrets` (OS-encrypted, never written to `settings.json`, never
+     * synced), with `DEEPSEEK_API_KEY` as the environment fallback. Optional so a
+     * caller without one (a test) still constructs — then only the environment
+     * variable can supply a key.
+     */
+    private readonly secrets?: vscode.SecretStorage,
   ) {
     this.mediaVersion = Date.now().toString(36);
     this.output = vscode.window.createOutputChannel('Spinney');
@@ -259,6 +282,10 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     // The shared client must exist before any runtime builds its agent.
     const cfg = this.getConfig();
     this.client = new DeepSeekClient({ apiKey: cfg.apiKey, baseUrl: cfg.baseUrl, model: this.defaultModel });
+    // SecretStorage is asynchronous, so the key is read once here and installed
+    // into that shared client a tick later; `getConfig().apiKey` reports the live
+    // value from then on. Nothing can send a turn before the user types one.
+    void this.loadApiKey('startup');
     // The panel manager needs only callbacks, so it can be built before the
     // sessions (runtimes post into it lazily).
     this.panels = new PanelManager({
@@ -289,7 +316,9 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
 
   getConfig(): HarnessConfig {
     const cfg = vscode.workspace.getConfiguration('spinney');
-    const apiKey = (cfg.get<string>('apiKey') ?? '').trim() || (process.env.DEEPSEEK_API_KEY ?? '').trim();
+    // The API key is NOT a setting: it is read from SecretStorage (or the
+    // environment) by `readApiKey` and cached here — see `loadApiKey`.
+    const apiKey = this.apiKey;
     const model = cfg.get<string>('model') ?? DEFAULT_MODEL;
     // A blank base URL means "use the default" rather than a relative URL.
     const baseUrl = (cfg.get<string>('baseUrl') ?? '').trim() || 'https://api.deepseek.com';
@@ -304,6 +333,121 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     const subAgentTranscriptDir = (cfg.get<string>('subAgentTranscriptDir') ?? '').trim();
     const autoSessionTitles = cfg.get<boolean>('autoSessionTitles') ?? true;
     return { apiKey, model, baseUrl, maxTurns, thinkingEffort, foldToolCalls, foldThinking, maxConcurrentSubagents, maxLevel2Subagents, saveSubAgentTranscripts, saveSessionTranscripts, subAgentTranscriptDir, autoSessionTitles };
+  }
+
+  // ---- API key (SecretStorage) ----
+
+  /**
+   * Read the key out of SecretStorage, falling back to `DEEPSEEK_API_KEY`, and
+   * install it into the shared client. Called once at activation and again after
+   * `spinney.setApiKey` / `spinney.clearApiKey`, so this window never needs a
+   * reload to pick a key up (the client is shared, so the main agent and every
+   * sub-agent use the new one on their very next request).
+   */
+  async loadApiKey(reason: string): Promise<void> {
+    const { key, source } = await this.readApiKey();
+    this.installApiKey(key);
+    this.output.appendLine(
+      `[config] api key (${reason}): ${key ? `loaded from ${source}` : 'missing — run "spinney.setApiKey"'}`,
+    );
+  }
+
+  /**
+   * Resolve the key and say where it came from. A SecretStorage read can fail
+   * (a locked keyring, a headless host) — that is not fatal: the environment
+   * variable is still a valid home for a key.
+   */
+  private async readApiKey(): Promise<{ key: string; source: 'SecretStorage' | 'DEEPSEEK_API_KEY' | 'none' }> {
+    if (this.secrets) {
+      try {
+        const stored = ((await this.secrets.get(API_KEY_SECRET)) ?? '').trim();
+        if (stored) {
+          return { key: stored, source: 'SecretStorage' };
+        }
+      } catch (err) {
+        this.output.appendLine(
+          `[config] could not read the secret storage: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    const env = (process.env.DEEPSEEK_API_KEY ?? '').trim();
+    return env ? { key: env, source: 'DEEPSEEK_API_KEY' } : { key: '', source: 'none' };
+  }
+
+  /**
+   * Install a key as the live one: cache it, hand it to the shared client (which
+   * reads its options when each request is built, so the next one already uses
+   * it) and let every open tab refresh its wallet readout — the key may be
+   * exactly what was missing.
+   */
+  private installApiKey(key: string): void {
+    this.apiKey = key;
+    this.client.configure({ apiKey: key });
+    if (!key) {
+      return;
+    }
+    this.missingKeyNotified = true; // a nudge is pointless once a key exists
+    for (const rt of this.runtimes.values()) {
+      void rt.refreshBalance();
+    }
+  }
+
+  /**
+   * `spinney.setApiKey`: ask for the key (masked), store it in SecretStorage and
+   * install it live. The value never touches `settings.json`.
+   */
+  async setApiKeyInteractive(): Promise<void> {
+    const value = await vscode.window.showInputBox({
+      prompt: 'DeepSeek API key — stored in the OS-encrypted secret storage, not in settings.json.',
+      placeHolder: 'sk-…',
+      password: true,
+      ignoreFocusOut: true,
+      validateInput: (input) => (input.trim() ? undefined : 'An API key is required.'),
+    });
+    const key = (value ?? '').trim();
+    if (!key) {
+      return; // cancelled
+    }
+    if (!this.secrets) {
+      void vscode.window.showErrorMessage(
+        'Spinney: this host has no secret storage; set the DEEPSEEK_API_KEY environment variable instead.',
+      );
+      return;
+    }
+    await this.secrets.store(API_KEY_SECRET, key);
+    await this.loadApiKey('setApiKey');
+    void vscode.window.showInformationMessage('Spinney: API key saved.');
+  }
+
+  /** `spinney.clearApiKey`: drop the stored key (`DEEPSEEK_API_KEY` may still serve requests). */
+  async clearApiKey(): Promise<void> {
+    await this.secrets?.delete(API_KEY_SECRET);
+    await this.loadApiKey('clearApiKey');
+    void vscode.window.showInformationMessage(
+      this.apiKey
+        ? 'Spinney: stored API key cleared — still using the DEEPSEEK_API_KEY environment variable.'
+        : 'Spinney: API key cleared.',
+    );
+  }
+
+  /**
+   * The one nudge for a missing key, shown *before* a send is accepted. It is a
+   * non-modal notification with a button, deliberately not awaited: a missing key
+   * must never block the composer (the request itself reports the real error).
+   * Shown at most once per window.
+   */
+  private warnMissingApiKey(): void {
+    if (this.apiKey || this.missingKeyNotified) {
+      return;
+    }
+    this.missingKeyNotified = true;
+    void vscode.window
+      .showWarningMessage('Spinney: no DeepSeek API key is configured yet.', 'Set API Key')
+      .then((pick) => {
+        if (pick === 'Set API Key') {
+          void vscode.commands.executeCommand('spinney.setApiKey');
+        }
+      });
   }
 
   /**
@@ -347,10 +491,13 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    * Apply a settings change to the live objects, so editing `spinney.*`
    * takes effect in this window instead of only after a reload.
    *
-   * - **API key / base URL** are re-read into the shared `DeepSeekClient`. The
-   *   main agent and every sub-agent hold that same instance, so a new key works
-   *   on the very next request. This is deliberately applied even while a turn is
-   *   running: the options are read when each request is built.
+   * - **base URL** is re-read into the shared `DeepSeekClient`. The main agent and
+   *   every sub-agent hold that same instance, so a new base URL works on the very
+   *   next request. This is deliberately applied even while a turn is running: the
+   *   options are read when each request is built. The **API key** takes the same
+   *   path, but it is not a setting — it is installed by `loadApiKey` (the
+   *   `spinney.setApiKey` / `spinney.clearApiKey` commands), so a settings event
+   *   never touches it.
    * - **`maxTurns`**, the **context window** and the **sub-agent pool limit** are
    *   pushed to their live owners (every runtime).
    * - **`model`** / **`thinkingEffort`** are applied only when those two keys
@@ -371,7 +518,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     // Re-read the model table first: it decides the recognized model list, every
     // context window and every image capability derived below.
     this.applyModelTable();
-    this.client.configure({ apiKey: cfg.apiKey, baseUrl: cfg.baseUrl });
+    this.client.configure({ baseUrl: cfg.baseUrl });
     const modelChanged = !event || event.affectsConfiguration('spinney.model');
     const effortChanged = !event || event.affectsConfiguration('spinney.thinkingEffort');
     if (modelChanged || effortChanged) {
@@ -411,14 +558,14 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     if (skippedBusy) {
       this.output.appendLine('[config] model/thinkingEffort change skipped: a turn is running');
     }
-    if (!event || event.affectsConfiguration('spinney.apiKey') || event.affectsConfiguration('spinney.baseUrl')) {
-      // The credentials may be exactly what was missing: refresh the credit line.
+    if (!event || event.affectsConfiguration('spinney.baseUrl')) {
+      // The endpoint changed: the credit line it answers comes from that host.
       for (const rt of this.runtimes.values()) {
         void rt.refreshBalance();
       }
     }
     this.output.appendLine(
-      `[config] settings changed live: key=${cfg.apiKey ? 'set' : 'missing'} baseUrl=${cfg.baseUrl} maxTurns=${cfg.maxTurns} maxSubagents=${cfg.maxConcurrentSubagents}`,
+      `[config] settings changed live: key=${this.apiKey ? 'set' : 'missing'} baseUrl=${cfg.baseUrl} maxTurns=${cfg.maxTurns} maxSubagents=${cfg.maxConcurrentSubagents}`,
     );
   }
 
@@ -1582,9 +1729,9 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       sessionId: hop.originSessionId,
       nodeId: hop.returnNodeId,
       prompt:
-        `[会话跳转回执] 你派到新会话「${session.title}」(${session.id}) 的任务已结束（状态：${status}）。\n` +
-        `它的最终回复：\n\n${clipped || '(新会话没有产出文本回复)'}\n\n` +
-        `（需要完整过程可用 search_transcripts sessionId=${session.id} 检索）`,
+        `[session hop receipt] The task you dispatched to the new session "${session.title}" (${session.id}) has finished (status: ${status}).\n` +
+        `Its final reply:\n\n${clipped || '(the new session produced no text reply)'}\n\n` +
+        `(search_transcripts sessionId=${session.id} has the full trace if you need it)`,
     };
     this.outputLog(
       `[hop] returning to ${hop.originSessionId}` +
@@ -2459,6 +2606,9 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       rt.postNotice('warning', 'An external controller is rebooting the window; please wait a moment.');
       return;
     }
+    // A send is the moment a key matters: nudge once (never block — the request
+    // itself reports the real error).
+    this.warnMissingApiKey();
     await rt.onUserMessage(text, attachments);
   }
 
@@ -2645,7 +2795,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     const v = this.mediaVersion;
     const withV = (uri: string) => `${uri}${uri.includes('?') ? '&' : '?'}v=${v}`;
     const scriptUri = withV(String(webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'main.js'))));
-    const markdownItUri = withV(String(webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'markdown-it.min.js'))));
+    const markdownItUri = withV(String(webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'vendor', 'markdown-it', 'markdown-it.min.js'))));
     const treeUri = withV(String(webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'tree.js'))));
     // Vendored, pinned tree-layout engine (non-layered-tidy-tree-layout@2.0.2, MIT).
     // Not an npm dependency — see media/vendor/non-layered-tidy-tree-layout/PROVENANCE.md.

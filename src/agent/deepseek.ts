@@ -112,10 +112,11 @@ export class DeepSeekClient {
 
   /**
    * Update the connection settings **in place**. The same client instance is
-   * shared by the main agent and every sub-agent, so re-reading
-   * `spinney.apiKey` / `baseUrl` here makes a new key work on the very next
-   * request — no window reload, and safe to call mid-turn (each request reads
-   * the options when it is built). Fields absent from the patch are kept.
+   * shared by the main agent and every sub-agent, so installing a new `baseUrl`
+   * (or `apiKey`) here — `ChatViewProvider.loadApiKey` / `onConfigurationChanged`
+   * — makes it work on the very next request: no window reload, and safe to call
+   * mid-turn (each request reads the options when it is built). Fields absent
+   * from the patch are kept.
    */
   configure(patch: Partial<DeepSeekOptions>): void {
     if (typeof patch.apiKey === 'string') {
@@ -138,7 +139,7 @@ export class DeepSeekClient {
   async getBalance(): Promise<DeepSeekBalance> {
     if (!this.options.apiKey) {
       throw new DeepSeekError(
-        'No DeepSeek API key configured. Set "spinney.apiKey" or the DEEPSEEK_API_KEY environment variable.',
+        'No DeepSeek API key configured. Run the spinney.setApiKey command (or set the DEEPSEEK_API_KEY environment variable).',
       );
     }
     const url = `${this.options.baseUrl.replace(/\/$/, '')}/user/balance`;
@@ -197,7 +198,7 @@ export class DeepSeekClient {
   async uploadFile(bytes: Uint8Array, filename = 'image', signal?: AbortSignal): Promise<UploadedFile> {
     if (!this.options.apiKey) {
       throw new DeepSeekError(
-        'No DeepSeek API key configured. Set "spinney.apiKey" or the DEEPSEEK_API_KEY environment variable.',
+        'No DeepSeek API key configured. Run the spinney.setApiKey command (or set the DEEPSEEK_API_KEY environment variable).',
       );
     }
     const mime = detectImageMime(bytes);
@@ -253,7 +254,7 @@ export class DeepSeekClient {
     const { messages, tools, signal } = request;
     if (!this.options.apiKey) {
       throw new DeepSeekError(
-        'No DeepSeek API key configured. Set "spinney.apiKey" or the DEEPSEEK_API_KEY environment variable.',
+        'No DeepSeek API key configured. Run the spinney.setApiKey command (or set the DEEPSEEK_API_KEY environment variable).',
       );
     }
 
@@ -495,7 +496,7 @@ export class DeepSeekClient {
   async complete(request: CompletionRequest): Promise<{ text: string; usage?: Usage }> {
     if (!this.options.apiKey) {
       throw new DeepSeekError(
-        'No DeepSeek API key configured. Set "spinney.apiKey" or the DEEPSEEK_API_KEY environment variable.',
+        'No DeepSeek API key configured. Run the spinney.setApiKey command (or set the DEEPSEEK_API_KEY environment variable).',
       );
     }
     const url = `${this.options.baseUrl.replace(/\/$/, '')}/chat/completions`;

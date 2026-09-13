@@ -5,8 +5,11 @@ import { spawnSync } from 'child_process';
 /**
  * Shell selection for the exec_command tool.
  *
- * Priority (best first): Git Bash > PowerShell Core (pwsh) > Windows
- * PowerShell 5.1 > cmd.exe.
+ * Priority on Windows (best first): Git Bash > PowerShell Core (pwsh) > Windows
+ * PowerShell 5.1 > cmd.exe. On POSIX the order is bash (first on PATH) > pwsh >
+ * Windows PowerShell (if some port is installed) > /bin/sh — the portable
+ * Bourne shell every Unix-like system ships, which is what keeps a POSIX host
+ * from falling through to a `cmd.exe` that does not exist there.
  *
  * Rationale (verified on a zh_CN / GBK(936) Windows host):
  *  - Git Bash / MSYS2 is an end-to-end UTF-8 stack, so shell messages and
@@ -21,7 +24,7 @@ import { spawnSync } from 'child_process';
  * a Unicode argv instead of being re-encoded by cmd's GBK command-line parser.
  */
 
-export type ShellKind = 'bash' | 'pwsh' | 'posh5' | 'cmd';
+export type ShellKind = 'bash' | 'pwsh' | 'posh5' | 'sh' | 'cmd';
 
 export interface ShellInfo {
   kind: ShellKind;
@@ -121,7 +124,10 @@ function detectShell(): ShellInfo {
     return {
       kind: 'bash',
       file: bash,
-      label: 'Git Bash',
+      // "Git Bash" only where it is one: on POSIX this is the system bash, and
+      // the label reaches the model through the tool description and the
+      // `{{environment}}` line, so naming the wrong shell is a wrong fact.
+      label: isWin ? 'Git Bash' : 'bash',
       buildArgs: (cmd) => ['-c', cmd],
       env: {
         ...process.env,
@@ -156,7 +162,19 @@ function detectShell(): ShellInfo {
     };
   }
 
-  // 4) Last resort: cmd.exe.
+  // 4) POSIX last resort: /bin/sh. Its kind is `sh`, not `bash` — it is a
+  //    POSIX shell, so bash-only syntax the model may write is not guaranteed.
+  if (process.platform !== 'win32' && exists('/bin/sh')) {
+    return {
+      kind: 'sh',
+      file: '/bin/sh',
+      label: 'sh',
+      buildArgs: (cmd) => ['-c', cmd],
+      env: { ...process.env },
+    };
+  }
+
+  // 5) Windows last resort: cmd.exe.
   return {
     kind: 'cmd',
     file: process.env.ComSpec || 'cmd.exe',

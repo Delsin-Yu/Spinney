@@ -420,7 +420,7 @@ export class Agent {
    * matching this agent's capabilities, and — main agent only — `hop_session` /
    * `list_nodes` / `rename_session`. Every tool is advertised with its full
    * schema; there is no folded "gradual reveal" tier. The intercepted set comes
-   * from the same capability flags the system prompt's `## 分工` guidance
+   * from the same capability flags the system prompt's `## Delegation` guidance
    * assumes, so the two can never disagree.
    */
   private getTools(): ToolDefinition[] {

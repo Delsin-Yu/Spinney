@@ -119,7 +119,7 @@ export function makeExecCommandTool(getAccess: () => BackgroundAccess | null): A
         description:
           'Run a shell command in the harness root (the workspace folder, or the harness scratch folder when no folder is open) and return its combined stdout/stderr. Use for builds, tests, git, npm, etc. Optionally set cwd relative to the harness root. Set timeout (seconds; defaults to the spinney.commandTimeout setting, which is 600 = 10 minutes unless changed). timeout_behavior controls what happens when a command runs past timeout: "stop" (default) kills it, "move_to_background" promotes the still-running command to a background terminal (returns its id), and "start_in_background" launches it in the background immediately (returns its id and does not wait). Commands run through the detected shell (currently ' +
           getShell().label +
-          ') and in that shell syntax (bash-style for Git Bash, PowerShell syntax otherwise).',
+          ') and in that shell syntax (bash-style for bash/sh, PowerShell syntax otherwise).',
         parameters: {
           type: 'object',
           properties: {

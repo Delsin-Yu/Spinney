@@ -1963,7 +1963,7 @@ export class SessionRuntime {
     if (!parent) {
       return;
     }
-    const cardText = `子代理 #${node.id.slice(-6)} ${result.ok ? '完成' : '失败'}: ${result.summary || '(no summary)'}${this.transcriptNote(node)}`;
+    const cardText = `Sub-agent #${node.id.slice(-6)} ${result.ok ? 'finished' : 'failed'}: ${result.summary || '(no summary)'}${this.transcriptNote(node)}`;
     this.queueSubAgentSignal(parent, [{ ok: result.ok, summary: result.summary, node }], cardText);
     this.host.persist();
   }
@@ -2018,7 +2018,7 @@ export class SessionRuntime {
       if (model && !isKnownModel(model)) {
         return `Error: unknown model "${model}".`;
       }
-      const node = createNode(newId(), parent.id, `子代理: ${instruction.slice(0, 32)}`, 'running');
+      const node = createNode(newId(), parent.id, `Sub-agent: ${instruction.slice(0, 32)}`, 'running');
       node.kind = 'agent';
       node.agentDepth = childDepth;
       node.agentStatus = 'running';
@@ -2192,17 +2192,17 @@ export class SessionRuntime {
    */
   private queueSubAgentSignal(parent: TreeNode, results: Array<{ ok: boolean; summary: string; node: TreeNode }>, cardText?: string): void {
     const lines = results.map(
-      (r) => `子代理 #${r.node.id.slice(-6)} ${r.ok ? '完成' : '失败'}: ${r.summary || '(no summary)'}${this.transcriptNote(r.node)}`,
+      (r) => `Sub-agent #${r.node.id.slice(-6)} ${r.ok ? 'finished' : 'failed'}: ${r.summary || '(no summary)'}${this.transcriptNote(r.node)}`,
     );
     const body = cardText ?? lines.join('\n');
-    const doneText = `${results.length} 个子代理完成`;
-    const text = `[子代理批次] ${doneText}\n${body}`;
+    const doneText = `${results.length} sub-agent(s) finished`;
+    const text = `[Sub-agent batch] ${doneText}\n${body}`;
     const signal: SignalNotice = {
       nodeId: parent.id,
       kind: 'subagent',
       sourceNodeIds: results.map((r) => r.node.id),
       text,
-      card: { kind: 'subagent', id: `sub-${parent.id}`, name: '子代理完成', doneText, content: body },
+      card: { kind: 'subagent', id: `sub-${parent.id}`, name: 'Sub-agents finished', doneText, content: body },
     };
     if (parent.kind === 'agent' && !this.isNodeLive(parent.id)) {
       // A finished sub-agent parent cannot receive an injected turn on its own
@@ -2384,7 +2384,7 @@ export class SessionRuntime {
    */
   private onAsyncBatchDone(parent: TreeNode, results: Array<{ ok: boolean; summary: string; node: TreeNode }>): void {
     const lines = results.map(
-      (r) => `子代理 #${r.node.id.slice(-6)} ${r.ok ? '完成' : '失败'}: ${r.summary || '(no summary)'}${this.transcriptNote(r.node)}`,
+      (r) => `Sub-agent #${r.node.id.slice(-6)} ${r.ok ? 'finished' : 'failed'}: ${r.summary || '(no summary)'}${this.transcriptNote(r.node)}`,
     );
     this.queueSubAgentSignal(parent, results, lines.join('\n'));
     this.host.persist();
@@ -2739,7 +2739,7 @@ export class SessionRuntime {
         continue;
       }
       this.renderSignalCards(nodeId, batch);
-      this.lastStatus = batch.some((s) => s.kind === 'subagent') ? '子代理完成' : 'Background terminal finished';
+      this.lastStatus = batch.some((s) => s.kind === 'subagent') ? 'Sub-agents finished' : 'Background terminal finished';
       this.setBusy(true);
       this.post({ type: 'status', text: this.lastStatus });
       // Re-affirm the view in the webview BEFORE the turn streams: a nested sub-agent
