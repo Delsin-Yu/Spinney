@@ -12,9 +12,12 @@ Install Spinney from the [Visual Studio Marketplace](https://marketplace.visuals
 - The old chain stays in the tree, dimmed.
 - The agent reads and writes files, and it runs shell commands.
 - Sub-agents run in parallel and report to the caller.
-- Press Stop at any time to interrupt a turn.
+- A long command runs in a background terminal while the agent keeps working.
+- Press Stop at an active head any time to interrupt a turn.
 
 ## Tools
+
+Files and search:
 
 | Tool | Purpose |
 | --- | --- |
@@ -22,8 +25,35 @@ Install Spinney from the [Visual Studio Marketplace](https://marketplace.visuals
 | `write_file` | Write a file and create parent folders. |
 | `replace_in_file` | Replace an exact substring. The substring must be unique. |
 | `list_dir` | List directory entries. |
-| `exec_command` | Run a shell command. |
+| `search_files` | Search files for a regex. A large result spills to a temp file. |
+
+Shell and background terminals:
+
+| Tool | Purpose |
+| --- | --- |
+| `exec_command` | Run a shell command. It can hold the command in a background terminal. |
+| `check_background_terminal` | Read a background terminal's status and output. |
+| `join_background` | Wait for a background terminal to finish. |
+| `kill_background` | Stop a background terminal and its process tree. |
+
+Images and history:
+
+| Tool | Purpose |
+| --- | --- |
 | `read_image` | Read an image, then upload it for a vision model. |
+| `search_transcripts` | Search earlier conversations, including sub-agent runs. |
+
+Chat tree, sessions and sub-agents:
+
+| Tool | Purpose |
+| --- | --- |
+| `list_nodes` | Read the chat tree: its nodes, its branches, and the checked-out node. |
+| `spawn_agents` | Start sub-agents in parallel, each with its own task. |
+| `spawn_readonly_agents` | Start sub-agents that can only read. |
+| `send_agent_message` | Continue a sub-agent that has finished. |
+| `send_readonly_agent_message` | Continue a read-only sub-agent that has finished. |
+| `hop_session` | Hand a task to a fresh session, then take back its answer. |
+| `rename_session` | Rename a session. |
 
 ## Models
 
