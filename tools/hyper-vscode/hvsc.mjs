@@ -5,7 +5,7 @@
  * It owns the process lifecycle (so a "reboot" is just kill + relaunch with the
  * same argv) and exposes a local HTTP endpoint for callers such as the harness
  * agent. The harness side lives behind its own opt-in control plane
- * (`agentHarness.httpApi.enabled`), discovered through
+ * (`spinney.httpApi.enabled`), discovered through
  * `<globalStorage>/http/<instanceId>.json`.
  *
  *   hvsc serve   [--port 7777] [--start <workspace>|--no-workspace] [--isolated]
@@ -25,7 +25,7 @@
  * Instances are launched with **profile passthrough** by default (no
  * `--user-data-dir`), so the new window shares the user's profile and therefore
  * the same chat state. The control plane must then be enabled in the user's
- * settings (`agentHarness.httpApi.enabled`), because `code -n` attaches to the
+ * settings (`spinney.httpApi.enabled`), because `code -n` attaches to the
  * running main process and our env vars do not reach the new window. `--isolated`
  * keeps the old behaviour (own profile, own main process → hard kill/relaunch).
  *
@@ -61,7 +61,7 @@ const STATE_DIR = process.env.HYPER_VSCODE_STATE_DIR || join(TOOL_DIR, '.state')
 const STATE_FILE = join(STATE_DIR, 'daemon.json');
 const INSTANCES_FILE = join(STATE_DIR, 'instances.json');
 const LOG_FILE = join(STATE_DIR, 'daemon.log');
-const EXT_ID = 'minimal-host.minimal-agent-harness';
+const EXT_ID = 'deyu.spinney';
 
 // ---------------------------------------------------------------- utilities
 
@@ -111,7 +111,7 @@ const wsLabel = (workspace) => workspace ?? '(no workspace)';
 
 /** One-line summary of the live harness windows, for "target not found" errors. */
 function describeDiscoveries(list) {
-  if (!list?.length) return 'no live harness window found (is agentHarness.httpApi.enabled on?)';
+  if (!list?.length) return 'no live harness window found (is spinney.httpApi.enabled on?)';
   return `live harness windows: ${list.map((d) => `${d.instanceId} @ ${wsLabel(d.workspace)} :${d.port}`).join(', ')}`;
 }
 
@@ -291,7 +291,7 @@ function deepSeekKey() {
   if (home) candidates.push(join(home, '.config', 'Code', 'User', 'settings.json'));
   for (const file of candidates) {
     const settings = readJson(file);
-    const key = settings?.['agentHarness.apiKey'];
+    const key = settings?.['spinney.apiKey'];
     if (typeof key === 'string' && key.trim()) return key.trim();
   }
   return null;
@@ -346,7 +346,7 @@ function launchCode(instanceId, workspace, extraArgs = [], opts = {}) {
   const extDir = userExtensionsDir();
   if (extDir) args.push(`--extensions-dir=${extDir}`);
   args.push(...extraArgs);
-  const env = { ...process.env, AGENT_HARNESS_INSTANCE_ID: instanceId, AGENT_HARNESS_HTTP: '1' };
+  const env = { ...process.env, SPINNEY_INSTANCE_ID: instanceId, SPINNEY_HTTP: '1' };
   const key = deepSeekKey();
   if (key) env.DEEPSEEK_API_KEY = key;
   const child = spawn(resolveCodeExe(), args, {
@@ -935,12 +935,12 @@ function ancestryPids(pid, levels = 12) {
  *
  * This is what makes `--current` work for a window hvsc never launched: the
  * harness spawns its shells as descendants of the window's extension host, so one
- * of our ancestors is that window's discovery pid. `AGENT_HARNESS_INSTANCE_ID` is
+ * of our ancestors is that window's discovery pid. `SPINNEY_INSTANCE_ID` is
  * checked first (an isolated/managed window carries it), then the ancestry.
  */
 function currentWindow() {
   const all = readDiscoveries();
-  const env = (process.env.AGENT_HARNESS_INSTANCE_ID ?? '').trim();
+  const env = (process.env.SPINNEY_INSTANCE_ID ?? '').trim();
   if (env) {
     const byEnv = all.find((d) => d.instanceId === env || String(d.pid) === env);
     if (byEnv) return byEnv;

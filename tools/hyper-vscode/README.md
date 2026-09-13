@@ -14,7 +14,7 @@ wake the agent up afterwards.
 | --- | --- | --- |
 | `hvsc` daemon | this folder (`hvsc.mjs serve`) | launches/supervises `code` windows, exposes the reboot API |
 | `serve.ps1` | this folder | bootstrap that starts the daemon outside VS Code |
-| control plane | the extension (`agentHarness.httpApi.enabled`) | `/health`, `/state`, `/wait-for-finish`, `/navigate`, `/continue`, `/reload-window` |
+| control plane | the extension (`spinney.httpApi.enabled`) | `/health`, `/state`, `/wait-for-finish`, `/navigate`, `/continue`, `/reload-window` |
 | discovery file | `<globalStorage>/http/<instanceId>.json` | port + bearer token the daemon reads (0600) |
 | daemon state | `.state/daemon.json`, `.state/instances.json`, `.state/daemon.log` | token/port, instances (launched **or adopted**, re-adopted after a daemon restart), append-only log |
 
@@ -27,9 +27,9 @@ same `workspaceState` — the chat session the supervisor wants to talk to.
 Consequences:
 
 - `code -n` attaches to the already-running main process, so the daemon's env
-  vars (`AGENT_HARNESS_INSTANCE_ID`, `DEEPSEEK_API_KEY`, …) do **not** reach the
+  vars (`SPINNEY_INSTANCE_ID`, `DEEPSEEK_API_KEY`, …) do **not** reach the
   new window. Enable the control plane in the user's settings instead:
-  `"agentHarness.httpApi.enabled": true`. The instance id then becomes
+  `"spinney.httpApi.enabled": true`. The instance id then becomes
   `pid-<extension-host pid>` and the daemon matches it by workspace + launch time
   (see *No-repo mode* below for the no-folder case).
 - The extension host's parent is the **user's** main process, so a hard kill would
@@ -83,7 +83,7 @@ node tools\hyper-vscode\hvsc.mjs adopt --current                     # register 
 | Target | How it is resolved |
 | --- | --- |
 | `pid-19940` (or a record id, or a raw pid) | the live discovery file / the record that points at it |
-| `--current` | the caller's **process ancestry**: harness terminals are descendants of the window's extension host, so one of the ancestors *is* that window's discovery pid. No record and no `AGENT_HARNESS_INSTANCE_ID` needed — in passthrough mode our env never reached that window |
+| `--current` | the caller's **process ancestry**: harness terminals are descendants of the window's extension host, so one of the ancestors *is* that window's discovery pid. No record and no `SPINNEY_INSTANCE_ID` needed — in passthrough mode our env never reached that window |
 | `--workspace <path>` | the one live window that has that folder open (`workspace: null` for a no-repo window) |
 | `--all` | every record, managed or adopted |
 
@@ -108,7 +108,7 @@ replacement). `hvsc status` shows the pair: `pid-19940 -> pid-4908`.
 
 ```powershell
 # 1) enable the control plane once (user settings.json)
-#    "agentHarness.httpApi.enabled": true
+#    "spinney.httpApi.enabled": true
 
 # 2) start the daemon in a standalone terminal (it must outlive the window)
 powershell -ExecutionPolicy Bypass -File tools\hyper-vscode\serve.ps1 -Port 7777 -Workspace .
@@ -168,5 +168,5 @@ Bearer token: `tools/hyper-vscode/.state/daemon.json` (created at startup).
 | `HYPER_VSCODE_GLOBAL_STORAGE` | replace the discovery root (a lab daemon never sees the user's real windows) |
 | `HYPER_VSCODE_STATE_DIR` | replace `.state/` (lets a second daemon run beside the real one) |
 | `HYPER_VSCODE_EXTENSIONS_DIR` | override `--extensions-dir` |
-| `AGENT_HARNESS_INSTANCE_ID` | set by the daemon when it spawns `code` (isolated mode only) |
-| `agentHarness.httpApi.enabled` / `.port` | control plane on/off, fixed or ephemeral port |
+| `SPINNEY_INSTANCE_ID` | set by the daemon when it spawns `code` (isolated mode only) |
+| `spinney.httpApi.enabled` / `.port` | control plane on/off, fixed or ephemeral port |

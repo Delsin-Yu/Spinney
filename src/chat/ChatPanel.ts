@@ -2,7 +2,7 @@ import * as vscode from 'vscode';
 import { currentOp, timedSync } from '../perf';
 
 /** View type of the editor chat surface; also the serializer id (window recovery). */
-export const CHAT_VIEW_TYPE = 'agentHarness.chatTree';
+export const CHAT_VIEW_TYPE = 'spinney.chatTree';
 
 /**
  * Message types a fresh `postAllState` repaint replaces. A panel whose webview has

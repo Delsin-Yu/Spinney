@@ -17,7 +17,7 @@
   and `{{fanOut}}`; it stays lean — identity + environment + three behaviour lines
   — and never repeats the main template.
 - `renderPromptTemplate()` fills them. An unknown placeholder name or a malformed
-  `{{` **throws and logs to the "Agent Harness" output channel** (the guard for a
+  `{{` **throws and logs to the "Spinney" output channel** (the guard for a
   typo'd name; `src/perf.ts`'s `harnessLog` is the sink). It scans the *template*,
   not the rendered output, so a `{{` inside an injected value (an AGENTS.md
   snippet) is data and never an error.
@@ -56,6 +56,6 @@
 - Session semantics are unchanged: the prompt is synthesized per activation and
   never stored in a node (`docs/agents/invariants/chat-tree.md`); on a model or
   effort switch only `messages[0]` is rewritten (`refreshSystemIdentity`).
-- To read the current prompt, run **`Agent Harness: Show System Prompt`**: it
+- To read the current prompt, run **`Spinney: Show System Prompt`**: it
   renders for the active model + effort and the session's `AGENTS.md` snapshot and
   opens the result in an editor tab.

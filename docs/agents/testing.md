@@ -30,7 +30,7 @@ regression fails *packaging* instead of the user's session:
   `paint` report, which is the only way to see a silently dead probe without a live
   host — see `invariants/streaming-perf.md`.
 - `npm run check:signals` (`tools/check-signal-persist.js`) — the completion-signal
-  persistence contract (`tools/research/signal-notification-plan.md` §0.1 / D1): a
+  persistence contract (the completion-signal plan, §0.1 / D1): a
   `kind:'bg'` background-terminal card must survive a restart with its `delivered`
   flag and terminal snapshot (`bgTaskId` / `bgExitCode` / `bgElapsedMs` /
   `bgOutputTail`), a card that was mid-flight when the host went away must stop
@@ -59,7 +59,7 @@ exactly the bug class. The method that does, with no real API key and no tokens:
    stream (`data: {…}` … `data: [DONE]`) for `stream: true` / plain JSON for
    `stream: false`.
 2. Edit `.vscode/settings.json` the way a user does in the Settings UI — point
-   `agentHarness.baseUrl` at the mock and set a marker `agentHarness.apiKey` —
+   `spinney.baseUrl` at the mock and set a marker `spinney.apiKey` —
    then assert what the running host sent: `GET /user/balance` with the new key
    and base URL (A), again after a second key-only edit (B), and a real
    `POST /chat/completions` carrying the newest key, `stream: true` and the tool
@@ -80,6 +80,5 @@ activation (and never re-reads or pushes it) fails A/B/C — that is what a regr
 here looks like.
 
 The implementation used while fixing this was deliberately thrown away
-(`.agent-harness/live-config-test/`, gitignored scratch). If it is wanted as a
-tracked tool it belongs in `tools/research/`, not `tools/` — see
-`scratch-space.md`.
+(`.spinney/live-config-test/`, gitignored scratch). If it is wanted as a tracked
+tool it belongs in `tools/` — see `scratch-space.md`.

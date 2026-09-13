@@ -1,9 +1,9 @@
 {
-  "name": "minimal-agent-harness",
-  "displayName": "Minimal Agent Harness",
+  "name": "spinney",
+  "displayName": "Spinney",
   "description": "A minimalistic agent harness — sidebar chat with file read/write and command execution, powered by the official DeepSeek API.",
   "version": "0.0.1",
-  "publisher": "minimal-host",
+  "publisher": "deyu",
   "license": "MIT",
   "engines": {
     "vscode": "^1.85.0"
@@ -13,145 +13,145 @@
     "Other"
   ],
   "activationEvents": [
-    "onView:agentHarness.sessions",
-    "onCommand:agentHarness.openChat",
-    "onWebviewPanel:agentHarness.chatTree"
+    "onView:spinney.sessions",
+    "onCommand:spinney.openChat",
+    "onWebviewPanel:spinney.chatTree"
   ],
   "main": "./out/extension.js",
   "contributes": {
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "agentHarness",
-          "title": "Agent Harness",
+          "id": "spinney",
+          "title": "Spinney",
           "icon": "$(comment-discussion)"
         }
       ]
     },
     "views": {
-      "agentHarness": [
+      "spinney": [
         {
-          "id": "agentHarness.sessions",
+          "id": "spinney.sessions",
           "name": "Sessions",
-          "contextualTitle": "Agent Harness"
+          "contextualTitle": "Spinney"
         }
       ]
     },
     "commands": [
       {
-        "command": "agentHarness.openChat",
-        "title": "Agent Harness: Open Chat Tree",
+        "command": "spinney.openChat",
+        "title": "Spinney: Open Chat Tree",
         "icon": "$(comment-discussion)"
       },
       {
-        "command": "agentHarness.focus",
-        "title": "Agent Harness: Focus Chat",
+        "command": "spinney.focus",
+        "title": "Spinney: Focus Chat",
         "icon": "$(comment-discussion)"
       },
       {
-        "command": "agentHarness.openSession",
+        "command": "spinney.openSession",
         "title": "Open Session",
         "icon": "$(comment-discussion)"
       },
       {
-        "command": "agentHarness.newSession",
+        "command": "spinney.newSession",
         "title": "New Session",
         "icon": "$(add)"
       },
       {
-        "command": "agentHarness.renameSession",
+        "command": "spinney.renameSession",
         "title": "Rename Session…",
         "icon": "$(edit)"
       },
       {
-        "command": "agentHarness.autoRenameSession",
+        "command": "spinney.autoRenameSession",
         "title": "Auto-rename Session",
         "icon": "$(refresh)"
       },
       {
-        "command": "agentHarness.copySessionId",
+        "command": "spinney.copySessionId",
         "title": "Copy Session ID",
         "icon": "$(copy)"
       },
       {
-        "command": "agentHarness.deleteSession",
+        "command": "spinney.deleteSession",
         "title": "Delete Session",
         "icon": "$(trash)"
       },
       {
-        "command": "agentHarness.deleteBranch",
-        "title": "Agent Harness: Delete Branch at Checked-out Turn",
+        "command": "spinney.deleteBranch",
+        "title": "Spinney: Delete Branch at Checked-out Turn",
         "icon": "$(trash)"
       },
       {
-        "command": "agentHarness.clear",
-        "title": "Agent Harness: Clear Conversation"
+        "command": "spinney.clear",
+        "title": "Spinney: Clear Conversation"
       },
       {
-        "command": "agentHarness.showSystemPrompt",
-        "title": "Agent Harness: Show System Prompt"
+        "command": "spinney.showSystemPrompt",
+        "title": "Spinney: Show System Prompt"
       }
     ],
     "menus": {
       "view/title": [
         {
-          "command": "agentHarness.newSession",
-          "when": "view == agentHarness.sessions",
+          "command": "spinney.newSession",
+          "when": "view == spinney.sessions",
           "group": "navigation"
         },
         {
-          "command": "agentHarness.openChat",
-          "when": "view == agentHarness.sessions",
+          "command": "spinney.openChat",
+          "when": "view == spinney.sessions",
           "group": "navigation"
         }
       ],
       "view/item/context": [
         {
-          "command": "agentHarness.openSession",
-          "when": "view == agentHarness.sessions",
+          "command": "spinney.openSession",
+          "when": "view == spinney.sessions",
           "group": "inline"
         },
         {
-          "command": "agentHarness.deleteSession",
-          "when": "view == agentHarness.sessions",
+          "command": "spinney.deleteSession",
+          "when": "view == spinney.sessions",
           "group": "inline"
         },
         {
-          "command": "agentHarness.renameSession",
-          "when": "view == agentHarness.sessions",
+          "command": "spinney.renameSession",
+          "when": "view == spinney.sessions",
           "group": "1_modification@1"
         },
         {
-          "command": "agentHarness.autoRenameSession",
-          "when": "view == agentHarness.sessions",
+          "command": "spinney.autoRenameSession",
+          "when": "view == spinney.sessions",
           "group": "1_modification@2"
         },
         {
-          "command": "agentHarness.copySessionId",
-          "when": "view == agentHarness.sessions",
+          "command": "spinney.copySessionId",
+          "when": "view == spinney.sessions",
           "group": "2_copy"
         }
       ]
     },
     "configuration": {
-      "title": "Minimal Agent Harness",
+      "title": "Spinney",
       "properties": {
-        "agentHarness.apiKey": {
+        "spinney.apiKey": {
           "type": "string",
           "default": "",
           "markdownDescription": "DeepSeek API key. Get one at https://platform.deepseek.com. Alternatively set the `DEEPSEEK_API_KEY` environment variable.",
           "scope": "window"
         },
-        "agentHarness.model": {
+        "spinney.model": {
           "type": "string",
           "default": "deepseek-flash",
           "enum": [
             "deepseek-flash"
           ],
-          "markdownDescription": "DeepSeek model to use. `deepseek-flash` (DeepSeek-V4.1-Flash, 1M-token context) accepts image input — attach or paste images in the chat. Additional models, and per-model context-window / image overrides, come from `agentHarness.modelTable`.",
+          "markdownDescription": "DeepSeek model to use. `deepseek-flash` (DeepSeek-V4.1-Flash, 1M-token context) accepts image input — attach or paste images in the chat. Additional models, and per-model context-window / image overrides, come from `spinney.modelTable`.",
           "scope": "window"
         },
-        "agentHarness.modelTable": {
+        "spinney.modelTable": {
           "type": "object",
           "default": {},
           "additionalProperties": {
@@ -175,101 +175,101 @@
             "pattern": "^[^\\s:]+$",
             "patternErrorMessage": "A model id cannot contain spaces or a colon."
           },
-          "markdownDescription": "Extra models for the dropdown, as structured data. Edit it in [settings.json](command:workbench.action.openSettingsJson?%7B%22revealSetting%22%3A%7B%22key%22%3A%22agentHarness.modelTable%22%2C%22edit%22%3Atrue%7D%7D) — or from the chat's **Models** panel, which shows one column per field:\n\n```json\n\"agentHarness.modelTable\": {\n  \"some-model\": { \"vision\": false, \"max_tokens\": 1048576 }\n}\n```\n\nAn entry for `deepseek-flash` overrides the built-in model; any other id is added to the dropdown. A field you leave out keeps the built-in value (non-vision, 1048576 tokens). Entries that cannot be parsed are ignored and listed in the **Agent Harness** output channel.",
+          "markdownDescription": "Extra models for the dropdown, as structured data. Edit it in [settings.json](command:workbench.action.openSettingsJson?%7B%22revealSetting%22%3A%7B%22key%22%3A%22spinney.modelTable%22%2C%22edit%22%3Atrue%7D%7D) — or from the chat's **Models** panel, which shows one column per field:\n\n```json\n\"spinney.modelTable\": {\n  \"some-model\": { \"vision\": false, \"max_tokens\": 1048576 }\n}\n```\n\nAn entry for `deepseek-flash` overrides the built-in model; any other id is added to the dropdown. A field you leave out keeps the built-in value (non-vision, 1048576 tokens). Entries that cannot be parsed are ignored and listed in the **Spinney** output channel.",
           "scope": "window"
         },
-        "agentHarness.baseUrl": {
+        "spinney.baseUrl": {
           "type": "string",
           "default": "https://api.deepseek.com",
           "description": "DeepSeek API base URL.",
           "scope": "window"
         },
-        "agentHarness.commandTimeout": {
+        "spinney.commandTimeout": {
           "type": "number",
           "default": 600,
           "description": "Maximum time (seconds) a command may run before being killed. Default 600 (10 minutes); used as the default for exec_command when the tool call does not pass its own timeout.",
           "scope": "window"
         },
-        "agentHarness.maxTurns": {
+        "spinney.maxTurns": {
           "type": "number",
           "default": 20,
           "description": "Maximum tool-call rounds per user message to prevent runaway loops.",
           "scope": "window"
         },
-        "agentHarness.contextWindow": {
+        "spinney.contextWindow": {
           "type": "number",
           "default": 0,
-          "description": "Context window (in tokens) for the context-usage indicator, used for models that are neither vendored nor listed in agentHarness.modelTable. A modelTable row wins over this. Leave 0 to use the catalog's window.",
+          "description": "Context window (in tokens) for the context-usage indicator, used for models that are neither vendored nor listed in spinney.modelTable. A modelTable row wins over this. Leave 0 to use the catalog's window.",
           "scope": "window"
         },
-        "agentHarness.thinkingEffort": {
+        "spinney.thinkingEffort": {
           "type": "string",
           "default": "medium",
           "enum": ["none", "low", "medium", "high"],
           "description": "How much effort the model should spend reasoning before answering. 'low'/'medium'/'high' send a reasoning_effort hint; 'none' omits the parameter and uses the API default.",
           "scope": "window"
         },
-        "agentHarness.foldToolCalls": {
+        "spinney.foldToolCalls": {
           "type": "boolean",
           "default": true,
           "description": "Collapse tool-call cards by default in the chat tree; expand them by clicking the header.",
           "scope": "window"
         },
-        "agentHarness.foldThinking": {
+        "spinney.foldThinking": {
           "type": "boolean",
           "default": true,
           "description": "Collapse the reasoning/thinking block by default in the chat tree; expand it by clicking its header.",
           "scope": "window"
         },
-        "agentHarness.maxConcurrentSubagents": {
+        "spinney.maxConcurrentSubagents": {
           "type": "number",
           "default": 15,
           "description": "How many level-1 sub-agents the main agent may run concurrently (a slot pool; extra tasks queue).",
           "scope": "window"
         },
-        "agentHarness.maxLevel2Subagents": {
+        "spinney.maxLevel2Subagents": {
           "type": "number",
           "default": 2,
           "description": "How many sub-sub-agents each sub-agent may start. Depth is hard-capped at 2 (no sub-sub-sub-agent).",
           "scope": "window"
         },
-        "agentHarness.saveSubAgentTranscripts": {
+        "spinney.saveSubAgentTranscripts": {
           "type": "boolean",
           "default": true,
           "description": "Write each finished sub-agent's full conversation to disk as JSONL (one API message per line, meta + tool-call stats on line 1) and hand its path back to the caller.",
           "scope": "window"
         },
-        "agentHarness.saveSessionTranscripts": {
+        "spinney.saveSessionTranscripts": {
           "type": "boolean",
           "default": true,
           "description": "Write each finished main-agent turn to disk as JSONL (same format as sub-agent transcripts) so search_transcripts can recall earlier conversations. Session history otherwise lives only in the extension's stored state.",
           "scope": "window"
         },
-        "agentHarness.subAgentTranscriptDir": {
+        "spinney.subAgentTranscriptDir": {
           "type": "string",
           "default": "",
           "description": "Folder for transcript dumps (main-agent turns + sub-agent runs), relative to the harness root (the workspace folder, or the harness scratch folder when no folder is open); a per-session subfolder is created inside. Leave empty to use the extension's global storage.",
           "scope": "window"
         },
-        "agentHarness.autoSessionTitles": {
+        "spinney.autoSessionTitles": {
           "type": "boolean",
           "default": true,
           "description": "Name sessions automatically: after the first turn, and again once the conversation has grown (at most every 2 minutes). Titles are generated by the model, falling back to the first message when the request fails. Renaming a session manually locks its title. Sessions created before this feature are named once on activation.",
           "scope": "window"
         },
-        "agentHarness.maxInlineToolOutput": {
+        "spinney.maxInlineToolOutput": {
           "type": "number",
           "default": 32768,
           "description": "Maximum size (bytes) of a search_files / list_dir / search_transcripts result returned inline. Larger results are written to a temp file and only its path plus a short preview are returned. Set 0 to always inline.",
           "scope": "window"
         },
-        "agentHarness.httpApi.enabled": {
+        "spinney.httpApi.enabled": {
           "type": "boolean",
           "default": false,
           "description": "Expose a local HTTP control plane on 127.0.0.1 (bearer-token gated) so an external controller such as tools/hyper-vscode can read state, wait for the agent to go idle, navigate to a node, and continue from it. Off by default; /continue lets the caller make the agent run an instruction, so treat it as a local-trust boundary.",
           "scope": "window"
         },
-        "agentHarness.httpApi.port": {
+        "spinney.httpApi.port": {
           "type": "number",
           "default": 0,
           "description": "Port for the HTTP control plane. 0 picks a free port; the chosen port and token are written to <globalStorage>/http/<instanceId>.json for the supervisor to discover.",

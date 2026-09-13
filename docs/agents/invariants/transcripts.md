@@ -2,23 +2,23 @@
 - **Layout:** `<root>/<sessionId>/<nodeId>.jsonl`, one file per main-agent turn
   (`kind:'session'`) and per sub-agent run (`kind:'subagent'`). Node ids are
   unique per session, so both kinds coexist in one folder. `<root>` is
-  `<agentHarness.subAgentTranscriptDir>` (relative to the agent root — the
+  `<spinney.subAgentTranscriptDir>` (relative to the agent root — the
   workspace folder, or the no-repo scratch folder `<globalStorage>/no-workspace`)
   or, by default, `<globalStorage>/transcripts/` — i.e. **outside** the
   workspace, which is why `search_transcripts` exists (`search_files` cannot walk
   there).
 - **Why main-agent turns are dumped:** session history lives only in the Memento
-  (`agentHarness.state`, a sqlite blob) and is clipped to 64 KiB per message on
+  (`spinney.state`, a sqlite blob) and is clipped to 64 KiB per message on
   persist, so no tool can grep it. `ChatViewProvider.finishTurn` calls
   `dumpSessionTranscript(node, session, status)` → `writeSessionTranscript`, which
   mirrors the node's stored messages (so a turn a later injected notice turn
   reuses is rewritten, exactly like the node). Gated by
-  `agentHarness.saveSessionTranscripts` (default true); skipped for `kind:'agent'`
+  `spinney.saveSessionTranscripts` (default true); skipped for `kind:'agent'`
   nodes and empty turns; a failure is logged and never breaks the turn.
 - **One-time backfill:** sessions whose turns finished *before* the dumps
   existed have no JSONL, so `search_transcripts` cannot see them (their only
   copy is the Memento). `ChatViewProvider.scheduleTranscriptBackfill` runs once
-  per install (marker `agentHarness.transcriptBackfill` in the Memento, 1.5 s
+  per install (marker `spinney.transcriptBackfill` in the Memento, 1.5 s
   after activation, yielding every 25 nodes): it walks every restored tree and
   dumps each node with no file on disk — **an existing dump is never
   overwritten**. Reconstructed dumps carry `backfilled:true` in their meta (and

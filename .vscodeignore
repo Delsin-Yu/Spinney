@@ -1,7 +1,7 @@
 .vscode/**
 .vscode-test/**
 tools/**
-.agent-harness/**
+.spinney/**
 src/**
 node_modules/**
 .gitignore

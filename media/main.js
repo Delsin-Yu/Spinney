@@ -82,7 +82,7 @@
   // id (`reset` / `tree` / `path` carry `traceId`). Half of the cost of a switch
   // happens *here* (DOM, markdown, layout), so this side measures the burst and
   // reports it back as a `perfDiag` message, which closes the trace in the
-  // **Agent Harness** output channel (the host logs it under the same op id).
+  // **Spinney** output channel (the host logs it under the same op id).
   // Two smaller probes ride along:
   //
   //  - a message handler that blocks this thread for >= SLOW_HANDLER_MS is
@@ -2201,7 +2201,7 @@
   // ---- Node header menu (RMB) ----
   // The header's one useful action is the node id: it names the node in
   // `list_nodes`, in the transcript dumps (`<root>/<sessionId>/<nodeId>.jsonl`) and
-  // in every `[node <id>]` line of the Agent Harness output channel, so it has to
+  // in every `[node <id>]` line of the Spinney output channel, so it has to
   // be reachable from the card itself and not only by opening a dump file.
   //
   // VS Code's webview host shows *its* menu for any `contextmenu` that reaches it
@@ -2392,7 +2392,7 @@
   }
 
   // Filled from the provider's `config` message: the vendored model plus every
-  // model the user declared in `agentHarness.modelTable`. No catalog copy here.
+  // model the user declared in `spinney.modelTable`. No catalog copy here.
   let MODELS = [];
   let VISION_MODELS = [];
 
@@ -2595,7 +2595,7 @@
       showAttachHint(
         VISION_MODELS.length > 0
           ? 'Switch to a vision model (' + VISION_MODELS.join(' / ') + ') to attach an image.'
-          : 'No image-capable model is configured — declare one in agentHarness.modelTable to attach an image.',
+          : 'No image-capable model is configured — declare one in spinney.modelTable to attach an image.',
       );
       return;
     }

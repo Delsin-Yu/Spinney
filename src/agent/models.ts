@@ -4,7 +4,7 @@
  *
  * Exactly one model is vendored: `deepseek-flash` (DeepSeek-V4.1-Flash, a
  * 1,048,576-token context window, image input). Everything else is the user's
- * business, declared in the `agentHarness.modelTable` setting — including the
+ * business, declared in the `spinney.modelTable` setting — including the
  * legacy ids DeepSeek still accepts (they are served by the same V4.1-Flash
  * backend, so they are vision-capable no matter what their name suggests) and
  * `deepseek-v4-pro` once it is routed to V4.1-Flash as well. See
@@ -12,11 +12,11 @@
  *
  * Everything derives from here, so changing the vendored model is a one-line
  * edit:
- *   - the settings dropdown (`package.json` `agentHarness.model.enum`, which
+ *   - the settings dropdown (`package.json` `spinney.model.enum`, which
  *     cannot import TypeScript) is verified against this list by
  *     `tools/check-models.js` on every `build-deploy`,
  *   - the chat's model dropdown is built at runtime from {@link modelIds}
- *     (vendored + `agentHarness.modelTable`), so a user-added model is pickable,
+ *     (vendored + `spinney.modelTable`), so a user-added model is pickable,
  *   - user-facing copy (README, settings description) may name models, but only
  *     ones listed here — the same check fails the build otherwise,
  *   - plugin text that reaches the model (the system prompt, tool descriptions,
@@ -25,7 +25,7 @@
  */
 
 export interface ModelSpec {
-  /** The id sent to the API; also the value of `agentHarness.model`. */
+  /** The id sent to the API; also the value of `spinney.model`. */
   id: string;
   /** Context window in tokens, for the usage indicator. */
   contextWindow: number;
@@ -50,11 +50,11 @@ export const DEFAULT_MODEL = VENDORED_MODEL.id;
 /** Used when a model is unknown and nothing else applies. */
 export const DEFAULT_CONTEXT_WINDOW = VENDORED_MODEL.contextWindow;
 
-/** Ids listed in `agentHarness.modelTable`; empty until the provider applies the setting. */
+/** Ids listed in `spinney.modelTable`; empty until the provider applies the setting. */
 let overrides: ModelSpec[] = [];
 
 /**
- * Install the parsed `agentHarness.modelTable`. Called by the chat provider on
+ * Install the parsed `spinney.modelTable`. Called by the chat provider on
  * activation and on every settings change; the table is *user* configuration,
  * never discovered by talking to the API.
  */
@@ -89,7 +89,7 @@ export function isKnownModel(model: string): boolean {
   return modelSpecs().some((m) => m.id === model);
 }
 
-/** True if the id was listed in `agentHarness.modelTable` (row wins over the settings fallback). */
+/** True if the id was listed in `spinney.modelTable` (row wins over the settings fallback). */
 export function isTableModel(model: string): boolean {
   return overrides.some((m) => m.id === model);
 }
@@ -128,13 +128,13 @@ export interface ModelTableParseResult {
 const WINDOW_KEYS = new Set(['max_tokens', 'context', 'context_window', 'window']);
 
 /**
- * Parse the `agentHarness.modelTable` setting. It is **structured data** — an
+ * Parse the `spinney.modelTable` setting. It is **structured data** — an
  * object of model id → fields — because that is what a hand-edited
  * `settings.json` should contain, and the setting's own UI is just a link to it
  * (VS Code can only render a two-column key/value table from a schema; the
  * three-column editor lives in the chat panel):
  *
- *     "agentHarness.modelTable": {
+ *     "spinney.modelTable": {
  *       "deepseek-v4-pro": { "vision": false, "max_tokens": 1048576 }
  *     }
  *

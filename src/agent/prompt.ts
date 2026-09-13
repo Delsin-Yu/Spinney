@@ -78,7 +78,7 @@ export const SUB_AGENT_SYSTEM_PROMPT_TEMPLATE = [
 /** The identity lines shared by the main and sub-agent prompts. */
 export function identityLines(model: string, effort: ThinkingEffort): string[] {
   const lines: string[] = [
-    '你是「Minimal Agent Harness」（agentHarness）——一个自主、全能的代理。',
+    '你是「Spinney」（spinney）——一个自主、全能的代理。',
     '你当前运行在「' + (model || DEFAULT_MODEL) + '」模型上。',
   ];
   if (effort && effort !== 'none') {
@@ -149,7 +149,7 @@ export function environmentSection(facts: EnvironmentFacts): string {
 /**
  * Fill a `{{name}}` template. Every placeholder must have a value: an unknown
  * name (a typo) or a malformed `{{` tag is a bug in the template itself, so it
- * is written to the "Agent Harness" output channel and thrown instead of being
+ * is written to the "Spinney" output channel and thrown instead of being
  * shipped to the model. Only the *template* is scanned — a `{{` inside an
  * injected value (an AGENTS.md snippet) is data, not a placeholder.
  */

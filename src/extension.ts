@@ -63,7 +63,7 @@ export function activate(context: vscode.ExtensionContext): void {
   // never caches session state itself.
   const sessionsProvider = new SessionsProvider(() => chatProvider?.getSessionTreeItems() ?? []);
   chatProvider.onStateChanged = () => sessionsProvider.refresh();
-  const sessionsTree = vscode.window.createTreeView('agentHarness.sessions', {
+  const sessionsTree = vscode.window.createTreeView('spinney.sessions', {
     treeDataProvider: sessionsProvider,
     showCollapseAll: false,
     // Multi-select powers "Delete Selected Sessions…" (Ctrl/Shift-click in the
@@ -81,31 +81,31 @@ export function activate(context: vscode.ExtensionContext): void {
     // Settings are otherwise read once per activation. Push a change into the
     // live objects (a new API key must work without reloading the window).
     vscode.workspace.onDidChangeConfiguration((event) => {
-      if (!event.affectsConfiguration('agentHarness')) {
+      if (!event.affectsConfiguration('spinney')) {
         return;
       }
       chatProvider?.onConfigurationChanged(event);
       // The control plane can only be (re)bound by restarting its listener.
-      if (event.affectsConfiguration('agentHarness.httpApi')) {
+      if (event.affectsConfiguration('spinney.httpApi')) {
         void controlServer.restart();
       }
     }),
-    vscode.commands.registerCommand('agentHarness.openChat', () => chatProvider?.openChat()),
-    vscode.commands.registerCommand('agentHarness.focus', () => chatProvider?.openChat()),
-    vscode.commands.registerCommand('agentHarness.openSession', (arg) => {
+    vscode.commands.registerCommand('spinney.openChat', () => chatProvider?.openChat()),
+    vscode.commands.registerCommand('spinney.focus', () => chatProvider?.openChat()),
+    vscode.commands.registerCommand('spinney.openSession', (arg) => {
       const id = toSessionId(arg);
       if (id) {
         chatProvider?.openSession(id);
       }
     }),
-    vscode.commands.registerCommand('agentHarness.newSession', () => chatProvider?.newSession()),
-    vscode.commands.registerCommand('agentHarness.renameSession', (arg) => {
+    vscode.commands.registerCommand('spinney.newSession', () => chatProvider?.newSession()),
+    vscode.commands.registerCommand('spinney.renameSession', (arg) => {
       void chatProvider?.renameSessionInteractive(arg);
     }),
-    vscode.commands.registerCommand('agentHarness.autoRenameSession', (arg) => {
+    vscode.commands.registerCommand('spinney.autoRenameSession', (arg) => {
       void chatProvider?.autoRenameSession(arg);
     }),
-    vscode.commands.registerCommand('agentHarness.deleteSession', async (arg) => {
+    vscode.commands.registerCommand('spinney.deleteSession', async (arg) => {
       const explicit = toSessionId(arg);
       // The inline bucket is the only delete entry, and the only sensible batch
       // one: right-clicking the list drops the selection, so a context-menu item
@@ -127,7 +127,7 @@ export function activate(context: vscode.ExtensionContext): void {
       // irreversible (conversation + transcript dumps), so confirm first.
       if (!explicit) {
         const pick = await vscode.window.showWarningMessage(
-          'Delete the current Agent Harness session? Its conversation and transcript dumps are removed.',
+          'Delete the current Spinney session? Its conversation and transcript dumps are removed.',
           { modal: true },
           'Delete',
         );
@@ -137,7 +137,7 @@ export function activate(context: vscode.ExtensionContext): void {
       }
       chatProvider?.deleteSession(id);
     }),
-    vscode.commands.registerCommand('agentHarness.copySessionId', async (arg) => {
+    vscode.commands.registerCommand('spinney.copySessionId', async (arg) => {
       // Right-clicking a session in the sidebar passes the tree item; from the
       // palette there is no arg, so fall back to the active session.
       const id = toSessionId(arg) || chatProvider?.currentSessionId || '';
@@ -147,13 +147,13 @@ export function activate(context: vscode.ExtensionContext): void {
       await vscode.env.clipboard.writeText(id);
       vscode.window.setStatusBarMessage(`Copied session id: ${id}`, 2000);
     }),
-    vscode.commands.registerCommand('agentHarness.deleteBranch', () => {
+    vscode.commands.registerCommand('spinney.deleteBranch', () => {
       // Deletes the branch rooted at the checked-out turn; the provider asks for
       // a modal confirmation before anything is removed.
       void chatProvider?.deleteCheckedOutBranchInteractive();
     }),
-    vscode.commands.registerCommand('agentHarness.clear', () => chatProvider?.clear()),
-    vscode.commands.registerCommand('agentHarness.showSystemPrompt', () => {
+    vscode.commands.registerCommand('spinney.clear', () => chatProvider?.clear()),
+    vscode.commands.registerCommand('spinney.showSystemPrompt', () => {
       void chatProvider?.showSystemPrompt();
     }),
   );

@@ -60,7 +60,7 @@ are inconsistent):
 ## Audit record
 
 Audited 2026-09-10; full evidence in the local (gitignored) report
-`.agent-harness/research/audit/supply-chain-audit.md`. Summary: single maintainer
+`.spinney/research/audit/supply-chain-audit.md`. Summary: single maintainer
 `stetrevor` (GitHub owner matches the npm publisher), 4 versions all published in
 October 2019, no ownership change, no install scripts, no `eval`/`Function`/
 `child_process`/network access, zero runtime dependencies, MIT SPDX match, tarball

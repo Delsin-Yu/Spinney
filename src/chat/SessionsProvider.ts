@@ -54,7 +54,7 @@ export class SessionsProvider implements vscode.TreeDataProvider<vscode.TreeItem
       // Busy wins over active: the running session is always the active one, so
       // checking `active` first hid the spinner exactly when it mattered.
       item.iconPath = new vscode.ThemeIcon(it.busy ? 'sync~spin' : it.active ? 'comment-discussion' : 'comment');
-      item.command = { command: 'agentHarness.openSession', title: 'Open Session', arguments: [it.id] };
+      item.command = { command: 'spinney.openSession', title: 'Open Session', arguments: [it.id] };
       item.contextValue = 'session';
       return item;
     });

@@ -42,7 +42,7 @@
 
 ```
 ChatViewProvider (coordinator, 1 per window)
-├─ sessions / persistence (agentHarness.state)
+├─ sessions / persistence (spinney.state)
 ├─ PanelManager: Map<sessionId, ChatPanel>   (one tab per session)
 ├─ titles / transcripts / commands / config / control plane / webview routing
 └─ runtimes: Map<sessionId, SessionRuntime>
@@ -261,7 +261,7 @@ Rules that keep a reboot verifiable (the self-driving loop):
 
 - `tools/harness-test.mjs` drives the local control plane (discovery file in globalStorage,
   bearer token) and asserts host behaviour end-to-end: concurrent `session/start`s,
-  `state.runningNodes`, message ownership in `agentHarness.state`, background ownership,
+  `state.runningNodes`, message ownership in `spinney.state`, background ownership,
   delete/clear rules. It is the P1–P4 acceptance harness.
 - `npm run check:webview` must replay every message shape above (add samples per phase).
 - Smoke-testable pure modules (`tree.ts`, `backgroundHub.ts` with a fake `CommandHandle`)
@@ -277,5 +277,5 @@ plus this file's status line.
 
 ## 8. Progress ledger
 
-Live status lives in `.agent-harness/progress.md` (scratch): phase, last green compile,
+Live status lives in `.spinney/progress.md` (scratch): phase, last green compile,
 what is deployed, and the exact next action.

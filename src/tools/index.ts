@@ -61,7 +61,7 @@ export function getWorkspaceRoot(): string {
 
 /** The scratch root that stands in for a workspace folder in no-repo mode. */
 function noWorkspaceRoot(): string {
-  const base = harnessStorageDir ?? path.join(os.tmpdir(), 'agent-harness-storage');
+  const base = harnessStorageDir ?? path.join(os.tmpdir(), 'spinney-storage');
   return path.join(base, 'no-workspace');
 }
 
@@ -155,21 +155,21 @@ function truncate(s: string, n = 200): string {
 
 /**
  * Where oversized tool results are spilled. Under the agent root, so a
- * workspace-local `.agent-harness/` keeps every agent-produced artifact in one
+ * workspace-local `.spinney/` keeps every agent-produced artifact in one
  * place and no-repo mode gets the same layout inside its scratch root (global
- * storage). `.agent-harness` is in `SKIP_DIRS`, so a repo-wide search never
+ * storage). `.spinney` is in `SKIP_DIRS`, so a repo-wide search never
  * returns the agent's own scratch — grep a spilled file by passing its exact
  * path instead (single-file search still works).
  */
 function spillDir(): string {
   try {
-    return path.join(getAgentRoot(), '.agent-harness', 'tool-output');
+    return path.join(getAgentRoot(), '.spinney', 'tool-output');
   } catch {
-    return path.join(os.tmpdir(), 'agent-harness-tool-output');
+    return path.join(os.tmpdir(), 'spinney-tool-output');
   }
 }
 
-/** Fallback inline cap when `agentHarness.maxInlineToolOutput` is absent. */
+/** Fallback inline cap when `spinney.maxInlineToolOutput` is absent. */
 const DEFAULT_INLINE_LIMIT = 32 * 1024;
 
 /**
@@ -180,7 +180,7 @@ const DEFAULT_INLINE_LIMIT = 32 * 1024;
  */
 export function limitInline(text: string, tool: string): string {
   const configured = vscode.workspace
-    .getConfiguration('agentHarness')
+    .getConfiguration('spinney')
     .get<number>('maxInlineToolOutput');
   const limit = typeof configured === 'number' && configured >= 0 ? configured : DEFAULT_INLINE_LIMIT;
   if (!limit || Buffer.byteLength(text, 'utf8') <= limit) {
@@ -408,7 +408,7 @@ function missingArgumentError(
   );
 }
 
-export const SKIP_DIRS = new Set(['node_modules', '.git', 'out', 'dist', 'build', '.agent-harness']);
+export const SKIP_DIRS = new Set(['node_modules', '.git', 'out', 'dist', 'build', '.spinney']);
 
 export class ToolRegistry {
   private readonly tools = new Map<string, AgentTool>();
@@ -422,7 +422,7 @@ export class ToolRegistry {
   private backgroundAccess: BackgroundAccess | null = null;
   /**
    * Transcript roots for `search_transcripts`, resolved at call time (they
-   * depend on `agentHarness.subAgentTranscriptDir` and the global-storage path,
+   * depend on `spinney.subAgentTranscriptDir` and the global-storage path,
    * so a settings change needs no rebuild).
    */
   private transcriptRoots: (() => string[]) | null = null;

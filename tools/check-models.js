@@ -37,7 +37,7 @@ const problems = [];
 function scan(file, text, { allowAny = false } = {}) {
   const lines = text.split(/\r?\n/);
   // A fenced block whose info string mentions `model-table` documents the
-  // `agentHarness.modelTable` syntax, so the ids inside it are *examples of user
+  // `spinney.modelTable` syntax, so the ids inside it are *examples of user
   // configuration*, not copy about the catalog. Everything else is scanned.
   let fence = false;
   let modelTableFence = false;
@@ -69,26 +69,26 @@ function scan(file, text, { allowAny = false } = {}) {
 }
 
 // --- 1. the settings enum must contain exactly the catalog, nothing else ------
-// (`agentHarness.modelTable` is deliberately *not* scanned: its whole purpose is
+// (`spinney.modelTable` is deliberately *not* scanned: its whole purpose is
 // naming models the catalog does not have.)
 const pkgPath = path.join(root, 'package.json');
 const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-const modelProp = pkg.contributes?.configuration?.properties?.['agentHarness.model'];
+const modelProp = pkg.contributes?.configuration?.properties?.['spinney.model'];
 const enumIds = Array.isArray(modelProp?.enum) ? modelProp.enum : [];
 const missing = ids.filter((id) => !enumIds.includes(id));
 const extra = enumIds.filter((id) => !idSet.has(id));
 if (missing.length) {
-  problems.push(`package.json: agentHarness.model.enum is missing ${missing.join(', ')}`);
+  problems.push(`package.json: spinney.model.enum is missing ${missing.join(', ')}`);
 }
 if (extra.length) {
-  problems.push(`package.json: agentHarness.model.enum lists unknown ${extra.join(', ')}`);
+  problems.push(`package.json: spinney.model.enum lists unknown ${extra.join(', ')}`);
 }
 if (modelProp?.default !== DEFAULT_MODEL) {
-  problems.push(`package.json: agentHarness.model.default is "${modelProp?.default}", expected "${DEFAULT_MODEL}"`);
+  problems.push(`package.json: spinney.model.default is "${modelProp?.default}", expected "${DEFAULT_MODEL}"`);
 }
 
 // --- 2. copy may name models, but only real ones -----------------------------
-scan('package.json', JSON.stringify(pkg.contributes.configuration.properties['agentHarness.model'], null, 1), { allowAny: true });
+scan('package.json', JSON.stringify(pkg.contributes.configuration.properties['spinney.model'], null, 1), { allowAny: true });
 scan('README.md', fs.readFileSync(path.join(root, 'README.md'), 'utf8'), { allowAny: true });
 
 for (const dir of ['docs']) {
@@ -125,7 +125,7 @@ function walkCode(dir, ext, skipRel) {
 }
 walkCode(srcRoot, '.ts', (rel) => rel === path.join('src', catalogRel));
 // The webview lives in media/ and must not carry a second copy of the catalog
-// either: it renders the model list the provider posts (`agentHarness.modelTable`
+// either: it renders the model list the provider posts (`spinney.modelTable`
 // included). Vendored JS is off limits — it is hash-fixed.
 walkCode(path.join(root, 'media'), '.js', (rel) => rel.startsWith(path.join('media', 'vendor')));
 

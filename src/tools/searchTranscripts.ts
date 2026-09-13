@@ -10,7 +10,7 @@ import { ensureNotAborted, limitInline } from './index';
  * workspace, so `search_files` cannot reach them.
  *
  * The roots are supplied by the provider (they depend on
- * `agentHarness.subAgentTranscriptDir` and the global-storage path), resolved at
+ * `spinney.subAgentTranscriptDir` and the global-storage path), resolved at
  * call time so a settings change needs no tool rebuild.
  */
 export function makeSearchTranscriptsTool(getRoots: () => string[]): AgentTool {

@@ -116,7 +116,7 @@
   (Git Bash > pwsh > Windows PowerShell 5.1 > cmd.exe) with UTF-8 safeguards.
   The WSL launcher (`System32\bash.exe` / `WindowsApps`) is **not** accepted as
   Git Bash (different filesystem, no `zh_CN.UTF-8`, Windows cwd).
-- `src/perf.ts` — the `[perf]` diagnostics: `perf()` (sink = the Agent Harness
+- `src/perf.ts` — the `[perf]` diagnostics: `perf()` (sink = the Spinney
   output channel; takes a string **or a thunk**, a thunk is only evaluated when a
   sink is installed), `harnessLog()` (same channel without the prefix, used by the
   prompt-template guard), `timedSync()`, the **correlated op traces**

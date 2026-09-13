@@ -1,7 +1,7 @@
 ## Vision / images
 - Image support is **data, not a guess**: `isVisionModel()` reads the catalog —
   the vendored `deepseek-flash` plus any `vision=true` row the user added in
-  `agentHarness.modelTable`. Image content blocks are **only allowed in `user`
+  `spinney.modelTable`. Image content blocks are **only allowed in `user`
   messages** (`system` / `assistant` / `tool` reject them).
 - A model that is *not* image-capable does **not** return a 400: DeepSeek
   silently replaces the image with an `[Unsupported Image]` text part and answers

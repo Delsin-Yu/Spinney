@@ -19,16 +19,16 @@
 > (`search_files`, `search_transcripts`, `list_dir`, `exec_command`,
 > `check_background_terminal`, `join_background`) runs its result through
 > `limitInline()`: above
-> `agentHarness.maxInlineToolOutput`
+> `spinney.maxInlineToolOutput`
 > (default 32768 bytes, `0` = always inline) the full text is written to
-> `<agentRoot>/.agent-harness/tool-output/<tool>-<id>.txt` (under the workspace
-> folder, or `<globalStorage>/no-workspace/.agent-harness/tool-output/` with no
+> `<agentRoot>/.spinney/tool-output/<tool>-<id>.txt` (under the workspace
+> folder, or `<globalStorage>/no-workspace/.spinney/tool-output/` with no
 > folder open) and only the absolute path,
 > byte/line count and an 8-line preview are returned — so a `context`-heavy search
 > on a big file or a chatty command cannot flood the context. The spilled file is a
 > normal file:
 > `read_file` can page it, and `search_files` can grep it **by its exact path**
-> (`.agent-harness` is in `SKIP_DIRS`, so repo-wide walks skip it). A write failure
+> (`.spinney` is in `SKIP_DIRS`, so repo-wide walks skip it). A write failure
 > falls back to inlining, so a result is never lost.
 | `exec_command` | `command` (alias `cmd`), `cwd?`, `timeout?`, `timeout_behavior?` | Runs through the detected shell (`getShell()`), returns combined stdout+stderr trimmed. Errors/timeouts/aborts are prefixed with a `[...]` note. `timeout_behavior` = `stop` (default, kill on timeout) / `move_to_background` (promote a still-running command to a background terminal and return its id) / `start_in_background` (launch immediately, return id, don't wait). |
 | `check_background_terminal` | `pid` | Status of a background terminal (running / finished, exit code, output so far). |

@@ -74,7 +74,7 @@ import { beginOp, logWebviewReport, opMark, perf, setPerfSink, startLagWatch, st
 
 // Model ids, context windows and image support all live in one place:
 // `src/agent/models.ts` (verified against `package.json` by tools/check-models.js).
-const STORAGE_KEY = 'agentHarness.state';
+const STORAGE_KEY = 'spinney.state';
 /**
  * The active-session pointer, in its **own** memento key. A session switch only
  * moves this pointer, and doing that through `persist()` re-serialized the whole
@@ -82,7 +82,7 @@ const STORAGE_KEY = 'agentHarness.state';
  * SQLite write) to store one id. Read side: this key wins; the blob's own
  * `activeSessionId` field is the fallback for state written before it existed.
  */
-const ACTIVE_SESSION_KEY = 'agentHarness.activeSession';
+const ACTIVE_SESSION_KEY = 'spinney.activeSession';
 /**
  * How long a content write may be coalesced away. State changes arrive in bursts
  * (a turn with a dozen tool calls, a stream of background updates) and each write
@@ -92,20 +92,20 @@ const PERSIST_DEBOUNCE_MS = 800;
 /** …but never leave the newest state unpublished longer than this. */
 const PERSIST_MAX_WAIT_MS = 3000;
 /** One-shot marker for the historical-transcript backfill (see `backfillTranscripts`). */
-const TRANSCRIPT_BACKFILL_KEY = 'agentHarness.transcriptBackfill';
+const TRANSCRIPT_BACKFILL_KEY = 'spinney.transcriptBackfill';
 const TRANSCRIPT_BACKFILL_VERSION = 'v1';
 /** One-shot marker for the historical session-title backfill (see `backfillSessionTitles`). */
-const TITLE_BACKFILL_KEY = 'agentHarness.sessionTitleBackfill';
+const TITLE_BACKFILL_KEY = 'spinney.sessionTitleBackfill';
 const TITLE_BACKFILL_VERSION = 'v1';
 /** How long one title completion may take before falling back to the heuristic. */
 const TITLE_REQUEST_TIMEOUT_MS = 25_000;
 /** Give up a backfill pass after this long; the marker stays unset so it resumes. */
 const TITLE_BACKFILL_DEADLINE_MS = 10 * 60 * 1000;
 /** One-shot copy of the pre-tree (v1) state. Kept as a FILE, never in the memento. */
-const STORAGE_BACKUP_KEY = 'agentHarness.state.v1backup';
+const STORAGE_BACKUP_KEY = 'spinney.state.v1backup';
 /** Where {@link STORAGE_BACKUP_KEY}'s content is parked (see `moveV1BackupOut`). */
 const V1_BACKUP_FILE = 'state-v1-backup.json';
-const CONFIG_KEY = 'agentHarness.runtimeConfig';
+const CONFIG_KEY = 'spinney.runtimeConfig';
 
 /**
  * The last assistant text a finished turn produced (used to carry a hopped
@@ -132,7 +132,7 @@ function lastAssistantText(node: TreeNode): string {
 
 /**
  * Locally persists the active model + thinking-effort selection. The two
- * `*FromSettings` fields record the `agentHarness.*` values that were in force
+ * `*FromSettings` fields record the `spinney.*` values that were in force
  * when the selection was stored, so a later edit of the *setting* (an explicit
  * choice too) can win over an older dropdown pick — see `loadRuntimeConfig`.
  */
@@ -149,7 +149,7 @@ interface RuntimeConfig {
  * `PanelManager` (see `src/chat/panels.ts`); this class owns what is genuinely
  * global:
  *
- *  - sessions and their persistence (`agentHarness.state`);
+ *  - sessions and their persistence (`spinney.state`);
  *  - the `sessionId → SessionRuntime` map (`runtimes`);
  *  - tabs (`panels`), titles, transcripts, config, the control plane;
  *  - the global hop bookkeeping (`hopReturn` / `pendingSessionStart`).
@@ -239,7 +239,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     private readonly smallStorage?: vscode.Memento,
   ) {
     this.mediaVersion = Date.now().toString(36);
-    this.output = vscode.window.createOutputChannel('Agent Harness');
+    this.output = vscode.window.createOutputChannel('Spinney');
     setPerfSink((line) => this.output.appendLine(line));
     // The host's own event loop is watched from here on: a stall in the extension
     // host (persist, a tree rebuild) shows up as a late timer, which no `perf()`
@@ -288,7 +288,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   }
 
   getConfig(): HarnessConfig {
-    const cfg = vscode.workspace.getConfiguration('agentHarness');
+    const cfg = vscode.workspace.getConfiguration('spinney');
     const apiKey = (cfg.get<string>('apiKey') ?? '').trim() || (process.env.DEEPSEEK_API_KEY ?? '').trim();
     const model = cfg.get<string>('model') ?? DEFAULT_MODEL;
     // A blank base URL means "use the default" rather than a relative URL.
@@ -344,7 +344,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   }
 
   /**
-   * Apply a settings change to the live objects, so editing `agentHarness.*`
+   * Apply a settings change to the live objects, so editing `spinney.*`
    * takes effect in this window instead of only after a reload.
    *
    * - **API key / base URL** are re-read into the shared `DeepSeekClient`. The
@@ -361,7 +361,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    *   value is retired, see `loadRuntimeConfig`). Like the dropdowns, the value is
    *   skipped while that session is running.
    *
-   * Every other `agentHarness.*` key is already read lazily at its point of use
+   * Every other `spinney.*` key is already read lazily at its point of use
    * — `autoSessionTitles`, `maxLevel2Subagents`, `saveSessionTranscripts`,
    * `saveSubAgentTranscripts`, `subAgentTranscriptDir`, `maxInlineToolOutput`,
    * `commandTimeout` — so nothing else has to happen here.
@@ -372,8 +372,8 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     // context window and every image capability derived below.
     this.applyModelTable();
     this.client.configure({ apiKey: cfg.apiKey, baseUrl: cfg.baseUrl });
-    const modelChanged = !event || event.affectsConfiguration('agentHarness.model');
-    const effortChanged = !event || event.affectsConfiguration('agentHarness.thinkingEffort');
+    const modelChanged = !event || event.affectsConfiguration('spinney.model');
+    const effortChanged = !event || event.affectsConfiguration('spinney.thinkingEffort');
     if (modelChanged || effortChanged) {
       // A settings edit also moves the default for sessions created from now on
       // (and retires a persisted record made against an older setting value).
@@ -411,7 +411,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     if (skippedBusy) {
       this.output.appendLine('[config] model/thinkingEffort change skipped: a turn is running');
     }
-    if (!event || event.affectsConfiguration('agentHarness.apiKey') || event.affectsConfiguration('agentHarness.baseUrl')) {
+    if (!event || event.affectsConfiguration('spinney.apiKey') || event.affectsConfiguration('spinney.baseUrl')) {
       // The credentials may be exactly what was missing: refresh the credit line.
       for (const rt of this.runtimes.values()) {
         void rt.refreshBalance();
@@ -423,11 +423,11 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   }
 
   getContextWindow(model: string): number {
-    // A row in `agentHarness.modelTable` is the most specific answer there is —
+    // A row in `spinney.modelTable` is the most specific answer there is —
     // the user asked for that model explicitly, so it beats the global fallback.
     if (!isTableModel(model)) {
       const override = vscode.workspace
-        .getConfiguration('agentHarness')
+        .getConfiguration('spinney')
         .get<number>('contextWindow');
       if (override && override > 0) {
         return override;
@@ -437,13 +437,13 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   }
 
   /**
-   * Read `agentHarness.modelTable`, install it as the model catalog's override
+   * Read `spinney.modelTable`, install it as the model catalog's override
    * layer, and report what it did. Bad rows are skipped (never half-applied)
    * and written to the output channel — the setting's syntax is documented in
    * `package.json`, and silence would make a typo look like a harness bug.
    */
   private applyModelTable(): void {
-    const raw = vscode.workspace.getConfiguration('agentHarness').get<unknown>('modelTable');
+    const raw = vscode.workspace.getConfiguration('spinney').get<unknown>('modelTable');
     const { specs, errors } = parseModelTable(raw);
     setModelOverrides(specs);
     this.output.appendLine(
@@ -460,7 +460,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   }
 
   /**
-   * Accept a model id only if the catalog (vendored + `agentHarness.modelTable`)
+   * Accept a model id only if the catalog (vendored + `spinney.modelTable`)
    * knows it; anything else falls back to the default and says so. A stale id in
    * settings must not silently hide images or mis-size the context indicator.
    */
@@ -469,7 +469,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       return candidate || DEFAULT_MODEL;
     }
     this.output.appendLine(
-      `[config] unknown model "${candidate}": not in the catalog and not in agentHarness.modelTable — using ${DEFAULT_MODEL}`,
+      `[config] unknown model "${candidate}": not in the catalog and not in spinney.modelTable — using ${DEFAULT_MODEL}`,
     );
     return DEFAULT_MODEL;
   }
@@ -481,7 +481,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   }
 
   /**
-   * The **default** model/effort: the persisted `agentHarness.runtimeConfig`
+   * The **default** model/effort: the persisted `spinney.runtimeConfig`
    * record falling back to the settings. A session's own pick is layered on top
    * of this by `effectiveModel` / `effectiveEffort` (P4) — this method only
    * answers "what would a session with no pick start from?".
@@ -490,7 +490,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     const defaults = this.getConfig();
     const stored = this.readSmall<Partial<RuntimeConfig>>(CONFIG_KEY) ?? {};
     // A dropdown pick shadows the setting only while that setting is unchanged:
-    // editing `agentHarness.model` in settings.json is an explicit choice as
+    // editing `spinney.model` in settings.json is an explicit choice as
     // well, so it wins over a pick made *before* the edit (a pick made after it
     // is persisted together with the new setting value and keeps winning). A
     // record without the snapshot fields predates this rule, so it is trusted.
@@ -510,8 +510,8 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   /**
    * The model/effort a session runs with (P4): its own pick when that pick still
    * shadows the setting it was made under (`sessionModelPick`), else the persisted
-   * default above — which itself falls back to the `agentHarness.model` /
-   * `agentHarness.thinkingEffort` settings. Resolved here, once, and handed to the
+   * default above — which itself falls back to the `spinney.model` /
+   * `spinney.thinkingEffort` settings. Resolved here, once, and handed to the
    * runtime at construction; the runtime keeps the live value from then on and
    * writes a change back onto the session (`setModel` / `setThinkingEffort`).
    */
@@ -1267,7 +1267,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   /**
    * Root folder holding every session's transcript dumps (`<root>/<sessionId>/`).
    * Defaults to the extension's global storage (never the user's repo);
-   * `agentHarness.subAgentTranscriptDir` redirects it, with a relative path
+   * `spinney.subAgentTranscriptDir` redirects it, with a relative path
    * resolving against the harness root (the workspace folder, or the scratch
    * folder when no folder is open).
    */
@@ -1279,7 +1279,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     if (this.globalStorage) {
       return path.join(this.globalStorage.fsPath, 'transcripts');
     }
-    return path.join(os.tmpdir(), 'agent-harness-transcripts');
+    return path.join(os.tmpdir(), 'spinney-transcripts');
   }
 
   /** One session's transcript folder (main-agent turns + sub-agent runs). */
@@ -1730,7 +1730,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
 
   // ---- Commands ----
 
-  /** Open the chat panel for the active session (agentHarness.openChat / focus). */
+  /** Open the chat panel for the active session (spinney.openChat / focus). */
   openChat(): void {
     const session = this.getActiveSession();
     if (!session) {
@@ -1760,7 +1760,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
 
   /**
    * Open the fully-rendered system prompt in an editor tab
-   * (agentHarness.showSystemPrompt). The content is rendered from the *current*
+   * (spinney.showSystemPrompt). The content is rendered from the *current*
    * session state — the active model, the reasoning effort and the AGENTS.md
    * snapshot taken when the session started — so it is exactly what the model
    * would receive on the next turn.
@@ -1860,7 +1860,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
 
   /**
    * Delete every selected session at once (sidebar multi-select →
-   * `agentHarness.deleteSessions`). ONE modal confirmation covers the batch: it
+   * `spinney.deleteSessions`). ONE modal confirmation covers the batch: it
    * names the sessions, the turn cards and the transcript dumps that go, and the
    * running background terminals that will be killed. A session with a live
    * *turn* is skipped rather than silently dropped — its node would vanish under
@@ -2156,7 +2156,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
 
   // ---- External control plane (src/http/controlServer.ts) ----
 
-  /** Append a line to the Agent Harness output channel (used by the control plane). */
+  /** Append a line to the Spinney output channel (used by the control plane). */
   outputLog(line: string): void {
     this.output.appendLine(line);
   }
@@ -2660,7 +2660,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; font-src ${webview.cspSource}; img-src ${webview.cspSource} https: data:; script-src 'nonce-${nonce}';" />
   <link rel="stylesheet" href="${styleUri}" />
-  <title>Agent Harness</title>
+  <title>Spinney</title>
 </head>
 <body>
   <div id="tree-toolbar">

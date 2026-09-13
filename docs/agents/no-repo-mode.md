@@ -61,7 +61,7 @@ modules have no `ExtensionContext`).
   - `setHarnessStorageDir(context.globalStorageUri.fsPath)` at activation.
   - `vscode.workspace.onDidChangeWorkspaceFolders` → re-snapshot AGENTS.md
     (previously read once per activation with no listener at all).
-  - `transcriptRoot()` resolves a *relative* `agentHarness.subAgentTranscriptDir`
+  - `transcriptRoot()` resolves a *relative* `spinney.subAgentTranscriptDir`
     against the agent root instead of silently falling back to global storage.
 - **P3 — supervisor** (`tools/hyper-vscode/hvsc.mjs`, `serve.ps1`, its README):
   `workspace: null` becomes a first-class instance identity (`samePath` treats
@@ -86,7 +86,7 @@ modules have no `ExtensionContext`).
 - No `AGENTS.md` means the project-instructions section is dropped from the
   prompt (existing `stripAgentsMdSection` behavior). A *global* instructions file
   (`<globalStorage>/AGENTS.md`) is deliberately **not** part of this change.
-- `read_image` and computer-use need absolute paths; `--path .agent-harness/screenshots`
+- `read_image` and computer-use need absolute paths; `--path .spinney/screenshots`
   still works because the shell cwd is the agent root.
 
 ## Status
@@ -101,7 +101,7 @@ modules have no `ExtensionContext`).
 - [x] P4 — docs
 
 Verified with a throwaway harness-mocked smoke test
-(`.agent-harness/no-repo-smoke.js`, disposable): repo mode unchanged, no-repo
+(`.spinney/no-repo-smoke.js`, disposable): repo mode unchanged, no-repo
 root created on demand, relative/absolute resolution, `getWorkspaceRoot()` still
 throwing, and a real oversized-result spill landing under
-`<scratch>/.agent-harness/tool-output/`.
+`<scratch>/.spinney/tool-output/`.

@@ -92,5 +92,5 @@
   and already-rendered nodes are skipped (`_itemsRendered`) to avoid re-running markdown.
 - Migrating v1 `{messages, displayItems}` splits at each `user` message; items are
   re-attached by walking both lists (best effort) and the original state is backed
-  up to `agentHarness.state.v1backup`.
+  up to `spinney.state.v1backup`.
 

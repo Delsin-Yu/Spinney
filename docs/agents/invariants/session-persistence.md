@@ -1,31 +1,31 @@
 ## Session persistence & config
-- Storage keys: `agentHarness.state` (v2: `{ version, activeSessionId, sessions }`,
+- Storage keys: `spinney.state` (v2: `{ version, activeSessionId, sessions }`,
   each session is a **tree** of `TreeNode`; `STORED_STATE_VERSION = 2` and P4 did not
-  bump it — the new session fields are optional), `agentHarness.activeSession` (the
+  bump it — the new session fields are optional), `spinney.activeSession` (the
   focused tab's session id, **on its own** — see below),
-  `agentHarness.runtimeConfig` (the
+  `spinney.runtimeConfig` (the
   **default** `model` + `thinkingEffort` record, used by sessions with no pick),
-  `agentHarness.transcriptBackfill` (the one-time historical-dump marker) and
-  `agentHarness.sessionTitleBackfill` (the one-time historical-title marker; left unset
+  `spinney.transcriptBackfill` (the one-time historical-dump marker) and
+  `spinney.sessionTitleBackfill` (the one-time historical-title marker; left unset
   when a pass is interrupted or the model is unavailable, so it resumes on the next
   activation).
 - **Which Memento holds a key matters as much as which key** — VS Code keeps an
   extension's entire `workspaceState` as **one** row (`5ad8cddf…/state.vscdb`, key
-  `minimal-host.minimal-agent-harness`, measured at **118,860,732 chars** with every
+  `deyu.spinney`, measured at **118,860,732 chars** with every
   one of our keys inside it). So *any* `update` on the content Memento re-serializes
   and rewrites all of it, however small the value: a pointer write was measured as
   `lag blocked 549ms` right after a switch. Hence the split
   (`ChatViewProvider.small` / `readSmall` / `writeSmall`):
   - **content Memento** (`workspaceState`, or `globalState` in no-repo mode):
-    `agentHarness.state` only;
-  - **`context.globalState`** (`smallStorage`): `agentHarness.activeSession`,
-    `agentHarness.runtimeConfig`, `agentHarness.transcriptBackfill`,
-    `agentHarness.sessionTitleBackfill` — all tiny, all written often.
+    `spinney.state` only;
+  - **`context.globalState`** (`smallStorage`): `spinney.activeSession`,
+    `spinney.runtimeConfig`, `spinney.transcriptBackfill`,
+    `spinney.sessionTitleBackfill` — all tiny, all written often.
   A value found only in the content row (state written before this split) is adopted
   on read and written small for next time; the stale copy is deliberately left behind
   (deleting it would rewrite the 119 M chars for a few bytes) and simply loses from
   then on.
-- **The active-session pointer is its own key** (`agentHarness.activeSession`, in the
+- **The active-session pointer is its own key** (`spinney.activeSession`, in the
   small scope): a session switch only moves a pointer, and doing it through
   `persist()` re-serialized the whole state (~111 M chars → ~1.6 s of blocked
   extension host) to store one id. `setActiveSession` → `persistActiveSession` writes
@@ -34,7 +34,7 @@
   (`loadSessions`) prefers the key and falls back to the blob's `activeSessionId`
   field; a pointer naming a session that no longer exists self-heals to `sessions[0]`.
 - **The pre-tree (v1) copy is a file, not a memento key**: `moveV1BackupOut` parks
-  `agentHarness.state.v1backup` as `<globalStorage>/state-v1-backup.json` and drops
+  `spinney.state.v1backup` as `<globalStorage>/state-v1-backup.json` and drops
   the key — it was ~20 M chars (~15%) of *every* memento write and nothing ever read
   it again (the migration completed long ago). The data is moved, never discarded;
   if the file cannot be written the key stays, with a line in the output channel.
@@ -73,9 +73,9 @@
   (`SessionRuntime.setModel` / `setThinkingEffort` → `session.model` / `session.effort`,
   then `persist()`), so each tab keeps its own selection across a reload.
   `sessionModelPick` / `sessionEffortPick` (in `tree.ts`) honour a pick only while it
-  still shadows the `agentHarness.model` / `agentHarness.thinkingEffort` setting it was
+  still shadows the `spinney.model` / `spinney.thinkingEffort` setting it was
   made under — editing that setting retires the pick. A session with no pick follows
-  `effectiveModel` / `effectiveEffort` → the persisted `agentHarness.runtimeConfig`
+  `effectiveModel` / `effectiveEffort` → the persisted `spinney.runtimeConfig`
   record → the setting. An explicit pick also calls `persistRuntimeConfig`, which
   updates that global record as the **seed for sessions created later**; it never
   touches an existing session's own choice. `applyDefaultModel` / `applyDefaultEffort`

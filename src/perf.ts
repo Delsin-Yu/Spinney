@@ -1,5 +1,5 @@
 /**
- * Lightweight performance instrumentation. Lines go to the "Agent Harness"
+ * Lightweight performance instrumentation. Lines go to the "Spinney"
  * output channel (and nowhere else) so a long session can be diagnosed without
  * changing agent behaviour. Disabled sink = zero work besides the string concat
  * of the line itself, which we only do when a sink is set.
@@ -20,7 +20,7 @@
  *    session), which is the other half of "the UI stutters" and is invisible in a
  *    `perf()` line: a blocked host writes nothing while it is blocked.
  *
- * Read the lines in View → Output → "Agent Harness"; see
+ * Read the lines in View → Output → "Spinney"; see
  * `docs/agents/invariants/streaming-perf.md` for what to look for.
  */
 

@@ -1,6 +1,6 @@
 /*
  * check-signal-persist — the completion-signal work's *persistence* half, as a
- * build-time guard (see tools/research/signal-notification-plan.md §0.1 / D1).
+ * build-time guard (the completion-signal plan, §0.1 / D1).
  *
  * Round-trips a persisted session through `migrateState` (the exact load path
  * `ChatViewProvider.loadSessions` uses) and asserts that a `kind:'bg'` card

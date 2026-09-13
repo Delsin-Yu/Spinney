@@ -306,7 +306,7 @@ export class Agent {
   }
 
   /**
-   * Set the tool-round limit for subsequent turns (`agentHarness.maxTurns` may
+   * Set the tool-round limit for subsequent turns (`spinney.maxTurns` may
    * change while the window is open). A non-positive/non-finite value is ignored
    * so a bad setting cannot disable the loop guard entirely.
    */

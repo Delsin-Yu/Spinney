@@ -1,7 +1,7 @@
 {
-    "agentHarness.thinkingEffort": "medium",
-    "agentHarness.model": "deepseek-flash",
-    "agentHarness.commandTimeout": 600,
-    "agentHarness.httpApi.enabled": true,
-    "agentHarness.modelTable": {}
+    "spinney.thinkingEffort": "medium",
+    "spinney.model": "deepseek-flash",
+    "spinney.commandTimeout": 600,
+    "spinney.httpApi.enabled": true,
+    "spinney.modelTable": {}
 }

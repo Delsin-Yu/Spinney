@@ -299,7 +299,7 @@ export interface RuntimeHost {
   stateChanged(): void;
   /**
    * Remember an explicit per-session pick as the **default for future sessions**:
-   * the persisted `agentHarness.runtimeConfig` record plus the provider's
+   * the persisted `spinney.runtimeConfig` record plus the provider's
    * `defaultModel` / `defaultThinkingEffort` seeds. P4 moved the live selection
    * onto the session (`session.model` / `session.effort`, written by `setModel` /
    * `setThinkingEffort` and saved with `persist()`), so this call must never
@@ -407,7 +407,7 @@ export class SessionRuntime {
   /**
    * The model/thinking-effort of this session. Seeded at construction from the
    * session's own pick when it still shadows the setting it was made under, else
-   * from the provider's defaults (`agentHarness.runtimeConfig`, then the
+   * from the provider's defaults (`spinney.runtimeConfig`, then the
    * settings); a change made here is written back onto `this.session` and saved
    * with it (P4). Every node worker is seeded/pushed from these two fields, so a
    * session's branches all run the same selection.
@@ -614,7 +614,7 @@ export class SessionRuntime {
   }
 
   /**
-   * Adopt a changed `agentHarness.model` setting. Only a session with no
+   * Adopt a changed `spinney.model` setting. Only a session with no
    * effective pick follows it — an explicit per-tab pick keeps winning, exactly
    * like the old "dropdown pick shadows the setting" rule — with the same caveat
    * as the global record: editing the setting is an explicit choice too, so a
@@ -640,7 +640,7 @@ export class SessionRuntime {
       // not changed: the per-session selection wins over the settings value.
       return;
     }
-    // A pick anchored to an older `agentHarness.model` value loses to the edited
+    // A pick anchored to an older `spinney.model` value loses to the edited
     // setting, so it is dropped here rather than being resurrected on the next
     // reload (where `sessionModelPick` would ignore it anyway).
     const hadPick = this.session.model !== undefined;
@@ -697,7 +697,7 @@ export class SessionRuntime {
     this.changeEffort(effort, true);
   }
 
-  /** Adopt a changed `agentHarness.thinkingEffort` setting; see `applyDefaultModel`. */
+  /** Adopt a changed `spinney.thinkingEffort` setting; see `applyDefaultModel`. */
   applyDefaultEffort(effort: ThinkingEffort): void {
     this.changeEffort(effort, false);
   }
@@ -741,7 +741,7 @@ export class SessionRuntime {
     this.host.output.appendLine(`[config] thinkingEffort=${effort}${explicit ? ' (session pick)' : ' (settings)'}`);
   }
 
-  /** Push a settings change onto every node worker (`agentHarness.maxTurns`). */
+  /** Push a settings change onto every node worker (`spinney.maxTurns`). */
   setMaxTurns(maxTurns: number): void {
     for (const worker of this.nodeWorkers.values()) {
       worker.agent.setMaxTurns(maxTurns);
@@ -1006,7 +1006,7 @@ export class SessionRuntime {
       type: 'config',
       model: this.model,
       // The dropdown offers the vendored model plus whatever the user added in
-      // `agentHarness.modelTable`, and the image affordances follow the same
+      // `spinney.modelTable`, and the image affordances follow the same
       // list — no second copy of the catalog in the webview.
       models: modelIds(),
       visionModels: visionModelIds(),
@@ -1320,7 +1320,7 @@ export class SessionRuntime {
     }
     const userText = text.trim();
 
-    // Only models declared image-capable (catalog + `agentHarness.modelTable`) may
+    // Only models declared image-capable (catalog + `spinney.modelTable`) may
     // carry image blocks. A model that is not would not 400 — DeepSeek silently
     // swaps the image for an "[Unsupported Image]" text part and the model then
     // invents what it cannot see — so drop the attachments, send the text alone,

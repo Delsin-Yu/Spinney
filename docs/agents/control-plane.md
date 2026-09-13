@@ -4,7 +4,7 @@ The extension cannot reload its own window and report back — it dies with the
 reload. So the reload lifecycle lives **outside** the extension:
 
 - `src/http/controlServer.ts` — an opt-in local HTTP control plane
-  (`agentHarness.httpApi.enabled`, default **off**; loopback only; bearer token
+  (`spinney.httpApi.enabled`, default **off**; loopback only; bearer token
   written to `<globalStorage>/http/<instanceId>.json`, mode 0600). Its discovery
   file's `workspace` field is the workspace folder path, or `null` when no folder
   is open.
@@ -117,12 +117,12 @@ Operational rules:
 - Profile **passthrough** is the default (`code -n`, no `--user-data-dir`), so the
   new window shares the user's `workspaceState`. Its env vars do **not** reach
   that window, so the control plane must be enabled in settings
-  (`agentHarness.httpApi.enabled`, workspace or user scope). `--isolated` keeps a
+  (`spinney.httpApi.enabled`, workspace or user scope). `--isolated` keeps a
   separate profile and allows a hard kill/relaunch.
 - Never pass `--wait` to `hvsc reboot` from inside a turn: the supervisor's
   `/wait-for-finish` would wait for that very turn (deadlock). Fire it without
   `--wait` and let the supervisor `/continue` the agent afterwards.
 - `/continue` makes the agent run a caller-supplied instruction — a
-  **local-trust RCE boundary**. Keep `agentHarness.httpApi.enabled` off unless a
+  **local-trust RCE boundary**. Keep `spinney.httpApi.enabled` off unless a
   controller needs it, and never log the token.
 

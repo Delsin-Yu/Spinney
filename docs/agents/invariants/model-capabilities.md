@@ -2,7 +2,7 @@
 
 **Rule:** the harness knows exactly one model's capabilities (the vendored
 `deepseek-flash`) and takes every other model — including a per-model override of
-the vendored one — from the user's `agentHarness.modelTable` setting. There is no
+the vendored one — from the user's `spinney.modelTable` setting. There is no
 capability probe, no self-learning from an error, and no second copy of the
 catalog outside `src/agent/models.ts`. If a model's context window or image
 support is wrong, the fix is one line in the setting, not a network round-trip.
@@ -38,7 +38,7 @@ published date. A name cannot imply a capability, so the user declares it, as
 **structured data** in `settings.json`:
 
 ```json model-table
-"agentHarness.modelTable": {
+"spinney.modelTable": {
   "deepseek-flash":  { "vision": true,  "max_tokens": 1048576 },
   "deepseek-v4-pro": { "vision": false, "max_tokens": 1048576 }
 }
@@ -76,7 +76,7 @@ allowed, because the settings editor renders descriptions with
 `openerService.open(href, { allowCommands: true })` and resolves `#setting.id` as
 a jump to another setting:
 
-    [settings.json](command:workbench.action.openSettingsJson?%7B%22revealSetting%22%3A%7B%22key%22%3A%22agentHarness.modelTable%22%2C%22edit%22%3Atrue%7D%7D)
+    [settings.json](command:workbench.action.openSettingsJson?%7B%22revealSetting%22%3A%7B%22key%22%3A%22spinney.modelTable%22%2C%22edit%22%3Atrue%7D%7D)
 
 That is the same call VS Code's own button makes (`openSettingsJson` with
 `revealSetting: { key, edit }`), so it opens the file *on that key*, creating it if

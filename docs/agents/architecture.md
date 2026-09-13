@@ -16,8 +16,8 @@ User (editor WebviewPanel) <--postMessage--> ChatViewProvider (src/chat)
 +                                           +  exec_command -> shell detection (src/tools/shell.ts)
 ```
 
-1. `extension.ts::activate` creates the sidebar `TreeView` (`agentHarness.sessions`)
-   and the commands (`agentHarness.openChat`, `openSession`, `newSession`,
+1. `extension.ts::activate` creates the sidebar `TreeView` (`spinney.sessions`)
+   and the commands (`spinney.openChat`, `openSession`, `newSession`,
    `deleteSession`, `clear`, `focus`).
 2. The webview (`media/main.js`) sends messages (`userMessage`, `checkout`,
    `setModel`, `setThinkingEffort`, `stop`, `clear`, `pickImage`, `setNodeSize`).
@@ -28,7 +28,7 @@ User (editor WebviewPanel) <--postMessage--> ChatViewProvider (src/chat)
    conversation. Each session persists its own `messages` (API history) and
    `displayItems` (UI transcript) and is restored from `vscode.Memento`.
 4. Window recovery: `extension.ts` registers a `WebviewPanelSerializer` for the
-   `agentHarness.chatTree` viewType. VS Code serializes the chat tab at shutdown
+   `spinney.chatTree` viewType. VS Code serializes the chat tab at shutdown
    and hands it back on the next activation → `ChatViewProvider.restorePanel`
    adopts it (`ChatPanel.revive` re-sets the HTML and re-hooks the events), binds
    it to the session the webview remembered via `vscode.setState({ sessionId })`

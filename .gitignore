@@ -31,4 +31,4 @@ Thumbs.db
 tools/hyper-vscode/.state/
 
 # Agent scratch space (screenshots, spilled tool output)
-.agent-harness/
+.spinney/

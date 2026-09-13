@@ -26,7 +26,7 @@
   (`margin-bottom: 20px`), inside the card/block. The tree viewport itself is a
   pannable canvas (pan/zoom/fit), not a scroll container.
 - `[perf]` lines (request JSON size, assistant-round, tool timings, persist, stream
-  flush) go to the **Agent Harness** output channel. Open View → Output → "Agent Harness".
+  flush) go to the **Spinney** output channel. Open View → Output → "Spinney".
 
 ### Diagnosing a stutter (the `[perf] op#` traces)
 A stutter — above all when **switching sessions** — is one user-visible operation
@@ -114,7 +114,7 @@ op#9 +3407ms webview-paint since=219 cards=8 dom=10035 → end 3407ms painted
 
 Five separate costs, fixed one by one (each fix verified against these same lines):
 1. **A pointer move wrote the whole state.** `setActiveSession` now writes
-   `agentHarness.activeSession` alone — and that key lives in the **other** Memento
+   `spinney.activeSession` alone — and that key lives in the **other** Memento
    scope, because VS Code keeps an extension's whole `workspaceState` as one row:
    a "40-byte" update inside it still rewrote all 118.9 M chars (`lag blocked 549ms`
    right after the pointer write). See `invariants/session-persistence.md`.

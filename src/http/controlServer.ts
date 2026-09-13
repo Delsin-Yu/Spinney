@@ -19,12 +19,12 @@
  *
  * Bound to 127.0.0.1 and gated by a bearer token generated per process; the
  * port/token are written to `<globalStorage>/http/<instanceId>.json` (0600) so
- * the supervisor can discover them. `AGENT_HARNESS_INSTANCE_ID`,
- * `AGENT_HARNESS_HTTP_PORT` and `AGENT_HARNESS_HTTP_TOKEN` override the
+ * the supervisor can discover them. `SPINNEY_INSTANCE_ID`,
+ * `SPINNEY_HTTP_PORT` and `SPINNEY_HTTP_TOKEN` override the
  * discovery identity (the supervisor sets the instance id when it spawns `code`).
  *
  * `/continue` makes the agent run a caller-supplied instruction, i.e. it is a
- * local-trust RCE boundary: keep `agentHarness.httpApi.enabled` off unless a
+ * local-trust RCE boundary: keep `spinney.httpApi.enabled` off unless a
  * controller needs it, and never log the token.
  */
 import * as crypto from 'crypto';
@@ -145,20 +145,20 @@ export class ControlServer implements vscode.Disposable {
     private readonly globalStorage: vscode.Uri | undefined,
     private readonly log: (line: string) => void,
   ) {
-    this.instanceId = (process.env.AGENT_HARNESS_INSTANCE_ID ?? '').trim() || `pid-${process.pid}`;
-    this.token = (process.env.AGENT_HARNESS_HTTP_TOKEN ?? '').trim() || crypto.randomBytes(24).toString('hex');
+    this.instanceId = (process.env.SPINNEY_INSTANCE_ID ?? '').trim() || `pid-${process.pid}`;
+    this.token = (process.env.SPINNEY_HTTP_TOKEN ?? '').trim() || crypto.randomBytes(24).toString('hex');
   }
 
   /** Start listening when enabled; a no-op otherwise. Never throws. */
   async start(): Promise<void> {
-    const cfg = vscode.workspace.getConfiguration('agentHarness');
+    const cfg = vscode.workspace.getConfiguration('spinney');
     // Off by default; a supervisor may opt in per instance with the env var.
-    const enabled = (cfg.get<boolean>('httpApi.enabled') ?? false) || process.env.AGENT_HARNESS_HTTP === '1';
+    const enabled = (cfg.get<boolean>('httpApi.enabled') ?? false) || process.env.SPINNEY_HTTP === '1';
     if (!enabled) {
       return;
     }
     const configured = cfg.get<number>('httpApi.port') ?? 0;
-    const envPort = Number(process.env.AGENT_HARNESS_HTTP_PORT ?? '');
+    const envPort = Number(process.env.SPINNEY_HTTP_PORT ?? '');
     const port = Number.isFinite(envPort) && envPort > 0 ? envPort : configured;
     try {
       const server = http.createServer((req, res) => {
@@ -187,7 +187,7 @@ export class ControlServer implements vscode.Disposable {
 
   /**
    * Re-read the configuration and rebind the listener. Called when
-   * `agentHarness.httpApi.*` changes, so enabling/disabling the control plane
+   * `spinney.httpApi.*` changes, so enabling/disabling the control plane
    * (or moving its port) does not need a window reload. `start()` is a no-op
    * when the plane is disabled, which is how a disable takes effect.
    */
@@ -224,7 +224,7 @@ export class ControlServer implements vscode.Disposable {
         token: this.token,
         workspace: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null,
         startedAt: this.startedAt,
-        version: vscode.extensions.getExtension('minimal-host.minimal-agent-harness')?.packageJSON?.version ?? '',
+        version: vscode.extensions.getExtension('deyu.spinney')?.packageJSON?.version ?? '',
       };
       fs.writeFileSync(file, JSON.stringify(payload, null, 2), { encoding: 'utf8', mode: 0o600 });
       this.discoveryFile = file;

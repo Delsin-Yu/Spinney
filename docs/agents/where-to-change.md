@@ -50,11 +50,11 @@
   (`deleteBranchInteractive` → modal confirm → `deleteBranch`), the per-node
   transcript removal in `src/chat/transcript.ts` (`removeTranscripts` /
   `removeTranscriptFile`), and the card's `.node-del` button in `media/main.js`.
-  The palette command is `agentHarness.deleteBranch`.
+  The palette command is `spinney.deleteBranch`.
 - **Change session titles** → `src/chat/sessionTitles.ts` (gates, digest, prompts,
   fallback) and the "Session titles" block in `ChatViewProvider.ts`
   (`applySessionTitle` / `renameSession` / the auto-title drain + backfill). The
-  sidebar commands are `agentHarness.renameSession` / `agentHarness.autoRenameSession`;
+  sidebar commands are `spinney.renameSession` / `spinney.autoRenameSession`;
   the agent-facing tool is `rename_session`.
 - **Change the API client** → `src/agent/deepseek.ts`.
 

@@ -11,7 +11,7 @@ repo — it lives with the user's Cursor skills:
   `reference.md` (complete CLI surface + response shapes). Read them before a
   non-trivial session.
 - **Artifacts go to the workspace scratch space** (never `C:\Temp`): pass
-  `--path .agent-harness/screenshots` so every capture lands in the same
+  `--path .spinney/screenshots` so every capture lands in the same
   gitignored folder as the rest of the agent's scratch (see "Agent scratch space"
   below).
 
@@ -33,7 +33,7 @@ exists; the desktop is the last resort, not the first.
    `uia set-value --hwnd <hwnd> --ref eN --value "…"`, `uia invoke`, `uia toggle`,
    `uia select`; fall back to `mouse click --hwnd <hwnd> --ref eN --focus`.
 4. Verify with a fresh `window snapshot` — refs change after the UI updates.
-5. Screenshots: `screenshot --path .agent-harness/screenshots --hwnd <hwnd> --focus`
+5. Screenshots: `screenshot --path .spinney/screenshots --hwnd <hwnd> --focus`
    (or `--ref eN --pad 12` for a POI crop), then `read_image <png>` to actually
    look at it. Prefer a crop over a full-screen shot.
 
@@ -64,7 +64,7 @@ computer-use uia invoke --hwnd 0x00040C1A --ref e15
 computer-use mouse click --hwnd 0x00040C1A --ref e12 --focus
 computer-use mouse click --hwnd 0x00040C1A --coord window --x 40 --y 45 --focus
 computer-use key tap --hwnd 0x00040C1A --key a
-computer-use screenshot --path .agent-harness/screenshots --hwnd 0x00040C1A --focus
+computer-use screenshot --path .spinney/screenshots --hwnd 0x00040C1A --focus
 computer-use uia from-point --x 640 --y 360
 ```
 

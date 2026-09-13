@@ -7,5 +7,5 @@
 - **Runtime deps:** **none.** `node_modules` is only devDependencies
   (`typescript`, `@types/node`, `@types/vscode`, `@vscode/vsce`).
 - **Packaging:** `@vscode/vsce` produces a `.vsix`. There is a checked-in
-  `minimal-agent-harness-0.0.1.vsix` (gitignored via `*.vsix`).
+  `spinney-0.0.1.vsix` (gitignored via `*.vsix`).
 

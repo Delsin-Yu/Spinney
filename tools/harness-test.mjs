@@ -58,7 +58,7 @@ import * as path from 'node:path';
 // Constants
 // ---------------------------------------------------------------------------
 
-const EXT_ID = 'minimal-host.minimal-agent-harness';
+const EXT_ID = 'deyu.spinney';
 const SUITES = ['health', 'sessions', 'concurrency', 'navigation', 'background', 'signals', 'branch', 'selftest'];
 const DEFAULT_TIMEOUT_SEC = 180;
 const DEFAULT_INTERVAL_MS = 250;
@@ -86,7 +86,7 @@ const FIELD_PHASE = {
   'sessions[].cardDelivered': 'P2 (D1: `Delivered` is a tree/webview flag, not a control-plane field)',
 };
 
-const USAGE = `harness-test — drives the live Agent Harness window over its local control plane
+const USAGE = `harness-test — drives the live Spinney window over its local control plane
 (docs/agents/multi-session.md). Dev tooling; never shipped.
 
 Usage:
@@ -420,7 +420,7 @@ function selectTarget(candidates, { instance = null, explicitFile = null } = {})
   }
   if (pool.length === 0) {
     const stale = candidates.length ? ` (${candidates.length} stale/unreadable discovery file(s))` : '';
-    return { error: `no live harness window found${stale} — is agentHarness.httpApi.enabled on?`, candidates };
+    return { error: `no live harness window found${stale} — is spinney.httpApi.enabled on?`, candidates };
   }
   const best = pool[0];
   return {
@@ -494,13 +494,13 @@ function transcriptRootFor({ override = null, setting = '', globalStorage = null
     if (path.isAbsolute(configured)) {
       return configured;
     }
-    const base = workspace || (globalStorage ? path.join(globalStorage, 'no-workspace') : path.join(tmpDir, 'agent-harness-storage'));
+    const base = workspace || (globalStorage ? path.join(globalStorage, 'no-workspace') : path.join(tmpDir, 'spinney-storage'));
     return path.resolve(base, configured);
   }
   if (globalStorage) {
     return path.join(globalStorage, 'transcripts');
   }
-  return path.join(tmpDir, 'agent-harness-transcripts');
+  return path.join(tmpDir, 'spinney-transcripts');
 }
 
 /** Lenient JSONC read (VS Code settings allow comments). */
@@ -528,7 +528,7 @@ function readJsonc(file) {
 }
 
 /**
- * Resolve one `agentHarness.*` setting the way the host does: the workspace's
+ * Resolve one `spinney.*` setting the way the host does: the workspace's
  * `.vscode/settings.json` wins over the user's `settings.json` (machine /
  * workspace-folder layers are not modelled — the harness reads the same keys
  * from the same two files in practice).
@@ -939,7 +939,7 @@ async function waitForFile(file, timeoutMs, intervalMs = 500) {
 /** `null` when no dump should be expected (setting off) or is not there yet. */
 async function readTranscript(cx, sessionId, nodeId, { waitMs = TRANSCRIPT_WAIT_MS } = {}) {
   if (!cx.saveSessionTranscripts) {
-    return { skip: 'agentHarness.saveSessionTranscripts is off — this host writes no per-turn dumps' };
+    return { skip: 'spinney.saveSessionTranscripts is off — this host writes no per-turn dumps' };
   }
   const file = path.join(cx.transcriptDir(sessionId), `${nodeId}.jsonl`);
   const found = fs.existsSync(file) ? file : await waitForFile(file, waitMs);
@@ -1616,8 +1616,8 @@ async function suiteBackground(cx) {
 // ---------------------------------------------------------------------------
 
 /**
- * Acceptance for the completion-signal work (`tools/research/signal-notification-plan.md`
- * §3.2/§3.3, §4 P0+P1, §6): a finished background terminal is delivered into the
+ * Acceptance for the completion-signal work (§3.2/§3.3, §4 P0+P1, §6 of the plan
+ * that landed it): a finished background terminal is delivered into the
  * node that started it — never into a new node, never as a user bubble.
  *
  *   1. `/session/start` runs a turn that starts a short background job and then
@@ -1646,7 +1646,7 @@ async function suiteSignals(cx) {
     return suiteResult(
       name,
       'SKIP',
-      'agentHarness.saveSessionTranscripts is off — where a completion signal lands is only observable in the per-node transcript dump',
+      'spinney.saveSessionTranscripts is off — where a completion signal lands is only observable in the per-node transcript dump',
       checks,
     );
   }
@@ -2267,7 +2267,7 @@ function suiteSelftest(cx) {
     'transcriptRootFor keeps an absolute setting',
     transcriptRootFor({ setting: 'D:/tx', globalStorage: 'C:/gs' }) === 'D:/tx',
   );
-  checks.check('transcriptRootFor falls back to tmpdir', transcriptRootFor({ tmpDir: 'C:/tmp' }) === path.join('C:/tmp', 'agent-harness-transcripts'));
+  checks.check('transcriptRootFor falls back to tmpdir', transcriptRootFor({ tmpDir: 'C:/tmp' }) === path.join('C:/tmp', 'spinney-transcripts'));
 
   // -- transcript parsing
   const jsonl =
@@ -2662,11 +2662,11 @@ async function main(argv) {
       return;
     }
     const env = process.env;
-    const setting = readSetting('agentHarness.subAgentTranscriptDir', {
+    const setting = readSetting('spinney.subAgentTranscriptDir', {
       workspace: picked.target.workspace,
       env,
     });
-    cx.saveSessionTranscripts = readSetting('agentHarness.saveSessionTranscripts', {
+    cx.saveSessionTranscripts = readSetting('spinney.saveSessionTranscripts', {
       workspace: picked.target.workspace,
       env,
     }) !== false;

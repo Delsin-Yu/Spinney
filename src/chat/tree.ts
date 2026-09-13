@@ -125,8 +125,8 @@ export interface AgentSession {
   /**
    * The session's own model / thinking-effort pick (P4): each tab owns its
    * selection, so it lives here, persisted with the session. Absent ⇒ the session
-   * follows the global defaults — the persisted `agentHarness.runtimeConfig`
-   * record, then the `agentHarness.model` / `agentHarness.thinkingEffort`
+   * follows the global defaults — the persisted `spinney.runtimeConfig`
+   * record, then the `spinney.model` / `spinney.thinkingEffort`
    * settings. A pick is additionally anchored to the setting value it was made
    * under (`*FromSettings`), so editing that setting retires the pick: the
    * setting wins once it changes, exactly like the global record's rule (see
@@ -135,9 +135,9 @@ export interface AgentSession {
    */
   model?: string;
   effort?: ThinkingEffort;
-  /** `agentHarness.model` in force when `model` was picked (retirement anchor). */
+  /** `spinney.model` in force when `model` was picked (retirement anchor). */
   modelFromSettings?: string;
-  /** `agentHarness.thinkingEffort` in force when `effort` was picked. */
+  /** `spinney.thinkingEffort` in force when `effort` was picked. */
   effortFromSettings?: string;
 }
 
@@ -200,7 +200,7 @@ function asThinkingEffort(value: unknown): ThinkingEffort | undefined {
 /**
  * The session's own model pick, or `undefined` when it must follow the defaults
  * (P4). A pick only counts while it still shadows the setting it was made under:
- * editing `agentHarness.model` is an explicit choice too, so it retires a pick
+ * editing `spinney.model` is an explicit choice too, so it retires a pick
  * made before the edit — the same rule `loadRuntimeConfig` applies to the global
  * record, here applied per session.
  */

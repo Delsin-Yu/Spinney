@@ -5,7 +5,7 @@ import { CommandHandle, OUTPUT_CAP, spawnShellCommand } from './background';
 import { getAgentRoot, limitInline, resolvePath } from './index';
 import { getShell } from './shell';
 
-/** Fallback when `agentHarness.commandTimeout` is absent or not a positive number. */
+/** Fallback when `spinney.commandTimeout` is absent or not a positive number. */
 const DEFAULT_COMMAND_TIMEOUT_SEC = 600;
 
 /**
@@ -14,7 +14,7 @@ const DEFAULT_COMMAND_TIMEOUT_SEC = 600;
  * call that passes an explicit `timeout` always wins over this.
  */
 function defaultCommandTimeoutSec(): number {
-  const configured = vscode.workspace.getConfiguration('agentHarness').get<number>('commandTimeout');
+  const configured = vscode.workspace.getConfiguration('spinney').get<number>('commandTimeout');
   return typeof configured === 'number' && Number.isFinite(configured) && configured > 0
     ? configured
     : DEFAULT_COMMAND_TIMEOUT_SEC;
@@ -117,7 +117,7 @@ export function makeExecCommandTool(getAccess: () => BackgroundAccess | null): A
       function: {
         name: 'exec_command',
         description:
-          'Run a shell command in the harness root (the workspace folder, or the harness scratch folder when no folder is open) and return its combined stdout/stderr. Use for builds, tests, git, npm, etc. Optionally set cwd relative to the harness root. Set timeout (seconds; defaults to the agentHarness.commandTimeout setting, which is 600 = 10 minutes unless changed). timeout_behavior controls what happens when a command runs past timeout: "stop" (default) kills it, "move_to_background" promotes the still-running command to a background terminal (returns its id), and "start_in_background" launches it in the background immediately (returns its id and does not wait). Commands run through the detected shell (currently ' +
+          'Run a shell command in the harness root (the workspace folder, or the harness scratch folder when no folder is open) and return its combined stdout/stderr. Use for builds, tests, git, npm, etc. Optionally set cwd relative to the harness root. Set timeout (seconds; defaults to the spinney.commandTimeout setting, which is 600 = 10 minutes unless changed). timeout_behavior controls what happens when a command runs past timeout: "stop" (default) kills it, "move_to_background" promotes the still-running command to a background terminal (returns its id), and "start_in_background" launches it in the background immediately (returns its id and does not wait). Commands run through the detected shell (currently ' +
           getShell().label +
           ') and in that shell syntax (bash-style for Git Bash, PowerShell syntax otherwise).',
         parameters: {
@@ -127,7 +127,7 @@ export function makeExecCommandTool(getAccess: () => BackgroundAccess | null): A
             cwd: { type: 'string', description: 'Working directory, relative to the harness root.' },
             timeout: {
               type: 'number',
-              description: 'Timeout in seconds (defaults to agentHarness.commandTimeout, 600 = 10 minutes unless changed).',
+              description: 'Timeout in seconds (defaults to spinney.commandTimeout, 600 = 10 minutes unless changed).',
             },
             timeout_behavior: {
               type: 'string',

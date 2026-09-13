@@ -4,7 +4,7 @@
  * free up. Depth-2 sub-agents are NOT pool-limited (they run directly and are
  * capped by the per-parent `maxLevel2Subagents` budget instead).
  *
- * The limit is **mutable**: `agentHarness.maxConcurrentSubagents` can change
+ * The limit is **mutable**: `spinney.maxConcurrentSubagents` can change
  * while the window is open, and the settings listener calls `setMaxConcurrent`.
  * Raising it wakes queued tasks right away; lowering it lets the tasks already
  * running finish (nothing is killed) and only starts new ones as the pool

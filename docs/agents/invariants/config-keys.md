@@ -1,4 +1,4 @@
-## Config keys (`agentHarness.*`)
+## Config keys (`spinney.*`)
 `apiKey` (or `DEEPSEEK_API_KEY` env), `model`, `modelTable`, `baseUrl`, `commandTimeout`
 (seconds, default 600 = 10 minutes — the default for `exec_command` when the tool
 call does not pass its own `timeout`; a non-positive/absent value falls back to
@@ -11,26 +11,26 @@ beats it), `thinkingEffort`
 `maxLevel2Subagents` (default 2), `saveSubAgentTranscripts` (default `true`),
 `saveSessionTranscripts` (default `true` — dump each main-agent turn; the
 one-time historical backfill is keyed by the Memento marker
-`agentHarness.transcriptBackfill`),
+`spinney.transcriptBackfill`),
 `autoSessionTitles` (default `true` — name a session from its conversation after
 the first turn and refresh it when the conversation grows; a manual rename locks
 the title; the one-time historical backfill is keyed by the Memento marker
-`agentHarness.sessionTitleBackfill`),
+`spinney.sessionTitleBackfill`),
 `subAgentTranscriptDir` (default `""` = global storage; else relative to the
 **agent root** — the workspace folder, or the no-repo scratch folder
 `<globalStorage>/no-workspace`; now the root for **both** transcript kinds),
 `maxInlineToolOutput` (bytes, default `32768`; `0` = always inline — above it a
-tool result spills to `<agentRoot>/.agent-harness/tool-output/`). `SubAgentPool` clamps `maxConcurrentSubagents`
+tool result spills to `<agentRoot>/.spinney/tool-output/`). `SubAgentPool` clamps `maxConcurrentSubagents`
 to **≥ 1** (a non-positive limit would otherwise deadlock every sub-agent).
 `httpApi.enabled` (default `false` — the local control plane) and `httpApi.port`
 (default `0` = ephemeral).
 - Models: exactly one is vendored — `deepseek-flash` (DeepSeek-V4.1-Flash,
   `contextWindow: 1_048_576`, `vision: true`). Everything else is the user's
-  `agentHarness.modelTable`, structured data (the setting's own UI is a read-only
+  `spinney.modelTable`, structured data (the setting's own UI is a read-only
   preview plus a link into the JSON; the chat's **Models** panel is the editor):
 
   ```json model-table
-  "agentHarness.modelTable": {
+  "spinney.modelTable": {
     "deepseek-v4-pro": { "vision": false, "max_tokens": 1048576 },
     "another-model":   { "vision": true,  "max_tokens": 200000 }
   }
@@ -44,7 +44,7 @@ to **≥ 1** (a non-positive limit would otherwise deadlock every sub-agent).
   `invariants/model-capabilities.md` for why the data is structured, why the
   editor is the JSON itself, and why nothing is probed.
 - Context windows default to `DEFAULT_CONTEXT_WINDOW` (= the vendored model's
-  `1_048_576`); precedence is `modelTable` row → `agentHarness.contextWindow` →
+  `1_048_576`); precedence is `modelTable` row → `spinney.contextWindow` →
   catalog → default (`ChatViewProvider.getContextWindow`).
 - A model the catalog does not know is **not** used: `resolveModel` falls back to
   `DEFAULT_MODEL` and says so in the output channel (a stale id must not silently
@@ -53,7 +53,7 @@ to **≥ 1** (a non-positive limit would otherwise deadlock every sub-agent).
 
 ### When a change takes effect (no reload required)
 `extension.ts` listens to `onDidChangeConfiguration` and routes an
-`agentHarness.*` change to `ChatViewProvider.onConfigurationChanged(event)`. The
+`spinney.*` change to `ChatViewProvider.onConfigurationChanged(event)`. The
 split is **push vs. pull**: a key that is read once and cached somewhere live has
 to be *pushed* to that owner; a key read at its point of use is *pulled* and needs
 no handling.
@@ -76,7 +76,7 @@ no handling.
   session and survives a reload with it. It shadows the setting only while that setting is
   unchanged: `sessionModelPick` / `sessionEffortPick` ignore a pick whose anchor no longer
   matches, so editing the setting wins over an older pick and a pick made after the edit
-  keeps winning. The *global* `agentHarness.runtimeConfig` Memento is now only the
+  keeps winning. The *global* `spinney.runtimeConfig` Memento is now only the
   **default for sessions with no pick** (`effectiveModel` / `effectiveEffort` →
   `loadRuntimeConfig` → the setting) and the seed for sessions created later
   (`persistRuntimeConfig`). A stored record without the anchor fields predates the rule and

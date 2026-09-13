@@ -26,7 +26,7 @@ retries a **transient** failure up to `MAX_ATTEMPTS = 10` total attempts
 - **Never silent.** Every retry is reported through `CompletionRequest.onRetry`
   (the Agent turns it into a `status` event, `retryStatus` in `agent.ts`:
   "Model call failed (2/10); retrying in 2s…") and logged via `perf()` to the
-  Agent Harness output channel with the clipped reason. When attempts run out,
+  Spinney output channel with the clipped reason. When attempts run out,
   `withAttempts` appends `(after 10 attempts)` to the `DeepSeekError` message, so
   the error bubble in the chat says why it gave up.
 - `uploadFile` and `getBalance` are **not** retried: an image upload failure is
