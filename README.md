@@ -8,8 +8,7 @@ Install Spinney from the [Visual Studio Marketplace](https://marketplace.visuals
 
 ## What you get
 
-- Every turn is a node in a tree. Click a turn to check it out, then send a message to start a new branch there.
-- The old chain stays in the tree, dimmed.
+- Every turn is a node in a tree. Click a turn to check it out, then send a message to start a new branch there. The old chain stays in the tree, dimmed.
 - The agent reads and writes files, and it runs shell commands.
 - Sub-agents run in parallel and report to the caller.
 - A long command runs in a background terminal while the agent keeps working.
