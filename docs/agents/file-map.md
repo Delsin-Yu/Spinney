@@ -9,7 +9,11 @@
 - `src/chat/ChatPanel.ts` — a thin wrapper around a `WebviewPanel` (one chat tab).
   It carries its `sessionId`; `PanelManager` keeps one per session. `ChatPanel.create`
   makes a new panel, `ChatPanel.revive` adopts one VS Code restored from serialization
-  (window reload) — both share the same HTML/event wiring.
+  (window reload) — both share the same HTML/event wiring. It also gates on the
+  webview's first `ready`: messages posted before it are held, and `markReady()` →
+  one `postAllState` → `flushHeld()` (which drops the repaint messages the hold
+  accumulated) is what keeps a cold tab from rendering a stale tree and tearing it
+  down again — see `invariants/streaming-perf.md`.
 - `src/chat/panels.ts` — `PanelManager`: the `sessionId → ChatPanel` map. `ensure`
   returns/focuses a session's tab (creating it on first open), `adopt` takes over a
   serializer-restored panel (disposing a duplicate — a session has exactly one tab),
@@ -112,14 +116,20 @@
   (Git Bash > pwsh > Windows PowerShell 5.1 > cmd.exe) with UTF-8 safeguards.
   The WSL launcher (`System32\bash.exe` / `WindowsApps`) is **not** accepted as
   Git Bash (different filesystem, no `zh_CN.UTF-8`, Windows cwd).
-- `src/perf.ts` — tiny `[perf]` logger (sink = the Agent Harness output channel).
-  `perf()` takes a string **or a thunk**; a thunk is only evaluated when a sink is
-  installed, so an expensive line (JSON sizes, byte counts) costs nothing when off.
-  `harnessLog()` writes a line to the same channel without the `[perf]` prefix
-  (used by the prompt-template guard).
+- `src/perf.ts` — the `[perf]` diagnostics: `perf()` (sink = the Agent Harness
+  output channel; takes a string **or a thunk**, a thunk is only evaluated when a
+  sink is installed), `harnessLog()` (same channel without the prefix, used by the
+  prompt-template guard), `timedSync()`, the **correlated op traces**
+  (`beginOp`/`opMark`/`opTag`/`opPayload`, whose id travels to the webview and back
+  — see `invariants/streaming-perf.md`), `logWebviewReport` (the webview's
+  `perfDiag` half) and `startLagWatch()` (a late timer = a blocked extension host).
 - `media/main.js` — webview client (tree rendering, pan/zoom, streaming into the
   active node, composer, streaming meter, live tool drafts, drag-to-resize cards,
   background job cards + `.bgnotify` notification blocks).
+  It also carries the webview half of the `[perf]` traces (its perf block, near the
+  top): it measures the repaint burst the host tagged with a `traceId`, the markdown
+  and layout inside it, its own frame gaps and any slow message handler, and posts
+  them back as `perfDiag` — see `invariants/streaming-perf.md`.
   Canvas gestures live in one block near the end: LMB/MMB drag pans by offset,
   RMB-hold autoscroll-pans towards the cursor (browser middle-click semantics,
   with an origin marker and the `all-scroll` cursor), ctrl+wheel zooms.

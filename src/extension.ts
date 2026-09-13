@@ -27,7 +27,16 @@ export function activate(context: vscode.ExtensionContext): void {
   // Wire relative-path resolution to the extension's global storage before any
   // tool can run, so no-repo sessions (no workspace folder) still resolve.
   setHarnessStorageDir(context.globalStorageUri?.fsPath ?? null);
-  chatProvider = new ChatViewProvider(context.extensionUri, storage, context.globalStorageUri);
+  // `context.globalState` owns the handful of small keys (the active-session pointer,
+  // the model/effort default, the backfill markers): VS Code keeps an extension's
+  // whole workspaceState as ONE row, so writing a small key in there rewrites the
+  // entire content blob (~119 M chars) — see `ChatViewProvider`'s constructor.
+  chatProvider = new ChatViewProvider(
+    context.extensionUri,
+    storage,
+    context.globalStorageUri,
+    context.globalState,
+  );
 
   // Window recovery: VS Code re-creates the webview panels it serialized at
   // shutdown and hands each one back through this serializer. Registering it
@@ -150,8 +159,8 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 }
 
-export function deactivate(): void {
-  // Kill any background terminals still running so they are not orphaned when
-  // the extension host goes away.
-  chatProvider?.dispose();
+export function deactivate(): Thenable<void> | void {
+  // Flush a coalesced write before the host goes away — a window close is exactly
+  // when the newest state may still be pending (see `ChatViewProvider.shutdown`).
+  return chatProvider?.shutdown();
 }

@@ -22,6 +22,7 @@
  */
 import * as vscode from 'vscode';
 import { ChatPanel } from './ChatPanel';
+import { opMark, startRepaintOp, timedSync } from '../perf';
 
 export interface PanelManagerOptions {
   /** Local resource root for the webview. */
@@ -50,22 +51,51 @@ export class PanelManager {
     const existing = this.panels.get(sessionId);
     if (existing) {
       this.focusedId = sessionId;
-      existing.focus();
+      opMark('panel-ensure', 'existing tab');
+      timedSync('panel-focus', () => existing.focus());
       return existing;
     }
     let created!: ChatPanel;
-    created = ChatPanel.create({
-      sessionId,
-      title: this.opts.titleFor(sessionId),
-      extensionUri: this.opts.extensionUri,
-      getHtml: (webview) => this.opts.getHtml(webview),
-      onMessage: (message) => this.opts.onMessage(created, message),
-      onDispose: () => this.onPanelDisposed(created),
-    });
+    // A fresh tab is a webview window coming up: own the trace *here*, so the steps
+    // below (`panel-html`, `panel-create`, `panel-focus`) land in this tab's own
+    // operation instead of in whichever other tab happens to be repainting (a
+    // window reload restores several at once). A caller that already opened an op
+    // for this session (`switch-session`, `new-session`) keeps it — this joins.
+    startRepaintOp('panel-open', sessionId);
+    // Creating the panel is a webview window: the single most expensive step of a
+    // cold session switch, and the one whose repaint the webview reports back.
+    created = timedSync(
+      'panel-create',
+      () =>
+        ChatPanel.create({
+          sessionId,
+          title: this.opts.titleFor(sessionId),
+          extensionUri: this.opts.extensionUri,
+          getHtml: (webview) => this.opts.getHtml(webview),
+          onMessage: (message) => this.opts.onMessage(created, message),
+          onDispose: () => this.onPanelDisposed(created),
+        }),
+      `session=${sessionId}`,
+    );
     this.wire(created);
+    // `createWebviewPanel` can hand back a panel VS Code restored from a previous
+    // window *re-entrantly* — during the call above, not after it (a reload with a
+    // chat tab open, while something already asked for this session's tab: the
+    // supervisor's `--continue`, a sidebar click). `adopt` registers that panel, so
+    // the freshly created one would silently replace it in the map: two tabs for one
+    // session, and the webview left in the map is a brand-new (cold) one whose
+    // scripts have to load from scratch. Keep the adopted panel instead.
+    const raced = this.panels.get(sessionId);
+    if (raced) {
+      opMark('panel-ensure', 'adopted mid-create');
+      created.dispose();
+      this.focusedId = sessionId;
+      timedSync('panel-focus', () => raced.focus());
+      return raced;
+    }
     this.panels.set(sessionId, created);
     this.focusedId = sessionId;
-    created.focus();
+    timedSync('panel-focus', () => created.focus());
     return created;
   }
 
@@ -81,13 +111,24 @@ export class PanelManager {
       return existing;
     }
     let adopted!: ChatPanel;
-    adopted = ChatPanel.revive({
-      sessionId,
-      panel,
-      getHtml: (webview) => this.opts.getHtml(webview),
-      onMessage: (message) => this.opts.onMessage(adopted, message),
-      onDispose: () => this.onPanelDisposed(adopted),
-    });
+    // A restored tab is a webview window coming up exactly like `ensure`'s: own the
+    // trace *here* too, so `panel-html` / `panel-adopt` land in this tab's own
+    // operation instead of in whichever other tab happens to be repainting while VS
+    // Code hands the panel back (a window reload restores several at once, and its
+    // `ready` then joins this op).
+    startRepaintOp('panel-open', sessionId);
+    adopted = timedSync(
+      'panel-adopt',
+      () =>
+        ChatPanel.revive({
+          sessionId,
+          panel,
+          getHtml: (webview) => this.opts.getHtml(webview),
+          onMessage: (message) => this.opts.onMessage(adopted, message),
+          onDispose: () => this.onPanelDisposed(adopted),
+        }),
+      `session=${sessionId}`,
+    );
     this.wire(adopted);
     this.panels.set(sessionId, adopted);
     if (panel.active) {

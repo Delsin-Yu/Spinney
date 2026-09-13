@@ -4,7 +4,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { Agent } from '../agent/agent';
 import { DeepSeekClient } from '../agent/deepseek';
-import { ThinkingEffort } from '../agent/types';
+import { ChatMessage, ThinkingEffort } from '../agent/types';
 import {
   DEFAULT_MODEL,
   contextWindowFor,
@@ -16,6 +16,7 @@ import {
 } from '../agent/models';
 import {
   AgentSession,
+  DisplayItem,
   StoredState,
   STORED_STATE_VERSION,
   TitleSource,
@@ -69,11 +70,27 @@ import {
   writeSubAgentTranscript,
 } from './transcript';
 import { ControlHost, ControlResult, ControlState, WaitForFinishOptions } from '../http/controlServer';
-import { perf, setPerfSink } from '../perf';
+import { beginOp, logWebviewReport, opMark, perf, setPerfSink, startLagWatch, startRepaintOp, timedSync } from '../perf';
 
 // Model ids, context windows and image support all live in one place:
 // `src/agent/models.ts` (verified against `package.json` by tools/check-models.js).
 const STORAGE_KEY = 'agentHarness.state';
+/**
+ * The active-session pointer, in its **own** memento key. A session switch only
+ * moves this pointer, and doing that through `persist()` re-serialized the whole
+ * window state (~111 M chars → ~1.6 s of blocked extension host and a 273 MB
+ * SQLite write) to store one id. Read side: this key wins; the blob's own
+ * `activeSessionId` field is the fallback for state written before it existed.
+ */
+const ACTIVE_SESSION_KEY = 'agentHarness.activeSession';
+/**
+ * How long a content write may be coalesced away. State changes arrive in bursts
+ * (a turn with a dozen tool calls, a stream of background updates) and each write
+ * costs ~1 s of blocked extension host in a real profile, so a burst pays once.
+ */
+const PERSIST_DEBOUNCE_MS = 800;
+/** …but never leave the newest state unpublished longer than this. */
+const PERSIST_MAX_WAIT_MS = 3000;
 /** One-shot marker for the historical-transcript backfill (see `backfillTranscripts`). */
 const TRANSCRIPT_BACKFILL_KEY = 'agentHarness.transcriptBackfill';
 const TRANSCRIPT_BACKFILL_VERSION = 'v1';
@@ -84,8 +101,10 @@ const TITLE_BACKFILL_VERSION = 'v1';
 const TITLE_REQUEST_TIMEOUT_MS = 25_000;
 /** Give up a backfill pass after this long; the marker stays unset so it resumes. */
 const TITLE_BACKFILL_DEADLINE_MS = 10 * 60 * 1000;
-/** One-shot copy of the pre-tree (v1) state, written before the first migration. */
+/** One-shot copy of the pre-tree (v1) state. Kept as a FILE, never in the memento. */
 const STORAGE_BACKUP_KEY = 'agentHarness.state.v1backup';
+/** Where {@link STORAGE_BACKUP_KEY}'s content is parked (see `moveV1BackupOut`). */
+const V1_BACKUP_FILE = 'state-v1-backup.json';
 const CONFIG_KEY = 'agentHarness.runtimeConfig';
 
 /**
@@ -156,6 +175,16 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   private readonly client: DeepSeekClient;
   /** Last `storage.update` write; the control plane awaits it before a reboot. */
   private lastPersist: Promise<void> = Promise.resolve();
+  /** Pointer last written to its own key, so a switch writes it exactly once. */
+  private lastActiveWritten = '';
+  /** A content change is waiting for the coalescing window (see `persist`). */
+  private dirty = false;
+  /** When the oldest un-written change happened (bounds how stale state may get). */
+  private dirtySince = 0;
+  /** Changes folded into the pending write, reported as `coalesced=n`. */
+  private deferredWrites = 0;
+  /** The coalescing timer, or `null`. */
+  private persistTimer: ReturnType<typeof setTimeout> | null = null;
   /** While `Date.now() < controlHoldUntil` an external controller is rebooting. */
   private controlHoldUntil = 0;
   /** Set when the provider is being torn down; suppresses background notifications. */
@@ -170,8 +199,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    * and clears this.
    */
   private hopReturn: { originSessionId: string; armedAt: number; returnNodeId?: string } | null = null;
-  /** Cache-busting suffix for media URLs; changes per extension session. */
-  private readonly mediaVersion: string;
+  /** Cache-busting suffix for media URLs; changes per extension session. */  private readonly mediaVersion: string;
   readonly output: vscode.OutputChannel;
   /**
    * The persisted **default** model/effort selection, used to seed a session that
@@ -188,16 +216,35 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   private titleJob: { sessionId: string; controller: AbortController } | null = null;
   /** Sessions waiting for an automatic-title pass, drained one at a time. */
   private titlePending = new Set<string>();
+  /** Stopper for the host event-loop lag watch (diagnostics only). */
+  private stopLagWatch: (() => void) | null = null;
+  /** Sidebar refreshes per second — a runaway refresh rate is a stutter on its own. */
+  private refreshCount = 0;
+  private refreshWindow = 0;
   private titleDrainTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
     private readonly extensionUri: vscode.Uri,
     private readonly storage: vscode.Memento,
     private readonly globalStorage?: vscode.Uri,
+    /**
+     * The other Memento *scope*, for the handful of **small** keys (the
+     * active-session pointer, the model/effort default, the two backfill markers).
+     * VS Code keeps an extension's whole `workspaceState` as ONE row — measured at
+     * 118,860,732 chars here, all of our keys inside it — so a 40-byte update in
+     * there still re-serializes and rewrites all of it (`lag blocked 549ms` right
+     * after a switch's pointer write). The content blob stays in `storage`; the
+     * small keys must not.
+     */
+    private readonly smallStorage?: vscode.Memento,
   ) {
     this.mediaVersion = Date.now().toString(36);
     this.output = vscode.window.createOutputChannel('Agent Harness');
     setPerfSink((line) => this.output.appendLine(line));
+    // The host's own event loop is watched from here on: a stall in the extension
+    // host (persist, a tree rebuild) shows up as a late timer, which no `perf()`
+    // line can report while it is blocked.
+    this.stopLagWatch = startLagWatch();
     // The user's model table must be installed before anything derives a model
     // list, a context window or an image capability from the catalog.
     this.applyModelTable();
@@ -441,7 +488,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    */
   private loadRuntimeConfig(): RuntimeConfig {
     const defaults = this.getConfig();
-    const stored = this.storage.get<Partial<RuntimeConfig>>(CONFIG_KEY) ?? {};
+    const stored = this.readSmall<Partial<RuntimeConfig>>(CONFIG_KEY) ?? {};
     // A dropdown pick shadows the setting only while that setting is unchanged:
     // editing `agentHarness.model` in settings.json is an explicit choice as
     // well, so it wins over a pick made *before* the edit (a pick made after it
@@ -488,7 +535,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     this.defaultModel = model;
     this.defaultThinkingEffort = thinkingEffort;
     const cfg = this.getConfig();
-    void this.storage.update(CONFIG_KEY, {
+    void this.writeSmall(CONFIG_KEY, {
       model,
       thinkingEffort,
       modelFromSettings: cfg.model,
@@ -504,16 +551,23 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   private runtimeFor(session: AgentSession): SessionRuntime {
     let rt = this.runtimes.get(session.id);
     if (!rt) {
-      rt = new SessionRuntime(
-        this,
-        session,
-        this.client,
-        this.effectiveModel(session),
-        this.effectiveEffort(session),
-        this.backgroundHub,
+      // Building a runtime seeds the view-derived counters from the stored tree, so
+      // the first switch to a session that has never run in this window pays for it.
+      rt = timedSync(
+        'runtime-create',
+        () =>
+          new SessionRuntime(
+            this,
+            session,
+            this.client,
+            this.effectiveModel(session),
+            this.effectiveEffort(session),
+            this.backgroundHub,
+          ),
+        `session=${session.id} nodes=${Object.keys(session.nodes).length}`,
       );
       this.runtimes.set(session.id, rt);
-      this.onStateChanged?.();
+      this.notifyStateChanged();
     }
     return rt;
   }
@@ -528,16 +582,19 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     // stale system prompt, downgrade a turn that was still running, unlink
     // dangling children), so the loaded tree is always API-valid on activation.
     this.sessions = sessions;
-    if (migrated && rawState) {
-      // The tree format is not readable by the pre-tree build, so keep a copy of
-      // the original state before the first write in the new format.
-      void this.storage.update(STORAGE_BACKUP_KEY, rawState);
-      this.output.appendLine(`[migrate] pre-tree state backed up to ${STORAGE_BACKUP_KEY}`);
-    }
+    // The pre-tree (v1) safety copy belongs on disk, not in the memento: it is
+    // ~20 M chars of the blob that nothing ever reads again, and VS Code
+    // re-serializes the whole memento on every write.
+    this.moveV1BackupOut(migrated ? rawState : undefined);
+    let createdSession = false;
     if (this.sessions.length === 0) {
       this.createSessionInMemory();
+      createdSession = true;
     }
-    const active = this.sessions.find((s) => s.id === activeSessionId);
+    // The pointer lives in its own key; the blob's field is the pre-split fallback.
+    const remembered = this.readSmall<string>(ACTIVE_SESSION_KEY);
+    const wanted = typeof remembered === 'string' && remembered ? remembered : activeSessionId;
+    const active = this.sessions.find((s) => s.id === wanted);
     this.activeSessionId = active ? active.id : this.sessions[0].id;
     const nodes = this.sessions.reduce((n, s) => n + Object.keys(s.nodes).length, 0);
     perf(
@@ -545,29 +602,212 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         `load-sessions ${Date.now() - t0}ms sessions=${this.sessions.length} nodes=${nodes}` +
         (migrated ? ' migrated=v1' : ''),
     );
-    // Persist the (possibly migrated/healed) state so a resumed session is always valid.
-    this.persist();
+    this.persistActiveSession();
+    // Write the state back only when loading actually *changed* it: the heal pass
+    // (`migrateState` / `normalizeTreeSession`) is idempotent and re-runs on every
+    // activation, so re-serializing ~108 M chars "just in case" cost a couple of
+    // seconds of blocked host on every start — and, because writes are coalesced,
+    // it landed 800 ms later, right on top of the first session switch.
+    if (migrated || createdSession) {
+      this.persistNow();
+    }
   }
 
-  persist(): void {
+  /**
+   * Park the pre-tree (v1) state as a file in global storage and drop the memento
+   * key. It exists so a pre-tree build could still read the old shape; the
+   * migration has long completed, and in the memento it is ~15% of every write
+   * (see `docs/agents/invariants/streaming-perf.md`). The data is kept, only moved.
+   */
+  private moveV1BackupOut(freshV1?: unknown): void {
+    let backup: unknown = freshV1;
+    if (backup === undefined) {
+      backup = this.storage.get<unknown>(STORAGE_BACKUP_KEY);
+    }
+    if (backup === undefined) {
+      return;
+    }
+    const dir = this.globalStorage?.fsPath;
+    if (!dir) {
+      this.output.appendLine('[migrate] v1 backup left in the memento (no global storage to move it to)');
+      return;
+    }
+    try {
+      const file = path.join(dir, V1_BACKUP_FILE);
+      fs.writeFileSync(file, JSON.stringify(backup), 'utf8');
+      void this.storage.update(STORAGE_BACKUP_KEY, undefined);
+      this.output.appendLine(`[migrate] pre-tree (v1) state moved out of the memento → ${file}`);
+    } catch (err) {
+      this.output.appendLine(
+        `[migrate] could not move the v1 backup out: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+  }
+
+  /**
+   * The Memento that owns the small keys (see the constructor). Falls back to the
+   * content one when no separate scope was provided (no-repo mode, tests): there
+   * the two are the same object anyway.
+   */
+  private get small(): vscode.Memento {
+    return this.smallStorage ?? this.storage;
+  }
+
+  /**
+   * Read a small key. A value that only the big row has (state written before this
+   * split) is adopted: returned now, written small for next time. The big row is
+   * deliberately not cleaned — deleting a key there would rewrite all 119 M chars
+   * for a few bytes — so a stale copy simply loses to the small one from then on.
+   */
+  private readSmall<T>(key: string): T | undefined {
+    const small = this.small.get<T>(key);
+    if (small !== undefined) {
+      return small;
+    }
+    const legacy = this.storage.get<T>(key);
+    if (legacy !== undefined) {
+      void this.small.update(key, legacy);
+    }
+    return legacy;
+  }
+
+  /** Write a small key (cheap: it lands in a tiny row, not in the content blob). */
+  private writeSmall(key: string, value: unknown): Thenable<void> {
+    return this.small.update(key, value);
+  }
+
+  /**
+   * Write **only** the active-session pointer. A switch moves a pointer, not the
+   * conversation, so it must not go through `persist()` (111 M chars, ~1.6 s) — and
+   * it must not land in the content Memento either, where even a 40-byte update
+   * rewrites the whole row (`readSmall`). Called from every path that moves the
+   * pointer, including the content persist, so the two can never disagree for long.
+   */
+  private persistActiveSession(): void {
+    if (this.lastActiveWritten === this.activeSessionId) {
+      return;
+    }
+    this.lastActiveWritten = this.activeSessionId;
     const t0 = Date.now();
+    this.trackWrite(this.writeSmall(ACTIVE_SESSION_KEY, this.activeSessionId));
+    perf(() => `persist-active session=${this.activeSessionId} ${Date.now() - t0}ms`);
+  }
+
+  /** Track the newest write(s): the control plane awaits this before a reboot. */
+  private trackWrite(pending: Thenable<unknown>): void {
+    this.lastPersist = this.lastPersist
+      .then(() => pending)
+      .then(
+        () => undefined,
+        () => undefined,
+      );
+  }
+
+  /**
+   * Queue the content write. Writing the whole window state is expensive (~111 M
+   * chars, ~1 s of blocked host in a real profile), and state changes arrive in
+   * bursts — a turn with a dozen tool calls used to pay that price a dozen times —
+   * so writes are coalesced: the burst pays once. The 3 s ceiling bounds how stale
+   * the stored state can get while changes keep coming.
+   *
+   * A caller that must not lose what it just changed (a finished turn, a deletion,
+   * a hand-off to the control plane) uses `persistNow()`.
+   */
+  persist(): void {
+    this.dirty = true;
+    this.deferredWrites++;
+    if (this.dirtySince === 0) {
+      this.dirtySince = Date.now();
+    }
+    if (this.persistTimer != null) {
+      clearTimeout(this.persistTimer);
+    }
+    const waited = Date.now() - this.dirtySince;
+    const wait = Math.max(0, Math.min(PERSIST_DEBOUNCE_MS, PERSIST_MAX_WAIT_MS - waited));
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      this.persistNow();
+    }, wait);
+  }
+
+  /**
+   * Write the content immediately (cancelling a pending coalesced write). Every
+   * path that could otherwise lose real state — or leave the memento listing a
+   * branch whose transcript dumps are already deleted — goes through this.
+   */
+  persistNow(): void {
+    if (this.persistTimer != null) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+    }
+    const coalesced = this.deferredWrites;
+    this.dirty = false;
+    this.dirtySince = 0;
+    this.deferredWrites = 0;
+    const t0 = Date.now();
+    // The size estimate rides along with the payload build (one pass over data we
+    // already touch). A second pass over ~108 M chars, or a `JSON.stringify`, used
+    // to cost a few hundred ms *inside* the operation the line is about.
+    let chars = 0;
+    const addText = (text: unknown): void => {
+      if (typeof text === 'string') {
+        chars += text.length;
+      }
+    };
+    const clipItem = (item: DisplayItem): DisplayItem => {
+      const clipped = clipDisplayItem(item);
+      addText(clipped.text);
+      addText(clipped.thinking);
+      addText(clipped.args);
+      addText(clipped.content);
+      addText(clipped.doneText);
+      for (const attachment of clipped.attachments ?? []) {
+        addText(attachment.dataUrl);
+        addText(attachment.name);
+      }
+      return clipped;
+    };
+    const clipMsg = (msg: ChatMessage): ChatMessage => {
+      const clipped = clipMessageForStorage(msg);
+      addText(clipped.reasoning_content);
+      if (typeof clipped.content === 'string') {
+        addText(clipped.content);
+      } else if (Array.isArray(clipped.content)) {
+        for (const part of clipped.content as { text?: string; image_url?: { url?: string } }[]) {
+          addText(part.text);
+          addText(part.image_url?.url);
+        }
+      }
+      for (const call of clipped.tool_calls ?? []) {
+        addText(call.function?.arguments);
+      }
+      return clipped;
+    };
     const payload: StoredState = {
       version: STORED_STATE_VERSION,
       activeSessionId: this.activeSessionId,
-      sessions: this.sessions.map((s) => ({
-        ...s,
-        orphanItems: s.orphanItems.map(clipDisplayItem),
-        nodes: Object.fromEntries(
-          Object.entries(s.nodes).map(([id, node]): [string, TreeNode] => [
-            id,
-            {
-              ...node,
-              displayItems: node.displayItems.map(clipDisplayItem),
-              messages: node.messages.map(clipMessageForStorage),
-            },
-          ]),
-        ),
-      })),
+      sessions: this.sessions.map((s) => {
+        addText(s.title);
+        return {
+          ...s,
+          orphanItems: s.orphanItems.map(clipItem),
+          nodes: Object.fromEntries(
+            Object.entries(s.nodes).map(([id, node]): [string, TreeNode] => {
+              addText(node.title);
+              addText(node.bgCommand);
+              addText(node.bgOutputTail);
+              return [
+                id,
+                {
+                  ...node,
+                  displayItems: node.displayItems.map(clipItem),
+                  messages: node.messages.map(clipMsg),
+                },
+              ];
+            }),
+          ),
+        };
+      }),
     };
     const session = this.getActiveSession();
     const nodeCount = session ? Object.keys(session.nodes).length : 0;
@@ -578,20 +818,33 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         : session.orphanItems.length
       : 0;
     const extra =
-      `sessions=${this.sessions.length} nodes=${nodeCount} items=${items} msgs=${msgCount}`;
+      `sessions=${this.sessions.length} nodes=${nodeCount} items=${items} msgs=${msgCount}` +
+      (coalesced > 1 ? ` coalesced=${coalesced}` : '');
     const pending = this.storage.update(STORAGE_KEY, payload);
-    // The control plane awaits this before handing over to a reboot, so a kill
+    // The control plane awaits these before handing over to a reboot, so a kill
     // right after a turn cannot lose the last write.
-    this.lastPersist = Promise.resolve(pending).then(
-      () => undefined,
-      () => undefined,
-    );
-    perf(() => `persist-queued ${Date.now() - t0}ms ${extra}`);
+    this.trackWrite(pending);
+    // Keep the pointer key in step with the blob (it is the one the next
+    // activation reads first) — cheap, and it never writes the same value twice.
+    this.persistActiveSession();
+    perf(() => `persist-queued ${Date.now() - t0}ms ${extra} chars≈${chars}`);
     void pending.then(
-      () => perf(() => `persist-done ${Date.now() - t0}ms ${extra}`),
+      () => perf(() => `persist-done ${Date.now() - t0}ms ${extra} chars≈${chars}`),
       (err: unknown) =>
         perf(() => `persist-fail ${Date.now() - t0}ms ${extra} ${err instanceof Error ? err.message : String(err)}`),
     );
+  }
+
+  /**
+   * Write anything pending and resolve once every write has settled — the
+   * hand-off point for the control plane (`/wait-for-finish`, `/reload-window`)
+   * and for extension deactivation, where a coalesced write must not be lost.
+   */
+  async flushPersist(): Promise<void> {
+    if (this.dirty || this.persistTimer != null) {
+      this.persistNow();
+    }
+    await this.lastPersist;
   }
 
   /** The last focused tab's session id (persisted active session). */
@@ -605,7 +858,34 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
 
   /** Notify the host (the sidebar) that some state it renders has changed. */
   stateChanged(): void {
+    this.notifyStateChanged();
+  }
+
+  /**
+   * Fire the sidebar refresh — and keep an eye on it. A refresh makes VS Code
+   * re-read every session row (title, node count, "time ago"), so it is the
+   * cheapest way to make a session switch stutter: it is reported when one call
+   * takes real time, or when they come in faster than a human can read them.
+   */
+  private notifyStateChanged(): void {
+    const t0 = Date.now();
     this.onStateChanged?.();
+    const ms = Date.now() - t0;
+    if (ms >= 50) {
+      perf(`sidebar-refresh ${ms}ms (${this.sessions.length} sessions)`);
+    }
+    const now = Date.now();
+    if (this.refreshWindow === 0) {
+      this.refreshWindow = now;
+    }
+    this.refreshCount++;
+    if (now - this.refreshWindow >= 1000) {
+      if (this.refreshCount >= 10) {
+        perf(`sidebar-refresh ${this.refreshCount}/s`);
+      }
+      this.refreshCount = 0;
+      this.refreshWindow = now;
+    }
   }
 
   /** Sidebar rows: one per session, newest update first. */
@@ -671,7 +951,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     if (!changed) {
       return; // bookkeeping only (same title, refreshed cooldown)
     }
-    this.onStateChanged?.();
+    this.notifyStateChanged();
     this.panels.setTitle(session.id, this.panelTitle(session.id));
   }
 
@@ -864,7 +1144,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   }
 
   private scheduleTitleBackfill(): void {
-    if (this.storage.get<string>(TITLE_BACKFILL_KEY) === TITLE_BACKFILL_VERSION) {
+    if (this.readSmall<string>(TITLE_BACKFILL_KEY) === TITLE_BACKFILL_VERSION) {
       return;
     }
     // Not marked when the setting is off, so enabling it later still backfills.
@@ -924,7 +1204,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       this.outputLog(`[title] backfill paused (${visited} visited, ${Date.now() - t0}ms)`);
       return; // marker unset ⇒ resumes next activation
     }
-    await this.storage.update(TITLE_BACKFILL_KEY, TITLE_BACKFILL_VERSION);
+    await this.writeSmall(TITLE_BACKFILL_KEY, TITLE_BACKFILL_VERSION);
     this.outputLog(`[title] backfill: ${renamed}/${visited} renamed in ${Date.now() - t0}ms`);
   }
 
@@ -1056,7 +1336,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    * already up) and remembered in the Memento, so it costs one pass per install.
    */
   private scheduleTranscriptBackfill(): void {
-    if (this.storage.get<string>(TRANSCRIPT_BACKFILL_KEY) === TRANSCRIPT_BACKFILL_VERSION) {
+    if (this.readSmall<string>(TRANSCRIPT_BACKFILL_KEY) === TRANSCRIPT_BACKFILL_VERSION) {
       return;
     }
     // Not marked when the setting is off, so enabling it later still backfills.
@@ -1099,7 +1379,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         }
       }
     }
-    await this.storage.update(TRANSCRIPT_BACKFILL_KEY, TRANSCRIPT_BACKFILL_VERSION);
+    await this.writeSmall(TRANSCRIPT_BACKFILL_KEY, TRANSCRIPT_BACKFILL_VERSION);
     this.output.appendLine(
       `[transcript] backfill: ${written} written, ${skipped} already on disk, ${(bytes / 1024).toFixed(1)} KB, ${
         Date.now() - t0
@@ -1398,11 +1678,15 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    */
   private setActiveSession(sessionId: string): void {
     if (this.activeSessionId === sessionId) {
+      opMark('active-session', 'unchanged');
       return;
     }
     this.activeSessionId = sessionId;
-    this.persist();
-    this.onStateChanged?.();
+    // The pointer only: the conversation did not change, so this must not
+    // re-serialize the whole window state (that was ~1.6 s of blocked host on
+    // every switch — see docs/agents/invariants/streaming-perf.md).
+    this.persistActiveSession();
+    this.notifyStateChanged();
   }
 
   private onPanelClosed(sessionId: string): void {
@@ -1452,7 +1736,26 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     if (!session) {
       return;
     }
-    this.panels.ensure(session.id);
+    this.openTab(session.id, 'open-chat');
+  }
+
+  /**
+   * Open a session's tab, tracing the whole switch. The op is the operation the
+   * user experiences: tab creation, the HTML shell, the runtime, the persistence
+   * write — and, through the id the repaint messages carry (`reset`/`tree`/`path`
+   * → `opTag`), the webview's render, which reports back and ends the op. A tab
+   * that is already open only needs `reveal`, so its op ends immediately.
+   */
+  private openTab(sessionId: string, label: string): void {
+    const cold = !this.panels.has(sessionId);
+    const op = beginOp(label, `session=${sessionId} cold=${cold}`, { awaitWebview: cold, subject: sessionId });
+    try {
+      this.panels.ensure(sessionId);
+    } finally {
+      if (!cold) {
+        op.end('tab already open (no repaint)');
+      }
+    }
   }
 
   /**
@@ -1477,14 +1780,36 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     if (!session) {
       return;
     }
-    this.panels.ensure(session.id);
-    this.setActiveSession(session.id);
+    const cold = !this.panels.has(session.id);
+    const op = beginOp('switch-session', `session=${session.id} cold=${cold}`, {
+      awaitWebview: cold,
+      subject: session.id,
+    });
+    try {
+      this.panels.ensure(session.id);
+      this.setActiveSession(session.id);
+    } finally {
+      // A tab that was already open needed no repaint, so nothing will ever report
+      // on this op: it ends here, and its marks still say what the reveal and the
+      // active-session bookkeeping (persist + sidebar refresh) cost.
+      if (!cold) {
+        op.end('tab already open (no repaint)');
+      }
+    }
   }
 
   newSession(): void {
     const session = this.createSessionInMemory();
+    // A new session always gets a fresh tab, so this op waits for the webview's
+    // first paint like any other cold switch.
+    const op = beginOp('new-session', `session=${session.id}`, { awaitWebview: true, subject: session.id });
     this.persist();
-    this.panels.ensure(session.id);
+    try {
+      this.panels.ensure(session.id);
+    } catch (err) {
+      op.end('failed');
+      throw err;
+    }
   }
 
   /**
@@ -1642,8 +1967,12 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     if (!this.sessions.some((s) => s.id === this.activeSessionId)) {
       this.activeSessionId = this.sessions[0].id;
     }
-    this.persist();
-    this.onStateChanged?.();
+    // A deletion against the stored state: a coalesced write here would leave a
+    // deleted session (or one whose transcript dumps are already gone) coming back
+    // after a crash, so this one is written now.
+    this.persistNow();
+    this.persistActiveSession();
+    this.notifyStateChanged();
   }
 
   /** Clear one session's conversation (the panel that invoked `clear`). */
@@ -1682,11 +2011,13 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     if (!session.titleLocked) {
       session.title = 'New session';
       session.titleSource = 'provisional';
-      this.onStateChanged?.();
+      this.notifyStateChanged();
     }
     // The cleared conversation's transcript dumps are stale now.
     removeTranscriptDir(this.transcriptDir(session.id));
-    this.persist();
+    // Written now: the dumps are already gone from disk, so a stale memento would
+    // resurrect a conversation whose transcripts no longer exist.
+    this.persistNow();
   }
 
   // ---- Branch deletion ----
@@ -1811,9 +2142,12 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       }
       this.panels.setTitle(session.id, this.panelTitle(session.id));
     }
-    this.persist();
+    this.persistActiveSession();
+    // A branch deletion also drops transcript dumps from disk (`removeTranscripts`
+    // above): the stored state must stop listing those nodes now, not in 800 ms.
+    this.persistNow();
     // The sidebar row shows the node count + "time ago", both of which moved.
-    this.onStateChanged?.();
+    this.notifyStateChanged();
     this.outputLog(
       `[branch] deleted ${ids.length} node(s) at ${nodeId} in ${session.id}; ${dropped} transcript dump(s) removed`,
     );
@@ -1904,7 +2238,9 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       }
       await new Promise((resolve) => setTimeout(resolve, 150));
     }
-    await this.lastPersist;
+    // Hand-off: everything pending must be on disk before the caller (an external
+    // supervisor) may kill or reload this window.
+    await this.flushPersist();
     const holdMs = Number.isFinite(opts.holdMs) ? Math.max(0, Math.min(opts.holdMs ?? 0, 600000)) : 0;
     if (holdMs > 0) {
       this.controlHoldUntil = Date.now() + holdMs;
@@ -2060,7 +2396,9 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         this.applySessionTitle(session, opts.title.trim(), 'manual');
       }
       this.runtimeFor(session);
-      this.persist();
+      // The caller already has this session's id and may `/continue` it right away,
+      // so it has to exist on disk before the reply is sent.
+      this.persistNow();
       this.panels.ensure(session.id);
       return { ok: true, sessionId: session.id, nodeId: session.activeNodeId, prompted: false };
     }
@@ -2080,7 +2418,9 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       this.applySessionTitle(session, opts.title.trim(), 'manual');
     }
     const rt = this.runtimeFor(session);
-    this.persist();
+    // The turn below is about to write into this session; a fresh session that only
+    // exists in memory would be lost by a reload that arrives mid-turn.
+    this.persistNow();
     this.panels.ensure(session.id);
     await this.dispatchUserMessage(rt, opts.prompt, []);
     return { ok: true, sessionId: session.id, nodeId: session.activeNodeId, prompted: true };
@@ -2098,7 +2438,9 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     if (this.anyRunningSubAgents() || this.anyRunningBackground()) {
       return { ok: false, error: 'sub-agents or background terminals are still running', busy: true };
     }
-    void this.lastPersist.finally(() => {
+    // A reload kills this process: flush the coalesced write first, or the reload
+    // itself could lose the state it is reloading for.
+    void this.flushPersist().finally(() => {
       setTimeout(() => {
         void vscode.commands.executeCommand('workbench.action.reloadWindow');
       }, 400);
@@ -2135,10 +2477,37 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     if (!session) {
       return;
     }
+    // The webview's half of a traced operation (its render timings) is pure
+    // diagnostics: answer it *before* `runtimeFor`, which would build a whole
+    // session runtime just to log a line.
+    if (message?.type === 'perfDiag') {
+      logWebviewReport(`session=${session.id}`, message);
+      return;
+    }
+    if (message?.type === 'ready') {
+      // The tab is repainting itself. Open (or join) the op for **this** session
+      // before its runtime is built, so `runtime-create` and the repaint marks land
+      // on the tab's own operation rather than on whichever other tab is repainting
+      // right now (a window reload restores every tab at once).
+      startRepaintOp('panel-repaint', session.id);
+    }
     const rt = this.runtimeFor(session);
     switch (message?.type) {
       case 'ready':
+        // Order matters: the tab is up (release it), then the single full repaint,
+        // then whatever was held before it (e.g. deltas of a turn that started while
+        // this tab was still loading its scripts). The age says whether a cold
+        // switch's cost is ours (host work) or the browser's (loading main.js,
+        // markdown-it, tree.js and the layout engine) — nothing else reports that.
+        perf(() => `webview-ready session=${session.id} +${panel.ageMs()}ms`);
+        panel.markReady();
         rt.postAllState();
+        panel.flushHeld();
+        return;
+      case 'loadAgentItems':
+        // A sub-agent card was expanded: its transcript was deliberately left out of
+        // the `tree` message (see `SessionRuntime.postTree`).
+        rt.onAgentItems(String(message.id ?? ''));
         return;
       case 'userMessage':
         return this.dispatchUserMessage(rt, String(message.text ?? ''), message.attachments ?? []);
@@ -2225,7 +2594,26 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   }
 
   /** Kill every running background terminal (session delete / extension dispose). */
+  /**
+   * Extension deactivation (a window close, a reload, the host shutting down):
+   * write what is pending, wait for it, then tear down. `dispose()` cannot await,
+   * and a coalesced write must not be lost with the host.
+   */
+  async shutdown(): Promise<void> {
+    try {
+      await this.flushPersist();
+    } catch {
+      /* best effort: a failing write must not block teardown */
+    }
+    this.dispose();
+  }
+
   dispose(): void {
+    // A coalesced write must not die with the host: this is the last moment the
+    // state can be handed over (a window close, a reload, an extension shutdown).
+    if (this.dirty || this.persistTimer != null) {
+      this.persistNow();
+    }
     this.disposed = true;
     if (this.titleDrainTimer != null) {
       clearTimeout(this.titleDrainTimer);
@@ -2234,6 +2622,8 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     this.titleJob?.controller.abort();
     this.titleJob = null;
     this.titlePending.clear();
+    this.stopLagWatch?.();
+    this.stopLagWatch = null;
     setPerfSink(null);
     for (const rt of this.runtimes.values()) {
       rt.dispose();

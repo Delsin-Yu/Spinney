@@ -24,7 +24,11 @@ regression fails *packaging* instead of the user's session:
   readout). It exists because a stale identifier inside a message handler throws
   silently in the real webview — the UI just keeps its previous values, which is
   how the Thinking-effort dropdown once stuck on "none" after the chat-side model
-  panel was deleted while the `config` handler still called into it.
+  panel was deleted while the `config` handler still called into it. Its last step
+  is **deferred** (a timer) and checks that the webview's perf probes still report:
+  a traced repaint (`reset` carrying `traceId`) must come back as a `perfDiag`
+  `paint` report, which is the only way to see a silently dead probe without a live
+  host — see `invariants/streaming-perf.md`.
 - `npm run check:signals` (`tools/check-signal-persist.js`) — the completion-signal
   persistence contract (`tools/research/signal-notification-plan.md` §0.1 / D1): a
   `kind:'bg'` background-terminal card must survive a restart with its `delivered`

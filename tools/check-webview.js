@@ -48,7 +48,10 @@ const notes = [];
  */
 const NODE_ID = 'smoke-node';
 const TURN_MESSAGES = [
-  { type: 'reset' },
+  // A traced repaint: the host tags the burst of a session switch with the op id
+  // the webview has to report back (see media/main.js's perf probes — the
+  // deferred check at the bottom of this file waits for that report).
+  { type: 'reset', traceId: 1 },
   { type: 'state', busy: false, status: '', sessionId: 'smoke-session' },
   // Structural preamble: one node, checked out and streamed into. The composer
   // assertions below need a real card, a real `treeActiveId` and a `viewId`.
@@ -72,6 +75,10 @@ const TURN_MESSAGES = [
     ],
   },
   { type: 'path', ids: [NODE_ID], nodes: [{ id: NODE_ID, status: 'running', items: [] }] },
+  // A sub-agent card carries no transcript in `tree` (only `itemCount`), so an
+  // expanded one asks for it and renders the host's `agentItems` answer — the two
+  // shapes are checked in the lazy-sidecar section at the bottom of this file.
+  { type: 'agentItems', id: NODE_ID, items: [] },
   {
     type: 'config',
     model: 'smoke-model',
@@ -140,6 +147,12 @@ const listeners = {};
 const elements = new Map();
 /** Every message the webview posts to the host, so a button's wiring can be checked. */
 const posted = [];
+/**
+ * Every `perfDiag` report the probes posted. Those arrive on a later task (the
+ * burst flush waits for a frame), so they are collected here and checked in the
+ * deferred step at the bottom of this file.
+ */
+const diagnostics = [];
 
 /**
  * Does `element` carry the class `name`? The webview writes `className` as a
@@ -362,7 +375,10 @@ const sandbox = {
   document,
   window,
   acquireVsCodeApi: () => ({
-    postMessage: (message) => posted.push(message),
+    postMessage: (message) => {
+      posted.push(message);
+      if (message && message.type === 'perfDiag') diagnostics.push(message);
+    },
     getState: () => undefined,
     setState() {},
   }),
@@ -690,6 +706,96 @@ if (contextLabel !== 'ctx 50%') {
   }
 }
 
+// --- Lazy sub-agent transcripts ----------------------------------------------
+// A `tree` message used to carry every `kind:'agent'` node's whole transcript, which
+// made one 8-node session 2.3 MB and 10 035 DOM elements. Such a node now carries
+// `itemCount` and no `items`; a card that expands asks for them once
+// (`loadAgentItems`) and renders the `agentItems` answer exactly once. That is a
+// host⇄webview contract, so both halves are checked here.
+{
+  const ROOT = 'lazy-root';
+  const SUB = 'lazy-sub';
+  const node = (id, parentId, children, extra) => Object.assign(
+    { id, parentId, children, title: id, status: 'done', createdAt: 0, preview: id, usage: null, size: null },
+    extra || {},
+  );
+  const cardsOf = () => {
+    const cards = new Map();
+    for (const child of elementById('tree-canvas').children) {
+      if (child.dataset && child.dataset.id) cards.set(child.dataset.id, child);
+    }
+    return cards;
+  };
+
+  // The sub-agent is a child of the view focus, so its card is expanded (see
+  // `agentExpanded`) while it is NOT on the path — exactly the lazy case.
+  dispatch({ type: 'reset' });
+  posted.length = 0;
+  dispatch({
+    type: 'tree',
+    viewId: ROOT,
+    activeId: null,
+    rootId: ROOT,
+    nodes: [
+      node(ROOT, null, [SUB]),
+      node(SUB, ROOT, [], { kind: 'agent', agentStatus: 'done', itemCount: 3 }),
+    ],
+  });
+  dispatch({ type: 'path', ids: [ROOT], nodes: [{ id: ROOT, status: 'done', items: [] }] });
+
+  const sub = cardsOf().get(SUB);
+  if (!sub) {
+    problems.push('no card was rendered for the sub-agent node of the lazy-tree fixture');
+  }
+  const asked = posted.filter((m) => m && m.type === 'loadAgentItems');
+  if (asked.length !== 1 || asked[0].id !== SUB) {
+    problems.push(
+      `an expanded sub-agent card posted ${JSON.stringify(asked)}, expected exactly one ` +
+        `{ type: 'loadAgentItems', id: '${SUB}' }`,
+    );
+  }
+  const subItems = sub ? findByClass(sub, 'node-items') : null;
+  if (!subItems) {
+    problems.push('an agent card has no `.node-items` container');
+  } else {
+    const before = subItems.children.length;
+    if (before !== 0) {
+      problems.push(`a sub-agent card rendered ${before} item(s) before its transcript arrived (the tree carries only itemCount)`);
+    }
+    dispatch({ type: 'agentItems', id: SUB, items: [{ kind: 'assistant', text: '子代理答案' }] });
+    const after = subItems.children.length;
+    if (after !== 1) {
+      problems.push(`an agentItems answer produced ${after} item(s) in the card, expected 1`);
+    }
+    dispatch({ type: 'agentItems', id: SUB, items: [{ kind: 'assistant', text: '子代理答案' }] });
+    if (subItems.children.length !== after) {
+      problems.push(
+        `a second agentItems answer re-rendered the transcript (${after} → ${subItems.children.length} items) — ` +
+          'the card must render once',
+      );
+    }
+    // An answer for a node the tree no longer has must be ignored, not thrown.
+    dispatch({ type: 'agentItems', id: 'lazy-gone', items: [] });
+  }
+
+  // The lazy rule is about `tree` only: a `path` that carries items (a checked-out
+  // sidecar, or any turn node) must still render immediately.
+  dispatch({ type: 'reset' });
+  dispatch({
+    type: 'tree',
+    viewId: SUB,
+    activeId: null,
+    rootId: ROOT,
+    nodes: [node(ROOT, null, [SUB]), node(SUB, ROOT, [], { kind: 'agent' })],
+  });
+  dispatch({ type: 'path', ids: [SUB], nodes: [{ id: SUB, status: 'done', items: [{ kind: 'assistant', text: '内联' }] }] });
+  const checkedOut = cardsOf().get(SUB);
+  const inlineItems = checkedOut ? findByClass(checkedOut, 'node-items') : null;
+  if (!inlineItems || inlineItems.children.length === 0) {
+    problems.push('a `path` carrying items no longer renders them (a checked-out sidecar must render immediately)');
+  }
+}
+
 // --- The ▶ Continue / ↻ Retry button ------------------------------------------
 // A turn that ended without an answer — interrupted by the user, or failed on an
 // API error that outlived the client's retries — offers a button that asks the
@@ -901,22 +1007,46 @@ if (contextLabel !== 'ctx 50%') {
 
 // --- report ------------------------------------------------------------------
 
-if (problems.length > 0) {
-  console.error('check-webview: the chat webview does not survive the provider\n');
-  for (const problem of new Set(problems)) {
-    console.error('  ' + problem);
+/**
+ * The perf probes publish on a later task: the traced burst is flushed once it has
+ * been quiet for a moment (so a burst of `reset`/`tree`/`path` collapses into one
+ * report) and the report itself waits for a frame. Give them that task before
+ * deciding — a probe is diagnostics, but a probe that silently stopped reporting is
+ * still a broken webview, and this is the only place it can be seen without a live
+ * host. The delay has to outlast the webview's own coalescing window
+ * (`media/main.js` `BURST_QUIET_MS`, 50 ms).
+ */
+setTimeout(() => {
+  const paint = diagnostics.find((report) => report.kind === 'paint' && report.traceId === 1);
+  if (!paint) {
+    problems.push(
+      'the perf probes reported nothing for the traced repaint (a `reset` carrying `traceId`) — ' +
+        `posted ${JSON.stringify(diagnostics)}`,
+    );
+  } else if (typeof paint.since !== 'number' || typeof paint.cards !== 'number') {
+    problems.push(`the traced repaint reported ${JSON.stringify(paint)}, expected numeric timings`);
+  } else {
+    notes.push(`perf probes: ${diagnostics.length} report(s)`);
   }
-  console.error(
-    '\nDispatched messages: ' +
-      TURN_MESSAGES.map((message) => message.type).join(', ') +
-      '\nAdd any new provider message type to TURN_MESSAGES in tools/check-webview.js.',
-  );
-  process.exit(1);
-}
 
-console.log(`check-webview: OK — ${TURN_MESSAGES.length} messages, ${notes.join(', ')}.`);
-// Exit explicitly, the same way the failure path above does: the webview's own
-// token meter is a `setInterval` (media/main.js `tpsTimer`), and a green run
-// otherwise leaves it pending forever — the process would hang after printing OK
-// (which reads as "the checker is slow/stuck" to whoever ran it from a shell).
-process.exit(0);
+  if (problems.length > 0) {
+    console.error('check-webview: the chat webview does not survive the provider\n');
+    for (const problem of new Set(problems)) {
+      console.error('  ' + problem);
+    }
+    console.error(
+      '\nDispatched messages: ' +
+        TURN_MESSAGES.map((message) => message.type).join(', ') +
+        '\nAdd any new provider message type to TURN_MESSAGES in tools/check-webview.js.',
+    );
+    process.exit(1);
+  }
+
+  console.log(`check-webview: OK — ${TURN_MESSAGES.length} messages, ${notes.join(', ')}.`);
+  // Exit explicitly, the same way the failure path above does: the webview's own
+  // token meter is a `setInterval` (media/main.js `tpsTimer`) and the frame watch
+  // keeps a frame loop alive, so a green run otherwise leaves timers pending
+  // forever — the process would hang after printing OK (which reads as "the
+  // checker is slow/stuck" to whoever ran it from a shell).
+  process.exit(0);
+}, 150);
