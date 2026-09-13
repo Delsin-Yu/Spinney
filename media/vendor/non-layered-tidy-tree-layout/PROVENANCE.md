@@ -6,7 +6,7 @@ This directory is a byte-exact copy of files from the published npm tarball. It 
 **not** an npm dependency: there is no entry in `package.json`, nothing is fetched at
 build time, and no install/postinstall script ever runs. The tree layout engine is
 frozen at this version by design — a new version would need a new supply-chain audit
-(see `docs/agents/vendored-deps.md`).
+(see `docs/agents/invariants/vendored-deps.md`).
 
 | | |
 |---|---|
@@ -59,12 +59,12 @@ are inconsistent):
 
 ## Audit record
 
-Audited 2026-09-10; full evidence in the local (gitignored) report
-`.spinney/research/audit/supply-chain-audit.md`. Summary: single maintainer
-`stetrevor` (GitHub owner matches the npm publisher), 4 versions all published in
-October 2019, no ownership change, no install scripts, no `eval`/`Function`/
+Audited 2026-09-10; this file is the surviving record of that audit (the pre-vendoring
+working notes were removed from the repository when it went open source). Summary:
+single maintainer `stetrevor` (GitHub owner matches the npm publisher), 4 versions all
+published in October 2019, no ownership change, no install scripts, no `eval`/`Function`/
 `child_process`/network access, zero runtime dependencies, MIT SPDX match, tarball
 integrity matches the registry, `dist` + `src` byte-identical to tag `v2.0.2`, no
 typosquat of the name exists on npm, OSV reports no advisories. Residual risk is the
 usual one for a dormant single-maintainer package — neutralised here by pinning and
-vendoring: we never resolve it from the registry again.
+vendoring: this copy is never resolved from the registry again.

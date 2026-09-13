@@ -1,27 +1,42 @@
 # Invariant: vendored dependencies are pinned forever
 
-The tree layout engine is a **vendored, frozen** copy of
-`non-layered-tidy-tree-layout@2.0.2` (MIT) in
-`media/vendor/non-layered-tidy-tree-layout/`.
+Two assets under `media/vendor/` are **vendored, frozen** copies of published npm
+tarballs, shipped inside the `.vsix`:
+
+| Asset | Vendored copy | Pin record |
+|---|---|---|
+| tree layout engine `non-layered-tidy-tree-layout@2.0.2` (MIT) | `media/vendor/non-layered-tidy-tree-layout/` | that directory's `PROVENANCE.md` |
+| Markdown renderer `markdown-it@14.3.1` (MIT) | `media/vendor/markdown-it/` | that directory's `PROVENANCE.md` |
 
 ## Rules
 
-1. **Do not add it to `package.json`.** It is not a dependency, not a `devDependency`,
-   not a `file:` link. Nothing is resolved from npm at install/build/package time, so no
-   install script, no registry compromise and no version drift can reach us.
+1. **Do not add either of them to `package.json`.** Neither is a dependency, a
+   `devDependency` or a `file:` link, and nothing is resolved from npm at
+   install/build/package time, so no install script, no registry compromise and no
+   version drift can reach the shipped webview payload. One caveat that does **not**
+   weaken the rule: `markdown-it` (with its `linkify-it`, `mdurl`, `uc.micro`,
+   `punycode.js` and `entities` dependencies) also appears in `package-lock.json` as a
+   *transitive* dev dependency of `@vscode/vsce`. That copy is resolved at build time
+   only, is never shipped, and is never what the webview loads — the vendored bundle is.
+   Its existence is not a reason to relax the pin, and no runtime code may import from
+   `node_modules`.
 2. **Do not edit the vendored files.** They are byte-exact copies of the published
-   tarball, and their sha256s are recorded in `PROVENANCE.md`. An edit invalidates the
-   audit trail. `dist/` is what the webview loads; `src/` exists only so the minified
-   bundle can be re-audited offline.
-3. **Do not update the version.** "Pinned forever" is the design. A new version would
+   tarball, and their sha256s are recorded in each `PROVENANCE.md`. An edit invalidates
+   the audit trail. The engine's `dist/` is what the webview loads and its `src/` exists
+   only so the minified bundle can be re-audited offline; for `markdown-it` only the
+   minified browser bundle ships (`LICENSE` + `PROVENANCE.md` are the paperwork).
+3. **Do not update a version.** "Pinned forever" is the design. A new version would
    need a fresh supply-chain audit (see the checklist below) and a new `PROVENANCE.md`
-   before it may be vendored.
+   before it may be vendored — including a later patch of a package already vendored.
 4. **Keep the load order.** `src/chat/ChatViewProvider.ts` emits the engine `<script>`
-   (same nonce, before `media/tree.js`). `media/tree.js` throws a clear error if
+   (same nonce, before `media/tree.js`) and the `markdown-it` `<script>` the webview
+   renderer needs. `media/tree.js` throws a clear error if
    `window.nonLayeredTidyTreeLayout` is missing — do not add a silent fallback layout.
-5. The vendored bundle must stay `eval`/`Function`-free so the webview CSP needs no
+5. The vendored bundles must stay `eval`/`Function`-free so the webview CSP needs no
    `'unsafe-eval'`. Re-check with:
    `grep -c "eval(\|new Function" media/vendor/non-layered-tidy-tree-layout/dist/*.js`
+   and `grep -c "eval(\|new Function" media/vendor/markdown-it/markdown-it.min.js`
+   (both must print `0`).
 
 ## Engine semantics `media/tree.js` depends on
 
@@ -104,9 +119,15 @@ numbers quoted above.
 ## Related
 
 - `media/vendor/non-layered-tidy-tree-layout/PROVENANCE.md` — pin record, hashes, audit summary.
+- `media/vendor/markdown-it/PROVENANCE.md` — pin record for the Markdown renderer:
+  version, tarball integrity, sha256/byte count, and the third-party code inlined in
+  its bundle.
+- `THIRD_PARTY_NOTICES.md` (repository root, shipped in the `.vsix`) — the
+  redistribution notice: both bundles, their copyright lines and the paths of the
+  bundled `LICENSE` files.
 - The pre-vendoring survey (registry/OSV JSONs, benchmark scripts, prior-art notes)
-  was removed from the repository when it went open source. `PROVENANCE.md` above is
-  the surviving pin record: version, tarball integrity, per-file sha256, and the byte
-  comparison against the upstream tag.
+  was removed from the repository when it went open source. The `PROVENANCE.md` files
+  above are the surviving pin records: version, tarball integrity, per-file sha256, and
+  (for the engine) the byte comparison against the upstream tag.
 - `docs/agents/invariants/sub-agents.md` — the recursive agent-window layout invariant.
 - `docs/agents/file-map.md` — where the files live.

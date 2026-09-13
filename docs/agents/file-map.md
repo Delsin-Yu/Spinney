@@ -168,6 +168,12 @@
   `kind:'bg'` job card and the `.bgnotify` / `Delivered` badges). Every
   size inside `#composer` is `calc(<design px> * var(--cs))` so the input dock's
   controls and fonts scale with its host card.
-- `media/markdown-it.min.js` — vendored markdown renderer.
+- `media/vendor/markdown-it/` — **vendored, pinned** Markdown renderer
+  (`@14.3.1`, MIT): `markdown-it.min.js` (the file the webview loads), `LICENSE`,
+  `PROVENANCE.md` (hashes + the third-party code inlined in the bundle). Not an npm
+  dependency; never update it in place — see
+  `docs/agents/invariants/vendored-deps.md`. It replaced the old
+  `media/markdown-it.min.js`, which sat outside the `media/vendor/** -text` rule and
+  had drifted to CRLF.
 - `build-deploy.ps1` — compile + package + install helper.
 
