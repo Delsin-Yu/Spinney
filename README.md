@@ -6,6 +6,8 @@ Spinney is a VS Code extension. It puts an agent harness in an editor tab, and t
 
 Install Spinney from the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=deyu.spinney).
 
+Spinney works with a folder open and with no folder open. With no folder, a relative path resolves against a scratch folder in the extension storage.
+
 ## What you get
 
 - Every turn is a node in a tree. Click a turn to check it out, then send a message to start a new branch there. The old chain stays in the tree, dimmed.
@@ -53,6 +55,10 @@ Chat tree, sessions and sub-agents:
 | `send_readonly_agent_message` | Continue a read-only sub-agent that has finished. |
 | `hop_session` | Hand a task to a fresh session, then take back its answer. |
 | `rename_session` | Rename a session. |
+
+## Workspace instructions
+
+If the workspace root holds an `AGENTS.md` file, Spinney reads it once at start and adds it to the agent's system prompt. Reload the window after you edit that file. Run `Spinney: Show System Prompt` to read the exact prompt the model receives.
 
 ## Models
 
