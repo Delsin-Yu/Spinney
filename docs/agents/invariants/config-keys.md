@@ -1,5 +1,5 @@
 ## Config keys (`spinney.*`)
-`apiKey` (or `DEEPSEEK_API_KEY` env), `model`, `modelTable`, `baseUrl`, `commandTimeout`
+`model`, `modelTable`, `baseUrl`, `commandTimeout`
 (seconds, default 600 = 10 minutes — the default for `exec_command` when the tool
 call does not pass its own `timeout`; a non-positive/absent value falls back to
 600), `maxTurns`
@@ -60,7 +60,7 @@ no handling.
 
 | Key | Applied | Mechanism |
 | --- | --- | --- |
-| `apiKey`, `baseUrl` | next request (even mid-turn) | pulled into the shared `DeepSeekClient` via `configure()` — the main agent and every sub-agent hold that instance |
+| `baseUrl` | next request (even mid-turn) | pulled into the shared `DeepSeekClient` via `configure()` — the main agent and every sub-agent hold that instance |
 | `maxTurns` | next tool round (main agent) / next `spawn_agents` (sub-agents) | pushed: `Agent.setMaxTurns`; sub-agents re-read it at spawn |
 | `contextWindow` | immediately | pushed: recompute + `postContext()` |
 | `modelTable` | immediately | pushed: `applyModelTable()` (re-parse + install) → `postConfig()` (dropdown + image affordances) → `getContextWindow`/`postContext` for the row's own model |
@@ -84,3 +84,12 @@ no handling.
 - **Not a setting:** the `AGENTS.md` snapshot is taken once per activation
   (`loadAgentsMd`), so that one still needs a window reload — see
   `invariants/agents-md-snapshot.md`.
+
+### Secrets are the one exception
+`spinney.apiKey` was removed as a setting. The API key now lives in VS Code
+SecretStorage (`context.secrets.get('spinney.apiKey')`, with the
+`DEEPSEEK_API_KEY` environment variable as the fallback) and is read
+asynchronously when a request needs it — set it with the `Spinney: Set API Key`
+command and remove it with `Spinney: Clear API Key`. It is therefore **not** part
+of the "every `spinney.*` change applies immediately" rule. Every other
+`spinney.*` setting still applies at the moment you change it.

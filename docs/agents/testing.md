@@ -59,9 +59,10 @@ exactly the bug class. The method that does, with no real API key and no tokens:
    stream (`data: {…}` … `data: [DONE]`) for `stream: true` / plain JSON for
    `stream: false`.
 2. Edit `.vscode/settings.json` the way a user does in the Settings UI — point
-   `spinney.baseUrl` at the mock and set a marker `spinney.apiKey` —
-   then assert what the running host sent: `GET /user/balance` with the new key
-   and base URL (A), again after a second key-only edit (B), and a real
+   `spinney.baseUrl` at the mock — and set a marker key with **`Spinney: Set API
+   Key`** (the key lives in SecretStorage now, not in `settings.json`) —
+   then assert what the running host sent: `GET /user/balance` with the new base
+   URL (A), again after a second base-URL edit (B), and a real
    `POST /chat/completions` carrying the newest key, `stream: true` and the tool
    schemas (C).
 3. Checks A/B need nothing but the edit; C needs a real request — drive it through

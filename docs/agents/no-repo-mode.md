@@ -86,7 +86,7 @@ modules have no `ExtensionContext`).
 - No `AGENTS.md` means the project-instructions section is dropped from the
   prompt (existing `stripAgentsMdSection` behavior). A *global* instructions file
   (`<globalStorage>/AGENTS.md`) is deliberately **not** part of this change.
-- `read_image` and computer-use need absolute paths; `--path .spinney/screenshots`
+- `read_image` and any screenshot tool need absolute paths; `--path .spinney/screenshots`
   still works because the shell cwd is the agent root.
 
 ## Status

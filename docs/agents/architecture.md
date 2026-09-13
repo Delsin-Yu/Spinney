@@ -21,7 +21,8 @@ User (editor WebviewPanel) <--postMessage--> ChatViewProvider (src/chat)
    `deleteSession`, `clear`, `focus`).
 2. The webview (`media/main.js`) sends messages (`userMessage`, `checkout`,
    `setModel`, `setThinkingEffort`, `stop`, `clear`, `pickImage`, `setNodeSize`).
-   It streams in a sandboxed iframe and loads a vendored `markdown-it.min.js` plus
+   It streams in a sandboxed iframe and loads the vendored
+   `media/vendor/markdown-it/markdown-it.min.js` plus
    `media/tree.js` (pure layout), which uses the vendored pinned engine
    `non-layered-tidy-tree-layout@2.0.2` (loaded first, same CSP nonce).
 3. `ChatViewProvider` owns the `Agent` instance and one **session** per

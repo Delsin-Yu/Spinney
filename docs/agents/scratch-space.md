@@ -6,7 +6,7 @@ point into it:
 
 | Path | Contents |
 | --- | --- |
-| `.spinney/screenshots/` | `computer-use screenshot` output (pass `--path`) |
+| `.spinney/screenshots/` | screenshots written by a screenshot tool (it passes `--path`) |
 | `.spinney/tool-output/` | oversized `search_files`/`list_dir`/`exec_command`/background results (`limitInline`) |
 
 Both folders are **created on demand** (and were wiped once already), so an empty
