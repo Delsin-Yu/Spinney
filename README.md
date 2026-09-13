@@ -1,6 +1,6 @@
 # Spinney
 
-Spinney is a VS Code extension. It adds a branchable chat tree and an agent harness to an editor tab.
+Spinney is a VS Code extension. It puts an agent harness in an editor tab, and the conversation is a tree.
 
 ## Install
 
@@ -8,7 +8,7 @@ Install Spinney from the [Visual Studio Marketplace](https://marketplace.visuals
 
 ## What you get
 
-- The chat is a tree, not a flat log. Click any turn to check it out and start a new branch there.
+- Every turn is a node in a tree. Click a turn to check it out, then send a message to start a new branch there.
 - The old chain stays in the tree, dimmed.
 - The agent reads and writes files, and it runs shell commands.
 - Sub-agents run in parallel and report to the caller.
@@ -31,7 +31,7 @@ The default model is `deepseek-flash`. It accepts image input. Add other models 
 
 ## API key
 
-Run **Spinney: Set API Key** from the Command Palette. Spinney keeps the key in VS Code SecretStorage. Run **Spinney: Clear API Key** to erase it. You can also set the `DEEPSEEK_API_KEY` environment variable.
+Run `Spinney: Set API Key` from the Command Palette. Spinney keeps the key in VS Code SecretStorage. Run `Spinney: Clear API Key` to erase it. You can also set the `DEEPSEEK_API_KEY` environment variable.
 
 ## Privacy and data
 
