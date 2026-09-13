@@ -65,7 +65,7 @@ import { BackgroundTask } from '../tools/background';
 import { BackgroundHub, BackgroundOwner } from './backgroundHub';
 import { SubAgentPool } from './SubAgentPool';
 import { sumUsage, summarizeTranscript } from './transcript';
-import { perf } from '../perf';
+import { opPayload, opTag, perf, startRepaintOp, timedSync } from '../perf';
 
 /** Cap tool output stored/shown in the webview so a 16 MiB command dump cannot freeze the UI. */
 export const UI_TOOL_CONTENT_CAP = 32 * 1024;
@@ -285,7 +285,17 @@ export interface RuntimeHost {
   /** True once the provider is tearing down; suppresses async deliveries. */
   readonly disposed: boolean;
   getConfig(): HarnessConfig;
+  /**
+   * Queue a content write (coalesced — see `ChatViewProvider.persist`). The default
+   * for the chatty call sites (card sizes, delivered flags, tail lines).
+   */
   persist(): void;
+  /**
+   * Write the content **now**. For the moments where a delayed write would lose
+   * real conversation state or leave the memento disagreeing with the disk (a
+   * finished turn, a sub-agent's transcript, a deletion).
+   */
+  persistNow(): void;
   stateChanged(): void;
   /**
    * Remember an explicit per-session pick as the **default for future sessions**:
@@ -815,8 +825,14 @@ export class SessionRuntime {
     if (!session.nodes[nodeId] || nodeId === session.activeNodeId) {
       return;
     }
-    this.checkoutNode(session, nodeId);
-    this.currentPromptTokens = this.getLatestPromptTokens();
+    // Clicking a block only repaints the view path — but the webview may have to
+    // render a branch it never showed (markdown + layout), so it is traced like a
+    // session switch, and the `path` message carries the op id back to it.
+    startRepaintOp('checkout-node', this.sessionId, `session=${this.sessionId} node=${nodeId}`);
+    timedSync('checkout', () => {
+      this.checkoutNode(session, nodeId);
+      this.currentPromptTokens = this.getLatestPromptTokens();
+    });
     // No `reset`/`tree`: the structure is unchanged, so the webview just repaints
     // the active path in place (no tear-down → no blink), then pans to it.
     this.postPath();
@@ -877,16 +893,24 @@ export class SessionRuntime {
       bgKilled: node.bgKilled,
       bgElapsedMs: node.bgElapsedMs,
       bgOutputTail: node.bgOutputTail,
-      // Agent nodes carry their own transcript so they re-render after reload.
-      items: node.kind === 'agent' ? node.displayItems.map(clipDisplayItem) : undefined,
+      // A sub-agent card carries only its **count**: its transcript is fetched when
+      // the card is actually expanded (`onAgentItems`), because shipping every
+      // sidecar's items made one session's tree 2.3 MB and 10 k DOM elements for 8
+      // cards (see docs/agents/invariants/streaming-perf.md).
+      itemCount: node.kind === 'agent' ? node.displayItems.length : undefined,
     }));
-    this.post({
+    const message = {
       type: 'tree',
       activeId: this.activeStreamNodeId(),
       viewId: session.activeNodeId,
       rootId: session.rootId ?? null,
       nodes,
-    });
+      // Only a traced repaint (a switch / a checkout) of *this* session carries the
+      // id: the webview measures the burst it belongs to and reports it back.
+      ...opTag(this.sessionId),
+    };
+    opPayload('post-tree', message);
+    this.post(message);
   }
 
   /** The checked-out branch's transcript, grouped by node (for the tree view). */
@@ -901,7 +925,32 @@ export class SessionRuntime {
         items: node.displayItems.map(clipDisplayItem),
       };
     });
-    this.post({ type: 'path', ids, nodes });
+    const message = { type: 'path', ids, nodes, ...opTag(this.sessionId) };
+    opPayload('post-path', message);
+    this.post(message);
+  }
+
+  /**
+   * One sub-agent card asked for its transcript (`loadAgentItems`, posted by the
+   * webview when such a card is expanded). The `tree` message carries only
+   * `itemCount` for those nodes, so a session switch ships KBs instead of
+   * megabytes; this is the on-demand half of that contract.
+   */
+  onAgentItems(nodeId: string): void {
+    const node = this.session.nodes[nodeId];
+    if (!node || node.kind !== 'agent') {
+      return;
+    }
+    const items = node.displayItems.map(clipDisplayItem);
+    // Logged unconditionally: this is the on-demand half of the lazy sidecar
+    // contract, and `[perf]` is the only place a real window can confirm it fired
+    // (and how big the answer was) without a debugger.
+    perf(
+      () =>
+        `agent-items ${nodeId} items=${items.length} ` +
+        `chars=${items.reduce((n, it) => n + (it.text?.length ?? 0) + (it.content?.length ?? 0) + (it.args?.length ?? 0), 0)}`,
+    );
+    this.post({ type: 'agentItems', id: nodeId, items });
   }
 
   /** First line of the turn's answer, used as a collapsed card preview. */
@@ -999,15 +1048,23 @@ export class SessionRuntime {
 
   /** Full repaint of this session's tab (used on activation / panel rerender). */
   postAllState(): void {
-    this.currentPromptTokens = this.getLatestPromptTokens();
-    this.post({ type: 'reset' });
-    this.postState();
-    this.postTree();
-    this.postPath();
-    this.postConfig();
-    this.postContext();
-    this.postSessionStats();
-    this.postBackgrounds();
+    // A cold session switch is already traced (its op is open, for this session);
+    // a repaint nobody asked for — a window reload, a panel VS Code revived, which
+    // restores *every* chat tab at once — opens an op of its own per session, so
+    // the tabs never report on each other. Either way the webview's `paint` report
+    // closes the op.
+    startRepaintOp('panel-repaint', this.sessionId);
+    timedSync('post-all-state', () => {
+      this.currentPromptTokens = this.getLatestPromptTokens();
+      this.post({ type: 'reset', ...opTag(this.sessionId) });
+      this.postState();
+      this.postTree();
+      this.postPath();
+      this.postConfig();
+      this.postContext();
+      this.postSessionStats();
+      this.postBackgrounds();
+    });
     void this.refreshBalance();
   }
 
@@ -1228,7 +1285,9 @@ export class SessionRuntime {
         this.host.requestAutoTitle(session);
       }
     }
-    this.host.persist();
+    // A finished turn is the state that must never be lost (its history is what the
+    // next turn sends), so it is written now rather than coalesced.
+    this.host.persistNow();
     if (node && session.nodes[node.id]) {
       this.post({
         type: 'nodeUpdate',
@@ -2058,7 +2117,10 @@ export class SessionRuntime {
           job.node.agentTranscript = this.host.writeSubAgentTranscript(job, subAgent, status, summary, startedAt);
         }
         this.post({ type: 'agentDone', id: job.node.id, status, summary });
-        this.host.persist();
+        // The sub-agent's whole conversation (and the transcript dump it points at)
+        // is written now: a `send_agent_message` may resume it at any moment, and a
+        // coalesced write would lose the conversation the resume builds on.
+        this.host.persistNow();
         // This sub-agent (depth-1) may have queued its depth-2 children's completion
         // signals while it ran. Now that it stopped, the drain can hand them over:
         // an idle sub-agent node is resumed with them (a live one would have taken

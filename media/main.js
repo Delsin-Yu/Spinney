@@ -76,6 +76,162 @@
   let foldToolCalls = true;
   let foldThinking = true;
 
+  // ---- Performance probes (diagnostics only) -------------------------------
+  // The host traces one user-visible operation at a time — a session switch, a
+  // node checkout — and tags the repaint messages it sends with that operation's
+  // id (`reset` / `tree` / `path` carry `traceId`). Half of the cost of a switch
+  // happens *here* (DOM, markdown, layout), so this side measures the burst and
+  // reports it back as a `perfDiag` message, which closes the trace in the
+  // **Agent Harness** output channel (the host logs it under the same op id).
+  // Two smaller probes ride along:
+  //
+  //  - a message handler that blocks this thread for >= SLOW_HANDLER_MS is
+  //    reported by name (the webview cannot tell anyone it was stuck);
+  //  - frames are watched while a switch paints or a turn streams, and the worst
+  //    gap of the burst is reported once — a stutter *is* a long frame.
+  //
+  // All of it is optional diagnostics and must never affect the UI, so the
+  // reporting path swallows its own errors (but never the handler's).
+  const SLOW_HANDLER_MS = 40;
+  const STALL_MS = 80;
+  const FRAME_WATCH_MS = 2000;
+  const STREAM_WATCH_MS = 1000;
+  // How long the burst has to stay quiet to count as over. The repaint messages of
+  // one op are posted back to back but arrive as separate tasks, and each one
+  // resets this timer: `setTimeout(0)` would lose the race with the next message
+  // and split one switch into four reports.
+  const BURST_QUIET_MS = 50;
+  // Messages that mean "a turn is streaming": frames are watched while they arrive.
+  const STREAM_MESSAGE_TYPES = new Set([
+    'delta', 'thinkingDelta', 'toolCallDelta', 'toolEnd', 'agentStart', 'backgroundNotice',
+  ]);
+
+  let perfPending = null;   // the traced repaint burst currently being measured
+  let perfMarkdown = { ms: 0, calls: 0 };
+  let perfLayoutMs = 0;
+  let frameWatch = null;
+
+  function perfNow() {
+    return typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
+  }
+
+  /** Post one diagnostics report; a probe must never break the UI. */
+  function perfPost(kind, fields) {
+    try {
+      vscode.postMessage(Object.assign({ type: 'perfDiag', kind }, fields));
+    } catch (err) {
+      /* ignore */
+    }
+  }
+
+  /** How many elements the tree canvas holds — the DOM cost of a repaint. */
+  function perfDomCount() {
+    try {
+      return treeCanvas.querySelectorAll('*').length;
+    } catch (err) {
+      return 0;
+    }
+  }
+
+  /** Time `relayout()` for the burst report: the tidy-tree engine on a big session. */
+  function perfRelayout() {
+    const t0 = perfNow();
+    relayout();
+    perfLayoutMs += perfNow() - t0;
+  }
+
+  /** A traced repaint message: join (or start) the burst it belongs to. */
+  function perfTraceMessage(msg, ms) {
+    // A different op started while this one was still open: report what we have
+    // instead of dropping it on the floor.
+    if (perfPending && perfPending.traceId !== msg.traceId) {
+      perfTraceFlush();
+    }
+    if (!perfPending) {
+      perfMarkdown = { ms: 0, calls: 0 };
+      perfLayoutMs = 0;
+      perfPending = { traceId: msg.traceId, t0: perfNow(), ms: Object.create(null), timer: null };
+    }
+    perfPending.ms[msg.type] = (perfPending.ms[msg.type] || 0) + ms;
+    if (perfPending.timer) clearTimeout(perfPending.timer);
+    perfPending.timer = setTimeout(perfTraceFlush, BURST_QUIET_MS);
+    armFrameWatch('switch', FRAME_WATCH_MS);
+  }
+
+  /** Report the traced burst, once the browser has had a chance to paint it. */
+  function perfTraceFlush() {
+    const pending = perfPending;
+    perfPending = null;
+    if (!pending) return;
+    if (pending.timer) clearTimeout(pending.timer);
+    // This runs detached (a timer, then a frame), so a probe bug must die here.
+    try {
+      const steps = Object.keys(pending.ms)
+        .map((type) => type + '=' + Math.round(pending.ms[type]))
+        .join(',');
+      let items = 0;
+      for (const id of Object.keys(pathNodes)) items += (pathNodes[id].items || []).length;
+      requestAnimationFrame(() => {
+        perfPost('paint', {
+          traceId: pending.traceId,
+          since: Math.round(perfNow() - pending.t0),
+          steps,
+          markdown: Math.round(perfMarkdown.ms) + '/' + perfMarkdown.calls,
+          layout: Math.round(perfLayoutMs),
+          cards: Object.keys(nodeEls).length,
+          items,
+          dom: perfDomCount(),
+        });
+      });
+    } catch (err) {
+      /* diagnostics must never break the UI */
+    }
+  }
+
+  /** Watch frames for `ms` and report the worst gap of the burst. */
+  function armFrameWatch(phase, ms) {
+    if (frameWatch) {
+      frameWatch.until = Math.max(frameWatch.until, perfNow() + ms);
+      return;
+    }
+    const watch = { phase, until: perfNow() + ms, worst: 0, frames: 0, last: perfNow() };
+    frameWatch = watch;
+    const step = () => {
+      if (frameWatch !== watch) return;
+      const now = perfNow();
+      const gap = now - watch.last;
+      watch.last = now;
+      watch.frames++;
+      // A hidden window is throttled to ~1 fps, which is not a stutter anyone sees.
+      const hidden = typeof document !== 'undefined' && document.hidden;
+      if (gap >= STALL_MS && !hidden) watch.worst = Math.max(watch.worst, gap);
+      if (now >= watch.until) {
+        frameWatch = null;
+        if (watch.worst > 0) {
+          perfPost('frames', { phase: watch.phase, worst: Math.round(watch.worst), frames: watch.frames });
+        }
+        return;
+      }
+      requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  }
+
+  /** Measure one message the host sent; called from the single message listener. */
+  function perfAfterMessage(msg, ms) {
+    if (!msg || typeof msg !== 'object') return;
+    try {
+      if (msg.traceId !== undefined && msg.traceId !== null) {
+        perfTraceMessage(msg, ms);
+      } else if (ms >= SLOW_HANDLER_MS) {
+        perfPost('handler', { message: String(msg.type || '?'), ms: Math.round(ms) });
+      }
+      if (STREAM_MESSAGE_TYPES.has(msg.type)) armFrameWatch('stream', STREAM_WATCH_MS);
+    } catch (err) {
+      /* a probe must never break the UI */
+    }
+  }
+
   /**
    * Apply a changed fold default to the cards already on screen — a settings
    * change must not wait for the next repaint. Card bodies are the only state
@@ -151,10 +307,15 @@
   }
 
   function renderMarkdown(text) {
-    if (md) {
-      return md.render(text || '');
+    // Markdown is the single most expensive thing a repaint does (a long session
+    // re-renders hundreds of items), so the burst report counts it separately.
+    const t0 = perfNow();
+    try {
+      return md ? md.render(text || '') : escapeHtml(text);
+    } finally {
+      perfMarkdown.ms += perfNow() - t0;
+      perfMarkdown.calls++;
     }
-    return escapeHtml(text);
   }
 
   // ---- Manual scroll lock (the green light) ----
@@ -1023,6 +1184,17 @@
         card._needsBottomScroll = true;
       }
     }
+    // An agent node's transcript no longer rides in the `tree` / `path` payload
+    // (it was most of a big session's message): the host ships only `itemCount`,
+    // and the card fetches the items on its first expansion. `_itemsRequested`
+    // sticks to the card, so collapsing and reopening it — or a repaint that
+    // re-expands it — asks the host once, not once per expand.
+    const pendingItems = (pnode && pnode.itemCount) || meta.itemCount || 0;
+    const pendingKind = (pnode && pnode.kind) || meta.kind;
+    if (pendingItems > 0 && pendingKind === 'agent' && !card._itemsRendered && !card._itemsRequested) {
+      card._itemsRequested = true;
+      vscode.postMessage({ type: 'loadAgentItems', id });
+    }
     promptElCard.classList.remove('hidden');
     itemsEl.classList.remove('hidden');
     excerptEl.classList.add('hidden');
@@ -1580,7 +1752,7 @@
     } else {
       hideComposerCard();
     }
-    relayout();
+    perfRelayout();
     if (follow) keepActiveInView();
     updateFollowButton();
     updateBranchBanner();
@@ -1610,7 +1782,10 @@
       const pnode = pathNodes[id];
       if (!pnode) continue;
       const card = nodeEls[id];
-      if (!card._itemsRendered) {
+      // An agent node carries no `items` any more (only `itemCount`): its
+      // transcript arrives via `agentItems` after `expandedCard` below asks for
+      // it, so there is nothing to render from the path.
+      if (pnode.items && !card._itemsRendered) {
         renderNodeItems(card.querySelector('.node-items'), card.querySelector('.node-prompt'), pnode.items);
         card._itemsRendered = true;
         // Same finished-node default as in expandedCard: the thinking blocks only
@@ -1642,7 +1817,7 @@
     } else {
       hideComposerCard();
     }
-    relayout();
+    perfRelayout();
     if (follow) keepActiveInView();
     updateBranchBanner();
     updateComposerButtons();
@@ -2534,8 +2709,12 @@
     if (!nodeId || nodeId === treeActiveId) setActiveScrollLock(false);
   }
 
-  window.addEventListener('message', (event) => {
-    const msg = event.data;
+  /**
+   * One message from the host. It is called from the listener below, which times
+   * every message — a handler that blocks this thread is the one kind of stutter
+   * the webview cannot report about itself from inside the handler.
+   */
+  function handleMessage(msg) {
     switch (msg.type) {
       case 'tree':
         renderTree(msg);
@@ -2546,6 +2725,35 @@
       case 'nodeUpdate':
         applyNodeUpdate(msg);
         break;
+      case 'agentItems': {
+        // The host's answer to `loadAgentItems`: an agent node's transcript, which
+        // the `tree` / `path` payload no longer carries (only its `itemCount`).
+        // It renders exactly like the full-render path in `expandedCard`, once: a
+        // second answer for a card that already has its items — or one for a node
+        // a tree rebuild has dropped — is ignored (rendering twice would duplicate
+        // the whole transcript).
+        const card = nodeEls[msg.id];
+        if (!card || card._itemsRendered) break;
+        const itemsEl = card.querySelector('.node-items');
+        renderNodeItems(itemsEl, card.querySelector('.node-prompt'), msg.items || []);
+        card._itemsRendered = true;
+        // Same finished-node default as in `expandedCard` / `renderPath`: the
+        // thinking blocks only exist now, and this path skips their render branch.
+        if ((treeNodes[msg.id] || {}).status !== 'running') {
+          setCardScrollLock(card, false);
+          card._needsBottomScroll = true;
+        }
+        // Open the just-filled card at its newest content (a locked card is pinned
+        // there anyway, an unlocked one takes the flag `expandedCard` would).
+        if (card._itemScroll && card._itemScroll.locked) card._itemScroll.scrollToBottom();
+        else if (card._needsBottomScroll) itemsEl.scrollTop = itemsEl.scrollHeight;
+        card._needsBottomScroll = false;
+        // The items are what gives this card its height, and the card's height
+        // feeds the layout, so re-place the tree like any other card that changed
+        // size (debounced, so a burst of answers coalesces into one relayout).
+        scheduleLayout();
+        break;
+      }
       case 'panTo':
         panToNode(String(msg.id ?? ''));
         break;
@@ -2684,6 +2892,19 @@
         break;
       default:
         break;
+    }
+  }
+
+  window.addEventListener('message', (event) => {
+    const msg = event.data;
+    const t0 = perfNow();
+    try {
+      handleMessage(msg);
+    } finally {
+      // `finally`, not `catch`: a handler that throws must still reach whoever is
+      // watching for it (the extension host's console, `tools/check-webview.js`),
+      // while the measurement itself never gets in the way.
+      perfAfterMessage(msg, perfNow() - t0);
     }
   });
 

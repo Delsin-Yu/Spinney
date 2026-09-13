@@ -123,8 +123,9 @@ nodeWorkers: Map<nodeId, { agent: Agent; tools: ToolRegistry }>
 | message | shape | notes |
 | --- | --- | --- |
 | `state` | `{ sessionId, busy, status, runningNodes: string[] }` | `busy` = any run in the session; `runningNodes` = nodes with a live run. Composer shows Stop iff `runningNodes.includes(viewFocusId)`. |
-| `tree` | `{ activeId, viewId, rootId, nodes[] }` | `activeId` = stream target; `viewId` = view focus. Each node carries `kind` (`'turn' \| 'agent' \| 'bg'`), `delivered` (sidecars only) and, for a `kind:'bg'` card, its terminal snapshot (`bgTaskId` / `bgCommand` / `bgExitCode` / `bgKilled` / `bgElapsedMs` / `bgOutputTail`) so the card re-renders without asking the in-memory hub. |
-| `path` | `{ ids, nodes[] }` | the **view** path. |
+| `tree` | `{ activeId, viewId, rootId, nodes[] }` | `activeId` = stream target; `viewId` = view focus. Each node carries `kind` (`'turn' \| 'agent' \| 'bg'`), `delivered` (sidecars only) and, for a `kind:'bg'` card, its terminal snapshot (`bgTaskId` / `bgCommand` / `bgExitCode` / `bgKilled` / `bgElapsedMs` / `bgOutputTail`) so the card re-renders without asking the in-memory hub. A `kind:'agent'` node carries **`itemCount` and no `items`**: its transcript is fetched with `loadAgentItems` when the card is expanded (a session switch used to ship 2.3 MB of sidecar transcripts, and 10 k DOM elements for 8 cards). |
+| `path` | `{ ids, nodes[] }` | the **view** path. Its `nodes[].items` are complete (a checked-out node — including a sidecar — must render immediately). |
+| `agentItems` | `{ id, items }` | answer to `loadAgentItems`: that sub-agent card's transcript (`clipDisplayItem`-ed). |
 | `nodeUpdate` | `{ id, status, title, usage }` | unchanged. |
 | `panTo` | `{ id }` | unchanged (host pans the view, not the stream target). |
 | `delta` / `thinkingDelta` | `{ nodeId, text }` | **`nodeId` now always present.** |
@@ -144,6 +145,7 @@ nodeWorkers: Map<nodeId, { agent: Agent; tools: ToolRegistry }>
 | `checkout` | `{ id }` | view focus change; allowed while anything runs. |
 | `stop` | `{ nodeId? }` | stop that node's run (omit ⇒ every run of this session). |
 | `killBackground` | `{ id }` | resolved in this session (session-local ids). |
+| `loadAgentItems` | `{ id }` | that sub-agent card was expanded and wants its transcript (`tree` sent only `itemCount`); the host answers with `agentItems`. |
 | `deleteBranch`, `setNodeSize`, `killAgent`, `clear`, `pickImage`, `setModel`, `setThinkingEffort`, `openExternal`, `layoutDiagnostic`, `ready` | unchanged | `clear` clears **this session**. |
 
 All webview→host messages are handled **in the context of the panel's session**
