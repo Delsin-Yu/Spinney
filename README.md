@@ -16,6 +16,8 @@ Spinney works with a folder open and with no folder open. With no folder, a rela
 - Sub-agents run as parallel branches and report back to the parent that spawned them.
 - Press Stop to abort the turn at an active head.
 
+An agent inspects the same history with `list_nodes`, and it can hand a task to a fresh session with `hop_session`, then take back that session's answer.
+
 ## Tools
 
 Files and search:
