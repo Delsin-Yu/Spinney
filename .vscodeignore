@@ -2,11 +2,16 @@
 .vscode-test/**
 tools/**
 .spinney/**
+.agent-harness/**
+.github/**
 src/**
 node_modules/**
 .gitignore
+.gitattributes
+AGENTS.md
 tsconfig.json
 **/*.map
 **/*.ts
 build-deploy.ps1
 docs/**
+*.vsix

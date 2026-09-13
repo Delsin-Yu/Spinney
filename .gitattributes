@@ -3,3 +3,8 @@
 # media/vendor/non-layered-tidy-tree-layout/PROVENANCE.md, so a fresh clone has
 # to reproduce the published bytes exactly (see docs/agents/invariants/vendored-deps.md).
 media/vendor/** -text
+
+# Scripts: PowerShell wants CRLF (its own parsers are the only readers that care
+# about the difference), shell scripts want LF so a checkout on Linux/macOS runs.
+*.ps1 text eol=crlf
+*.sh text eol=lf

@@ -2,6 +2,6 @@
     "spinney.thinkingEffort": "medium",
     "spinney.model": "deepseek-flash",
     "spinney.commandTimeout": 600,
-    "spinney.httpApi.enabled": true,
+    "spinney.httpApi.enabled": false,
     "spinney.modelTable": {}
 }

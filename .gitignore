@@ -22,6 +22,8 @@ coverage/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+# Transcript dumps (one API message per line) written by the agent
+*.jsonl
 
 # OS
 .DS_Store
@@ -32,3 +34,5 @@ tools/hyper-vscode/.state/
 
 # Agent scratch space (screenshots, spilled tool output)
 .spinney/
+# pre-rename scratch dir, kept ignored so an older checkout stays clean
+.agent-harness/
