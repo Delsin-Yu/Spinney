@@ -1,10 +1,39 @@
 {
   "name": "spinney",
   "displayName": "Spinney",
-  "description": "A minimalistic agent harness — sidebar chat with file read/write and command execution, powered by the official DeepSeek API.",
+  "description": "A branchable agent tree for VS Code: fork any turn, run sub-agents in parallel, edit files and run shell.",
   "version": "0.0.1",
   "publisher": "deyu",
   "license": "MIT",
+  "author": {
+    "name": "Delsin-Yu",
+    "url": "https://github.com/Delsin-Yu"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Delsin-Yu/Spinney.git"
+  },
+  "bugs": {
+    "url": "https://github.com/Delsin-Yu/Spinney/issues"
+  },
+  "homepage": "https://github.com/Delsin-Yu/Spinney#readme",
+  "icon": "media/icon.png",
+  "private": true,
+  "keywords": [
+    "agent",
+    "agent harness",
+    "ai coding agent",
+    "deepseek",
+    "branching",
+    "subagent",
+    "chat tree",
+    "vscode extension"
+  ],
+  "capabilities": {
+    "untrustedWorkspaces": {
+      "supported": false
+    }
+  },
   "engines": {
     "vscode": "^1.85.0"
   },
@@ -13,8 +42,6 @@
     "Other"
   ],
   "activationEvents": [
-    "onView:spinney.sessions",
-    "onCommand:spinney.openChat",
     "onWebviewPanel:spinney.chatTree"
   ],
   "main": "./out/extension.js",
@@ -24,7 +51,7 @@
         {
           "id": "spinney",
           "title": "Spinney",
-          "icon": "$(comment-discussion)"
+          "icon": "media/activity.svg"
         }
       ]
     },
@@ -90,6 +117,14 @@
       {
         "command": "spinney.showSystemPrompt",
         "title": "Spinney: Show System Prompt"
+      },
+      {
+        "command": "spinney.setApiKey",
+        "title": "Spinney: Set API Key"
+      },
+      {
+        "command": "spinney.clearApiKey",
+        "title": "Spinney: Clear API Key"
       }
     ],
     "menus": {
@@ -136,12 +171,6 @@
     "configuration": {
       "title": "Spinney",
       "properties": {
-        "spinney.apiKey": {
-          "type": "string",
-          "default": "",
-          "markdownDescription": "DeepSeek API key. Get one at https://platform.deepseek.com. Alternatively set the `DEEPSEEK_API_KEY` environment variable.",
-          "scope": "window"
-        },
         "spinney.model": {
           "type": "string",
           "default": "deepseek-flash",
@@ -281,6 +310,7 @@
   "scripts": {
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
+    "package": "vsce package",
     "check:models": "node tools/check-models.js",
     "check:webview": "node tools/check-webview.js",
     "check:signals": "node tools/check-signal-persist.js",
@@ -288,7 +318,7 @@
   },
   "devDependencies": {
     "@types/node": "^20.11.0",
-    "@types/vscode": "^1.85.0",
+    "@types/vscode": "~1.85.0",
     "@vscode/vsce": "^3.9.2",
     "typescript": "^5.3.3"
   }
