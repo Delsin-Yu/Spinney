@@ -194,6 +194,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bottom); and the handle is painted below the card (`z-index: -1`), so the part of its
   box that reaches back over the card cannot swallow clicks meant for the Send button.
 
+- The green auto-scroll light (`.scroll-lock-dot`) is a 16px target instead of an 8px
+  one: an invisible `::before` pad sits 4px past the dot on every side, so the click
+  that toggles follow — and the hover glow that advertises it — reaches twice as far
+  while the light itself looks unchanged. The pad belongs to the dot, so the click
+  handler, the title and the `locked` state are untouched, and it grows inward, inside
+  the 20px strip the scroll container reserves below itself, clear of the scrollbar and
+  of the content above it.
+
 ### Removed
 
 - `spinney.thinkingEffort`: each model card declares its own levels and its own

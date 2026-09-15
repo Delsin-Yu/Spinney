@@ -1269,6 +1269,17 @@ button.icon-btn {
   z-index: 4;
 }
 
+/* The dot itself is a tiny target (8px). An invisible pad doubles its radius — the
+   click area reaches 8px while the visual stays an 8px light — so the pad is a
+   4px ring sitting 4px past the dot on every side. The pad belongs to the dot, so
+   a click anywhere on it toggles the lock (and the hover glow follows it). */
+.scroll-lock-dot::before {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+}
+
 .scroll-lock-dot:hover {
   opacity: 0.8;
 }
