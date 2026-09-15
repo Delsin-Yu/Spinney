@@ -538,6 +538,35 @@ if (contextLabel !== 'ctx 50%') {
   expectComposer('once nothing is running', []);
 }
 
+// A node that is *not* streaming but still owns unfinished work (a running
+// background terminal / async sub-agent batch, or a completion notice about to be
+// injected into it) locks its own composer: the send would open a second run on the
+// same line while that notice lands in the very node the new turn branches from.
+{
+  const input = elementById('input');
+  const send = elementById('send-btn');
+  const attach = elementById('attach-btn');
+  const banner = elementById('branch-banner');
+  const locked = (ids) =>
+    dispatch({ type: 'state', busy: false, status: '', sessionId: 'smoke-session', runningNodes: [], lockedNodes: ids });
+  locked([NODE_ID]);
+  if (!input.disabled || !send.disabled || !attach.disabled) {
+    problems.push(
+      'a node that still owns unfinished work leaves its composer usable (input / Send / attach must be disabled)',
+    );
+  }
+  if (!banner || banner.classList.contains('hidden') || !banner.textContent) {
+    problems.push('a locked composer explains nothing (no banner text)');
+  }
+  locked([]);
+  if (input.disabled || send.disabled || attach.disabled) {
+    problems.push('the composer stays disabled after the node reported no unfinished work');
+  }
+  if (banner && !banner.classList.contains('hidden')) {
+    problems.push('the lock banner is still shown after the node was unlocked');
+  }
+}
+
 // --- Sidecar cards: background job cards + the Delivered badge ----------------
 // A background job now renders as its own `kind:'bg'` card in the owner's sidecar
 // grid (the bottom dock is gone), and both sidecar kinds carry a `Delivered` badge

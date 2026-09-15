@@ -85,6 +85,22 @@
 - While an external controller holds the window (`host.isHeld()`), the hook returns `[]` and the
   idle drain backs off (500 ms, `runtime.ts:2343-2349`) instead of starting a turn — the reload
   must not be refused with "agent is busy".
+- **A node that owns unfinished work is locked against new sends.** While a job of
+  node X is still running (or its completion notice is already queued for X,
+  `signals`), X is reported in `state.lockedNodes`: the composer disables
+  input / Send / attach and shows a "waiting for the background task / sub-agent"
+  banner, and the host refuses a send there (`SessionRuntime.onUserMessage`,
+  `GET /state → sessions[].lockedNodes`, `/continue`, `/session/start`). The reason
+  is the delivery rule above: a user turn starts as a *child* of the node it was
+  sent from (`beginTurn`), while the notice is injected into the owner *itself*
+  (`beginInjectedTurn`), so sending from a node that is about to be injected would
+  run two agents on one conversation line — the notice would land before the user's
+  question in tree order and after it in wall-clock order, and that turn's reply
+  would never see the job's result. Only the owner is locked: a send from one of its
+  *existing* descendants is allowed (that is a different line), so a long-lived job
+  does not freeze the whole conversation below it. A job that is joined/killed
+  through a tool is settled without a notice, so the lock ends with it; killing it
+  from its card (`killBackground`) settles it the same way.
 - **Delete / clear / branch deletion:** a session, a cleared conversation or a branch that owns
   *running* jobs asks a modal confirmation first — `confirmKillBackgrounds` for delete/clear,
   `deleteBranchInteractive` for a branch (its count comes from

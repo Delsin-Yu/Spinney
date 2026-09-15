@@ -2375,6 +2375,10 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
           titleLocked: s.titleLocked === true ? true : undefined,
           running: rt ? rt.isRunning() : false,
           runningNodes: rt ? rt.runningNodes() : [],
+          // Not streaming, but still owning unfinished work (a running background
+          // job / async sub-agent batch, or a notice about to be injected into it):
+          // that node refuses a send until the work has been delivered.
+          lockedNodes: rt ? rt.lockedNodes() : [],
           runningBackgrounds: rt ? rt.hasRunningBackground() : false,
           // Which branch owns each running job: a controller can verify that a job
           // stayed with the node that spawned it while the view moved elsewhere.
@@ -2477,6 +2481,13 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     if (nodeId && rt.runningNodes().includes(nodeId)) {
       return { ok: false, error: 'the agent is busy; wait for it to finish first' };
     }
+    // Same node-scoped rule as the composer: unfinished work owned by this node
+    // (a background job, an async sub-agent batch) blocks a send until it has been
+    // delivered, or the notice would be injected into the node the new turn branches
+    // from.
+    if (nodeId && rt.lockedNodes().includes(nodeId)) {
+      return { ok: false, error: 'this node is waiting for its background task or sub-agent to finish' };
+    }
     this.panels.ensure(session.id);
     if (nodeId) {
       if (!session.nodes[nodeId]) {
@@ -2537,6 +2548,17 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       const targetNode = opts.nodeId ?? session.activeNodeId ?? session.rootId;
       if (targetNode && rt.runningNodes().includes(targetNode)) {
         return { ok: false, error: 'the agent is busy; wait for it to finish first', busy: true };
+      }
+      if (targetNode && rt.lockedNodes().includes(targetNode)) {
+        // Node-scoped like the composer: unfinished work owned by the target blocks
+        // the send, so the completion notice is not injected into the node the new
+        // turn would branch from. A queued hop return only fires when this window is
+        // globally idle, so it can never land here.
+        return {
+          ok: false,
+          error: 'this node is waiting for its background task or sub-agent to finish',
+          busy: true,
+        };
       }
       if (opts.nodeId) {
         if (!session.nodes[opts.nodeId]) {

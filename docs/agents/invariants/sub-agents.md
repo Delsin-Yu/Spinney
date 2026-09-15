@@ -28,6 +28,15 @@
   history and `pathMessages` (in `tree.ts`) skips it, so it never leaks into the parent's API path. On
   finish the sub-agent's conversation (minus the synthesized system prompt) is stored in `node.messages`
   so a follow-up can continue it, even across a restart.
+- A node whose async sub-agent batch is still running (or whose batch notice is already
+  queued for it) is **locked** against new user sends: `state.lockedNodes` reports the
+  batch's parent node, the composer disables input / Send, and the host refuses a send
+  there (`onUserMessage`, `/continue`, `/session/start`). The parent is the node the
+  notice is injected into (`beginInjectedTurn`), while a user turn branches off the node
+  it was sent from — sending while the batch is unfinished would put two agents on one
+  conversation line (notice before the question in tree order, after it in wall-clock
+  order). A depth-2 batch locks its depth-1 parent (whose own composer is hidden), not
+  the main node. See `invariants/background-terminals.md` for the same rule on jobs.
 - **`Delivered`:** a sidecar node carries `delivered` (`tree.ts:75`) once its outcome reached its
   reader, which is what the card's `Delivered` badge shows (`main.js:896-910`). A `sync`
   `spawn_agents` / `send_agent_message` hands the summary back as the caller's tool result, so

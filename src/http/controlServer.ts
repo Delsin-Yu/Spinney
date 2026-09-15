@@ -46,6 +46,13 @@ export interface ControlSessionInfo {
   running: boolean;
   /** Node ids of the session's live turn runs (empty when idle). */
   runningNodes: string[];
+  /**
+   * Node ids that are not streaming but still own unfinished work — a running
+   * background terminal, a running sub-agent batch, or a completion notice waiting
+   * to be injected into them. A send from such a node is refused (`/continue`,
+   * `/session/start`) and the composer is locked (same rule as the webview).
+   */
+  lockedNodes: string[];
   /** True while this session owns at least one running background terminal. */
   runningBackgrounds: boolean;
   /** Node ids that own at least one still-running background terminal (P2). */

@@ -36,6 +36,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- A node that owns unfinished work is now locked against new sends. While a
+  background terminal or an async sub-agent batch started by that node is still
+  running — or its completion notice is already queued for it — the composer
+  disables the input, Send and attach buttons and shows a "waiting for the
+  background task / sub-agent on this branch" banner, and the host refuses the
+  send (`onUserMessage`, `POST /continue`, `POST /session/start`). `GET /state`
+  reports those nodes as `sessions[].lockedNodes` (and `state.lockedNodes` to the
+  webview). The notice is injected into the node that owns the work while a user
+  turn branches off the node it was sent from, so sending from there used to run
+  two agents on one conversation line: the notice landed before the user's question
+  in tree order but after it in wall-clock order, and that reply never saw the job's
+  result. Only the owner is locked — its existing descendant branches stay usable,
+  so a long-lived job (a dev server) does not freeze the conversation below it.
 - The composer (the checked-out node's input dock) no longer scales. Its controls and
   fonts used to follow the host card's width — `--cs` was `card width / 560`, clamped to
   0.8–1.6, so dragging a card's resize handle (or a wide/narrow window hosting the

@@ -55,6 +55,13 @@
   // Send/Stop pair is a property of the view focus node, not of the session, so
   // this — and never `busy` — decides which of the two buttons is on screen.
   let runningNodes = new Set();
+  // Per-node: the nodes whose input is *locked* because they own unfinished work (a
+  // running background terminal / async sub-agent batch, or a completion notice
+  // about to be injected into them). They are deliberately not in `runningNodes`
+  // (no turn is streaming), but sending there would open a second run on the same
+  // line while the notice lands in this very node — so the Send button and the input
+  // are disabled until the host reports the node unlocked again.
+  let lockedNodes = new Set();
   let pendingAttachments = [];
   let currentModel = 'deepseek-chat';
   let currentEffort = 'medium';
@@ -1338,12 +1345,15 @@
   }
 
   // Composer banner + readonly: when the checked-out node already has children,
-  // sending creates a branch; when it is a read-only sub-agent node, the composer
-  // is disabled (only the main agent may drive a sub-agent via spawn/send).
+  // sending creates a branch; when it is a read-only sub-agent node, or one that
+  // still owns unfinished background / sub-agent work, the composer is disabled
+  // (only the main agent may drive a sub-agent via spawn/send, and a notice is
+  // about to be injected into the node the unfinished work belongs to).
   function updateBranchBanner() {
     if (!branchBanner) return;
     const node = treeNodes[treeActiveId];
     const isAgent = !!(node && isSidecarKind(node.kind));
+    const locked = focusIsLocked();
     // Sidecar cards are display-only, not conversational branches — only a *turn*
     // child makes the next message a branch.
     const hasTurnChildren = !!(
@@ -1352,14 +1362,18 @@
     if (isAgent) {
       branchBanner.textContent = tr('Sub-agent branch (read-only) — driven by the main agent through spawn_agents / send_agent_message');
       branchBanner.classList.remove('hidden');
+    } else if (locked) {
+      branchBanner.textContent = tr('Waiting for the background task / sub-agent on this branch to finish — sending is paused');
+      branchBanner.classList.remove('hidden');
     } else if (hasTurnChildren) {
       branchBanner.textContent = tr('⤷ branching from {0} — your reply starts a new branch', node.title || tr('(no title)'));
       branchBanner.classList.remove('hidden');
     } else {
       branchBanner.classList.add('hidden');
     }
-    // Read-only when the checked-out node is a sub-agent branch.
-    const readonly = isAgent;
+    // Read-only when the checked-out node is a sub-agent branch, or while it owes
+    // unfinished work (a strict superset of the host's own refusal).
+    const readonly = isAgent || locked;
     inputEl.disabled = readonly;
     sendBtn.disabled = readonly;
     attachBtn.disabled = readonly;
@@ -2403,6 +2417,16 @@
   }
 
   /**
+   * Whether the *view focus* node owns unfinished work of its own (a running
+   * background job / async sub-agent batch, or a notice about to be injected into
+   * it). It is not streaming, so Stop would be a lie, and a send is refused
+   * host-side — the composer therefore greys out instead of pretending to accept it.
+   */
+  function focusIsLocked() {
+    return !!treeActiveId && lockedNodes.has(treeActiveId);
+  }
+
+  /**
    * The composer shows Stop and hides Send iff the view focus node is running, and
    * the reverse otherwise. Driven by the per-node running set — never by the
    * session-level `busy` flag. Called whenever `state`, the tree, the focused path
@@ -2678,8 +2702,11 @@
     const text = inputEl.value.trim();
     // Sending targets the view focus node, so only *that* node being live blocks it
     // (the button is hidden in that case anyway); a run elsewhere in the session is
-    // exactly the "start a new concurrent run here" case (spec §1).
-    if ((!text && pendingAttachments.length === 0) || focusIsRunning()) return;
+    // exactly the "start a new concurrent run here" case (spec §1). A node that owes
+    // unfinished work is refused as well (the host refuses it too, see
+    // `lockedNodes`) — its notice would otherwise be injected into the node this
+    // turn branches from.
+    if ((!text && pendingAttachments.length === 0) || focusIsRunning() || focusIsLocked()) return;
     setFollow(true);
     vscode.postMessage({ type: 'userMessage', text, attachments: pendingAttachments });
     pendingAttachments = [];
@@ -2819,9 +2846,15 @@
         runningNodes = Array.isArray(msg.runningNodes)
           ? new Set(msg.runningNodes)
           : msg.busy ? new Set([treeActiveId]) : new Set();
+        // A host that predates the lock sends no `lockedNodes`: nothing is locked,
+        // which reproduces the old behaviour exactly.
+        lockedNodes = Array.isArray(msg.lockedNodes) ? new Set(msg.lockedNodes) : new Set();
         setBusy(msg.busy);
         setStatus(msg.status);
         rememberSession(msg.sessionId);
+        // The lock is a property of the view focus node, so a `state` that changes it
+        // must re-run the composer rules — the tree did not change.
+        updateBranchBanner();
         break;
       case 'background':
         // Legacy shape (an older host sends an untagged list): no owner is named,
@@ -2918,6 +2951,7 @@
         treeActiveId = null;
         activePathSet = new Set();
         runningNodes = new Set();
+        lockedNodes = new Set();
         messagesEl = null;
         renderTree({ nodes: [], rootId: null, activeId: null });
         break;

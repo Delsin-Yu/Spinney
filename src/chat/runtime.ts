@@ -529,6 +529,58 @@ export class SessionRuntime {
     return [...this.runs.keys()];
   }
 
+  /**
+   * Node ids whose composer must stay **locked**: the node owns work that is still
+   * unfinished and whose completion is bound to it — a running background terminal
+   * (`BackgroundHub` keys a job on the node whose turn spawned it), a running
+   * sub-agent batch (its direct `kind:'agent'` children are in `runningSubAgents`),
+   * or a completion notice already queued for it (`signals`, the window between a
+   * job finishing and its injected turn starting).
+   *
+   * Why locking, not just "Stop isn't shown": `beginTurn` starts the user's message
+   * as a *child* of the basis node, while the completion notice is injected into the
+   * basis node *itself* (`beginInjectedTurn`, `fresh:false`). Sending while a job is
+   * unfinished therefore runs two agents on one conversation line: the notice lands
+   * before the user's question in tree order but after it in wall-clock order, and
+   * the reply the user is waiting for never sees the job's result.
+   *
+   * Only the owner itself is locked — deliberately **not** its existing descendants.
+   * A send from one of those is a different line (its own path), and locking the
+   * whole subtree would freeze a long-lived job's whole conversation below it.
+   */
+  lockedNodes(): string[] {
+    const out = new Set<string>();
+    for (const hit of this.hub.listForSession(this.sessionId)) {
+      if (hit.task.status === 'running') {
+        out.add(hit.owner.nodeId);
+      }
+    }
+    for (const agentNodeId of this.runningSubAgents.keys()) {
+      const parentId = this.session.nodes[agentNodeId]?.parentId;
+      if (parentId) {
+        out.add(parentId);
+      }
+    }
+    for (const [nodeId, queue] of this.signals) {
+      if (queue.length > 0) {
+        out.add(nodeId);
+      }
+    }
+    return [...out].filter((id) => !!this.session.nodes[id]);
+  }
+
+  /** How many unfinished pieces of work `lockedNodes` is counting for one node. */
+  lockedWorkCount(nodeId: string): number {
+    let n = this.hub.runningForNode(this.sessionId, nodeId);
+    for (const agentNodeId of this.runningSubAgents.keys()) {
+      if (this.session.nodes[agentNodeId]?.parentId === nodeId) {
+        n += 1;
+      }
+    }
+    n += this.signals.get(nodeId)?.length ?? 0;
+    return n;
+  }
+
   /** True while any node worker's agent is mid-turn (defensive; see `isRunning`). */
   agentRunning(): boolean {
     for (const worker of this.nodeWorkers.values()) {
@@ -1077,6 +1129,9 @@ export class SessionRuntime {
    * Push the busy/status state for this session plus the nodes that are
    * streaming. The webview shows Stop iff the view focus is one of
    * `runningNodes`; `sessionId` lets it remember its session (vscode.setState).
+   * `lockedNodes` is the complementary rule for a node that is *not* streaming but
+   * still owns unfinished work (see `lockedNodes`): its Send and input are disabled
+   * until that work has been delivered.
    */
   postState(): void {
     this.post({
@@ -1085,6 +1140,7 @@ export class SessionRuntime {
       busy: this.isRunning(),
       status: this.lastStatus,
       runningNodes: this.runningNodes(),
+      lockedNodes: this.lockedNodes(),
     });
   }
 
@@ -1371,6 +1427,21 @@ export class SessionRuntime {
     // is known.)
     const basis = this.session.activeNodeId;
     if (basis && this.runs.has(basis)) {
+      return;
+    }
+    // The basis node still owns unfinished work (a background job, an async
+    // sub-agent batch, or a notice about to be injected into it): a send here would
+    // open a second run on the same line while that notice lands in the very node
+    // this turn branches from. The composer is locked for the same reason
+    // (`lockedNodes` in `state`), so this is the host-side half of one rule.
+    if (basis && this.lockedWorkCount(basis) > 0) {
+      this.postNotice(
+        'warning',
+        vscode.l10n.t(
+          'A background task or sub-agent is still running on this branch ({0}). Wait for it to finish, or kill it from its card, before sending.',
+          this.lockedWorkCount(basis),
+        ),
+      );
       return;
     }
     if (this.host.isHeld()) {
