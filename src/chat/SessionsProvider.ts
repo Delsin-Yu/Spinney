@@ -14,17 +14,17 @@ export interface SessionTreeItem {
 function relTime(ts: number): string {
   const sec = Math.max(0, Math.round((Date.now() - ts) / 1000));
   if (sec < 60) {
-    return 'just now';
+    return vscode.l10n.t('just now');
   }
   const min = Math.round(sec / 60);
   if (min < 60) {
-    return `${min}m ago`;
+    return vscode.l10n.t('{0}m ago', min);
   }
   const hr = Math.round(min / 60);
   if (hr < 24) {
-    return `${hr}h ago`;
+    return vscode.l10n.t('{0}h ago', hr);
   }
-  return `${Math.round(hr / 24)}d ago`;
+  return vscode.l10n.t('{0}d ago', Math.round(hr / 24));
 }
 
 /**
@@ -50,11 +50,13 @@ export class SessionsProvider implements vscode.TreeDataProvider<vscode.TreeItem
     return this.getItems().map((it) => {
       const item = new vscode.TreeItem(it.title, vscode.TreeItemCollapsibleState.None);
       item.id = it.id;
-      item.description = `${it.nodeCount} node${it.nodeCount === 1 ? '' : 's'} · ${relTime(it.updatedAt)}`;
+      const nodes =
+        it.nodeCount === 1 ? vscode.l10n.t('{0} node', it.nodeCount) : vscode.l10n.t('{0} nodes', it.nodeCount);
+      item.description = `${nodes} · ${relTime(it.updatedAt)}`;
       // Busy wins over active: the running session is always the active one, so
       // checking `active` first hid the spinner exactly when it mattered.
       item.iconPath = new vscode.ThemeIcon(it.busy ? 'sync~spin' : it.active ? 'comment-discussion' : 'comment');
-      item.command = { command: 'spinney.openSession', title: 'Open Session', arguments: [it.id] };
+      item.command = { command: 'spinney.openSession', title: vscode.l10n.t('Open Session'), arguments: [it.id] };
       item.contextValue = 'session';
       return item;
     });

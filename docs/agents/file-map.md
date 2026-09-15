@@ -78,6 +78,10 @@
 - `src/agent/profile.ts` — `describeAgent(profile, registryTools, facts?)`: the
   prompt **and** the tools array for one (role, model, effort, capabilities)
   profile — the public entry point for "what does the model actually receive".
+- `src/languageTags.ts` — the canonical ↔ reported tag pair for the two Chinese
+  scripts (`zh-Hans` ↔ `zh-cn`), and nothing else. Deliberately import-free: an
+  extension host module, a pure agent module and the `tools/` dev scripts all read
+  it, and the scripts `require('../out/languageTags.js')` outside the host.
 - `src/agent/languages.ts` — `replyLanguageName(value, vscodeLocale)`: the
   reply-language setting (`auto` or a VS Code language tag) → the language **name**
   the prompt carries, named through `Intl.DisplayNames` so the tag list lives only
@@ -89,10 +93,31 @@
   and its accessors (`DEFAULT_MODEL`, `isVisionModel`, `contextWindowFor`,
   `visionModelsLabel`). The **only** place a model id may appear;
   `tools/check-models.js` enforces that on every package.
-- `tools/check-models.js` · `tools/check-webview.js` — the two packaging guards
-  (`npm run check:models` / `check:webview`, run by `vscode:prepublish`): model-id
-  drift, and "does the chat webview still survive every message the provider
-  posts". See `testing.md`.
+- `src/i18n.ts` — the UI localisation entry point: which display language
+  (`vscode.env.language`, normalized) the host is in, the `l10n/bundle.l10n.<locale>.json`
+  reader behind the webview's injected dictionary (`webviewL10n`,
+  `ChatViewProvider.getHtml`), the `[i18n]` diagnostic line, and the
+  `defaultSessionTitle()` / `isDefaultSessionTitle()` pair that keeps the stored
+  "nobody named this session yet" sentinel working across languages. See
+  `invariants/i18n.md`.
+- `l10n/bundle.l10n.<locale>.json` · `package.nls.<locale>.json` — the shipped
+  catalogs, keyed by the **English source string**, named by the language's
+  **canonical** tag (`zh-Hans`, never `zh-cn`); `package.nls.json` holds the
+  English manifest values. One catalog serves the host (`vscode.l10n.t`, resolved
+  by VS Code) and the webview (`tr()` in `media/main.js`, fed by the injected
+  dictionary). English needs no runtime file. Adding a string means adding it here
+  too — `check:l10n` fails packaging otherwise.
+- `tools/sync-l10n-aliases.js` — writes (and, with `--clean`, removes) the
+  reported-tag copies of those catalogs, because VS Code only ever looks a catalog
+  up by the tag *it* reports. Run by `vscode:prepublish` before `vsce` reads the
+  tree, cleaned up by `build-deploy.ps1`'s `finally` and `npm run clean:l10n`; the
+  four names are gitignored. See `docs/agents/invariants/i18n.md`.
+- `tools/check-models.js` · `tools/check-webview.js` · `tools/check-signal-persist.js`
+  · `tools/check-l10n.js` — the packaging guards (`npm run check:models` /
+  `check:webview` / `check:signals` / `check:l10n`, run by `vscode:prepublish`):
+  model-id drift, "does the chat webview still survive every message the provider
+  posts", the completion-signal persistence contract, and the UI catalogs drifting
+  from the code. See `testing.md`.
 - `src/agent/tools/` — one file per intercepted tool (`readImage`, `spawnAgents`,
   `spawnReadonlyAgents`, `sendAgentMessage`, `sendReadonlyAgentMessage`,
   `hopSession`, `listNodes`, `renameSession`) plus the barrel that filters them.
@@ -133,6 +158,10 @@
 - `media/main.js` — webview client (tree rendering, pan/zoom, streaming into the
   active node, composer, streaming meter, live tool drafts, drag-to-resize cards,
   background job cards + `.bgnotify` notification blocks).
+  Every string it displays goes through its own `tr(message, ...args)` (defined at
+  the top of the file): the host has no `vscode.l10n` inside a webview, so it
+  injects the catalog as `window.__spinneyL10n` and `tr()` looks the English source
+  string up in it — see `invariants/i18n.md`.
   It also carries the webview half of the `[perf]` traces (its perf block, near the
   top): it measures the repaint burst the host tagged with a `traceId`, the markdown
   and layout inside it, its own frame gaps and any slow message handler, and posts

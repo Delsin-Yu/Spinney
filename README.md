@@ -90,12 +90,14 @@ Uninstall Spinney from the Extensions view. Then delete the folder `<globalStora
 ## Development
 
 1. `npm install`
-2. `npm run compile`
+2. `npm run dev` — `compile` plus `sync:l10n`. The Chinese catalogs VS Code looks up
+   are generated from the canonical ones, so a plain `npm run compile` leaves the
+   manifest and host strings English in this window (`docs/agents/invariants/i18n.md`).
 3. Press F5. This opens an Extension Development Host window.
 
-Three build guards run before packaging: `npm run check:models`, `npm run check:webview`, and `npm run check:signals`.
+Four build guards run before packaging: `npm run check:models`, `npm run check:webview`, `npm run check:signals`, and `npm run check:l10n`.
 
-Dev tooling lives in `tools/`: the guards, the acceptance driver `harness-test.mjs`, the `hvsc` supervisor, and one migration script. A change under `tools/` needs no build and no reload; that folder is not shipped in the `.vsix`.
+Dev tooling lives in `tools/`: the guards, `sync-l10n-aliases.js` (the generated l10n aliases), the acceptance driver `harness-test.mjs`, the `hvsc` supervisor, and one migration script. A change under `tools/` needs no build and no reload; that folder is not shipped in the `.vsix`.
 
 ## Migrating data from an older build
 

@@ -1,5 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import * as vscode from 'vscode';
 import { DeepSeekClient, DeepSeekError, RetryInfo } from './deepseek';
 import { ToolRegistry, resolvePath } from '../tools';
 import {
@@ -128,7 +129,12 @@ function buildInterruptNotice(tools: InterruptedToolCall[]): string {
  */
 function retryStatus(info: RetryInfo): string {
   const seconds = info.delayMs >= 1_000 ? `${Math.round(info.delayMs / 1_000)}s` : `${info.delayMs}ms`;
-  return `Model call failed (${info.attempt}/${info.maxAttempts}); retrying in ${seconds}…`;
+  return vscode.l10n.t(
+    'Model call failed ({0}/{1}); retrying in {2}…',
+    info.attempt,
+    info.maxAttempts,
+    seconds,
+  );
 }
 
 /**
@@ -596,7 +602,7 @@ export class Agent {
           throw new Error('interrupted');
         }
 
-        this.onEvent({ type: 'status', text: 'Thinking…' });
+        this.onEvent({ type: 'status', text: vscode.l10n.t('Thinking…') });
         const reqStart = Date.now();
         const { message: assistant, indices, usage } = await this.requestAssistantMessage(signal);
         perf(
@@ -660,7 +666,7 @@ export class Agent {
         if (usage) {
           this.onEvent({ type: 'usage', usage });
         }
-        this.onEvent({ type: 'status', text: 'Done' });
+        this.onEvent({ type: 'status', text: vscode.l10n.t('Done') });
         this.onEvent({ type: 'done' });
         return;
       }
@@ -1030,7 +1036,10 @@ export class Agent {
       // the offending image from the request body (the stored history keeps it)
       // and retry.
       if (imageRetry < 8 && this.markRejectedImages(err)) {
-        this.onEvent({ type: 'status', text: 'The provider rejected an image; hiding it and retrying…' });
+        this.onEvent({
+          type: 'status',
+          text: vscode.l10n.t('The provider rejected an image; hiding it and retrying…'),
+        });
         return this.requestAssistantMessage(signal, imageRetry + 1);
       }
       throw err;

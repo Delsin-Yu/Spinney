@@ -20,7 +20,7 @@ A change to anything under `src/`, `media/`, or `package.json` is not finished u
 
 - The version follows SemVer. We are at `0.x`, which is pre-1.0: a breaking change bumps the minor version only.
 - Tag every release as `vX.Y.Z`.
-- `vscode:prepublish` (compile plus the three guards) is the release gate: a release does not ship when that script fails.
+- `vscode:prepublish` (compile plus the four guards) is the release gate: a release does not ship when that script fails.
 - `CHANGELOG.md` uses the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
 ## Hard invariants (read before you touch code)
@@ -38,6 +38,7 @@ A change to anything under `src/`, `media/`, or `package.json` is not finished u
 - Model and thinking effort are per session (one per `SessionRuntime`; the default comes from the global record / setting).
 - `host.isHeld()` blocks every turn start (the `/wait-for-finish` hold, including injected background and sub-agent notification turns): self-driven reloads win the race through it, so do not weaken it.
 - `npm run check:models` fails packaging when a model id is hard-coded in `src/**`: always read model names from `src/agent/models.ts`.
+- Every user-visible string is localized, and each one is written as the English source inside a single `vscode.l10n.t('…')` (host) or `tr('…')` (webview) literal — never concatenated, never a template literal, because `npm run check:l10n` extracts the keys from exactly that shape and fails packaging when a shipped catalog misses one. The webview cannot call `vscode.l10n`; the host injects the catalog as `window.__spinneyL10n`. See `docs/agents/invariants/i18n.md`.
 - `npm run check:webview` loads `media/main.js` into an in-memory DOM before packaging and replays every provider message type; a "reference to a deleted identifier" inside a webview callback is silent in the real UI (it freezes on stale values), and this guard exists to catch it.
 
 ## Directory (the body lives in `docs/agents/`)
@@ -50,5 +51,6 @@ A change to anything under `src/`, `media/`, or `package.json` is not finished u
 - Multi-session / concurrency: `multi-session` (multi-tab + session/branch concurrency, the frozen P1–P4 contract) · the acceptance driver `tools/harness-test.mjs` (dev-only, not shipped in the `.vsix`)
 - Control plane / desktop: `control-plane` (includes hop_session / list_nodes)
 - Other invariants: `invariants/line-endings` · `invariants/config-keys` · `invariants/streaming-perf` · `invariants/vendored-deps`
+- UI text / i18n: `invariants/i18n` (one catalog per language, the two lookup paths, the `check:l10n` guard, what is deliberately left English)
 - No-workspace mode (no folder open): `no-repo-mode` (root, session storage, behavior differences)
 - Acceptance and artifacts: `testing` · `scratch-space`

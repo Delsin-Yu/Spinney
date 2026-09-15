@@ -1,6 +1,30 @@
 (function () {
   const vscode = acquireVsCodeApi();
 
+  /**
+   * Translate one UI string into the VS Code display language.
+   *
+   * `message` is the English source string, and it doubles as the key in the
+   * host's catalog (`l10n/bundle.l10n.<locale>.json`). A webview has no
+   * `vscode.l10n`, so the host injects the whole catalog as `window.__spinneyL10n`
+   * in the HTML shell and this looks the string up in it. An English window — and
+   * any string the catalog does not carry (a stale bundle, a brand-new string) —
+   * falls back to `message` itself, so the UI never shows a raw key, and
+   * `check-webview.js`, which loads this file with no dictionary at all, still
+   * works.
+   *
+   * `{0}`, `{1}`, … are the placeholders, exactly like `vscode.l10n.t`, so a
+   * translation is free to reorder the sentence around its arguments.
+   */
+  function tr(message, ...args) {
+    const dict = window.__spinneyL10n;
+    let text = (dict && dict[message]) || message;
+    for (let i = 0; i < args.length; i++) {
+      text = text.split('{' + i + '}').join(String(args[i]));
+    }
+    return text;
+  }
+
   const treeWrap = document.getElementById('tree-wrap');
   const treeCanvas = document.getElementById('tree-canvas');
   const treeEdges = document.getElementById('tree-edges');
@@ -356,8 +380,8 @@
     };
   }
 
-  const LOCK_TITLE_ON = 'Auto-scroll on — click to release';
-  const LOCK_TITLE_OFF = 'Auto-scroll off — click to follow again';
+  const LOCK_TITLE_ON = tr('Auto-scroll on — click to release');
+  const LOCK_TITLE_OFF = tr('Auto-scroll off — click to follow again');
 
   // A green lock dot lives on the host of a scrollable container, in the strip
   // reserved below it (the container keeps a bottom margin so the dot sits just
@@ -402,7 +426,7 @@
         const img = document.createElement('img');
         img.className = 'msg-img';
         img.src = att.dataUrl;
-        img.title = att.name || 'image';
+        img.title = att.name || tr('image');
         imgWrap.appendChild(img);
       }
       node.appendChild(imgWrap);
@@ -434,7 +458,7 @@
     if (!messagesEl) return;
     const node = el('div', 'msg harness-note');
     node.dataset.kind = 'harness';
-    node.appendChild(el('span', 'harness-badge', 'HARNESS'));
+    node.appendChild(el('span', 'harness-badge', tr('HARNESS')));
     node.appendChild(el('span', 'harness-text', text));
     messagesEl.appendChild(node);
     followActive();
@@ -446,7 +470,7 @@
     const head = el('div', 'thinking-head');
     const chev = el('span', 'chev', '▶');
     head.appendChild(chev);
-    head.appendChild(el('span', 'thinking-label', 'Thinking'));
+    head.appendChild(el('span', 'thinking-label', tr('Thinking')));
     box.appendChild(head);
     const body = el('div', 'thinking-body hidden');
     if (thinking) body.textContent = thinking;
@@ -583,9 +607,14 @@
   function formatUsage(usage) {
     const hit = usage.prompt_cache_hit_tokens ?? 0;
     const miss = usage.prompt_cache_miss_tokens ?? 0;
-    return 'tokens ' + usage.total_tokens +
-      ' (prompt ' + usage.prompt_tokens + ' + completion ' + usage.completion_tokens + ')' +
-      ' · cache hit ' + hit + ' / miss ' + miss;
+    return tr(
+      'tokens {0} (prompt {1} + completion {2}) · cache hit {3} / miss {4}',
+      usage.total_tokens,
+      usage.prompt_tokens,
+      usage.completion_tokens,
+      hit,
+      miss,
+    );
   }
 
   function appendUsage(usage) {
@@ -632,7 +661,7 @@
       } else if (m[2]) {
         const open = stack.pop();
         if (open && open.label === m[2]) {
-          out.push('[raw ' + open.label + ': ' + (m.index - open.start) + ' chars]');
+          out.push(tr('[raw {0}: {1} chars]', open.label, m.index - open.start));
         }
       }
     }
@@ -673,7 +702,7 @@
     head.appendChild(el('span', 'tool-name', name));
     // A brief (e.g. the path/command) so the collapsed card is still informative.
     head.appendChild(el('span', 'tool-brief', toolBrief(name, args)));
-    const status = el('span', 'tool-status running', 'running');
+    const status = el('span', 'tool-status running', tr('running'));
     status.dataset.role = 'status';
     head.appendChild(status);
     node.appendChild(head);
@@ -744,7 +773,7 @@
     head.appendChild(chev);
     const nameEl = el('span', 'tool-name', name || '');
     head.appendChild(nameEl);
-    const status = el('span', 'tool-status streaming', 'streaming');
+    const status = el('span', 'tool-status streaming', tr('streaming'));
     status.dataset.role = 'status';
     head.appendChild(status);
     node.appendChild(head);
@@ -807,7 +836,7 @@
 
     if (name) node._nameEl.textContent = name;
     node._statusEl.className = 'tool-status running';
-    node._statusEl.textContent = 'running';
+    node._statusEl.textContent = tr('running');
 
     node._bodyEl.innerHTML = '';
     if (args && args !== '{}') {
@@ -844,7 +873,7 @@
     const statusEl = node.querySelector('.tool-status');
     if (statusEl) {
       statusEl.className = 'tool-status done';
-      statusEl.textContent = 'done';
+      statusEl.textContent = tr('done');
     }
     const body = node.querySelector('.tool-body');
     if (body) {
@@ -862,10 +891,10 @@
     if (statusEl) {
       if (status === 'done') {
         statusEl.className = 'tool-status done';
-        statusEl.textContent = 'done';
+        statusEl.textContent = tr('done');
       } else {
         statusEl.className = 'tool-status running';
-        statusEl.textContent = 'running';
+        statusEl.textContent = tr('running');
       }
     }
   }
@@ -879,7 +908,7 @@
     // are told apart at a glance (they used to share the same "BG").
     head.appendChild(el('span', 'bgnotify-badge ' + (item.kind === 'subagent' ? 'sub' : 'bg'), item.kind === 'subagent' ? 'SUB' : 'BG'));
     head.appendChild(el('span', 'bgnotify-id', '#' + (item.id != null ? item.id : '')));
-    head.appendChild(el('span', 'bgnotify-status', item.doneText || 'finished'));
+    head.appendChild(el('span', 'bgnotify-status', item.doneText || tr('finished')));
     node.appendChild(head);
     if (item.name || item.cmd) {
       node.appendChild(el('div', 'bgnotify-cmd', item.name || item.cmd));
@@ -967,8 +996,8 @@
   let bgTasks = new Map();
 
   function killBackgroundButton(id) {
-    const kill = el('button', 'bg-kill', 'kill');
-    kill.title = 'Kill background terminal ' + id;
+    const kill = el('button', 'bg-kill', tr('kill'));
+    kill.title = tr('Kill background terminal {0}', id);
     kill.addEventListener('click', (ev) => {
       ev.stopPropagation();
       // The id is session-local; the host resolves it inside this panel's session.
@@ -978,14 +1007,14 @@
   }
 
   function statusTextFor(task, meta) {
-    if (task && task.status === 'running') return 'running';
-    if (task && task.pendingDelivery) return 'pending delivery';
-    if (task && task.killed) return 'killed';
-    if (task) return 'exit ' + (task.exitCode != null ? task.exitCode : '?');
+    if (task && task.status === 'running') return tr('running');
+    if (task && task.pendingDelivery) return tr('pending delivery');
+    if (task && task.killed) return tr('killed');
+    if (task) return tr('exit {0}', task.exitCode != null ? task.exitCode : '?');
     // No live snapshot: the job is over (its card is a record now).
-    if (meta && meta.bgKilled) return 'killed';
-    if (meta && meta.bgExitCode != null) return 'exit ' + meta.bgExitCode;
-    return meta && meta.status ? meta.status : 'finished';
+    if (meta && meta.bgKilled) return tr('killed');
+    if (meta && meta.bgExitCode != null) return tr('exit {0}', meta.bgExitCode);
+    return meta && meta.status ? meta.status : tr('finished');
   }
 
   /** Output tail: the live snapshot when the job runs, else the stored terminal one. */
@@ -1079,7 +1108,7 @@
     const wanted = !!(meta && meta.delivered && isSidecarKind(meta.kind));
     let badge = byClass(card, 'node-delivered-badge');
     if (wanted && !badge) {
-      badge = el('span', 'node-delivered-badge', 'Delivered');
+      badge = el('span', 'node-delivered-badge', tr('Delivered'));
       const head = card.querySelector('.node-head');
       const status = head.querySelector('.node-status');
       if (status) head.insertBefore(badge, status); else head.appendChild(badge);
@@ -1110,7 +1139,7 @@
       card.style.maxHeight = meta.size.h + 'px';
     }
     const head = el('div', 'node-head');
-    const title = el('span', 'node-title', meta.title || '(no title)');
+    const title = el('span', 'node-title', meta.title || tr('(no title)'));
     const status = el('span', 'node-status', meta.status || '');
     status.dataset.role = 'status';
     head.appendChild(title);
@@ -1129,7 +1158,7 @@
     // action is not one stray click away. The host asks for a modal confirmation
     // before it removes anything (history + transcript dumps).
     const del = el('button', 'node-del', '🗑');
-    del.title = 'Delete this branch — this turn and everything below it';
+    del.title = tr('Delete this branch — this turn and everything below it');
     del.addEventListener('click', (ev) => {
       ev.stopPropagation();
       vscode.postMessage({ type: 'deleteBranch', id });
@@ -1151,7 +1180,7 @@
 
     // Drag handle to resize the card (bottom-right).
     const handle = el('div', 'node-resize');
-    handle.title = 'Drag to resize';
+    handle.title = tr('Drag to resize');
     card.appendChild(handle);
 
     // Internal transcript scroll + green lock dot. A live turn follows its own
@@ -1277,7 +1306,7 @@
       const child = treeNodes[c];
       return child && !isSidecarKind(child.kind);
     });
-    const label = meta && meta.status === 'error' ? '↻ Retry' : '▶ Continue';
+    const label = meta && meta.status === 'error' ? tr('↻ Retry') : tr('▶ Continue');
     const show = !!id && terminal && !hasTurnChild && !isSidecarKind(meta.kind) && !runningNodes.has(id);
     if (!show) {
       if (btn) btn.remove();
@@ -1290,8 +1319,8 @@
     const button = el('button', 'node-continue', label);
     button.title =
       meta.status === 'error'
-        ? 'Ask the harness to retry this turn (it sends the message for you)'
-        : 'Ask the harness to continue from here (it sends the message for you)';
+        ? tr('Ask the harness to retry this turn (it sends the message for you)')
+        : tr('Ask the harness to continue from here (it sends the message for you)');
     button.addEventListener('click', (ev) => {
       ev.stopPropagation();
       vscode.postMessage({ type: 'continueTurn', id });
@@ -1321,10 +1350,10 @@
       node && node.children && node.children.some((c) => treeNodes[c] && !isSidecarKind(treeNodes[c].kind))
     );
     if (isAgent) {
-      branchBanner.textContent = 'Sub-agent branch (read-only) — driven by the main agent through spawn_agents / send_agent_message';
+      branchBanner.textContent = tr('Sub-agent branch (read-only) — driven by the main agent through spawn_agents / send_agent_message');
       branchBanner.classList.remove('hidden');
     } else if (hasTurnChildren) {
-      branchBanner.textContent = '⤷ branching from ' + (node.title || '(no title)') + ' — your reply starts a new branch';
+      branchBanner.textContent = tr('⤷ branching from {0} — your reply starts a new branch', node.title || tr('(no title)'));
       branchBanner.classList.remove('hidden');
     } else {
       branchBanner.classList.add('hidden');
@@ -1403,7 +1432,7 @@
   // button, and expand it so the live run is visible.
   function onAgentStart(msg) {
     if (!nodeEls[msg.id]) {
-      createNodeCard(msg.id, treeNodes[msg.id] || { title: 'Sub-agent', status: 'running', kind: 'agent' });
+      createNodeCard(msg.id, treeNodes[msg.id] || { title: tr('Sub-agent'), status: 'running', kind: 'agent' });
     }
     const card = nodeEls[msg.id];
     if (!card) return;
@@ -1424,10 +1453,10 @@
       const del = head.querySelector('.node-del');
       if (del) head.insertBefore(info, del); else head.appendChild(info);
     }
-    info.textContent = `d${msg.depth || 1} · ${msg.model || ''}${msg.write ? ' · write' : ' · ro'}`;
+    info.textContent = tr('d{0} · {1} · {2}', msg.depth || 1, msg.model || '', msg.write ? tr('write') : tr('ro'));
     if (!card.querySelector('.node-kill')) {
       const kill = el('button', 'node-kill', '✕');
-      kill.title = 'Kill this sub-agent';
+      kill.title = tr('Kill this sub-agent');
       kill.addEventListener('click', (ev) => {
         ev.stopPropagation();
         vscode.postMessage({ type: 'killAgent', id: msg.id });
@@ -1446,7 +1475,7 @@
       routeTo(msg.id, () => finalizeStreamingAnswer());
       const statusEl = card.querySelector('.node-status');
       if (statusEl) {
-        statusEl.textContent = msg.status === 'done' ? 'done' : msg.status === 'error' ? 'error' : 'interrupted';
+        statusEl.textContent = msg.status === 'done' ? tr('done') : msg.status === 'error' ? tr('error') : tr('interrupted');
         statusEl.dataset.status = msg.status === 'done' ? 'done' : msg.status === 'error' ? 'error' : 'interrupted';
       }
       const kill = card.querySelector('.node-kill');
@@ -1835,7 +1864,7 @@
     if (!composerCard) {
       composerCard = el('div', 'node expanded active composer-node');
       const head = el('div', 'node-head');
-      head.appendChild(el('span', 'node-title', 'New session'));
+      head.appendChild(el('span', 'node-title', tr('New session')));
       head.addEventListener('click', () => inputEl.focus());
       composerCard.appendChild(head);
       treeCanvas.appendChild(composerCard);
@@ -1912,7 +1941,7 @@
   function updateFollowButton() {
     if (followBtn) {
       followBtn.classList.toggle('active', follow);
-      followBtn.title = follow ? 'Following the active node' : 'Follow the active node';
+      followBtn.title = follow ? tr('Following the active node') : tr('Follow the active node');
     }
   }
 
@@ -2223,7 +2252,7 @@
     closeNodeMenu();
     const menu = el('div', 'node-menu');
     menu.dataset.id = id;
-    const item = el('button', 'node-menu-item', 'Copy node ID');
+    const item = el('button', 'node-menu-item', tr('Copy node ID'));
     // The id is the whole payload, so it is also the tooltip: the header's title is
     // a derived sentence, and pasting *it* is never what the menu is for.
     item.title = id;
@@ -2450,7 +2479,7 @@
     const pct = total > 0 ? Math.min(100, (used / total) * 100) : 0;
     contextLabel.textContent = 'ctx ' + (total > 0 ? Math.round(pct) : 0) + '%';
     const elCtx = document.getElementById('context');
-    if (elCtx) elCtx.title = 'Context: ' + used + ' / ' + total + ' tokens (' + pct.toFixed(1) + '%)';
+    if (elCtx) elCtx.title = tr('Context: {0} / {1} tokens ({2}%)', used, total, pct.toFixed(1));
   }
 
   let statsCacheData = null;
@@ -2473,21 +2502,22 @@
       const totalCache = statsCacheData.cacheHit + statsCacheData.cacheMiss;
       if (totalCache > 0) {
         parts.push(
-          'prompt-cache hit ' + statsCacheData.cacheHit + ' / ' + totalCache +
-          ' (' + statsCacheData.cacheHitRate.toFixed(1) + '%)',
+          tr('prompt-cache hit {0} / {1} ({2}%)', statsCacheData.cacheHit, totalCache,
+            statsCacheData.cacheHitRate.toFixed(1)),
         );
       }
     }
     if (statsBalanceData && statsBalanceData.balances && statsBalanceData.balances.length) {
       const wallet = statsBalanceData.balances.map((b) => {
         const sym = currencySymbol(b.currency);
-        return sym + b.totalBalance.toFixed(2) +
-          ' (granted ' + sym + b.grantedBalance.toFixed(2) +
-          ' + topped up ' + sym + b.toppedUpBalance.toFixed(2) + ')';
+        return tr('{0} (granted {1} + topped up {2})',
+          sym + b.totalBalance.toFixed(2),
+          sym + b.grantedBalance.toFixed(2),
+          sym + b.toppedUpBalance.toFixed(2));
       });
-      parts.push('wallet ' + wallet.join(' · '));
+      parts.push(tr('wallet {0}', wallet.join(' · ')));
     }
-    elStats.title = parts.length ? 'Session: ' + parts.join(' · ') : '';
+    elStats.title = parts.length ? tr('Session: {0}', parts.join(' · ')) : '';
   }
 
   function setSessionStats(stats) {
@@ -2594,8 +2624,8 @@
     if (!hasVisionModel()) {
       showAttachHint(
         VISION_MODELS.length > 0
-          ? 'Switch to a vision model (' + VISION_MODELS.join(' / ') + ') to attach an image.'
-          : 'No image-capable model is configured — declare one in spinney.modelTable to attach an image.',
+          ? tr('Switch to a vision model ({0}) to attach an image.', VISION_MODELS.join(' / '))
+          : tr('No image-capable model is configured — declare one in spinney.modelTable to attach an image.'),
       );
       return;
     }
@@ -2611,11 +2641,11 @@
       item.className = 'pending-att';
       const img = document.createElement('img');
       img.src = att.dataUrl;
-      img.title = att.name || 'image';
+      img.title = att.name || tr('image');
       const rm = document.createElement('button');
       rm.className = 'remove-att';
       rm.textContent = '×';
-      rm.title = 'Remove';
+      rm.title = tr('Remove');
       rm.addEventListener('click', () => {
         pendingAttachments.splice(i, 1);
         renderPendingAttachments();
@@ -2868,11 +2898,11 @@
         break;
       case 'interrupted':
         endRun(msg);
-        setStatus('Interrupted');
+        setStatus(tr('Interrupted'));
         break;
       case 'error':
-        endRun(msg, () => addAssistant('⚠️ ' + msg.message, true));
-        setStatus('Error');
+        endRun(msg, () => addAssistant(tr('⚠️ {0}', msg.message), true));
+        setStatus(tr('Error'));
         break;
       case 'notice':
         addNotice(msg.kind, msg.text);
@@ -2974,7 +3004,7 @@
   // ---- Input handlers ----
   sendBtn.addEventListener('click', send);
   stopBtn.addEventListener('click', () => {
-    setStatus('Stopping…');
+    setStatus(tr('Stopping…'));
     // Stop only the view focus node's run (spec §3.2): other nodes stay running.
     // A null focus (no node) means "stop everything in this session".
     vscode.postMessage({ type: 'stop', nodeId: treeActiveId });
@@ -3027,7 +3057,7 @@
   // Initial handshake.
   vscode.postMessage({ type: 'ready' });
   renderTree({ nodes: [], rootId: null, activeId: null });
-  setStatus('Ready');
+  setStatus(tr('Ready'));
   updateImageVisibility();
   updateFollowButton();
 })();

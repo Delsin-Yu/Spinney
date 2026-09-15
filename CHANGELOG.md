@@ -17,6 +17,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Simplified Chinese`, `Brazilian Portuguese`, …). Changing
   it mid-conversation warns that the next request may miss the prompt cache, like a
   model or thinking-effort change.
+- UI localization: every user-visible string — the chat window (webview), dialogs,
+  the sidebar, and the manifest (command titles, setting descriptions) — now
+  follows the VS Code display language, and the extension ships Simplified Chinese
+  (`zh-Hans`) and Traditional Chinese (`zh-Hant`). One catalog per language
+  (`l10n/bundle.l10n.<locale>.json`, keyed by the English source string) serves the
+  host and the webview; `package.nls.<locale>.json` serves `package.json`. The files
+  are named by the region-invariant tag, while VS Code still looks a catalog up by
+  the region tag it reports (`zh-cn` / `zh-tw` for the language packs), so those
+  copies are generated at package time (`npm run sync:l10n`) and removed again once
+  the `.vsix` is written. English needs no file — the source strings are the English
+  catalog — and any other language falls back to it. A new packaging guard
+  (`npm run check:l10n`) fails the build when a catalog and the code drift apart — a
+  string with no translation, a stale entry, a mismatched `{0}` placeholder, or a
+  generated copy that is missing or stale. The **Spinney** output channel prints an
+  `[i18n]` line naming the display language it resolved, the catalog it read, and the
+  copy VS Code reads for the host strings.
 
 ## [0.0.1] - 2026-09-14
 

@@ -50,6 +50,7 @@ import {
   turnCount,
 } from './sessionTitles';
 import { agentRootInfo, getWorkspaceRoot, resolvePath } from '../tools';
+import { defaultSessionTitle, displayLocale, l10nDiagnostics, webviewL10n } from '../i18n';
 import { BackgroundHub } from './backgroundHub';
 import { ChatPanel } from './ChatPanel';
 import { PanelManager } from './panels';
@@ -265,6 +266,10 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     this.mediaVersion = Date.now().toString(36);
     this.output = vscode.window.createOutputChannel('Spinney');
     setPerfSink((line) => this.output.appendLine(line));
+    // Which display language the UI is in, and whether a catalog was found for it
+    // (see src/i18n.ts): a non-English window without one simply stays English, and
+    // this line is the only way to tell that apart from "nothing to translate".
+    this.output.appendLine(l10nDiagnostics(this.extensionUri));
     // The host's own event loop is watched from here on: a stall in the extension
     // host (persist, a tree rebuild) shows up as a late timer, which no `perf()`
     // line can report while it is blocked.
@@ -403,11 +408,13 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    */
   async setApiKeyInteractive(): Promise<void> {
     const value = await vscode.window.showInputBox({
-      prompt: 'DeepSeek API key — stored in the OS-encrypted secret storage, not in settings.json.',
+      prompt: vscode.l10n.t(
+        'DeepSeek API key — stored in the OS-encrypted secret storage, not in settings.json.',
+      ),
       placeHolder: 'sk-…',
       password: true,
       ignoreFocusOut: true,
-      validateInput: (input) => (input.trim() ? undefined : 'An API key is required.'),
+      validateInput: (input) => (input.trim() ? undefined : vscode.l10n.t('An API key is required.')),
     });
     const key = (value ?? '').trim();
     if (!key) {
@@ -415,13 +422,15 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     }
     if (!this.secrets) {
       void vscode.window.showErrorMessage(
-        'Spinney: this host has no secret storage; set the DEEPSEEK_API_KEY environment variable instead.',
+        vscode.l10n.t(
+          'Spinney: this host has no secret storage; set the DEEPSEEK_API_KEY environment variable instead.',
+        ),
       );
       return;
     }
     await this.secrets.store(API_KEY_SECRET, key);
     await this.loadApiKey('setApiKey');
-    void vscode.window.showInformationMessage('Spinney: API key saved.');
+    void vscode.window.showInformationMessage(vscode.l10n.t('Spinney: API key saved.'));
   }
 
   /** `spinney.clearApiKey`: drop the stored key (`DEEPSEEK_API_KEY` may still serve requests). */
@@ -430,8 +439,8 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     await this.loadApiKey('clearApiKey');
     void vscode.window.showInformationMessage(
       this.apiKey
-        ? 'Spinney: stored API key cleared — still using the DEEPSEEK_API_KEY environment variable.'
-        : 'Spinney: API key cleared.',
+        ? vscode.l10n.t('Spinney: stored API key cleared — still using the DEEPSEEK_API_KEY environment variable.')
+        : vscode.l10n.t('Spinney: API key cleared.'),
     );
   }
 
@@ -446,10 +455,11 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       return;
     }
     this.missingKeyNotified = true;
+    const SET_API_KEY = vscode.l10n.t('Set API Key');
     void vscode.window
-      .showWarningMessage('Spinney: no DeepSeek API key is configured yet.', 'Set API Key')
+      .showWarningMessage(vscode.l10n.t('Spinney: no DeepSeek API key is configured yet.'), SET_API_KEY)
       .then((pick) => {
-        if (pick === 'Set API Key') {
+        if (pick === SET_API_KEY) {
           void vscode.commands.executeCommand('spinney.setApiKey');
         }
       });
@@ -1080,7 +1090,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   private createSessionInMemory(): AgentSession {
     const session: AgentSession = {
       id: newId(),
-      title: 'New session',
+      title: defaultSessionTitle(),
       createdAt: Date.now(),
       updatedAt: Date.now(),
       nodes: {},
@@ -1169,10 +1179,10 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       return;
     }
     const title = await vscode.window.showInputBox({
-      prompt: 'Session title — renaming locks it, so automatic naming will not overwrite it.',
+      prompt: vscode.l10n.t('Session title — renaming locks it, so automatic naming will not overwrite it.'),
       value: session.title,
-      placeHolder: 'Short, one line',
-      validateInput: (value) => (value.trim() ? undefined : 'A title is required.'),
+      placeHolder: vscode.l10n.t('Short, one line'),
+      validateInput: (value) => (value.trim() ? undefined : vscode.l10n.t('A title is required.')),
     });
     if (title === undefined) {
       return; // cancelled
@@ -1188,7 +1198,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     }
     if (!buildTitleDigest(session)) {
       void vscode.window.showInformationMessage(
-        'This session has no conversation yet — there is nothing to name from.',
+        vscode.l10n.t('This session has no conversation yet — there is nothing to name from.'),
       );
       return;
     }
@@ -1831,7 +1841,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
 
   private panelTitle(sessionId: string): string {
     const session = this.sessions.find((s) => s.id === sessionId);
-    return `Agent Chat Tree — ${session ? session.title : 'Session'}`;
+    return vscode.l10n.t('Agent Chat Tree — {0}', session ? session.title : vscode.l10n.t('Session'));
   }
 
   /** A tab became the focused one: `activeSessionId` is exactly that. */
@@ -1982,7 +1992,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    */
   private async confirmKillBackgrounds(detail: string, action: string): Promise<boolean> {
     const pick = await vscode.window.showWarningMessage(
-      'Background terminals are still running.',
+      vscode.l10n.t('Background terminals are still running.'),
       { modal: true, detail },
       action,
     );
@@ -2000,16 +2010,20 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     if (rt && rt.isRunning()) {
       rt.postNotice(
         'warning',
-        'Cannot delete a session while a turn is running. Wait for it to finish (or stop it) first.',
+        vscode.l10n.t(
+          'Cannot delete a session while a turn is running. Wait for it to finish (or stop it) first.',
+        ),
       );
       return;
     }
     const jobs = rt ? rt.runningBackgroundCount() : 0;
     if (jobs > 0 && !confirmedKill) {
       void this.confirmKillBackgrounds(
-        `${jobs} background terminal(s) of this session are still running. Deleting the session kills them ` +
-          '(their processes are torn down).',
-        'Delete session and kill',
+        vscode.l10n.t(
+          '{0} background terminal(s) of this session are still running. Deleting the session kills them (their processes are torn down).',
+          jobs,
+        ),
+        vscode.l10n.t('Delete session and kill'),
       ).then((ok) => {
         if (ok) {
           this.deleteSession(id, true);
@@ -2031,7 +2045,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   async deleteSessionsInteractive(ids: string[]): Promise<void> {
     const known = ids.filter((id) => this.sessions.some((s) => s.id === id));
     if (known.length === 0) {
-      void vscode.window.showInformationMessage('No sessions are selected.');
+      void vscode.window.showInformationMessage(vscode.l10n.t('No sessions are selected.'));
       return;
     }
     if (known.length === 1) {
@@ -2043,7 +2057,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     const doomed = known.filter((id) => !busy.includes(id));
     if (doomed.length === 0) {
       void vscode.window.showWarningMessage(
-        'Every selected session is running a turn. Stop them (or wait for them) and try again.',
+        vscode.l10n.t('Every selected session is running a turn. Stop them (or wait for them) and try again.'),
       );
       return;
     }
@@ -2053,17 +2067,19 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     );
     const jobs = doomed.reduce((n, id) => n + (this.runtimes.get(id)?.runningBackgroundCount() ?? 0), 0);
     const detail = [
-      `${doomed.length} session(s) and ${turns} turn card(s) are removed from this window.`,
-      'Their transcript dumps are deleted from disk, so search_transcripts will no longer find them.',
-      jobs > 0 ? `${jobs} running background terminal(s) will be killed.` : '',
-      busy.length > 0 ? `Skipped (a turn is running): ${busy.length} session(s).` : '',
-      'This cannot be undone.',
+      vscode.l10n.t('{0} session(s) and {1} turn card(s) are removed from this window.', doomed.length, turns),
+      vscode.l10n.t(
+        'Their transcript dumps are deleted from disk, so search_transcripts will no longer find them.',
+      ),
+      jobs > 0 ? vscode.l10n.t('{0} running background terminal(s) will be killed.', jobs) : '',
+      busy.length > 0 ? vscode.l10n.t('Skipped (a turn is running): {0} session(s).', busy.length) : '',
+      vscode.l10n.t('This cannot be undone.'),
     ]
       .filter(Boolean)
       .join('\n');
-    const label = `Delete ${doomed.length} Sessions`;
+    const label = vscode.l10n.t('Delete {0} Sessions', doomed.length);
     const pick = await vscode.window.showWarningMessage(
-      `Delete ${doomed.length} sessions?`,
+      vscode.l10n.t('Delete {0} sessions?', doomed.length),
       { modal: true, detail },
       label,
     );
@@ -2078,7 +2094,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     this.finishDeletions();
     if (busy.length > 0) {
       void vscode.window.showInformationMessage(
-        `${busy.length} session(s) were left running and not deleted.`,
+        vscode.l10n.t('{0} session(s) were left running and not deleted.', busy.length),
       );
     }
     this.outputLog(
@@ -2148,16 +2164,20 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     if (rt.isRunning()) {
       rt.postNotice(
         'warning',
-        'Cannot clear the conversation while a turn is running. Wait for it to finish (or stop it) first.',
+        vscode.l10n.t(
+          'Cannot clear the conversation while a turn is running. Wait for it to finish (or stop it) first.',
+        ),
       );
       return;
     }
     const jobs = rt.runningBackgroundCount();
     if (jobs > 0 && !confirmedKill) {
       void this.confirmKillBackgrounds(
-        `${jobs} background terminal(s) of this session are still running. Clearing the conversation kills them ` +
-          '(their processes are torn down).',
-        'Clear and kill',
+        vscode.l10n.t(
+          '{0} background terminal(s) of this session are still running. Clearing the conversation kills them (their processes are torn down).',
+          jobs,
+        ),
+        vscode.l10n.t('Clear and kill'),
       ).then((ok) => {
         if (ok) {
           this.clear(id, true);
@@ -2171,7 +2191,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     delete session.titleAutoAt;
     delete session.titleAutoNodes;
     if (!session.titleLocked) {
-      session.title = 'New session';
+      session.title = defaultSessionTitle();
       session.titleSource = 'provisional';
       this.notifyStateChanged();
     }
@@ -2209,22 +2229,34 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     // so the confirmation says so before anything is torn down.
     const jobs = rt.runningBackgroundsForNodes(ids);
     const detail = [
-      `History: ${turns} turn(s)${agents > 0 ? ` and ${agents} sub-agent card(s)` : ''} are removed from this conversation.`,
-      'Transcripts: their JSONL dumps are deleted from disk, so search_transcripts will no longer find them.',
+      agents > 0
+        ? vscode.l10n.t(
+            'History: {0} turn(s) and {1} sub-agent card(s) are removed from this conversation.',
+            turns,
+            agents,
+          )
+        : vscode.l10n.t('History: {0} turn(s) are removed from this conversation.', turns),
+      vscode.l10n.t(
+        'Transcripts: their JSONL dumps are deleted from disk, so search_transcripts will no longer find them.',
+      ),
       jobs > 0
-        ? `Background: ${jobs} running terminal(s) owned by this branch will be killed.`
+        ? vscode.l10n.t('Background: {0} running terminal(s) owned by this branch will be killed.', jobs)
         : '',
-      'The checked-out node moves to the parent of the deleted branch.',
-      'This cannot be undone.',
+      vscode.l10n.t('The checked-out node moves to the parent of the deleted branch.'),
+      vscode.l10n.t('This cannot be undone.'),
     ]
       .filter(Boolean)
       .join('\n');
+    const DELETE_BRANCH = vscode.l10n.t('Delete Branch');
     const pick = await vscode.window.showWarningMessage(
-      `Delete this branch — "${node.title || 'untitled'}" and everything below it?`,
+      vscode.l10n.t(
+        'Delete this branch — "{0}" and everything below it?',
+        node.title || vscode.l10n.t('untitled'),
+      ),
       { modal: true, detail },
-      'Delete Branch',
+      DELETE_BRANCH,
     );
-    if (pick !== 'Delete Branch') {
+    if (pick !== DELETE_BRANCH) {
       return false;
     }
     return this.deleteBranch(session.id, nodeId);
@@ -2235,7 +2267,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     const session = this.getActiveSession();
     const nodeId = session?.activeNodeId;
     if (!session || !nodeId) {
-      void vscode.window.showInformationMessage('There is no checked-out turn to delete.');
+      void vscode.window.showInformationMessage(vscode.l10n.t('There is no checked-out turn to delete.'));
       return false;
     }
     return this.deleteBranchInteractive(session.id, nodeId);
@@ -2248,10 +2280,10 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    */
   private branchDeletionBlocked(session: AgentSession, rt: SessionRuntime, nodeId: string): string {
     if (rt.isRunning() || rt.agentRunning()) {
-      return 'Cannot delete a branch while the agent is running. Wait for the turn to finish.';
+      return vscode.l10n.t('Cannot delete a branch while the agent is running. Wait for the turn to finish.');
     }
     if (branchIds(session, nodeId).some((id) => rt.hasRunningSubAgent(id))) {
-      return 'Cannot delete a branch that contains a running sub-agent. Kill it first.';
+      return vscode.l10n.t('Cannot delete a branch that contains a running sub-agent. Kill it first.');
     }
     return '';
   }
@@ -2299,7 +2331,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       delete session.titleAutoAt;
       delete session.titleAutoNodes;
       if (!session.titleLocked) {
-        session.title = 'New session';
+        session.title = defaultSessionTitle();
         session.titleSource = 'provisional';
       }
       this.panels.setTitle(session.id, this.panelTitle(session.id));
@@ -2618,7 +2650,10 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    */
   private async dispatchUserMessage(rt: SessionRuntime, text: string, attachments: UserAttachment[]): Promise<void> {
     if (this.isHeld()) {
-      rt.postNotice('warning', 'An external controller is rebooting the window; please wait a moment.');
+      rt.postNotice(
+        'warning',
+        vscode.l10n.t('An external controller is rebooting the window; please wait a moment.'),
+      );
       return;
     }
     // A send is the moment a key matters: nudge once (never block — the request
@@ -2755,7 +2790,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       return;
     }
     await vscode.env.clipboard.writeText(id);
-    vscode.window.setStatusBarMessage(`Copied node id: ${id}`, 2000);
+    vscode.window.setStatusBarMessage(vscode.l10n.t('Copied node id: {0}', id), 2000);
   }
 
   /** Kill every running background terminal (session delete / extension dispose). */
@@ -2817,20 +2852,26 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     const layoutEngineUri = withV(String(webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'vendor', 'non-layered-tidy-tree-layout', 'dist', 'non-layered-tidy-tree-layout.js'))));
     const styleUri = withV(String(webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'style.css'))));
     const nonce = this.getNonce();
+    // The webview has no `vscode.l10n`, so it gets the whole catalog as one
+    // inline dictionary and looks strings up itself (media/main.js `tr()`). The
+    // shell below is host-rendered and asks `vscode.l10n` directly — the same key,
+    // one catalog file (see src/i18n.ts).
+    const l10n = JSON.stringify(webviewL10n(this.extensionUri)).replace(/</g, '\\u003c');
 
     return `<!DOCTYPE html>
-<html lang="en">
+<html lang="${displayLocale()}">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; font-src ${webview.cspSource}; img-src ${webview.cspSource} https: data:; script-src 'nonce-${nonce}';" />
   <link rel="stylesheet" href="${styleUri}" />
   <title>Spinney</title>
+  <script nonce="${nonce}">window.__spinneyL10n = ${l10n};</script>
 </head>
 <body>
   <div id="tree-toolbar">
-    <button id="follow-btn" class="active" title="Follow the active node">⦿</button>
-    <button id="fit-btn" title="Fit the tree to view">⤢</button>
+    <button id="follow-btn" class="active" title="${vscode.l10n.t('Follow the active node')}">⦿</button>
+    <button id="fit-btn" title="${vscode.l10n.t('Fit the tree to view')}">⤢</button>
   </div>
   <div id="tree-wrap">
     <div id="tree-canvas">
@@ -2841,33 +2882,33 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     <div id="branch-banner" class="hidden"></div>
     <div id="attachments"></div>
     <div id="composer-row">
-      <textarea id="input" placeholder="Ask the agent… (Enter to send, Shift+Enter for newline)" rows="1" spellcheck="false" autocorrect="off" autocapitalize="off" autocomplete="off"></textarea>
+      <textarea id="input" placeholder="${vscode.l10n.t('Ask the agent… (Enter to send, Shift+Enter for newline)')}" rows="1" spellcheck="false" autocorrect="off" autocapitalize="off" autocomplete="off"></textarea>
       <div id="composer-controls">
-        <button id="attach-btn" class="icon-btn" title="Attach image" aria-label="Attach image">
+        <button id="attach-btn" class="icon-btn" title="${vscode.l10n.t('Attach image')}" aria-label="${vscode.l10n.t('Attach image')}">
           <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
         </button>
-        <select id="model-select" title="Model"></select>
-        <select id="effort-select" title="Thinking effort">
-          <option value="none">none</option>
-          <option value="low">low</option>
-          <option value="medium">medium</option>
-          <option value="high">high</option>
+        <select id="model-select" title="${vscode.l10n.t('Model')}"></select>
+        <select id="effort-select" title="${vscode.l10n.t('Thinking effort')}">
+          <option value="none">${vscode.l10n.t('none')}</option>
+          <option value="low">${vscode.l10n.t('low')}</option>
+          <option value="medium">${vscode.l10n.t('medium')}</option>
+          <option value="high">${vscode.l10n.t('high')}</option>
         </select>
         <div id="actions">
-          <button id="stop-btn" class="hidden">Stop</button>
-          <button id="send-btn">Send</button>
+          <button id="stop-btn" class="hidden">${vscode.l10n.t('Stop')}</button>
+          <button id="send-btn">${vscode.l10n.t('Send')}</button>
         </div>
       </div>
     </div>
-    <div id="meter-row-readout" title="Session prompt-cache hit rate + wallet">
+    <div id="meter-row-readout" title="${vscode.l10n.t('Session prompt-cache hit rate + wallet')}">
       <span id="status-dot" class="dot idle"></span>
       <span id="status-text"></span>
       <span id="metrics">
-        <span id="context" title="Context window usage">
+        <span id="context" title="${vscode.l10n.t('Context window usage')}">
           <span id="context-label">ctx 0%</span>
         </span>
         <span id="stat-balance">bal –</span>
-        <span id="tps-meter" title="Token generation rate (realtime estimate)">
+        <span id="tps-meter" title="${vscode.l10n.t('Token generation rate (realtime estimate)')}">
           <span id="tps-value">0</span>
           <span id="tps-unit">tok/s</span>
         </span>

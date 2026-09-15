@@ -12,6 +12,16 @@ dist/
 # Packaged VS Code extension
 *.vsix
 
+# Generated, never committed: the reported-tag copies of the l10n catalogs, which
+# VS Code reads by the tag it reports rather than by the canonical one the repo
+# authors. `npm run sync:l10n` writes them for the length of a package run and
+# `--clean` removes them again (docs/agents/invariants/i18n.md); the entries here
+# are the net that catches a leftover after an interrupted one.
+package.nls.zh-cn.json
+package.nls.zh-tw.json
+l10n/bundle.l10n.zh-cn.json
+l10n/bundle.l10n.zh-tw.json
+
 # Test / coverage
 .vscode-test/
 coverage/

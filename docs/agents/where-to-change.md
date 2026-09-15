@@ -23,6 +23,12 @@
   `style.css` maps every colour token in `:root` to a `--vscode-*` theme variable
   (the hex values are fallbacks only) so the panel follows light/dark/HC themes —
   keep any new colour theme-driven rather than hardcoded.
+- **Add or reword a user-visible string** → write it as the English source inside
+  one literal: `vscode.l10n.t('…')` in the host, `tr('…')` in `media/main.js`, or
+  `%key%` + `package.nls.json` for `package.json`; then add the entry to every
+  shipped catalog (`l10n/bundle.l10n.*.json`, `package.nls.*.json`). `npm run
+  check:l10n` fails packaging when the two sides drift. See
+  `docs/agents/invariants/i18n.md`.
 - **Change session persistence** → `loadSessions`/`persist`/`runtimeFor` in
   `ChatViewProvider.ts` and the `StorageKey`s; a session's shape (including the P4
   `model`/`effort` fields) is in `src/chat/tree.ts` (`normalizeTreeSession` keeps old

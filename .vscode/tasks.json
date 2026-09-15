@@ -10,6 +10,13 @@
     },
     {
       "type": "npm",
+      "script": "dev",
+      "group": "build",
+      "problemMatcher": "$tsc",
+      "label": "npm: dev"
+    },
+    {
+      "type": "npm",
       "script": "watch",
       "isBackground": true,
       "group": "build",

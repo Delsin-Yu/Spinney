@@ -63,6 +63,7 @@ import {
 } from './tree';
 import { ToolRegistry } from '../tools';
 import { BackgroundTask } from '../tools/background';
+import { defaultSessionTitle, isDefaultSessionTitle } from '../i18n';
 import { BackgroundHub, BackgroundOwner } from './backgroundHub';
 import { SubAgentPool } from './SubAgentPool';
 import { sumUsage, summarizeTranscript } from './transcript';
@@ -701,11 +702,16 @@ export class SessionRuntime {
     this.postConfig();
     this.postContext();
     if (this.hasHistory()) {
-      let notice =
-        'Model changed to ' + next + '. Existing conversation history was produced under a different model, so the next request may miss the prompt cache and reprocess the full context.';
+      let notice = vscode.l10n.t(
+        'Model changed to {0}. Existing conversation history was produced under a different model, so the next request may miss the prompt cache and reprocess the full context.',
+        next,
+      );
       if (!isVisionModel(next) && this.activeSessionHasImages()) {
         notice +=
-          ' Image blocks are hidden for this text-only model (the image data is kept) and will be restored when you switch back to a vision model.';
+          ' ' +
+          vscode.l10n.t(
+            'Image blocks are hidden for this text-only model (the image data is kept) and will be restored when you switch back to a vision model.',
+          );
       }
       this.postNotice('warning', notice);
     }
@@ -755,7 +761,10 @@ export class SessionRuntime {
     if (this.hasHistory()) {
       this.postNotice(
         'warning',
-        'Thinking effort changed to "' + effort + '". This affects the next request; the prompt cache may be missed.',
+        vscode.l10n.t(
+          'Thinking effort changed to "{0}". This affects the next request; the prompt cache may be missed.',
+          effort,
+        ),
       );
     }
     this.host.output.appendLine(`[config] thinkingEffort=${effort}${explicit ? ' (session pick)' : ' (settings)'}`);
@@ -787,9 +796,10 @@ export class SessionRuntime {
     if (this.hasHistory()) {
       this.postNotice(
         'warning',
-        'Reply language changed to "' +
-          next +
-          '". The system prompt changed with it, so the next request may miss the prompt cache and reprocess the full context.',
+        vscode.l10n.t(
+          'Reply language changed to "{0}". The system prompt changed with it, so the next request may miss the prompt cache and reprocess the full context.',
+          next,
+        ),
       );
     }
     this.host.output.appendLine(`[config] replyLanguage=${next}`);
@@ -1206,7 +1216,9 @@ export class SessionRuntime {
     if (parentId != null && this.runs.has(parentId)) {
       this.postNotice(
         'warning',
-        'A turn is already running in this session. Wait for it to finish (or stop it) before sending another.',
+        vscode.l10n.t(
+          'A turn is already running in this session. Wait for it to finish (or stop it) before sending another.',
+        ),
       );
       return null;
     }
@@ -1362,7 +1374,10 @@ export class SessionRuntime {
       return;
     }
     if (this.host.isHeld()) {
-      this.postNotice('warning', 'An external controller is rebooting the window; please wait a moment.');
+      this.postNotice(
+        'warning',
+        vscode.l10n.t('An external controller is rebooting the window; please wait a moment.'),
+      );
       return;
     }
     const userText = text.trim();
@@ -1374,14 +1389,19 @@ export class SessionRuntime {
     // and tell the user to switch models.
     if (attachments.length > 0 && !isVisionModel(this.model)) {
       const vision = visionModelsLabel();
+      const model = this.model || DEFAULT_MODEL;
       this.postNotice(
         'warning',
-        'Images are not supported by the current model (' +
-          (this.model || DEFAULT_MODEL) +
-          '). ' +
-          (vision
-            ? `Switch to a vision model (${vision}) to attach or paste an image.`
-            : 'No vision model is configured for this harness.'),
+        vision
+          ? vscode.l10n.t(
+              'Images are not supported by the current model ({0}). Switch to a vision model ({1}) to attach or paste an image.',
+              model,
+              vision,
+            )
+          : vscode.l10n.t(
+              'Images are not supported by the current model ({0}). No vision model is configured for this harness.',
+              model,
+            ),
       );
       attachments = [];
     }
@@ -1393,7 +1413,7 @@ export class SessionRuntime {
     let content: string | ContentPart[];
     if (attachments.length > 0) {
       this.setBusy(true);
-      this.lastStatus = 'Uploading images…';
+      this.lastStatus = vscode.l10n.t('Uploading images…');
       this.post({ type: 'status', text: this.lastStatus });
       this.uploadController = new AbortController();
       const uploadSignal = this.uploadController.signal;
@@ -1414,8 +1434,8 @@ export class SessionRuntime {
             // Another branch may still be streaming; only this session's own
             // upload is ending here.
             this.syncBusy();
-            this.lastStatus = 'Interrupted';
-            this.post({ type: 'status', text: 'Interrupted' });
+            this.lastStatus = vscode.l10n.t('Interrupted');
+            this.post({ type: 'status', text: vscode.l10n.t('Interrupted') });
             this.post({ type: 'interrupted' });
             return;
           }
@@ -1425,7 +1445,10 @@ export class SessionRuntime {
       }
       this.uploadController = null;
       if (failed.length > 0) {
-        this.postNotice('warning', 'Could not upload: ' + failed.join(', ') + '. Those images were omitted.');
+        this.postNotice(
+          'warning',
+          vscode.l10n.t('Could not upload: {0}. Those images were omitted.', failed.join(', ')),
+        );
       }
       if (parts.length === 0) {
         // Nothing to send (no text and every upload failed).
@@ -1450,8 +1473,8 @@ export class SessionRuntime {
     // automatic namer replaces it with a model-generated title once the turn
     // finishes).
     const session = this.session;
-    if (session.title === 'New session' && (userText || attachments.length > 0)) {
-      session.title = (userText || 'New session').slice(0, 40);
+    if (isDefaultSessionTitle(session.title) && (userText || attachments.length > 0)) {
+      session.title = (userText || defaultSessionTitle()).slice(0, 40);
       session.titleSource = 'provisional';
       this.host.stateChanged();
     }
@@ -1466,7 +1489,7 @@ export class SessionRuntime {
     run.items.push({ kind: 'user', text: userText, attachments });
     this.post({ type: 'user', text: userText, attachments });
     this.setBusy(true);
-    this.lastStatus = 'Thinking…';
+    this.lastStatus = vscode.l10n.t('Thinking…');
     this.post({ type: 'status', text: this.lastStatus });
     void run.agent.sendUserMessage(content);
   }
@@ -1504,7 +1527,10 @@ export class SessionRuntime {
       return false;
     }
     if (this.host.isHeld()) {
-      this.postNotice('warning', 'An external controller is rebooting the window; please wait a moment.');
+      this.postNotice(
+        'warning',
+        vscode.l10n.t('An external controller is rebooting the window; please wait a moment.'),
+      );
       return false;
     }
     const failure = node.status === 'error' ? lastFailureText(node) : undefined;
@@ -1520,7 +1546,7 @@ export class SessionRuntime {
     run.items.push({ kind: 'harness', text: message });
     this.post({ type: 'harnessNote', nodeId: node.id, text: message });
     this.setBusy(true);
-    this.lastStatus = 'Thinking…';
+    this.lastStatus = vscode.l10n.t('Thinking…');
     this.post({ type: 'status', text: this.lastStatus });
     // Patch just this card: the chip follows the run, and the ▶ button goes away
     // for the duration (the webview hides it while the node has a live run).
@@ -1566,8 +1592,8 @@ export class SessionRuntime {
   async handlePickImage(): Promise<void> {
     const result = await vscode.window.showOpenDialog({
       canSelectMany: false,
-      filters: { Images: ['png', 'jpg', 'jpeg', 'gif', 'webp'] },
-      openLabel: 'Attach Image',
+      filters: { [vscode.l10n.t('Images')]: ['png', 'jpg', 'jpeg', 'gif', 'webp'] },
+      openLabel: vscode.l10n.t('Attach Image'),
     });
     if (!result || result.length === 0) {
       return;
@@ -1652,7 +1678,7 @@ export class SessionRuntime {
           // Once a tool call starts running, reflect it in the header instead of
           // the generic "Thinking…".
           if (event.name) {
-            this.lastStatus = `Calling ${event.name}…`;
+            this.lastStatus = vscode.l10n.t('Calling {0}…', event.name);
             this.post({ type: 'status', text: this.lastStatus });
           }
           run.items.push({
@@ -1688,8 +1714,8 @@ export class SessionRuntime {
         if (run) this.flushStreamDeltas(run);
         // Preserve an informative final status (e.g. loop-limit note) if one was
         // set; otherwise fall back to a simple "Done".
-        if (!this.lastStatus || this.lastStatus === 'Thinking…') {
-          this.lastStatus = 'Done';
+        if (!this.lastStatus || this.lastStatus === vscode.l10n.t('Thinking…')) {
+          this.lastStatus = vscode.l10n.t('Done');
         }
         this.post({ type: 'status', text: this.lastStatus });
         this.post({ type: 'done', nodeId: run?.nodeId });
@@ -1701,7 +1727,7 @@ export class SessionRuntime {
         break;
       case 'interrupted':
         if (run) this.flushStreamDeltas(run);
-        this.lastStatus = 'Interrupted';
+        this.lastStatus = vscode.l10n.t('Interrupted');
         this.post({ type: 'interrupted', nodeId: run?.nodeId });
         // Remember, per node, which worker holds the pending interruption notice,
         // so a turn that continues from this node still gets it while a
@@ -1715,11 +1741,11 @@ export class SessionRuntime {
       case 'error':
         if (run) {
           this.flushStreamDeltas(run);
-          this.lastStatus = 'Error';
+          this.lastStatus = vscode.l10n.t('Error');
           run.items.push({ kind: 'assistant', text: `⚠️ ${event.message}`, error: true });
           this.post({ type: 'error', message: event.message, nodeId: run.nodeId });
         } else {
-          this.lastStatus = 'Error';
+          this.lastStatus = vscode.l10n.t('Error');
         }
         if (run) this.finishTurn(run, 'error');
         this.syncBusy();
@@ -2786,7 +2812,9 @@ export class SessionRuntime {
         continue;
       }
       this.renderSignalCards(nodeId, batch);
-      this.lastStatus = batch.some((s) => s.kind === 'subagent') ? 'Sub-agents finished' : 'Background terminal finished';
+      this.lastStatus = batch.some((s) => s.kind === 'subagent')
+        ? vscode.l10n.t('Sub-agents finished')
+        : vscode.l10n.t('Background terminal finished');
       this.setBusy(true);
       this.post({ type: 'status', text: this.lastStatus });
       // Re-affirm the view in the webview BEFORE the turn streams: a nested sub-agent
@@ -2913,7 +2941,7 @@ export class SessionRuntime {
       return;
     }
     if (hit.task.status !== 'running') {
-      this.postNotice('info', `Background terminal ${id} is not running.`);
+      this.postNotice('info', vscode.l10n.t('Background terminal {0} is not running.', id));
       return;
     }
     // User-initiated kill: notify the agent (queue if busy, deliver if idle).

@@ -131,12 +131,15 @@ export function activate(context: vscode.ExtensionContext): void {
       // Invoked from the palette (no explicit session id): deleting is
       // irreversible (conversation + transcript dumps), so confirm first.
       if (!explicit) {
+        const DELETE = vscode.l10n.t('Delete');
         const pick = await vscode.window.showWarningMessage(
-          'Delete the current Spinney session? Its conversation and transcript dumps are removed.',
+          vscode.l10n.t(
+            'Delete the current Spinney session? Its conversation and transcript dumps are removed.',
+          ),
           { modal: true },
-          'Delete',
+          DELETE,
         );
-        if (pick !== 'Delete') {
+        if (pick !== DELETE) {
           return;
         }
       }
@@ -150,7 +153,7 @@ export function activate(context: vscode.ExtensionContext): void {
         return;
       }
       await vscode.env.clipboard.writeText(id);
-      vscode.window.setStatusBarMessage(`Copied session id: ${id}`, 2000);
+      vscode.window.setStatusBarMessage(vscode.l10n.t('Copied session id: {0}', id), 2000);
     }),
     vscode.commands.registerCommand('spinney.deleteBranch', () => {
       // Deletes the branch rooted at the checked-out turn; the provider asks for

@@ -1,3 +1,4 @@
+import { CANONICAL_TAGS } from '../languageTags';
 import { DEFAULT_REPLY_LANGUAGE } from './prompt';
 
 /**
@@ -16,21 +17,6 @@ import { DEFAULT_REPLY_LANGUAGE } from './prompt';
  * names verbatim, so the dropdown in Settings reads exactly like the prompt does.
  */
 export const AUTO_REPLY_LANGUAGE = 'auto';
-
-/**
- * Tags whose CLDR name reads differently from the wording VS Code uses in its own
- * language picker. Both name the same script, so aliasing just picks the clearer
- * wording: "Simplified Chinese" over "Chinese (China)".
- *
- * The setting stores the canonical `zh-Hans` / `zh-Hant` (nothing here needs an
- * alias for those), but the region tags still arrive — from `vscode.env.language`,
- * which reports `zh-cn` / `zh-tw`, and from a `settings.json` written before the
- * rename.
- */
-const TAG_ALIASES: Record<string, string> = {
-  'zh-cn': 'zh-Hans',
-  'zh-tw': 'zh-Hant',
-};
 
 /**
  * A plausible BCP-47 language tag ("ja", "zh-cn", "zh-Hans"). A free-form name
@@ -64,7 +50,10 @@ export function replyLanguageName(value: string, vscodeLocale: string): string {
   }
   try {
     const names = new Intl.DisplayNames(['en'], { type: 'language' });
-    return names.of(TAG_ALIASES[candidate.toLowerCase()] ?? candidate) || candidate;
+    // `zh-cn` / `zh-tw` still arrive (what `vscode.env.language` reports, and what
+    // an older `settings.json` holds); `CANONICAL_TAGS` is the one place that knows
+    // they mean `zh-Hans` / `zh-Hant`. See `src/languageTags.ts`.
+    return names.of(CANONICAL_TAGS[candidate.toLowerCase()] ?? candidate) || candidate;
   } catch {
     return candidate; // not a tag this runtime can name
   }

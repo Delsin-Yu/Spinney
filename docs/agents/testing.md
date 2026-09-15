@@ -10,7 +10,7 @@ flow exercises read/write/exec against a scratch file (`_e2e.txt` is a leftover 
 fixture, safe to ignore or delete). Before a release, confirm `npm run compile` is clean and
 `build-deploy.ps1` succeeds.
 
-Three build-time guards are the exception, all run by `vscode:prepublish` so a
+Four build-time guards are the exception, all run by `vscode:prepublish` so a
 regression fails *packaging* instead of the user's session:
 
 - `npm run check:models` (`tools/check-models.js`) — model ids: the settings enum
@@ -38,6 +38,15 @@ regression fails *packaging* instead of the user's session:
   path (`pathMessages`) and the checkout chain (`leafOf`). It round-trips a fixture
   through `migrateState` — the exact load path `loadSessions` uses — so it needs
   `out/` and therefore runs after `compile` in `vscode:prepublish`.
+- `npm run check:l10n` (`tools/check-l10n.js`) — the UI catalogs: it extracts every
+  translatable key from the code (`vscode.l10n.t('<literal>'` in `src/**`,
+  `tr('<literal>'` in `media/*.js`, `%key%` in `package.json`) and fails when a
+  shipped catalog is missing one (the window would silently stay English), keeps a
+  stale one (a reworded string), or disagrees on `{0}` placeholders; it also checks
+  that `package.nls.<locale>.json` mirrors `package.nls.json` and that every
+  `%key%` resolves. It depends on the extractor's shape, which is why a
+  translatable message has to be a single literal — see
+  `invariants/i18n.md`.
 
 What `check:webview` can **not** tell you: anything visual (no CSS, no layout, no
 theme) and anything about the provider's TypeScript side. Maintenance: adding a
