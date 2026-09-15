@@ -71,7 +71,15 @@
 //       dialect (`deepseek` for the built-in row, `none` for a fresh one and for a
 //       dialect this build does not know), with a `↺` that restores *that row's*
 //       factory dialect and rides the same non-shape path as every other select — and,
-//       unlike a keystroke, a save carries the dialect it shows in the payload.
+//       unlike a keystroke, a save carries the dialect it shows in the payload,
+//   (o) the draft's **unsaved marker**: an edit posts exactly one
+//       `{ type: 'dirty', dirty: true }` — never one per keystroke — and switches the
+//       docked status strip at the top of the view to its unsaved sentence, a save the
+//       host accepts reports `dirty: false` and switches it back, a snapshot reports the
+//       draft clean (that message is the only thing a snapshot may post besides
+//       rendering), and the strip is **never hidden**: it starts in its clean state, one
+//       line tall in both. That flag is what the host turns into the tab's `*`
+//       (`ModelTreeController.applyDirty`).
 //
 // The page's *strings* are checked elsewhere (tools/check-l10n.js extracts every
 // `tr()` call whose argument is one literal), and its look is not checked anywhere:
@@ -118,7 +126,7 @@ let uuidSeed = 0;
  * working against a stub that never exists in the real document.
  */
 const SHELL_IDS = new Set([
-  'mt-toolbar', 'mt-spacer', 'mt-add-provider', 'mt-fit', 'mt-revert', 'mt-save',
+  'mt-dirty', 'mt-toolbar', 'mt-spacer', 'mt-add-provider', 'mt-fit', 'mt-revert', 'mt-save',
   'mt-settings', 'mt-banner', 'mt-main', 'mt-wrap', 'mt-canvas',
   'mt-edges', 'mt-nodes', 'mt-empty',
 ]);
@@ -758,8 +766,27 @@ const postedBeforeSnapshot = posted.length;
 if (dispatch({ type: 'modelTree', snapshot: SNAPSHOT })) {
   problems.push('a `modelTree` snapshot threw — the page no longer understands the host');
 }
-if (posted.length !== postedBeforeSnapshot) {
-  problems.push(`a snapshot made the page post ${JSON.stringify(posted.slice(postedBeforeSnapshot))} — it must only render`);
+// A snapshot is the stored truth, so it may do exactly one thing besides rendering:
+// report the draft as clean (`dirty: false` — the unsaved marker on the tab's title).
+// Anything else it posts would be a message about a draft it just replaced.
+const afterSnapshot = posted.slice(postedBeforeSnapshot);
+if (afterSnapshot.some((message) => !message || message.type !== 'dirty')) {
+  problems.push(`a snapshot made the page post ${JSON.stringify(afterSnapshot)} — it must only render (plus the dirty report)`);
+}
+if (afterSnapshot.some((message) => message.dirty !== false)) {
+  problems.push(`a snapshot reported the draft as ${JSON.stringify(afterSnapshot.map((m) => m && m.dirty))} — a snapshot *is* the stored state`);
+}
+// The strip is **docked**: never hidden, one line tall in either state (the CSS carries
+// the second half of that promise — the stub has no text engine), and it says which
+// state it is in. A page that is still booting has no unsaved edits.
+{
+  const strip = elementById('mt-dirty');
+  if (strip.classList.contains('hidden') || strip.classList.contains('mt-dirty-on')) {
+    problems.push(`the status strip starts as ${JSON.stringify(strip.className)} — a clean page must show the clean state, never nothing`);
+  }
+  if (String(strip.textContent || '').indexOf('No unsaved changes') < 0) {
+    problems.push(`the clean status strip shows ${JSON.stringify(strip.textContent)}`);
+  }
 }
 
 /**
@@ -1065,6 +1092,13 @@ function assertDraw() {
   const element = cardById('card-b');
   const nameInput = element ? firstInput(findField(element, 'name')) : null;
   const preview = element ? findField(element, 'preview') : null;
+  // The draft's flag is *reported*, not merely rendered: the `*` on the tab's title
+  // comes from it (`ModelTreeController.applyDirty`) and so does the strip at the top of
+  // the view. It is a transition, never a keystroke — typing a word must not post a
+  // message per character.
+  const dirtyPosts = (value) =>
+    posted.filter((message) => message && message.type === 'dirty' && message.dirty === value).length;
+  const dirtyBefore = dirtyPosts(true);
   if (!nameInput || typeof (nameInput._listeners || {}).input !== 'function') {
     problems.push('the selected card\'s name field has no input handler — typing in it would not reach the draft');
   } else {
@@ -1088,6 +1122,21 @@ function assertDraw() {
     }
     if (!preview || String(preview.textContent).indexOf('smoke-model-b') < 0) {
       problems.push('a keystroke did not refresh the card\'s request preview');
+    }
+    if (dirtyPosts(true) !== dirtyBefore + 1) {
+      problems.push(`an edit posted ${dirtyPosts(true) - dirtyBefore} "dirty: true" message(s), expected exactly one (the tab's unsaved marker)`);
+    }
+    const strip = elementById('mt-dirty');
+    if (strip.classList.contains('mt-dirty-off') || strip.classList.contains('hidden')) {
+      problems.push(`an edit left the status strip at ${JSON.stringify(strip.className)} — it must switch to the unsaved state`);
+    }
+    if (String(strip.textContent || '').indexOf('unsaved changes') < 0) {
+      problems.push(`the unsaved status strip shows ${JSON.stringify(strip.textContent)}, expected the unsaved-changes sentence`);
+    }
+    // The same value typed again: still dirty, so nothing new is posted.
+    fire(nameInput, 'input');
+    if (dirtyPosts(true) !== dirtyBefore + 1) {
+      problems.push('a second keystroke posted another "dirty" message — the flag is a transition, not a keystroke');
     }
   }
 
@@ -1314,6 +1363,12 @@ if (seam.state().dirty) {
 }
 if (!saveBtn().disabled) {
   problems.push('the Save button is not disabled once the draft is clean');
+}
+if (!elementById('mt-dirty').classList.contains('mt-dirty-off')) {
+  problems.push('a successful save left the status strip in the unsaved state');
+}
+if (!posted.some((message) => message && message.type === 'dirty' && message.dirty === false)) {
+  problems.push('a save the host accepted never reported the draft as clean — the tab would keep its "*"');
 }
 
 // --- 10. an invalid draft never reaches the host -------------------------------

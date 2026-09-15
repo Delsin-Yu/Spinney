@@ -658,8 +658,9 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    * fallback card, so there is always exactly one usable model.
    *
    * Bad rows are skipped (never half-applied) and written to the output channel —
-   * the page shows the same lines in its banner, and silence would make a typo
-   * look like a harness bug.
+   * the page shows the same problems in its banner, in the display language
+   * (`issues` are structured, `errors` is their English reading for this channel),
+   * and silence would make a typo look like a harness bug.
    */
   private applyModelCards(): void {
     const cfg = vscode.workspace.getConfiguration('spinney');

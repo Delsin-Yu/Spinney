@@ -14,7 +14,14 @@
  *                 { type: 'modelTreeSaveResult', ok, errors, savedAt }
  *   page → host   { type: 'ready' }  (once, at boot)
  *                 { type: 'save', payload }
+ *                 { type: 'dirty', dirty }
  *                 { type: 'openSettingsJson' }
+ *
+ * `dirty` is reported on every *transition* — never per keystroke — and is what puts
+ * the unsaved marker on the editor tab's title (`ModelPanel.setTitle`); the same flag
+ * colours the docked status strip at the top of the view (`#mt-dirty`) and enables
+ * Save / Revert. The strip is never hidden: it is one line tall in both states, so the
+ * tree below it never moves.
  *
  * There is no side panel: `#mt-main` holds the tree and nothing else, and the
  * *selected* node's card expands in place into its own form — every field the
@@ -118,6 +125,7 @@
   const nodesEl = document.getElementById('mt-nodes');
   const emptyEl = document.getElementById('mt-empty');
   const bannerEl = document.getElementById('mt-banner');
+  const dirtyEl = document.getElementById('mt-dirty');
   const fitBtn = document.getElementById('mt-fit');
   const saveBtn = document.getElementById('mt-save');
   const revertBtn = document.getElementById('mt-revert');
@@ -582,6 +590,22 @@
   // --- save / revert ---------------------------------------------------------
 
   /**
+   * The draft drifted from `snapshot` — or came back to it. One flag, three readers:
+   * Save / Revert's enabled state, the strip at the top of the view, and, through the
+   * message below, the editor tab's unsaved marker (`* Model Cards`, put there by the
+   * host: `ModelTreeController.applyDirty`).
+   *
+   * It is posted **on a transition only**. A keystroke flips it once, and the host cares
+   * about the state, never about how many times it moved — so typing a name sends one
+   * message, not one per character.
+   */
+  function setDirty(value) {
+    if (dirty === value) return;
+    dirty = value;
+    vscode.postMessage({ type: 'dirty', dirty: value });
+  }
+
+  /**
    * One keystroke in a field: the draft changed, the save state and the request
    * preview follow, and *nothing else on screen moves*. This is the whole point of
    * the two-pass layout: a field is a fixed-height row, so typing cannot change the
@@ -594,7 +618,7 @@
    * default.
    */
   function edit() {
-    dirty = true;
+    setDirty(true);
     renderToolbar();
     renderPreview();
     refreshResetButtons();
@@ -628,7 +652,7 @@
   function revert() {
     draft = draftFromSnapshot(snapshot);
     saveErrors = [];
-    dirty = false;
+    setDirty(false);
     ensureSelection();
     render();
   }
@@ -903,7 +927,7 @@
       const value = spec.target();
       spec.assign(value);
       if (sync) sync(value);
-      dirty = true;
+      setDirty(true);
       // `edit()` refreshes every button's state (below), so the one that was just
       // clicked disables itself there; `render()` rebuilds them all.
       if (spec.shapeChange) render();
@@ -1106,14 +1130,14 @@
       draft.apiKeys[provider.id] = value;
       draft.clearedKeys = draft.clearedKeys.filter((id) => id !== provider.id);
       provider.hasKey = true;
-      dirty = true;
+      setDirty(true);
       render();   // the badge and the hint line below it change the form's height
     }));
     actions.appendChild(button(tr('Clear key'), 'mt-btn mt-danger', () => {
       delete draft.apiKeys[provider.id];
       if (draft.clearedKeys.indexOf(provider.id) < 0) draft.clearedKeys.push(provider.id);
       provider.hasKey = false;
-      dirty = true;
+      setDirty(true);
       render();
     }));
     row.appendChild(actions);
@@ -1143,7 +1167,7 @@
         // derived from `providerId`, so this is a *shape* change — the whole tree is
         // redrawn (and the card re-parents) instead of just its own form.
         card.providerId = value;
-        dirty = true;
+        setDirty(true);
         render();
       },
     );
@@ -1233,7 +1257,7 @@
       // A `<select>` shows the *widest* option's text, but its own width is fixed by
       // the row's layout and a control never wraps: the card's measured height cannot
       // change, so this only has to repaint the preview and the toolbar.
-      dirty = true;
+      setDirty(true);
       edit();
     });
     transport.appendChild(select);
@@ -1299,7 +1323,7 @@
     const actions = el('div', 'mt-actions');
     actions.appendChild(button(tr('Add level'), 'mt-btn', () => {
       card.efforts.push('');
-      dirty = true;
+      setDirty(true);
       render();   // one more row is a shape change: the form is taller now
     }));
     // The level *list*'s own reset, beside "Add level" — that is the row that speaks
@@ -1396,7 +1420,7 @@
       if (card.defaultEffort === removed) {
         card.defaultEffort = card.efforts.length > 0 ? card.efforts[0] : '';
       }
-      dirty = true;
+      setDirty(true);
       render();
     });
     remove.title = tr('Remove level');
@@ -1446,7 +1470,7 @@
     setText(previewEl, previewText(card));
   }
 
-  // --- banner, the empty state, toolbar --------------------------------------
+  // --- the unsaved strip, the banner, the empty state, toolbar ----------------
 
   function renderBanner() {
     const problems = saveErrors.length > 0 ? saveErrors : snapshot.errors;
@@ -1469,6 +1493,15 @@
   function renderToolbar() {
     saveBtn.disabled = !dirty;
     revertBtn.disabled = !dirty;
+    // The docked strip at the top of the view is the same flag in words. It is **never
+    // hidden** — one line tall in both states, so the tree below it cannot move — and
+    // only its sentence and its colour change: the tab's title carries the glyph (the
+    // host puts it there, `ModelTreeController.applyDirty`), this strip says it in the
+    // display language. VS Code cannot ask before closing a tab, so the state has to be
+    // on screen while the work is unsaved rather than raised on the way out.
+    setText(dirtyEl, dirty ? tr('You have unsaved changes.') : tr('No unsaved changes.'));
+    dirtyEl.classList.toggle('mt-dirty-on', dirty);
+    dirtyEl.classList.toggle('mt-dirty-off', !dirty);
   }
 
   function render() {
@@ -1505,7 +1538,7 @@
     };
     draft.providers.push(provider);
     selection = { kind: 'provider', id: provider.id };
-    dirty = true;
+    setDirty(true);
     render();
     return provider;
   }
@@ -1542,7 +1575,7 @@
     };
     draft.cards.push(card);
     selection = { kind: 'card', id: card.id };
-    dirty = true;
+    setDirty(true);
     render();
     return card;
   }
@@ -1558,7 +1591,7 @@
       draft.defaultCardId = draft.cards.length > 0 ? draft.cards[0].id : '';
     }
     if (isSelected('provider', id)) selection = null;
-    dirty = true;
+    setDirty(true);
     ensureSelection();
     render();
   }
@@ -1569,7 +1602,7 @@
       draft.defaultCardId = draft.cards.length > 0 ? draft.cards[0].id : '';
     }
     if (isSelected('card', id)) selection = null;
-    dirty = true;
+    setDirty(true);
     ensureSelection();
     render();
   }
@@ -1577,7 +1610,7 @@
   function setDefaultCard(id) {
     if (draft.defaultCardId === id) return;
     draft.defaultCardId = id;
-    dirty = true;
+    setDirty(true);
     render();
   }
 
@@ -1664,7 +1697,7 @@
     defaults = snapshot.defaults;
     draft = draftFromSnapshot(snapshot);
     // A snapshot is the truth as stored: whatever was dirty is either saved or gone.
-    dirty = false;
+    setDirty(false);
     saveErrors = [];
     ensureSelection();
     render();
@@ -1685,7 +1718,7 @@
    */
   function applySaveResult(message) {
     if (message.ok) {
-      dirty = false;
+      setDirty(false);
       saveErrors = [];
       render();
       return;

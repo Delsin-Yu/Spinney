@@ -115,7 +115,41 @@ select:focus {
   border-color: var(--user-bg);
 }
 
-/* ---- banners ---- */
+/* ---- the docked status strip, and the banners ---- */
+
+/*
+ * The unsaved strip is **docked** at the very top of the view, above the toolbar, and it
+ * is exactly one line tall in *both* of its states — that is what makes it a dock rather
+ * than a banner: it is always on screen, so the tree below it never moves when the draft
+ * goes dirty (or stops being dirty). `nowrap` + `ellipsis` are part of that promise: a
+ * sentence is as long as the display language makes it, and a wrapped one would push the
+ * tree down by a line.
+ *
+ * It is a **status**, not an error: quiet and grey while the draft matches what is stored,
+ * and the chat's warning colours (`media/style.css` `.notice.warning`) the moment it does
+ * not. The colour is the only thing that changes for the eye.
+ */
+#mt-dirty {
+  flex: 0 0 auto;
+  padding: 6px 12px;
+  font-size: 12px;
+  line-height: 16px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  border-bottom: 1px solid var(--border);
+}
+
+#mt-dirty.mt-dirty-off {
+  background: var(--bg2);
+  color: var(--text-dim);
+}
+
+#mt-dirty.mt-dirty-on {
+  background: rgba(255, 184, 77, 0.12);
+  border-bottom-color: var(--warn);
+  color: var(--warn);
+}
 
 .mt-banner {
   flex: 0 0 auto;

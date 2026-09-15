@@ -204,7 +204,29 @@ the chat tree's visual language and the same vendored layout engine — with:
   them). Editing and renaming them is fine; only their disappearance is refused,
 - **client-side validation** mirrored by **host-side validation**
   (`validatePayload` in `src/chat/modelTree.ts`): the host is the authority, rejects a
-  bad payload with the reasons, and writes **nothing** — never a half-applied catalog,
+  bad payload with the reasons, and writes **nothing** — never a half-applied catalog.
+  The strip above the tree shows those reasons, and the *parse* failures of a hand-written
+  `settings.json` land there too — **localized**, because it is user-facing text: the
+  parser reports a structured issue (`CatalogIssue`: a code plus its arguments) and the
+  page's host turns it into a sentence (`ISSUE_TEXT` in `src/chat/modelTree.ts`), while the
+  English source lives in `CATALOG_ISSUE_TEXT` (`src/agent/models.ts`) for the output
+  channel, which stays English on purpose. The two tables are compared sentence by
+  sentence by `check:models`, because `src/agent/models.ts` cannot translate anything
+  itself — it must stay free of `vscode` (the dev guards `require` it in plain node),
+- **the draft says so**: while the draft differs from the stored state, the page reports
+  `{ type: 'dirty', dirty }` **on every transition** (never per keystroke) and the host
+  puts `* ` in front of the tab's title (`ModelTreeController.applyDirty`); the page says
+  the same thing in words in the **docked status strip** at the very top of the view
+  (`#mt-dirty`, above the toolbar): *No unsaved changes.* in quiet grey while the two
+  agree, *You have unsaved changes.* in the warning colour while they do not. It is
+  docked, not raised: it is **never hidden** and is one line tall in both states
+  (`white-space: nowrap` + an ellipsis, so no translation can wrap and move the tree), and
+  its height is what keeps the tree from shifting the moment the first keystroke lands.
+  That is the whole warning, deliberately: `WebviewPanel` has no "closing this tab discards
+  work" hook (`onDidDispose` is all there is), so the mark has to be *on screen* while the
+  work is unsaved rather than raised on the way out. Save / Revert, the title and the strip
+  all read the same flag, and a save the host accepts / a revert / a fresh snapshot clears
+  it,
 - per-provider **API-key fields** (write-only; a badge says whether a key exists),
   written to SecretStorage rather than the settings,
 - the chat tree's **gesture set** (`media/main.js`) with one deliberate difference:
@@ -270,20 +292,20 @@ apart), and the thinking-level dropdown is built from the **active card's** `eff
 | Piece | File |
 | --- | --- |
 | `ProviderSpec` / `ModelCard` / `VisionTransport`, the built-in provider and card, `DEFAULT_MODEL`, `DEFAULT_PROVIDER_ID`, `BUILTIN_EFFORTS`, `DEFAULT_EFFORT`, `NO_EFFORT`, `MAX_IMAGE_BYTES` | `src/agent/models.ts` |
-| `parseCatalog()` (`parseProviderRow` / `parseCardRow` / `parseVision`) — object shape, per-field defaults, error rows | `src/agent/models.ts` |
+| `parseCatalog()` (`parseProviderRow` / `parseCardRow` / `parseVision`) — object shape, per-field defaults, unusable rows as `CatalogIssue` (`CATALOG_ISSUE_TEXT` + `formatIssue` are their English reading) | `src/agent/models.ts` |
 | `setCatalog()` + accessors: `providerSpecs` / `providerById` / `cards` / `cardById` / `resolveCard` / `defaultCard` / `contextWindowFor` / `isVisionCard` / `visionCardsLabel` / `cardDisplayName` / `effortsFor` / `normalizeEffort` / `newId` / `providerNameFromUrl` | `src/agent/models.ts` |
 | `applyModelCards()` / `onModelCardsSaved()` / `refreshKeys()` / `resolveModel()` — read the settings, install the catalog, push to live owners | `ChatViewProvider` (`src/chat/ChatViewProvider.ts`) |
 | `BalanceDialect` / `BALANCE_DIALECTS` / `isBalanceDialect()` / `BalanceEntry` / `Balance` / `emptyBalance()` / `fetchBalance()` — the four dialects, and the one place that reads a wallet (`none` sends no request at all) | `src/agent/balance.ts` |
 | `ApiClient` — the SSE transport, its retries and the image upload; it no longer knows about a wallet | `src/agent/apiClient.ts` |
 | `ClientRegistry` — one client per provider, per-provider keys, the two gates, the routing (`body.model` from the card) and the wallet (`balance(spec)`) | `src/agent/clients.ts` |
 | `RequestGate` — the FIFO, abort-aware slot gate | `src/agent/requestGate.ts` |
-| The page shell + its serializer lifecycle (`MODEL_VIEW_TYPE`, `ModelPanel.create` / `revive`, the `ready` hold) | `src/chat/ModelPanel.ts` |
-| The page controller: the message protocol, `validatePayload` (host authority), `apiKeySecretName` | `src/chat/modelTree.ts` |
-| The page itself (tree, the selected card's form, draft/save/revert, key fields, request preview) | `media/modeltree.js` · `media/modeltree.css` |
+| The page shell + its serializer lifecycle (`MODEL_VIEW_TYPE`, `ModelPanel.create` / `revive`, the `ready` hold, `setTitle` for the `* ` marker) | `src/chat/ModelPanel.ts` |
+| The page controller: the message protocol, `validatePayload` (host authority), `applyDirty` (the tab's `* `), `ISSUE_TEXT` (the parser's sentences in the display language), `apiKeySecretName` | `src/chat/modelTree.ts` |
+| The page itself (tree, the selected card's form, draft/save/revert, the `dirty` report and the docked status strip at the top, key fields, request preview) | `media/modeltree.js` · `media/modeltree.css` |
 | The command (`spinney.openModelCards`) and the gear the webview asks for (`openModelTree`) | `src/extension.ts` · `media/main.js` |
 | The chat's dropdowns (`postConfig`) and the wallet readout (`refreshBalance()` → the `balance` message) | `src/chat/runtime.ts` |
 | Settings (`model`, `providers`, `modelCards`) | `package.json` |
-| Guards (`npm run check:models` / `check:modeltree`): `spinney.model.default` == the fallback, the two catalog settings exist, no `enum` on `spinney.model`, no model id in `src/**/*.ts` (the catalog module excepted) or `media/*.js` (the vendored bundles excepted), README/docs name only ids the catalog has; the page protocol replay | `tools/check-models.js` · `tools/check-modeltree.js` |
+| Guards (`npm run check:models` / `check:modeltree`): `spinney.model.default` == the fallback, the two catalog settings exist, no `enum` on `spinney.model`, no model id in `src/**/*.ts` (the catalog module excepted) or `media/*.js` (the vendored bundles excepted), README/docs name only ids the catalog has, every `CATALOG_ISSUE_TEXT` sentence match the page's `ISSUE_TEXT` copy; the page protocol replay (including the unsaved marker: one `dirty` per transition, the strip's two states, a snapshot reporting the draft clean) | `tools/check-models.js` · `tools/check-modeltree.js` |
 
 Every mention of a model id in README/docs must be one the catalog has — today that is
 only the built-in one (`tools/check-models.js` fails an id `MODEL_CATALOG` does not

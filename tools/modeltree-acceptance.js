@@ -19,7 +19,12 @@
  *     declares rather than detects: the page's save writes the row's dialect, a
  *     dialect this build does not know is refused without writing anything, and a
  *     settings row (or an older build's row) that leaves the field out lands on the
- *     dialect its host declares.
+ *     dialect its host declares,
+ *   - the **unsaved marker**: the page's `dirty` message puts `* ` in front of the tab's
+ *     title and takes it away again — VS Code cannot veto a tab close, so the title is
+ *     where "this page is not stored yet" has to live,
+ *   - a snapshot's `errors` are **user-facing text**: a broken settings row arrives as a
+ *     sentence in the display language, never as the parser's English line.
  *
  * It stubs the `vscode` module (a `Module._load` hook), so it needs `out/`
  * (`npm run compile`) and nothing else: no window, no network.
@@ -42,6 +47,17 @@ const keys = new Map(); // SecretStorage
 const commandCalls = [];
 const settingsValues = new Map(); // what `get` answers
 
+/**
+ * One translated sentence, keyed by its English source — the shape the shipped catalogs
+ * use (`l10n/bundle.l10n.*.json`). It exists so a snapshot's `errors` can be proven to
+ * be *user-facing text*: the parser reports issues, the page's host turns them into a
+ * sentence in the display language.
+ */
+const TRANSLATED_SENTENCE = {
+  'modelCards["{0}"]: defaultEffort "{1}" is not one of {2} — using "{3}"':
+    '模型卡片“{0}”的 defaultEffort“{1}”不在 {2} 之中 —— 改用“{3}”',
+};
+
 const makeWebview = () => {
   const listeners = [];
   const posted = [];
@@ -62,13 +78,17 @@ const makeWebview = () => {
   };
 };
 
-const makePanel = () => {
+const makePanel = (title = '') => {
   const webview = makeWebview();
   let disposeHandler = null;
   const panel = {
     webview,
-    title: '',
+    title,
     reveal() {},
+    /** `ModelPanel.setTitle`: the tab label, which carries the unsaved marker. */
+    setTitle(next) {
+      panel.title = next;
+    },
     dispose() {
       if (disposeHandler) disposeHandler();
     },
@@ -83,13 +103,21 @@ const makePanel = () => {
 let lastPanel = null;
 
 const vscodeStub = {
-  l10n: { t: (s, ...args) => String(s).replace(/\{(\d+)\}/g, (_, i) => String(args[i] ?? '')) },
+  // One sentence is "translated" on purpose: the lines the page's banner shows are built
+  // here, in the display language (`ISSUE_TEXT` in `src/chat/modelTree.ts`), so the
+  // acceptance run can tell that apart from the parser's English line passing through.
+  l10n: {
+    t: (source, ...args) => {
+      const sentence = TRANSLATED_SENTENCE[source] || String(source);
+      return sentence.replace(/\{(\d+)\}/g, (_, i) => String(args[i] ?? ''));
+    },
+  },
   env: { language: 'en' },
   ViewColumn: { Active: -1, One: 1 },
   ConfigurationTarget: { Global: 1, Workspace: 2, WorkspaceFolder: 3 },
   window: {
-    createWebviewPanel: () => {
-      lastPanel = makePanel();
+    createWebviewPanel: (_type, title) => {
+      lastPanel = makePanel(title);
       return lastPanel;
     },
     showWarningMessage: async () => undefined,
@@ -288,6 +316,8 @@ const snapshots = () => lastPanel.webview.posted.filter((m) => m.type === 'model
     await new Promise((r) => setTimeout(r, 0));
     const snap = snapshots().slice(-1)[0].snapshot;
     ok('the unusable default level is reported', snap.errors.some((e) => e.includes('defaultEffort')), snap.errors.join(' | '));
+    ok('  … in the display language, not the parser\'s English line',
+      snap.errors.some((e) => e.includes('改用')), snap.errors.join(' | '));
     ok('  … and the card is still usable on level "low"', snap.cards[0].defaultEffort === 'low', snap.cards[0].defaultEffort);
   }
 
@@ -572,6 +602,19 @@ const snapshots = () => lastPanel.webview.posted.filter((m) => m.type === 'model
     const first = lastPanel;
     controller.open();
     ok('a second open focuses the same panel', lastPanel === first);
+  }
+
+  console.log('-- the unsaved marker rides the tab\'s title --');
+  {
+    const { controller } = controllerFor();
+    controller.open();
+    const plain = lastPanel.title;
+    ok('a fresh page has no marker on the tab', plain === 'Model Cards', JSON.stringify(plain));
+    lastPanel.webview.listeners.forEach((handler) => handler({ type: 'dirty', dirty: true }));
+    ok('a draft with unsaved edits marks the tab', lastPanel.title === '* ' + plain, JSON.stringify(lastPanel.title));
+    // Coming back is what a save / revert / snapshot does; the marker must not linger.
+    lastPanel.webview.listeners.forEach((handler) => handler({ type: 'dirty', dirty: false }));
+    ok('  … and a clean draft takes the marker away', lastPanel.title === plain, JSON.stringify(lastPanel.title));
   }
 
   console.log('-- the settings-JSON escape hatch --');

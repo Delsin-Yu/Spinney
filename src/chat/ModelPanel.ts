@@ -13,6 +13,8 @@ import { displayLocale, webviewL10n } from '../i18n';
  * driven by a frozen message protocol), so it mirrors `ChatPanel`'s lifecycle
  * exactly: build the shell in the constructor, hold what is posted before the
  * page says `ready`, and hand every page→host message to the provider verbatim.
+ * The page also reports whether its draft is dirty, which is what the tab's unsaved
+ * marker (`* Model Cards`) is made of — see `setTitle`.
  *
  * The host glue (the command, the serializer, reading/writing the settings store,
  * the chat-side dropdowns) lives elsewhere and imports the types below.
@@ -173,6 +175,22 @@ export class ModelPanel {
     this.panel.reveal(undefined, false);
   }
 
+  /**
+   * The tab's label. The page's `dirty` message is the only caller: the title carries
+   * the unsaved marker (`* Model Cards`), because a settings page with a draft has to
+   * be readable as "not stored yet" from the tab strip alone — VS Code cannot veto the
+   * close of a webview tab, so there is nowhere else to warn *before* it goes.
+   *
+   * Guarded like `post()`: a message that lands after `dispose()` must not touch a
+   * disposed panel.
+   */
+  setTitle(title: string): void {
+    if (this.disposed) {
+      return;
+    }
+    this.panel.title = title;
+  }
+
   post(message: unknown): void {
     // `panel` is readonly and never null; the real hazard is posting after the
     // panel was disposed (the webview is gone and postMessage rejects).
@@ -261,8 +279,10 @@ function getHtml(webview: vscode.Webview, opts: ModelPanelOptions): string {
   // every one of them by id at boot and renders everything inside them itself. There
   // is no dock and no second panel: the tree is the whole page, and the *selected*
   // card is rebuilt in place as its own form (see media/modeltree.js), so the only
-  // containers here are the toolbar, the two message strips, the tree and the
-  // empty-state hint.
+  // containers here are the docked status strip at the top, the toolbar, the two
+  // message strips, the tree and the empty-state hint. The strip ships with the
+  // *clean* sentence already in it, because it is never hidden: a page that is still
+  // booting has no unsaved edits, and no state of it may be an empty band.
   return `<!DOCTYPE html>
 <html lang="${displayLocale()}">
 <head>
@@ -274,6 +294,7 @@ function getHtml(webview: vscode.Webview, opts: ModelPanelOptions): string {
   <script nonce="${nonce}">window.__spinneyL10n = ${l10n};</script>
 </head>
 <body>
+  <div id="mt-dirty" class="mt-dirty-off">${vscode.l10n.t('No unsaved changes.')}</div>
   <div id="mt-toolbar">
     <button id="mt-add-provider">${vscode.l10n.t('Add provider')}</button>
     <span id="mt-spacer"></span>

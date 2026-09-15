@@ -19,6 +19,8 @@ import { CardView, ModelPanel, ModelPanelOptions, ModelTreeSave, ModelTreeSnapsh
 import {
   BUILTIN_CARD_DEFAULTS,
   BUILTIN_PROVIDER_DEFAULTS,
+  CatalogIssue,
+  CatalogIssueCode,
   DEFAULT_MODEL,
   DEFAULT_PROVIDER_ID,
   FRESH_CARD_DEFAULTS,
@@ -106,6 +108,11 @@ export class ModelTreeController {
       case 'save':
         void this.save((message as { payload?: ModelTreeSave }).payload);
         return;
+      case 'dirty':
+        // The page's draft drifted from what the host last posted (or came back):
+        // the panel's title carries the marker, nothing else here changes.
+        this.applyDirty((message as { dirty?: unknown }).dirty === true);
+        return;
       case 'openSettingsJson':
         void vscode.commands.executeCommand('workbench.action.openSettingsJson', {
           revealSetting: { key: 'spinney.modelCards', edit: true },
@@ -114,6 +121,22 @@ export class ModelTreeController {
       default:
         this.opts.log(`[model-tree] ignoring unknown page message: ${String(type)}`);
     }
+  }
+
+  /**
+   * The page's dirty flag, on the panel's title: `* Model Cards` while the draft holds
+   * unsaved edits, plain `Model Cards` once it does not. VS Code cannot veto a tab
+   * close (`WebviewPanel` only reports `onDidDispose`), so the title is the one place
+   * the *tab itself* can say "this is not what is stored" — the strip the page draws at
+   * the top of the view says it in words.
+   *
+   * The marker is a glyph prefixed to the translated name, not a translated sentence of
+   * its own: a narrow tab truncates from the right, and `*` needs no translation (the
+   * same rule the compact dock tokens follow, see docs/agents/invariants/i18n.md).
+   */
+  private applyDirty(dirty: boolean): void {
+    const title = vscode.l10n.t('Model Cards');
+    this.panel?.setTitle(dirty ? '* ' + title : title);
   }
 
   /** Read the settings, parse them, and hand the page its snapshot. */
@@ -153,7 +176,10 @@ export class ModelTreeController {
       providers,
       cards,
       defaultCardId: parsed.cards.some((c) => c.id === rows.defaultCardId) ? rows.defaultCardId : (parsed.cards[0]?.id ?? ''),
-      errors: parsed.errors,
+      // The page's banner shows these lines, so they travel **in the display language**:
+      // the parser reports issues (`CatalogIssue`), and the English sentence its output
+      // channel prints is only one of the two readings (`ISSUE_TEXT` below).
+      errors: parsed.issues.map(issueText),
       defaults: {
         builtin: { provider: BUILTIN_PROVIDER_DEFAULTS, card: BUILTIN_CARD_DEFAULTS },
         fresh: { provider: FRESH_PROVIDER_DEFAULTS, card: FRESH_CARD_DEFAULTS },
@@ -386,6 +412,52 @@ function isTransport(value: unknown): boolean {
 
 function isCount(value: unknown): boolean {
   return typeof value === 'number' && Number.isFinite(value) && Math.floor(value) >= 0;
+}
+
+/**
+ * The parser's sentences in the display language — one `vscode.l10n.t` literal per
+ * rule, the **same** English source `CATALOG_ISSUE_TEXT` carries in
+ * `src/agent/models.ts`. That module cannot translate them (its dev guards `require` it
+ * in plain node, where `vscode` does not exist), so the pair is written twice and kept
+ * honest mechanically: `tools/check-l10n.js` extracts exactly this literal shape, and
+ * `tools/check-models.js` fails the build when a sentence stops matching the parser's.
+ *
+ * The values are **functions**, not strings: `vscode.l10n.t` is resolved when the
+ * banner is built, never at module load.
+ */
+const ISSUE_TEXT: Record<CatalogIssueCode, (args: readonly (string | number)[]) => string> = {
+  'provider-not-object': (a) =>
+    vscode.l10n.t('providers["{0}"]: expected { name, baseUrl, balance, concurrency }, got {1}', a[0], a[1]),
+  'provider-name': (a) => vscode.l10n.t('providers["{0}"]: name must be a non-empty string', a[0]),
+  'provider-url': (a) => vscode.l10n.t('providers["{0}"]: {1} must be a non-empty URL', a[0], a[1]),
+  'provider-balance': (a) => vscode.l10n.t('providers["{0}"]: {1} must be one of {2}, got {3}', a[0], a[1], a[2], a[3]),
+  'provider-unknown-field': (a) =>
+    vscode.l10n.t('providers["{0}"]: unknown field "{1}" (expected name, baseUrl, balance, concurrency)', a[0], a[1]),
+  'provider-url-missing': (a) => vscode.l10n.t('providers["{0}"]: baseUrl is required', a[0]),
+  'row-concurrency': (a) =>
+    vscode.l10n.t('{0}["{1}"]: {2} must be 0 (unlimited) or a positive integer, got {3}', a[0], a[1], a[2], a[3]),
+  'card-not-object': (a) => vscode.l10n.t('modelCards["{0}"]: expected an object of card fields, got {1}', a[0], a[1]),
+  'card-name': (a) => vscode.l10n.t('modelCards["{0}"]: name must be a string', a[0]),
+  'card-provider-id': (a) => vscode.l10n.t('modelCards["{0}"]: providerId must be a non-empty string', a[0]),
+  'card-wire-model': (a) => vscode.l10n.t('modelCards["{0}"]: oaiModel must be a non-empty string', a[0]),
+  'card-context-window': (a) =>
+    vscode.l10n.t('modelCards["{0}"]: {1} must be a positive token count, got {2}', a[0], a[1], a[2]),
+  'card-vision': (a) =>
+    vscode.l10n.t('modelCards["{0}"]: vision must be true/false or { enabled, transport: "openai" | "deepseek" }', a[0]),
+  'card-efforts-array': (a) => vscode.l10n.t('modelCards["{0}"]: {1} must be an array of level names', a[0], a[1]),
+  'card-efforts-empty': (a) => vscode.l10n.t('modelCards["{0}"]: {1} must name at least one level', a[0], a[1]),
+  'card-default-effort': (a) => vscode.l10n.t('modelCards["{0}"]: {1} must be a level name', a[0], a[1]),
+  'card-unknown-field': (a) => vscode.l10n.t('modelCards["{0}"]: unknown field "{1}"', a[0], a[1]),
+  'card-wire-model-missing': (a) => vscode.l10n.t('modelCards["{0}"]: oaiModel is required', a[0]),
+  'card-default-effort-repaired': (a) =>
+    vscode.l10n.t('modelCards["{0}"]: defaultEffort "{1}" is not one of {2} — using "{3}"', a[0], a[1], a[2], a[3]),
+  'catalog-not-object': (a) => vscode.l10n.t('spinney.{0} must be an object of id → fields (got {1})', a[0], a[1]),
+  'catalog-empty-id': (a) => vscode.l10n.t('{0}: a row has an empty id', a[0]),
+};
+
+/** One issue, as the line the page's banner shows. */
+function issueText(reported: CatalogIssue): string {
+  return ISSUE_TEXT[reported.code](reported.args);
 }
 
 /** The id a freshly created row gets. The page generates its own; this is the fallback. */

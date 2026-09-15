@@ -189,6 +189,7 @@ const {
   VENDORED_PROVIDER,
   BUILTIN_PROVIDER_DEFAULTS,
   FRESH_PROVIDER_DEFAULTS,
+  CATALOG_ISSUE_TEXT,
 } = require(catalogPath);
 
 // The drift scan fails the build through `problems`; these checks report the same way —
@@ -419,6 +420,80 @@ async function checkWalletFetch() {
   ok('  … WITHOUT a request being attempted', keyless.calls.length === 0, `${keyless.calls.length} request(s)`);
 }
 
+// --- 5. the parser's sentences, and the page's own copy of them ----------------
+//
+// `src/agent/models.ts` reports an unusable settings row as a **code + arguments**, never
+// as a finished sentence, and it cannot own the translation: it must stay free of
+// `vscode` (the guards here `require` it in plain node). So `src/chat/modelTree.ts` carries
+// the same English source again, as one `vscode.l10n.t` literal per rule (`ISSUE_TEXT`) —
+// the shape `tools/check-l10n.js` extracts and the only shape a translator can see.
+//
+// Two copies of 21 sentences drift in the worst possible way: silently. The page's banner
+// would keep showing the *old* wording — in English too, since `l10n.t` falls back to the
+// literal — so they are compared here, text against text. The table's shape is part of the
+// contract: an entry is `'<code>': (a) => vscode.l10n.t('<English source>', …)`, and a
+// rewrite that stops matching fails below rather than passing unnoticed.
+
+const issueProblems = [];
+console.log('-- the parser\'s issue sentences, and the page\'s copy of them --');
+
+/** Turn a JS string literal's body into the value the running code would see. */
+function unescape(body) {
+  return body.replace(/\\(u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|[\s\S])/g, (all, esc) => {
+    switch (esc[0]) {
+      case 'n':
+        return '\n';
+      case 'r':
+        return '\r';
+      case 't':
+        return '\t';
+      case 'u':
+      case 'x':
+        return String.fromCharCode(parseInt(esc.slice(1), 16));
+      default:
+        return esc; // \" \\ \' and anything else: the character itself
+    }
+  });
+}
+
+/** The `code → English source` pairs of `ISSUE_TEXT` in `src/chat/modelTree.ts`. */
+function readIssueTable() {
+  const file = path.join(root, 'src', 'chat', 'modelTree.ts');
+  const found = new Map();
+  const re = /'([a-z][a-z-]*)':\s*\(a\)\s*=>\s*vscode\.l10n\.t\(\s*'((?:\\.|[^'\\])*)'/g;
+  const text = fs.readFileSync(file, 'utf8');
+  let match;
+  while ((match = re.exec(text)) !== null) {
+    found.set(match[1], unescape(match[2]));
+  }
+  return found;
+}
+
+{
+  const pageTable = readIssueTable();
+  const codes = Object.keys(CATALOG_ISSUE_TEXT);
+  for (const code of codes) {
+    const sentence = CATALOG_ISSUE_TEXT[code];
+    if (!pageTable.has(code)) {
+      issueProblems.push(
+        `src/chat/modelTree.ts has no ISSUE_TEXT entry for "${code}" — the page's banner would show the code instead of a sentence`,
+      );
+      continue;
+    }
+    const onPage = pageTable.get(code);
+    if (onPage !== sentence) {
+      issueProblems.push(`"${code}": the page says ${JSON.stringify(onPage)}, the parser says ${JSON.stringify(sentence)}`);
+    }
+    pageTable.delete(code);
+  }
+  for (const code of pageTable.keys()) {
+    issueProblems.push(`src/chat/modelTree.ts has an ISSUE_TEXT entry "${code}", which CATALOG_ISSUE_TEXT does not know`);
+  }
+  if (issueProblems.length === 0) {
+    console.log(`  [ok  ] the parser's ${codes.length} issue sentence(s) and the page's copy of them agree`);
+  }
+}
+
 /**
  * The summary. It is a function rather than the file's last statements because the
  * wallet checks `await`: the OK line and the exit code have to be decided *after* the
@@ -440,6 +515,16 @@ function summarize() {
       console.error('  ' + p);
     }
     console.error('\nThe dialects are declared in src/agent/balance.ts and landed on a row by src/agent/models.ts.');
+    process.exit(1);
+  }
+  if (issueProblems.length) {
+    console.error('check-models: the catalog-issue sentences drifted\n');
+    for (const p of issueProblems) {
+      console.error('  ' + p);
+    }
+    console.error(
+      '\nThe English source is CATALOG_ISSUE_TEXT (src/agent/models.ts); the page reads the same sentences through ISSUE_TEXT (src/chat/modelTree.ts).',
+    );
     process.exit(1);
   }
 

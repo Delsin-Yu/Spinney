@@ -466,10 +466,99 @@ export function providerBalanceFromUrl(url: string): BalanceDialect {
   return knownProviderHost(url)?.balance ?? 'none';
 }
 
+/**
+ * One unusable settings row, as **data rather than a sentence**: `code` names the rule
+ * and `args` fills its placeholders. The English line is built here
+ * (`CATALOG_ISSUE_TEXT` → `formatIssue`) for the output channel, and the Model Card
+ * Tree page's banner reads the *same* source sentence through `vscode.l10n.t` in
+ * `src/chat/modelTree.ts` — the parity of the two tables is checked by
+ * `tools/check-models.js`, because this module has to stay free of `vscode`: the dev
+ * scripts `require` it in plain node.
+ */
+export type CatalogIssueCode =
+  | 'provider-not-object'
+  | 'provider-name'
+  | 'provider-url'
+  | 'provider-balance'
+  | 'provider-unknown-field'
+  | 'provider-url-missing'
+  | 'row-concurrency'
+  | 'card-not-object'
+  | 'card-name'
+  | 'card-provider-id'
+  | 'card-wire-model'
+  | 'card-context-window'
+  | 'card-vision'
+  | 'card-efforts-array'
+  | 'card-efforts-empty'
+  | 'card-default-effort'
+  | 'card-unknown-field'
+  | 'card-wire-model-missing'
+  | 'card-default-effort-repaired'
+  | 'catalog-not-object'
+  | 'catalog-empty-id';
+
+/** One reported problem, with the arguments its sentence interpolates. */
+export interface CatalogIssue {
+  code: CatalogIssueCode;
+  args: (string | number)[];
+}
+
+/**
+ * The English source of every issue, one literal per rule — the same wording the
+ * parser has always printed. `{0}` / `{1}` are the placeholders the l10n catalogs use
+ * (and `tools/check-l10n.js` compares), so a translation substitutes exactly like this
+ * line does. `row-concurrency` is shared by both row kinds: its sentence differs only
+ * in the row label, which travels as an argument.
+ */
+export const CATALOG_ISSUE_TEXT: Record<CatalogIssueCode, string> = {
+  'provider-not-object': 'providers["{0}"]: expected { name, baseUrl, balance, concurrency }, got {1}',
+  'provider-name': 'providers["{0}"]: name must be a non-empty string',
+  'provider-url': 'providers["{0}"]: {1} must be a non-empty URL',
+  'provider-balance': 'providers["{0}"]: {1} must be one of {2}, got {3}',
+  'provider-unknown-field': 'providers["{0}"]: unknown field "{1}" (expected name, baseUrl, balance, concurrency)',
+  'provider-url-missing': 'providers["{0}"]: baseUrl is required',
+  'row-concurrency': '{0}["{1}"]: {2} must be 0 (unlimited) or a positive integer, got {3}',
+  'card-not-object': 'modelCards["{0}"]: expected an object of card fields, got {1}',
+  'card-name': 'modelCards["{0}"]: name must be a string',
+  'card-provider-id': 'modelCards["{0}"]: providerId must be a non-empty string',
+  'card-wire-model': 'modelCards["{0}"]: oaiModel must be a non-empty string',
+  'card-context-window': 'modelCards["{0}"]: {1} must be a positive token count, got {2}',
+  'card-vision': 'modelCards["{0}"]: vision must be true/false or { enabled, transport: "openai" | "deepseek" }',
+  'card-efforts-array': 'modelCards["{0}"]: {1} must be an array of level names',
+  'card-efforts-empty': 'modelCards["{0}"]: {1} must name at least one level',
+  'card-default-effort': 'modelCards["{0}"]: {1} must be a level name',
+  'card-unknown-field': 'modelCards["{0}"]: unknown field "{1}"',
+  'card-wire-model-missing': 'modelCards["{0}"]: oaiModel is required',
+  'card-default-effort-repaired': 'modelCards["{0}"]: defaultEffort "{1}" is not one of {2} — using "{3}"',
+  'catalog-not-object': 'spinney.{0} must be an object of id → fields (got {1})',
+  'catalog-empty-id': '{0}: a row has an empty id',
+};
+
+/** One issue, built at the site that found it. */
+function issue(code: CatalogIssueCode, ...args: (string | number)[]): CatalogIssue {
+  return { code, args };
+}
+
+/** Fill `{0}` / `{1}` … the way `vscode.l10n.t` does. */
+function fill(text: string, args: readonly (string | number)[]): string {
+  return text.replace(/\{(\d+)\}/g, (all, index) => {
+    const value = args[Number(index)];
+    return value === undefined ? all : String(value);
+  });
+}
+
+/** The English line of one issue — what the Spinney output channel prints. */
+export function formatIssue(reported: CatalogIssue): string {
+  return fill(CATALOG_ISSUE_TEXT[reported.code], reported.args);
+}
+
 export interface CatalogParseResult {
   providers: ProviderSpec[];
   cards: ModelCard[];
-  /** One human-readable line per unusable row, for the output channel. */
+  /** Every problem, structured: the load for a localized reader (the page's banner). */
+  issues: CatalogIssue[];
+  /** The same problems as English lines, for the output channel. */
   errors: string[];
 }
 
@@ -501,10 +590,10 @@ function nonNegativeInt(raw: unknown): number | undefined {
   return Math.floor(value);
 }
 
-/** A provider row's own key/field errors, collected for the output channel. */
-function parseProviderRow(id: string, rawFields: unknown, errors: string[]): ProviderSpec | undefined {
+/** A provider row's own key/field problems, collected as issues. */
+function parseProviderRow(id: string, rawFields: unknown, issues: CatalogIssue[]): ProviderSpec | undefined {
   if (rawFields !== undefined && rawFields !== null && (typeof rawFields !== 'object' || Array.isArray(rawFields))) {
-    errors.push(`providers["${id}"]: expected { name, baseUrl, balance, concurrency }, got ${JSON.stringify(rawFields)}`);
+    issues.push(issue('provider-not-object', id, JSON.stringify(rawFields)));
     return undefined;
   }
   const fields = (rawFields ?? {}) as Record<string, unknown>;
@@ -517,37 +606,35 @@ function parseProviderRow(id: string, rawFields: unknown, errors: string[]): Pro
     if (key === 'name') {
       name = typeof rawValue === 'string' ? rawValue.trim() : '';
       if (!name) {
-        errors.push(`providers["${id}"]: name must be a non-empty string`);
+        issues.push(issue('provider-name', id));
         return undefined;
       }
     } else if (PROVIDER_URL_KEYS.has(key)) {
       baseUrl = typeof rawValue === 'string' ? rawValue.trim() : '';
       if (!baseUrl) {
-        errors.push(`providers["${id}"]: ${rawKey} must be a non-empty URL`);
+        issues.push(issue('provider-url', id, rawKey));
         return undefined;
       }
     } else if (PROVIDER_BALANCE_KEYS.has(key)) {
       if (!isBalanceDialect(rawValue)) {
-        errors.push(
-          `providers["${id}"]: ${rawKey} must be one of ${BALANCE_DIALECTS.join(', ')}, got ${JSON.stringify(rawValue)}`,
-        );
+        issues.push(issue('provider-balance', id, rawKey, BALANCE_DIALECTS.join(', '), JSON.stringify(rawValue)));
         return undefined;
       }
       balance = rawValue;
     } else if (CONCURRENCY_KEYS.has(key)) {
       const value = nonNegativeInt(rawValue);
       if (value === undefined) {
-        errors.push(`providers["${id}"]: ${rawKey} must be 0 (unlimited) or a positive integer, got ${JSON.stringify(rawValue)}`);
+        issues.push(issue('row-concurrency', 'providers', id, rawKey, JSON.stringify(rawValue)));
         return undefined;
       }
       concurrency = value;
     } else {
-      errors.push(`providers["${id}"]: unknown field "${rawKey}" (expected name, baseUrl, balance, concurrency)`);
+      issues.push(issue('provider-unknown-field', id, rawKey));
       return undefined;
     }
   }
   if (!baseUrl) {
-    errors.push(`providers["${id}"]: baseUrl is required`);
+    issues.push(issue('provider-url-missing', id));
     return undefined;
   }
   // An omitted `balance` is answered by the host: this build ships a parser for one
@@ -592,9 +679,9 @@ function parseVision(raw: unknown): VisionSpec | undefined {
   return undefined;
 }
 
-function parseCardRow(id: string, rawFields: unknown, errors: string[]): ModelCard | undefined {
+function parseCardRow(id: string, rawFields: unknown, issues: CatalogIssue[]): ModelCard | undefined {
   if (rawFields !== undefined && rawFields !== null && (typeof rawFields !== 'object' || Array.isArray(rawFields))) {
-    errors.push(`modelCards["${id}"]: expected an object of card fields, got ${JSON.stringify(rawFields)}`);
+    issues.push(issue('card-not-object', id, JSON.stringify(rawFields)));
     return undefined;
   }
   const fields = (rawFields ?? {}) as Record<string, unknown>;
@@ -613,66 +700,66 @@ function parseCardRow(id: string, rawFields: unknown, errors: string[]): ModelCa
     const key = rawKey.trim().toLowerCase();
     if (key === 'name') {
       if (typeof rawValue !== 'string') {
-        errors.push(`modelCards["${id}"]: name must be a string`);
+        issues.push(issue('card-name', id));
         return undefined;
       }
       card.name = rawValue.trim();
     } else if (CARD_PROVIDER_KEYS.has(key)) {
       if (typeof rawValue !== 'string' || !rawValue.trim()) {
-        errors.push(`modelCards["${id}"]: providerId must be a non-empty string`);
+        issues.push(issue('card-provider-id', id));
         return undefined;
       }
       card.providerId = rawValue.trim();
     } else if (CARD_WIRE_KEYS.has(key)) {
       if (typeof rawValue !== 'string' || !rawValue.trim()) {
-        errors.push(`modelCards["${id}"]: oaiModel must be a non-empty string`);
+        issues.push(issue('card-wire-model', id));
         return undefined;
       }
       card.oaiModel = rawValue.trim();
     } else if (WINDOW_KEYS.has(key)) {
       const value = positiveInt(rawValue, true);
       if (value === undefined) {
-        errors.push(`modelCards["${id}"]: ${rawKey} must be a positive token count, got ${JSON.stringify(rawValue)}`);
+        issues.push(issue('card-context-window', id, rawKey, JSON.stringify(rawValue)));
         return undefined;
       }
       card.contextWindow = value;
     } else if (key === 'vision') {
       const vision = parseVision(rawValue);
       if (!vision) {
-        errors.push(`modelCards["${id}"]: vision must be true/false or { enabled, transport: "openai" | "deepseek" }`);
+        issues.push(issue('card-vision', id));
         return undefined;
       }
       card.vision = vision;
     } else if (EFFORT_KEYS.has(key)) {
       if (!Array.isArray(rawValue) || rawValue.some((l) => typeof l !== 'string')) {
-        errors.push(`modelCards["${id}"]: ${rawKey} must be an array of level names`);
+        issues.push(issue('card-efforts-array', id, rawKey));
         return undefined;
       }
       card.efforts = (rawValue as string[]).map((l) => l.trim()).filter((l) => l !== '');
       if (card.efforts.length === 0) {
-        errors.push(`modelCards["${id}"]: ${rawKey} must name at least one level`);
+        issues.push(issue('card-efforts-empty', id, rawKey));
         return undefined;
       }
     } else if (DEFAULT_EFFORT_KEYS.has(key)) {
       if (typeof rawValue !== 'string') {
-        errors.push(`modelCards["${id}"]: ${rawKey} must be a level name`);
+        issues.push(issue('card-default-effort', id, rawKey));
         return undefined;
       }
       card.defaultEffort = rawValue.trim();
     } else if (CONCURRENCY_KEYS.has(key)) {
       const value = nonNegativeInt(rawValue);
       if (value === undefined) {
-        errors.push(`modelCards["${id}"]: ${rawKey} must be 0 (unlimited) or a positive integer, got ${JSON.stringify(rawValue)}`);
+        issues.push(issue('row-concurrency', 'modelCards', id, rawKey, JSON.stringify(rawValue)));
         return undefined;
       }
       card.concurrency = value;
     } else {
-      errors.push(`modelCards["${id}"]: unknown field "${rawKey}"`);
+      issues.push(issue('card-unknown-field', id, rawKey));
       return undefined;
     }
   }
   if (!card.oaiModel) {
-    errors.push(`modelCards["${id}"]: oaiModel is required`);
+    issues.push(issue('card-wire-model-missing', id));
     return undefined;
   }
   if (!card.name) {
@@ -682,7 +769,7 @@ function parseCardRow(id: string, rawFields: unknown, errors: string[]): ModelCa
   const levels = card.efforts;
   const chosen = levels.find((l) => l.toLowerCase() === card.defaultEffort.toLowerCase());
   if (!chosen) {
-    errors.push(`modelCards["${id}"]: defaultEffort "${card.defaultEffort}" is not one of ${levels.join(', ')} — using "${levels[0]}"`);
+    issues.push(issue('card-default-effort-repaired', id, card.defaultEffort, levels.join(', '), levels[0]));
     card.defaultEffort = levels.includes(DEFAULT_EFFORT) ? DEFAULT_EFFORT : levels[0];
   } else {
     card.defaultEffort = chosen;
@@ -700,7 +787,7 @@ function parseCardRow(id: string, rawFields: unknown, errors: string[]): ModelCa
 export function parseCatalog(providersRaw: unknown, cardsRaw: unknown): CatalogParseResult {
   const providers: ProviderSpec[] = [];
   const cardsOut: ModelCard[] = [];
-  const errors: string[] = [];
+  const issues: CatalogIssue[] = [];
 
   for (const [label, raw, row, push] of [
     ['providers', providersRaw, parseProviderRow, providers],
@@ -710,23 +797,26 @@ export function parseCatalog(providersRaw: unknown, cardsRaw: unknown): CatalogP
       continue;
     }
     if (typeof raw !== 'object' || Array.isArray(raw)) {
-      errors.push(`spinney.${label} must be an object of id → fields (got ${Array.isArray(raw) ? 'an array' : typeof raw})`);
+      issues.push(issue('catalog-not-object', label, Array.isArray(raw) ? 'an array' : typeof raw));
       continue;
     }
     for (const [rawId, rawFields] of Object.entries(raw as Record<string, unknown>)) {
       const id = rawId.trim();
       if (!id) {
-        errors.push(`${label}: a row has an empty id`);
+        issues.push(issue('catalog-empty-id', label));
         continue;
       }
-      const parsed = row(id, rawFields, errors);
+      const parsed = row(id, rawFields, issues);
       if (parsed) {
         (push as unknown[]).push(parsed);
       }
     }
   }
 
-  return { providers, cards: cardsOut, errors };
+  // The English copy is a projection of the issues, never a second source: the output
+  // channel prints these lines, the page's banner asks `src/chat/modelTree.ts` for the
+  // same issues in the display language.
+  return { providers, cards: cardsOut, issues, errors: issues.map(formatIssue) };
 }
 
 /** The provider's own sentence: "maximum context length is <N> tokens. However, you requested <M>". */

@@ -18,6 +18,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   host — `api.deepseek.com` → `deepseek`, anything else → `none` — because it is
   declared, never probed: no request is spent finding out, and no endpoint is read as if
   it spoke DeepSeek's dialect. The built-in provider still reads DeepSeek's wallet.
+- The Model Cards page says when it holds unsaved edits. The editor tab's title carries
+  `* Model Cards` while the draft differs from the stored configuration, and a **docked**
+  status strip at the very top of the view says the same thing in the display language
+  (*No unsaved changes.* while it matches, *You have unsaved changes.* while it does not).
+  The strip is never hidden and is one line tall in both states, so the tree below it does
+  not move when the first edit lands. Both follow the one flag Save / Revert read, so a
+  save, a revert or a fresh snapshot clears them. Closing the tab cannot be vetoed
+  (`WebviewPanel` only reports `onDidDispose`), so the mark is on screen while the work is
+  unsaved rather than raised on the way out.
 
 ### Changed
 
@@ -33,6 +42,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Everything that really is DeepSeek keeps the name: the vendored `deepseek-flash`
   card, the built-in provider's base URL, `DEEPSEEK_API_KEY`, and the `deepseek` image
   transport.
+- The Model Cards page's banner is localized. An unusable `settings.json` row is reported
+  as structured data (a code plus its arguments) and turned into a sentence by the page's
+  host, so the banner reads in the display language like the rest of the page. The
+  Spinney **output channel** keeps the English wording it has always printed —
+  diagnostics are deliberately not translated.
 
 ## [0.0.2] - 2026-09-16
 
