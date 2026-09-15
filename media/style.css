@@ -138,16 +138,16 @@ body {
   padding: 8px 10px;
   border-top: 1px solid var(--border);
   background: var(--bg2);
+  /* Flush with the card's bottom edge and painting its own background: it has to
+     round its own corners now that `.node` no longer clips its children. */
+  border-radius: 0 0 calc(var(--radius) - 1px) calc(var(--radius) - 1px);
   /* The canvas disables selection for panning; the input needs it back. */
   user-select: text;
   -webkit-user-select: text;
 }
 
-/* Leave the card's bottom-right resize handle clear. */
-#composer #meter-row-readout {
-  padding-right: 16px;
-}
-
+/* The composer's rows sit inside its own 10px padding, and the resize handle now
+   floats outside the card, so no extra clearance is reserved on the right. */
 #composer-controls {
   display: flex;
   align-items: center;
@@ -213,8 +213,6 @@ body {
   display: flex;
   align-items: center;
   gap: 4px;
-  /* Leave the bottom-right corner free for the resize handle. */
-  padding-right: 14px;
   min-width: 0;
   font-family: "Consolas", "Courier New", monospace;
   font-size: 10px;
@@ -1009,7 +1007,13 @@ button.icon-btn {
   background: var(--assistant-bg);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  overflow: hidden;
+  /* `visible`, not `hidden`: the resize handle is deliberately placed *outside*
+     the card's bottom-right corner (see `.node-resize`), and a clip here would
+     cut it off. Nothing inside needs the clip — every scroller (.node-items,
+     .node-prompt, .thinking-body) scrolls on its own — but the two children that
+     paint their own background must carry the card's rounding instead:
+     `.node-head` at the top, `#composer` at the bottom. */
+  overflow: visible;
   display: flex;
   flex-direction: column;
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.25);
@@ -1047,6 +1051,10 @@ button.icon-btn {
   padding: 8px 10px;
   border-bottom: 1px solid var(--border);
   background: var(--bg2);
+  /* Paints its own background and is flush with the card's top edge, so it has
+     to round its own corners (`calc` = the card's radius minus its 1px border);
+     `.node` cannot clip it any more. */
+  border-radius: calc(var(--radius) - 1px) calc(var(--radius) - 1px) 0 0;
   cursor: pointer;
 }
 
@@ -1306,22 +1314,40 @@ button.icon-btn {
   margin-right: 4px;
 }
 
-/* Drag handle to resize a node card. */
+/* Drag handle to resize a node card: a short wire at the card's bottom-right
+   corner — the card's own corner echoed just outside it, wrapping a few px back
+   toward the edges. It is a real stroke (SVG `stroke-linecap/linejoin: round`),
+   not borders, so the ends and the bend are round; the stroke is used as a mask
+   over a plain background, which keeps its colour a CSS variable (accent on
+   hover). */
 .node-resize {
+  /* 3px stroke, r=13 bend, two equal 10px arms, in a 26×26 box. */
+  --resize-wire: url("data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 26 26' fill='none' stroke='%23fff' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'><path d='M24.5 1.5 V11.5 A13 13 0 0 1 11.5 24.5 H1.5'/></svg>");
   position: absolute;
-  right: 0;
-  bottom: 0;
-  width: 16px;
-  height: 16px;
+  right: -9px;
+  bottom: -9px;
+  width: 26px;
+  height: 26px;
   cursor: nwse-resize;
-  z-index: 6;
-  background: linear-gradient(135deg, transparent 50%, var(--text-dim) 50%);
-  border-radius: 0 0 6px 0;
-  opacity: 0.55;
+  background-color: var(--text);
+  opacity: 0.8;
+  -webkit-mask-image: var(--resize-wire);
+  mask-image: var(--resize-wire);
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+  -webkit-mask-size: 100% 100%;
+  mask-size: 100% 100%;
+  /* Behind the card, not above it: the box reaches up and left past the corner,
+     over the composer's meter row, and a transparent box still swallows clicks.
+     Painted below the card, the card's own footprint takes those hits back, so
+     only the part sticking out stays grabbable — the wire and the space around
+     it, which is what the pointer aims at. */
+  z-index: -1;
 }
 
 .node-resize:hover {
   opacity: 1;
+  background-color: var(--accent);
 }
 
 /* Live wireframe shown while dragging to resize (no content / no layout). */

@@ -183,6 +183,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in the middle of the old flat list (say `spinney.autoSessionTitles`) simply moved next
   to its neighbours.
 
+- A card's drag handle now sits **outside** the bottom-right corner instead of on top of
+  it: a short wire (3px, round-capped, `r=13` bend, two equal 10px arms) 8px clear of
+  the card, drawn as an SVG stroke masked over a plain background so the ends and the
+  bend are round and the accent on hover is a colour change. It no longer covers the
+  composer docked at the bottom of the active card, so the two paddings that existed
+  only to keep the meter row clear of it are gone. Two consequences: `.node` no longer
+  clips its children (`overflow: visible`), so the two children painting their own
+  background round their own corners (`.node-head` at the top, `#composer` at the
+  bottom); and the handle is painted below the card (`z-index: -1`), so the part of its
+  box that reaches back over the card cannot swallow clicks meant for the Send button.
+
 ### Removed
 
 - `spinney.thinkingEffort`: each model card declares its own levels and its own
