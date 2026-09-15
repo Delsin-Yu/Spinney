@@ -25,6 +25,68 @@ function retryDelay(attempt: number): number {
 }
 
 /**
+ * Stall watchdogs for one attempt. The retry policy above only ever reacts to an
+ * **error**, and a connection that goes quiet neither errors nor ends: without
+ * these timers the only thing that can end such a request is the user pressing
+ * Stop, which is exactly the "first answer takes forever, Stop + Continue fixes
+ * it" symptom. The healthy baseline is narrow — over ~1000 logged requests the
+ * time from send to response headers was 0.5–3.4 s (p99 ≈ 2.9 s) — so a much
+ * longer silence is an anomaly, and aborting it is safe: the abort tears the
+ * socket down, so the retry leaves on a connection that is known to be fresh.
+ */
+const FIRST_BYTE_TIMEOUT_MS = 20_000;
+/**
+ * The first request after a long silence is the one most likely to be handed a
+ * pooled keep-alive socket the provider already dropped while the window sat
+ * idle, so it gets the shorter budget: fail fast, retry, and be done in ~13 s
+ * instead of hanging until the user notices.
+ */
+const FIRST_BYTE_TIMEOUT_AFTER_IDLE_MS = 12_000;
+/** Headers arrived but no payload: still retriable, nothing has been yielded yet. */
+const FIRST_CHUNK_TIMEOUT_MS = 20_000;
+/** Silence *inside* an answer (thoughts and tool args pulse every ~50 ms). */
+const STREAM_IDLE_TIMEOUT_MS = 60_000;
+/** No request for this long counts as "the client was idle" (see the header budget). */
+const IDLE_GAP_MS = 60_000;
+/** While a request waits for its first byte, say so at this cadence. */
+const SLOW_HEADERS_NOTICE_MS = 5_000;
+
+/**
+ * One attempt's own signal: the caller's Stop **plus** the watchdogs of this
+ * attempt. They have to stay separate signals, because the retry policy keys on
+ * the *caller's*: `opts.signal.aborted` means "the user stopped the run — never
+ * retry", while a watchdog abort means "this connection went quiet — worth
+ * another try on a fresh socket". Aborting this one tears the attempt's socket
+ * down without touching the caller's run.
+ */
+interface AttemptWatch {
+  controller: AbortController;
+  /** The signal the request is sent on and its body is read on. */
+  signal: AbortSignal;
+  /** Why a watchdog ended the attempt; undefined while the attempt is healthy. */
+  stalled?: string;
+  /** Drop the listener on the caller's signal once the attempt is over. */
+  detach(): void;
+}
+
+function watchAttempt(outer?: AbortSignal): AttemptWatch {
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  if (outer) {
+    if (outer.aborted) {
+      controller.abort();
+    } else {
+      outer.addEventListener('abort', onAbort, { once: true });
+    }
+  }
+  return {
+    controller,
+    signal: controller.signal,
+    detach: () => outer?.removeEventListener('abort', onAbort),
+  };
+}
+
+/**
  * A retry about to be made. Reported so the UI can say "retrying (2/10)…"
  * instead of looking hung, and so the output channel records what went wrong.
  */
@@ -108,6 +170,13 @@ export class DeepSeekError extends Error {
  * Node.js runtime (Node 18+).
  */
 export class DeepSeekClient {
+  /**
+   * When the last attempt started, on this shared client. Only used to tell a
+   * request that follows a long silence (the socket may be half-open) from one in
+   * the middle of a turn, which gets the normal first-byte budget.
+   */
+  private lastAttemptAt = 0;
+
   constructor(private readonly options: DeepSeekOptions) {}
 
   /**
@@ -292,7 +361,7 @@ export class DeepSeekClient {
       let yielded = false;
       let readError: DeepSeekError | undefined;
       try {
-        for await (const chunk of this.readStream(opened.response, signal)) {
+        for await (const chunk of this.readStream(opened.response, signal, opened.watch, attempt)) {
           yielded = true;
           yield chunk;
         }
@@ -300,8 +369,19 @@ export class DeepSeekClient {
         if (signal?.aborted) {
           throw new DeepSeekError('Request aborted.');
         }
-        const message = err instanceof Error ? err.message : String(err);
-        readError = new DeepSeekError(`Network error reading DeepSeek stream: ${message}`);
+        // A watchdog abort reads as a body error here; name the real reason so the
+        // UI's ↻ Retry says "no data for Ns" instead of a bogus network failure.
+        readError = opened.watch.stalled
+          ? new DeepSeekError(`DeepSeek stream stalled: ${opened.watch.stalled}.`)
+          : new DeepSeekError(
+              `Network error reading DeepSeek stream: ${err instanceof Error ? err.message : String(err)}`,
+            );
+        if (opened.watch.stalled) {
+          // A post-yield stall is fatal (no retry line will follow), so record it.
+          perf(() => `request-stall ${opened.watch.stalled} yielded=${yielded}`);
+        }
+      } finally {
+        opened.watch.detach();
       }
       if (!readError) {
         return;
@@ -318,14 +398,26 @@ export class DeepSeekClient {
    * every read **and** after every buffered line, so a Stop discards data that
    * already arrived; the final `data:` line is flushed even when it came without
    * a trailing newline.
+   *
+   * `signal` is the caller's (a Stop), `watch` this attempt's own signal plus its
+   * stall watchdog: the gap *between* two reads is timed here, because a body that
+   * stops delivering is the second half of the same hang the header watchdog
+   * covers.
    */
-  private async *readStream(response: Response, signal?: AbortSignal): AsyncGenerator<StreamChunk> {
+  private async *readStream(
+    response: Response,
+    signal: AbortSignal | undefined,
+    watch: AttemptWatch,
+    attempt: number,
+  ): AsyncGenerator<StreamChunk> {
     if (!response.body) {
       throw new DeepSeekError('DeepSeek returned no response body.');
     }
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
+    let firstChunk = true;
+    const readStart = Date.now();
 
     while (true) {
       // Check the signal before every read so a cancellation is honoured even
@@ -334,9 +426,29 @@ export class DeepSeekClient {
       if (signal?.aborted) {
         throw new DeepSeekError('Request aborted.');
       }
-      const { done, value } = await reader.read();
+      // Nothing has been yielded before the first chunk, so that wait is still
+      // retriable; once tokens are flowing a silence is fatal instead (see the
+      // caller: re-sending would duplicate output the caller already assembled).
+      const idleMs = firstChunk ? FIRST_CHUNK_TIMEOUT_MS : STREAM_IDLE_TIMEOUT_MS;
+      const idleTimer = setTimeout(() => {
+        watch.stalled = `no data for ${idleMs}ms ${firstChunk ? 'before the first chunk' : 'mid-answer'}`;
+        watch.controller.abort();
+      }, idleMs);
+      let done = false;
+      let value: Uint8Array | undefined;
+      try {
+        const read = await reader.read();
+        done = read.done;
+        value = read.value;
+      } finally {
+        clearTimeout(idleTimer);
+      }
       if (done) {
         break;
+      }
+      if (firstChunk) {
+        firstChunk = false;
+        perf(() => `request-first-chunk ${Date.now() - readStart}ms attempt=${attempt}`);
       }
       buffer += decoder.decode(value, { stream: true });
 
@@ -396,11 +508,32 @@ export class DeepSeekClient {
     payload: string,
     opts: { signal?: AbortSignal; onRetry?: RetryReporter },
     attemptStart = 1,
-  ): Promise<{ response: Response; attempt: number }> {
+  ): Promise<{ response: Response; attempt: number; watch: AttemptWatch }> {
     let last: DeepSeekError | undefined;
     for (let attempt = attemptStart; attempt <= MAX_ATTEMPTS; attempt++) {
-      let response: Response;
+      // A request that follows a long silence is the one most likely to be handed
+      // a pooled keep-alive socket the provider already dropped, so it gets the
+      // shorter first-byte budget: fail fast, retry, and the retry leaves on a
+      // connection that is known to be new (the abort tore the old one down).
+      const idle = this.lastAttemptAt > 0 && Date.now() - this.lastAttemptAt >= IDLE_GAP_MS;
+      this.lastAttemptAt = Date.now();
+      const budget = idle ? FIRST_BYTE_TIMEOUT_AFTER_IDLE_MS : FIRST_BYTE_TIMEOUT_MS;
+      const watch = watchAttempt(opts.signal);
       const fetchStart = Date.now();
+      // Say it out loud while it is happening: an attempt with no first byte logs
+      // nothing at all, which is exactly why this used to look like a hung model.
+      const slowNotice = setInterval(
+        () =>
+          perf(
+            () => `request-headers pending ${Date.now() - fetchStart}ms attempt=${attempt} idle=${idle}`,
+          ),
+        SLOW_HEADERS_NOTICE_MS,
+      );
+      const firstByteTimer = setTimeout(() => {
+        watch.stalled = `no response headers for ${budget}ms`;
+        watch.controller.abort();
+      }, budget);
+      let response: Response;
       try {
         response = await fetch(url, {
           method: 'POST',
@@ -409,23 +542,37 @@ export class DeepSeekClient {
             Authorization: `Bearer ${this.options.apiKey}`,
           },
           body: payload,
-          signal: opts.signal,
+          signal: watch.signal,
         });
       } catch (err) {
+        clearInterval(slowNotice);
+        clearTimeout(firstByteTimer);
+        watch.detach();
         if (opts.signal?.aborted) {
           throw new DeepSeekError('Request aborted.');
         }
         const message = err instanceof Error ? err.message : String(err);
-        last = new DeepSeekError(`Network error calling DeepSeek: ${message}`);
+        last = watch.stalled
+          ? new DeepSeekError(`DeepSeek ${watch.stalled} (attempt ${attempt}).`)
+          : new DeepSeekError(`Network error calling DeepSeek: ${message}`);
+        perf(() => `request-timeout ${watch.stalled ? 'headers' : 'network'} ${Date.now() - fetchStart}ms attempt=${attempt}`);
         if (!(await this.retryLater(attempt, last.message, opts.onRetry, opts.signal))) {
           throw withAttempts(last, attempt);
         }
         continue;
       }
-      perf(() => `request-headers ${Date.now() - fetchStart}ms status=${response.status} attempt=${attempt}`);
+      clearInterval(slowNotice);
+      clearTimeout(firstByteTimer);
+      perf(
+        () =>
+          `request-headers ${Date.now() - fetchStart}ms status=${response.status} attempt=${attempt} ` +
+          `idle=${idle} budget=${budget}ms`,
+      );
       if (response.ok && response.body) {
-        return { response, attempt };
+        return { response, attempt, watch };
       }
+      // Every path below ends the attempt without reading a body: stop watching it.
+      watch.detach();
       if (!response.ok) {
         const text = await response.text().catch(() => '');
         last = new DeepSeekError(
@@ -518,15 +665,23 @@ export class DeepSeekClient {
       body.temperature = request.temperature;
     }
 
-    // Same transparent retry policy as `stream` (transient failures only).
-    const { response } = await this.postWithRetry(url, JSON.stringify(body), {
+    // Same transparent retry policy as `stream` (transient failures only) and the
+    // same first-byte watchdog. The body read itself is not watched: this path is
+    // used for short side answers (session titles), whose caller already bounds it
+    // with its own abort timer.
+    const { response, watch } = await this.postWithRetry(url, JSON.stringify(body), {
       signal: request.signal,
       onRetry: request.onRetry,
     });
-    const data = (await response.json()) as {
+    let data: {
       choices?: Array<{ message?: { content?: string | null } }>;
       usage?: Usage;
     };
+    try {
+      data = (await response.json()) as typeof data;
+    } finally {
+      watch.detach();
+    }
     const text = data.choices?.[0]?.message?.content ?? '';
     return { text: typeof text === 'string' ? text : '', usage: data.usage };
   }

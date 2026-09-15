@@ -36,6 +36,40 @@ retries a **transient** failure up to `MAX_ATTEMPTS = 10` total attempts
   `vision-images.md`) still works because a 400 is not retriable here: it surfaces
   immediately and the Agent hides the offending image and re-asks.
 
+### 1b. The stall watchdogs (a request that produces nothing is not "thinking")
+
+The retry policy above only reacts to an **error**, and a connection that goes
+quiet neither errors nor ends — so the only thing that used to end such a request
+was the user pressing Stop. That was the "the first answer takes forever, and Stop
++ Continue makes it instant" report: after a long silence the client is most likely
+handed a pooled keep-alive socket the provider already dropped, `fetch` never
+resolves, the turn shows `Thinking…` with the tok/s meter pinned at 0, and the
+`[perf]` channel stays empty (nothing is logged before the response headers
+arrive). Three timers in `deepseek.ts` now bound it:
+
+- `FIRST_BYTE_TIMEOUT_MS` (20 s) — no response headers. `FIRST_BYTE_TIMEOUT_AFTER_IDLE_MS`
+  (12 s) is used instead when the previous attempt started ≥ `IDLE_GAP_MS` (60 s)
+  ago: that is the request most likely to be holding a dead socket, and the abort
+  is what tears it down, so the retry leaves on a connection known to be fresh.
+  The budget is measured against a narrow healthy baseline — ~1000 logged requests
+  land in 0.5–3.4 s to first byte (p99 ≈ 2.9 s).
+- `FIRST_CHUNK_TIMEOUT_MS` (20 s) — headers arrived but no payload. Nothing has
+  been yielded yet, so this stays **retriable**.
+- `STREAM_IDLE_TIMEOUT_MS` (60 s) — silence *inside* an answer. Thoughts and tool
+  args pulse every ~50 ms, so a full minute is unambiguous; after the first chunk
+  the retry rule above applies unchanged (fatal, no duplicate output).
+
+Each attempt runs on its own `AttemptWatch` signal, chained to the caller's: the
+watchdogs abort only the attempt, so `opts.signal.aborted` keeps meaning "the user
+pressed Stop — never retry". A watchdog abort is reported like any other transient
+failure (`onRetry` → the "retrying (n/10)…" status) and the retry rides the same
+backoff budget. Instrumentation for the next report: a
+`request-headers pending <ms> attempt=N idle=…` line every 5 s while a request has
+no first byte, `request-headers … idle= budget=ms`, `request-first-chunk <ms>`
+(= the real TTFT), `request-timeout <headers|network>`, and `request-stall <reason>
+yielded=<bool>` for a stream that went quiet. `complete()` (session titles) shares
+the header watchdog but not the body one — its caller already bounds it.
+
 ## 2. The ▶ Continue / ↻ Retry button (transparent continue)
 
 A turn can end without an answer in two ways: the user pressed Stop

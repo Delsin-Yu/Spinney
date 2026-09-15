@@ -66,6 +66,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in the middle of the old flat list (say `spinney.autoSessionTitles`) simply moved next
   to its neighbours.
 
+### Fixed
+
+- A model request that produces no traffic can no longer hang a turn. The client
+  only ever retried on an *error*, and a connection that goes quiet neither errors
+  nor ends, so the only thing that used to end it was pressing Stop — the "first
+  answer takes forever, Stop + Continue makes it instant" report, which shows up as
+  `Thinking…` with the tok/s meter pinned at 0 (typically on the first request after
+  the window sat idle, when the pooled keep-alive socket is already half-open). Each
+  attempt now runs under three watchdogs: 20 s to the response headers (12 s for the
+  first request after a ≥60 s idle gap), 20 s to the first chunk, 60 s of silence
+  inside an answer. An abort by a watchdog retries transparently through the existing
+  backoff (the abort is what tears the dead socket down, so the retry leaves on a
+  fresh connection); after the first chunk a stall stays fatal, so no output is
+  duplicated. Stop keeps its meaning: a user abort is never retried. The output
+  channel also gained `request-headers pending/slow`, `request-first-chunk`,
+  `request-timeout` and `request-stall` lines, so a request that has not produced
+  its first byte is now visible *while* it waits.
+
 ## [0.0.1] - 2026-09-14
 
 ### Added
