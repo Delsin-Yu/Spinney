@@ -3,7 +3,7 @@
   "displayName": "Spinney",
   "description": "A branchable agent tree for VS Code: fork any turn, run sub-agents in parallel, edit files and run shell.",
   "version": "0.0.1",
-  "publisher": "deyu",
+  "publisher": "DE-YU",
   "license": "MIT",
   "author": {
     "name": "Delsin-Yu",
