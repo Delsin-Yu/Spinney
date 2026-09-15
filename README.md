@@ -80,7 +80,7 @@ Spinney writes sessions and tool output to disk as plaintext JSONL. The default 
 
 ## Uninstall and clear data
 
-Uninstall Spinney from the Extensions view. Then delete the folder `<globalStorage>/de-yu.spinney` by hand. That folder holds transcripts, backups, and the HTTP discovery file. Sessions also live in the workspace storage. Delete that folder too.
+Uninstall Spinney from the Extensions view. Then delete the folder `<globalStorage>/de-yu.spinney` by hand. That folder holds transcripts, backups, and the HTTP discovery file — not the conversations. The sessions themselves are Memento rows in `state.vscdb`, keyed by the extension id as `package.json` spells it (`DE-YU.spinney`): one in `globalStorage/state.vscdb`, and one in each `<workspaceStorage>/<hash>/state.vscdb`. Delete those rows too.
 
 ## Roadmap
 
@@ -95,14 +95,18 @@ Uninstall Spinney from the Extensions view. Then delete the folder `<globalStora
 
 Three build guards run before packaging: `npm run check:models`, `npm run check:webview`, and `npm run check:signals`.
 
+Dev tooling lives in `tools/`: the guards, the acceptance driver `harness-test.mjs`, the `hvsc` supervisor, and one migration script. A change under `tools/` needs no build and no reload; that folder is not shipped in the `.vsix`.
+
 ## Migrating data from an older build
 
-An older build used a different extension id. `tools/migrate-state.mjs` moves its sessions and transcripts into `de-yu.spinney`. Run the script only when VS Code is closed. Start with a dry run. Then apply it:
+An older build used a different extension id. `tools/migrate-state.mjs` moves its sessions and transcripts to the new id. It handles both spellings of that id: the Memento rows in `state.vscdb` keep the manifest case (`DE-YU.spinney`), while the folder under `globalStorage` is lowercased (`de-yu.spinney`). The script prints both halves before it writes anything. If the new build already ran, it merges into the rows that build wrote, and keeps the conversations of both. Close VS Code first: it refuses to write while a window is open. Start with a dry run. Then apply it:
 
 ```bash
 node tools/migrate-state.mjs --dry-run
 node tools/migrate-state.mjs --apply
 ```
+
+The script moves no Secrets. Run `Spinney: Set API Key` again after the migration. It also leaves `<repo>/.agent-harness` folders alone; those hold tool output of the old build.
 
 ## License and third-party code
 

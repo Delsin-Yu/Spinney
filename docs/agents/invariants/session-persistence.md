@@ -11,7 +11,7 @@
   activation).
 - **Which Memento holds a key matters as much as which key** — VS Code keeps an
   extension's entire `workspaceState` as **one** row (`5ad8cddf…/state.vscdb`, key
-  `de-yu.spinney`, measured at **118,860,732 chars** with every
+  `DE-YU.spinney`, measured at **118,860,732 chars** with every
   one of our keys inside it). So *any* `update` on the content Memento re-serializes
   and rewrites all of it, however small the value: a pointer write was measured as
   `lag blocked 549ms` right after a switch. Hence the split
@@ -25,6 +25,24 @@
   on read and written small for next time; the stale copy is deliberately left behind
   (deleting it would rewrite the 119 M chars for a few bytes) and simply loses from
   then on.
+- **The row key is the manifest's case; the storage folder is not.** VS Code keys
+  each per-extension row by `publisher.name` *as declared* (`DE-YU.spinney`, not
+  `de-yu.spinney`) in both `state.vscdb`s, while the `globalStorage` folder and the
+  `secret://…"extensionId"` keys are lowercased (shipped `globalValue` is
+  `joinPath(globalStorageHome, identifier.value.toLowerCase())`). Field evidence:
+  rows `GitHub.copilot-chat` / `JetBrains.resharper-code` sit beside lowercased
+  folders, and no lowercase row exists for either. SQLite item keys are
+  case-sensitive, so an id change does not move data, it changes which key the
+  extension reads: the old tree stays invisible under the old key, and the first
+  activation writes a fresh, empty row under the new one. Re-key the rows, not just
+  the folder — `tools/migrate-state.mjs` takes the ids in manifest case and derives
+  the lowercased folder. VS Code has its own rename migration
+  (`extensionStorage.migrate.<from>-<to>` plus `extensionStorage.migrationList` in
+  the profile storage), but it only runs for renames the Marketplace reports; a
+  locally installed `.vsix` under a new publisher leaves every row behind. This is
+  why `<globalStorage>/de-yu.spinney` holds transcripts, scratch, the v1 backup and
+  `http/`, but never a conversation. It also does not re-key Secrets, so a renamed
+  install asks for the API key again (`secret://…"extensionId"` rows, lowercased).
 - **The active-session pointer is its own key** (`spinney.activeSession`, in the
   small scope): a session switch only moves a pointer, and doing it through
   `persist()` re-serialized the whole state (~111 M chars → ~1.6 s of blocked
