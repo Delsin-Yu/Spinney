@@ -288,7 +288,6 @@ export class Agent {
     private readonly client: DeepSeekClient,
     private readonly tools: ToolRegistry,
     private readonly onEvent: (event: AgentEvent) => void,
-    private maxTurns = 20,
   ) {
     this.reset();
   }
@@ -303,17 +302,6 @@ export class Agent {
   setThinkingEffort(effort: ThinkingEffort): void {
     this.thinkingEffort = effort;
     this.refreshSystemIdentity();
-  }
-
-  /**
-   * Set the tool-round limit for subsequent turns (`spinney.maxTurns` may
-   * change while the window is open). A non-positive/non-finite value is ignored
-   * so a bad setting cannot disable the loop guard entirely.
-   */
-  setMaxTurns(maxTurns: number): void {
-    if (Number.isFinite(maxTurns) && maxTurns > 0) {
-      this.maxTurns = Math.floor(maxTurns);
-    }
   }
 
   /** Set a provider hook that runs sub-agents for the `spawn_agents` tool. */
@@ -586,7 +574,6 @@ export class Agent {
 
   private async runTurn(signal: AbortSignal, turnStartIndex: number): Promise<void> {
     try {
-      let toolTurnCount = 0;
       while (true) {
         if (this.isStopped(signal)) {
           throw new Error('interrupted');
@@ -601,7 +588,6 @@ export class Agent {
             `tools=${assistant.tool_calls?.length ?? 0} ` +
             `chars=${typeof assistant.content === 'string' ? assistant.content.length : 0}`,
         );
-        const iterationStart = this.messages.length;
         // Never retain an assistant message the API would reject: a turn must
         // carry content or tool_calls. A completely empty response (no content,
         // no reasoning, no tool_calls) has nothing worth keeping in history.
@@ -612,20 +598,6 @@ export class Agent {
         }
 
         if (assistant.tool_calls && assistant.tool_calls.length > 0) {
-          toolTurnCount++;
-          if (toolTurnCount > this.maxTurns) {
-            // Roll back the just-added assistant message that carries tool_calls
-            // (without its tool responses) so the persisted transcript stays valid
-            // across restarts and never triggers a 400 on resume.
-            this.messages.splice(iterationStart);
-            this.onEvent({
-              type: 'status',
-              text: `Stopped after ${this.maxTurns} tool rounds (loop limit).`,
-            });
-            this.onEvent({ type: 'done' });
-            return;
-          }
-
           for (let i = 0; i < assistant.tool_calls.length; i++) {
             if (this.isStopped(signal)) {
               throw new Error('interrupted');

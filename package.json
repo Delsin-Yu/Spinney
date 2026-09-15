@@ -219,12 +219,6 @@
           "description": "Maximum time (seconds) a command may run before being killed. Default 600 (10 minutes); used as the default for exec_command when the tool call does not pass its own timeout.",
           "scope": "window"
         },
-        "spinney.maxTurns": {
-          "type": "number",
-          "default": 20,
-          "description": "Maximum tool-call rounds per user message to prevent runaway loops.",
-          "scope": "window"
-        },
         "spinney.contextWindow": {
           "type": "number",
           "default": 0,

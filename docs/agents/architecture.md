@@ -39,7 +39,7 @@ User (editor WebviewPanel) <--postMessage--> ChatViewProvider (src/chat)
 5. `Agent.sendUserMessage` pushes a user message and runs the loop: stream an
    assistant turn → if it emits `tool_calls`, execute each tool (emitting
    `toolStart`/`toolEnd`) and append `tool` results → loop → until a plain-text
-   answer or `maxTurns` is exceeded.
+   answer.
 6. `Agent` emits `AgentEvent`s (`streamDelta`, `reasoningDelta`, `toolCall*`,
    `usage`, `status`, `done`, `interrupted`, `error`); the provider forwards them
    to the webview and mutates the session's `displayItems`.

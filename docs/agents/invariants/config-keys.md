@@ -2,8 +2,7 @@
 `model`, `modelTable`, `baseUrl`, `commandTimeout`
 (seconds, default 600 = 10 minutes — the default for `exec_command` when the tool
 call does not pass its own `timeout`; a non-positive/absent value falls back to
-600), `maxTurns`
-(default 20), `contextWindow` (0 = use the catalog's window; a `modelTable` row
+600), `contextWindow` (0 = use the catalog's window; a `modelTable` row
 beats it), `thinkingEffort`
 (`none|low|medium|high`, default `medium` — `none` omits `reasoning_effort`),
 `foldToolCalls` (default `true`),
@@ -61,7 +60,6 @@ no handling.
 | Key | Applied | Mechanism |
 | --- | --- | --- |
 | `baseUrl` | next request (even mid-turn) | pulled into the shared `DeepSeekClient` via `configure()` — the main agent and every sub-agent hold that instance |
-| `maxTurns` | next tool round (main agent) / next `spawn_agents` (sub-agents) | pushed: `Agent.setMaxTurns`; sub-agents re-read it at spawn |
 | `contextWindow` | immediately | pushed: recompute + `postContext()` |
 | `modelTable` | immediately | pushed: `applyModelTable()` (re-parse + install) → `postConfig()` (dropdown + image affordances) → `getContextWindow`/`postContext` for the row's own model |
 | `maxConcurrentSubagents` | immediately (raising wakes queued tasks; lowering drains) | pushed: `SubAgentPool.setMaxConcurrent` |

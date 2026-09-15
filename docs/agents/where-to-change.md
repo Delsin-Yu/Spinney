@@ -8,15 +8,14 @@
   `Agent.executeToolCall`). The description string is handed to the model — keep
   it accurate; optionally update `media/main.js` rendering.
 - **Change the agent prompt** → `src/agent/prompt.ts` only (templates +
-  placeholders); the loop, tool interception and `maxTurns` are in
+  placeholders); the loop and tool interception are in
   `src/agent/agent.ts`. See `docs/agents/invariants/system-prompt.md`.
 - **Add a setting** → `package.json` `contributes.configuration` +
   `ChatViewProvider.getConfig()`. A setting must take effect **without a window
   reload**: read it at its point of use (the preferred shape), or, if some live
   owner caches it, push it from `ChatViewProvider.onConfigurationChanged()`
   (wired in `extension.ts` from `onDidChangeConfiguration`), which pushes it to the
-  live owners (`SessionRuntime.applyDefaultModel` / `applyDefaultEffort` /
-  `setMaxTurns`); a value read only once at activation is a bug. Extend the table in
+  live owners (`SessionRuntime.applyDefaultModel` / `applyDefaultEffort`); a value read only once at activation is a bug. Extend the table in
   `docs/agents/invariants/config-keys.md` with the new key.
 - **Change the UI** → `media/main.js` (behavior) and/or `media/style.css`
   (styling); the HTML shell is in `getHtml()` in `ChatViewProvider.ts`.

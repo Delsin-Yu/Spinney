@@ -158,7 +158,6 @@ export interface HarnessConfig {
   apiKey: string;
   model: string;
   baseUrl: string;
-  maxTurns: number;
   thinkingEffort: ThinkingEffort;
   foldToolCalls: boolean;
   foldThinking: boolean;
@@ -471,7 +470,7 @@ export class SessionRuntime {
         currentOwner: () => ({ sessionId: this.sessionId, nodeId: node.id }),
         hub: this.hub,
       });
-      const agent = new Agent(this.client, tools, (event) => this.handleAgentEventFor(node, event), this.host.getConfig().maxTurns);
+      const agent = new Agent(this.client, tools, (event) => this.handleAgentEventFor(node, event));
       agent.setModel(this.model);
       agent.setThinkingEffort(this.thinkingEffort);
       // This agent can spawn sub-agents: hand it this runtime's orchestrator,
@@ -739,13 +738,6 @@ export class SessionRuntime {
       );
     }
     this.host.output.appendLine(`[config] thinkingEffort=${effort}${explicit ? ' (session pick)' : ' (settings)'}`);
-  }
-
-  /** Push a settings change onto every node worker (`spinney.maxTurns`). */
-  setMaxTurns(maxTurns: number): void {
-    for (const worker of this.nodeWorkers.values()) {
-      worker.agent.setMaxTurns(maxTurns);
-    }
   }
 
   /** Push a settings change onto the live sub-agent pool. */
@@ -2129,7 +2121,7 @@ export class SessionRuntime {
         resolve({ ok: status === 'done', summary, model: job.spec.model || this.model });
       };
 
-      const sub = new Agent(this.client, subTools, (event) => this.handleSubAgentEvent(job.node, event, finish), this.host.getConfig().maxTurns);
+      const sub = new Agent(this.client, subTools, (event) => this.handleSubAgentEvent(job.node, event, finish));
       subAgent = sub;
       sub.setModel(job.spec.model || this.model);
       sub.setThinkingEffort(this.thinkingEffort);

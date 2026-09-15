@@ -322,7 +322,6 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     const model = cfg.get<string>('model') ?? DEFAULT_MODEL;
     // A blank base URL means "use the default" rather than a relative URL.
     const baseUrl = (cfg.get<string>('baseUrl') ?? '').trim() || 'https://api.deepseek.com';
-    const maxTurns = cfg.get<number>('maxTurns') ?? 20;
     const thinkingEffort = (cfg.get<string>('thinkingEffort') ?? 'medium') as ThinkingEffort;
     const foldToolCalls = cfg.get<boolean>('foldToolCalls') ?? true;
     const foldThinking = cfg.get<boolean>('foldThinking') ?? true;
@@ -332,7 +331,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     const saveSessionTranscripts = cfg.get<boolean>('saveSessionTranscripts') ?? true;
     const subAgentTranscriptDir = (cfg.get<string>('subAgentTranscriptDir') ?? '').trim();
     const autoSessionTitles = cfg.get<boolean>('autoSessionTitles') ?? true;
-    return { apiKey, model, baseUrl, maxTurns, thinkingEffort, foldToolCalls, foldThinking, maxConcurrentSubagents, maxLevel2Subagents, saveSubAgentTranscripts, saveSessionTranscripts, subAgentTranscriptDir, autoSessionTitles };
+    return { apiKey, model, baseUrl, thinkingEffort, foldToolCalls, foldThinking, maxConcurrentSubagents, maxLevel2Subagents, saveSubAgentTranscripts, saveSessionTranscripts, subAgentTranscriptDir, autoSessionTitles };
   }
 
   // ---- API key (SecretStorage) ----
@@ -498,7 +497,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    *   path, but it is not a setting — it is installed by `loadApiKey` (the
    *   `spinney.setApiKey` / `spinney.clearApiKey` commands), so a settings event
    *   never touches it.
-   * - **`maxTurns`**, the **context window** and the **sub-agent pool limit** are
+   * - The **context window** and the **sub-agent pool limit** are
    *   pushed to their live owners (every runtime).
    * - **`model`** / **`thinkingEffort`** are applied only when those two keys
    *   actually changed, and then only to sessions that have **no pick of their
@@ -532,7 +531,6 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     }
     let skippedBusy = false;
     for (const rt of this.runtimes.values()) {
-      rt.setMaxTurns(cfg.maxTurns);
       rt.setSubAgentPoolLimit(cfg.maxConcurrentSubagents);
       rt.recheckContextWindow();
       if (modelChanged) {
@@ -565,7 +563,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       }
     }
     this.output.appendLine(
-      `[config] settings changed live: key=${this.apiKey ? 'set' : 'missing'} baseUrl=${cfg.baseUrl} maxTurns=${cfg.maxTurns} maxSubagents=${cfg.maxConcurrentSubagents}`,
+      `[config] settings changed live: key=${this.apiKey ? 'set' : 'missing'} baseUrl=${cfg.baseUrl} maxSubagents=${cfg.maxConcurrentSubagents}`,
     );
   }
 
