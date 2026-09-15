@@ -11,7 +11,7 @@
   activation).
 - **Which Memento holds a key matters as much as which key** — VS Code keeps an
   extension's entire `workspaceState` as **one** row (`5ad8cddf…/state.vscdb`, key
-  `deyu.spinney`, measured at **118,860,732 chars** with every
+  `de-yu.spinney`, measured at **118,860,732 chars** with every
   one of our keys inside it). So *any* `update` on the content Memento re-serializes
   and rewrites all of it, however small the value: a pointer write was measured as
   `lag blocked 549ms` right after a switch. Hence the split

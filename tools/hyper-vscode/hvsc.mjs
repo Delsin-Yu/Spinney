@@ -61,7 +61,7 @@ const STATE_DIR = process.env.HYPER_VSCODE_STATE_DIR || join(TOOL_DIR, '.state')
 const STATE_FILE = join(STATE_DIR, 'daemon.json');
 const INSTANCES_FILE = join(STATE_DIR, 'instances.json');
 const LOG_FILE = join(STATE_DIR, 'daemon.log');
-const EXT_ID = 'deyu.spinney';
+const EXT_ID = 'de-yu.spinney';
 
 // ---------------------------------------------------------------- utilities
 

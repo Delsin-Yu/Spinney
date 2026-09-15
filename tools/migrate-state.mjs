@@ -61,7 +61,7 @@ const DEFAULTS = {
   /** The pre-rename extension id (its rows and its globalStorage folder). */
   from: 'minimal-host.minimal-agent-harness',
   /** The renamed extension id (`publisher.name` in package.json). */
-  to: 'deyu.spinney',
+  to: 'de-yu.spinney',
   /** The old / new activity-bar view container id, as it appears in row keys. */
   fromContainer: 'agentHarness',
   toContainer: 'spinney',

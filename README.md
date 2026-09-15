@@ -4,7 +4,7 @@ Spinney is a VS Code extension. It puts an agent harness in an editor tab, and t
 
 ## Install
 
-Install Spinney from the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=deyu.spinney).
+Install Spinney from the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=de-yu.spinney).
 
 Spinney works with a folder open and with no folder open. With no folder, a relative path resolves against a scratch folder in the extension storage.
 
@@ -80,7 +80,7 @@ Spinney writes sessions and tool output to disk as plaintext JSONL. The default 
 
 ## Uninstall and clear data
 
-Uninstall Spinney from the Extensions view. Then delete the folder `<globalStorage>/deyu.spinney` by hand. That folder holds transcripts, backups, and the HTTP discovery file. Sessions also live in the workspace storage. Delete that folder too.
+Uninstall Spinney from the Extensions view. Then delete the folder `<globalStorage>/de-yu.spinney` by hand. That folder holds transcripts, backups, and the HTTP discovery file. Sessions also live in the workspace storage. Delete that folder too.
 
 ## Roadmap
 
@@ -97,7 +97,7 @@ Three build guards run before packaging: `npm run check:models`, `npm run check:
 
 ## Migrating data from an older build
 
-An older build used a different extension id. `tools/migrate-state.mjs` moves its sessions and transcripts into `deyu.spinney`. Run the script only when VS Code is closed. Start with a dry run. Then apply it:
+An older build used a different extension id. `tools/migrate-state.mjs` moves its sessions and transcripts into `de-yu.spinney`. Run the script only when VS Code is closed. Start with a dry run. Then apply it:
 
 ```bash
 node tools/migrate-state.mjs --dry-run

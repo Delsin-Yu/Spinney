@@ -58,7 +58,7 @@ import * as path from 'node:path';
 // Constants
 // ---------------------------------------------------------------------------
 
-const EXT_ID = 'deyu.spinney';
+const EXT_ID = 'de-yu.spinney';
 const SUITES = ['health', 'sessions', 'concurrency', 'navigation', 'background', 'signals', 'branch', 'selftest'];
 const DEFAULT_TIMEOUT_SEC = 180;
 const DEFAULT_INTERVAL_MS = 250;
