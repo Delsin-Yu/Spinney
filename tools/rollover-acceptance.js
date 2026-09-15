@@ -59,12 +59,34 @@ Module._load = function (request, parent, isMain) {
 
 const R = require(path.join(ROOT, 'out', 'chat', 'runtime.js'));
 const T = require(path.join(ROOT, 'out', 'chat', 'tree.js'));
+const M = require(path.join(ROOT, 'out', 'agent', 'models.js'));
+const { ClientRegistry } = require(path.join(ROOT, 'out', 'agent', 'clients.js'));
 const { BackgroundHub } = require(path.join(ROOT, 'out', 'chat', 'backgroundHub.js'));
 const { DeepSeekClient } = require(path.join(ROOT, 'out', 'agent', 'deepseek.js'));
 
 DeepSeekClient.prototype.stream = async function* () {
   throw new Error('offline (acceptance run)');
 };
+
+// One deterministic provider + model card, so a runtime resolves to a known card
+// instead of the built-in fallback (whose provider would be the real API host).
+const TEST_CARD_ID = 'test-card';
+M.setCatalog(
+  [{ id: 'test-provider', name: 'test', baseUrl: 'http://127.0.0.1:1', concurrency: 0 }],
+  [
+    {
+      id: TEST_CARD_ID,
+      name: 'test-model',
+      providerId: 'test-provider',
+      oaiModel: 'test-model',
+      contextWindow: 1048576,
+      vision: { enabled: true, transport: 'deepseek' },
+      efforts: ['none', 'low', 'medium', 'high'],
+      defaultEffort: 'medium',
+      concurrency: 0,
+    },
+  ],
+);
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'rollover-'));
 const dumps = [];
@@ -91,10 +113,7 @@ const host = new Proxy(
       autoSessionTitles: false,
       foldToolCalls: true,
       foldThinking: true,
-      apiKey: 'x',
-      model: 'test-model',
-      baseUrl: 'http://127.0.0.1:1',
-      thinkingEffort: 'medium',
+      defaultCardId: TEST_CARD_ID,
       replyLanguage: 'English',
     }),
     isHeld: () => false,
@@ -164,8 +183,8 @@ function makeRuntime(session) {
   const rt = new R.SessionRuntime(
     host,
     session,
-    new DeepSeekClient({ apiKey: 'x', baseUrl: 'http://127.0.0.1:1' }),
-    'test-model',
+    new ClientRegistry({ apiKeyFor: async () => 'x' }),
+    TEST_CARD_ID,
     'medium',
     hub,
   );

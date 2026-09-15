@@ -10,12 +10,15 @@ flow exercises read/write/exec against a scratch file (`_e2e.txt` is a leftover 
 fixture, safe to ignore or delete). Before a release, confirm `npm run compile` is clean and
 `build-deploy.ps1` succeeds.
 
-Five build-time guards are the exception, all run by `vscode:prepublish` so a
+Six build-time guards are the exception, all run by `vscode:prepublish` so a
 regression fails *packaging* instead of the user's session:
 
-- `npm run check:models` (`tools/check-models.js`) — model ids: the settings enum
-  must equal the catalog, `src/**` and `media/*.js` may not name an id, and
-  README/docs may only name catalog ids. See `invariants/model-capabilities.md`.
+- `npm run check:models` (`tools/check-models.js`) — the model configuration:
+  `spinney.model.default` must be the fallback card, `spinney.providers` and
+  `spinney.modelCards` must exist as object schemas, `spinney.model` must **not**
+  carry an `enum` (the cards are the list), `src/**` and `media/**/*.js` may not name
+  a model id, and README/docs may only name catalog ids. See
+  `invariants/model-cards.md`.
 - `npm run check:webview` (`tools/check-webview.js`) — the chat webview script:
   `media/main.js` is neither compiled nor linted, so it loads the script into an
   in-memory DOM (no browser, no VS Code), dispatches one message per type
@@ -29,6 +32,31 @@ regression fails *packaging* instead of the user's session:
   a traced repaint (`reset` carrying `traceId`) must come back as a `perfDiag`
   `paint` report, which is the only way to see a silently dead probe without a live
   host — see `invariants/streaming-perf.md`.
+- `npm run check:modeltree` (`tools/check-modeltree.js`) — the Model Card Tree page:
+  `media/modeltree.js` is neither compiled nor linted, so this loads it into an
+  in-memory DOM (plus the vendored layout engine the HTML shell loads before it) and
+  replays the frozen page protocol — the one `ready` at boot, the ids the script
+  fetches checked against the ones the shell declares, a `modelTree` snapshot drawn as
+  one card per provider/card with the engine's coordinates and one connector per model
+  card, **the connector layer's viewport** (`#mt-canvas` and the `<svg>` carrying the
+  same positive size, one `<path>` per card that has a provider, each one starting on
+  its provider's bottom edge and ending on its card's top edge), **the selected card
+  being the form** (every field, the read-only id and the request preview inside that
+  card, none of them in an unselected one), a keystroke that flips Save on without
+  moving or rebuilding anything while the posted payload carries the edit, an effort
+  level that re-measures the card taller and back (the two-pass layout), a failed save
+  that keeps the dirty draft and shows the host's reason, a full add-card → save round
+  trip (a locally generated v4 UUID, trimmed fields, neither `hasKey` nor `isBuiltin`),
+  an invalid draft blocked client-side, a card moved to another provider re-parenting
+  (its connector follows it), **the gestures** (`zoomAt` keeping the point under the
+  cursor fixed and stopping at the 0.4 / 1.5 bounds, a drag that pans without
+  selecting, one automatic fit on the first snapshot and never again, the RMB
+  autoscroll starting and stopping), and a fresh snapshot rebuilding the tree. It
+  answers one question — "does the page still understand the host, and is anything it
+  draws actually drawn?" — with no browser and no VS Code. `node tools/check-modeltree.js`
+  runs it directly; an explicit path checks the checker itself. The protocol it pins
+  lives in `src/chat/ModelPanel.ts`: if the host really changed, update
+  `media/modeltree.js` and this checker together.
 - `npm run check:signals` (`tools/check-signal-persist.js`) — the completion-signal
   persistence contract (the completion-signal plan, §0.1 / D1): a
   `kind:'bg'` background-terminal card must survive a restart with its `delivered`
@@ -61,9 +89,9 @@ regression fails *packaging* instead of the user's session:
   at all — so they are pinned here. Like `check:signals` it is pure node against `out/`,
   and therefore also runs after `compile` in `vscode:prepublish`.
 
-`tools/rollover-acceptance.js` is the one acceptance run that needs neither a window
-nor a provider — dev-only, **not** in `vscode:prepublish`. The guards above can only
-reach the pure modules, while the risky half of a context rollover lives in
+`tools/rollover-acceptance.js` is one of the two acceptance runs that need neither a
+window nor a provider — dev-only, **not** in `vscode:prepublish`. The guards above can
+only reach the pure modules, while the risky half of a context rollover lives in
 `SessionRuntime`: it stubs the `vscode` module (a `Module._load` hook) plus an offline
 client and drives `rolloverContext()` for real. What it pins: the new window's first
 request is `[system, harness]` with no ancestor message in it, the old node's
@@ -73,6 +101,42 @@ request/answer plus the clip note and attachment count are in the message, the w
 is numbered per branch, and a node that is not context-full falls back to the in-place
 continue. `node tools/rollover-acceptance.js` after `npm run compile`; it reads a few
 private fields, so a refactor may break the script while the product stays fine.
+
+`tools/modeltree-acceptance.js` is the same shape for the Model Card Tree page's host
+half — dev-only, **not** in `vscode:prepublish`, no window and no provider. It stubs
+the `vscode` module and drives `ModelTreeController` for real: a `ready` produces
+exactly one snapshot, an **invalid** save writes nothing at all and answers with the
+reasons, a valid save writes the two settings at Global scope, stores or clears the
+per-provider keys and calls back once, and the SecretStorage naming rule holds
+(`spinney.apiKey` for the built-in provider, `spinney.apiKey.<id>` for the rest).
+`node tools/modeltree-acceptance.js` after `npm run compile`; it reads a few private
+fields, so a refactor may break the script while the product stays fine. It is the
+complement of `check:modeltree` — that one is the page, this one is the host.
+
+`tools/model-switch-acceptance.js` is the fourth windowless acceptance run, for the
+**per-node model selection**. It stubs `vscode`, runs a real `SessionRuntime` against a
+catalog of three cards (two dialects on two providers) and an offline client that records
+every request, then asserts what would go on the wire: a follow-up from a node runs on
+**that node's** card and the new node records it; a node with no card inherits the nearest
+ancestor's; a dropdown pick is pending until its send, is consumed by it, and is forgotten
+on a checkout; picking the card the node already uses emits **no** "Model changed" notice;
+another branch is never retargeted by a pick made elsewhere; a level is clamped by the
+node's own card; and a history's DeepSeek upload block is hidden behind a placeholder when
+the request runs on a non-`deepseek` card while passing through untouched on a `deepseek`
+one. `node tools/model-switch-acceptance.js` after `npm run compile`.
+
+`tools/gate-acceptance.js` is the third windowless acceptance run, for the request
+gate (`src/agent/requestGate.ts`) that `ClientRegistry` puts in front of every
+provider and every card. Waiting code is the kind that looks right and deadlocks in
+practice, so it drives the gate directly — FIFO order, `0 = unlimited`, an abort while
+queued (Stop must end a request that is only *waiting* for a slot), an abort that
+arrives before the slot is taken, a cap lowered below what is already in flight, and a
+raised cap waking the queue — and then through `ClientRegistry.stream`: two streams
+against a one-slot card never overlap, the card's **wire name** (not its id) is what
+goes on the wire, a stream that is broken out of early still gives its slot back, and a
+session-title completion answers while the only slot is busy. It also refuses to pass
+quietly: a run that ends while an `await` is pending (i.e. a deadlock) exits non-zero.
+`node tools/gate-acceptance.js` after `npm run compile`.
 
 What `check:webview` can **not** tell you: anything visual (no CSS, no layout, no
 theme) and anything about the provider's TypeScript side. Maintenance: adding a
@@ -93,8 +157,10 @@ exactly the bug class. The method that does, with no real API key and no tokens:
    `/user/balance` with valid JSON, and `/chat/completions` with a minimal SSE
    stream (`data: {…}` … `data: [DONE]`) for `stream: true` / plain JSON for
    `stream: false`.
-2. Edit `.vscode/settings.json` the way a user does in the Settings UI — point
-   `spinney.baseUrl` at the mock — and set a marker key with **`Spinney: Set API
+2. Edit `.vscode/settings.json` the way a user does in the Settings UI — point a
+   provider's `baseUrl` (`spinney.providers`) at the mock, with a `spinney.modelCards`
+   card on it and `spinney.model` set to that
+   card's id — and set a marker key with **`Spinney: Set API
    Key`** (the key lives in SecretStorage now, not in `settings.json`) —
    then assert what the running host sent: `GET /user/balance` with the new base
    URL (A), again after a second base-URL edit (B), and a real

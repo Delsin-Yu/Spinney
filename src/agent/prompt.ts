@@ -10,7 +10,7 @@ import { ThinkingEffort } from './types';
  * Static text is written out; the few runtime values are `{{placeholder}}`
  * holes filled by {@link renderPromptTemplate}:
  *
- *   {{identity}}    who the agent is (harness name + model + reasoning effort)
+ *   {{identity}}    who the agent is (harness name + model card + reasoning level)
  *   {{environment}} where it runs (OS / shell / workspace)
  *   {{language}}    the reply language (`spinney.replyLanguage`)
  *   {{agentsMd}}    the workspace AGENTS.md snapshot taken at session start
@@ -96,7 +96,26 @@ export const SUB_AGENT_SYSTEM_PROMPT_TEMPLATE = [
   '{{fanOut}}',
 ].join('\n');
 
-/** The identity lines shared by the main and sub-agent prompts. */
+/**
+ * The identity lines shared by the main and sub-agent prompts.
+ *
+ * `model` is the **display name of the model card** the agent runs on, not an API
+ * model id: the callers pass `cardDisplayName(card)` (`src/agent/models.ts`),
+ * which is what the user called the card and carries the wire name in
+ * parentheses when the two differ — a card named "Foo" whose `oaiModel` is
+ * `foo-v2` is rendered here as `Foo (foo-v2)`, so the sentence never lies about
+ * which endpoint answered. The empty case falls back to {@link DEFAULT_MODEL}
+ * (the vendored card's id) rather than rendering a blank name.
+ *
+ * `effort` is the **card's own level string**, free-form by design: each card
+ * declares its menu of levels (`ModelCard.efforts` — `BUILTIN_EFFORTS`
+ * (`none` / `low` / `medium` / `high`) on a fresh card, freely edited by the
+ * user; `normalizeEffort` in `src/agent/models.ts` is what clamps a value onto
+ * that menu), so this only echoes whatever level the session currently picked on
+ * that card. The one value with a meaning of its own is the literal `none`,
+ * which means "send no `reasoning_effort` at all": the sentence is then left out
+ * entirely instead of claiming an effort of "none".
+ */
 export function identityLines(model: string, effort: ThinkingEffort): string[] {
   const lines: string[] = [
     'You are "Spinney" (spinney) — an autonomous, general-purpose agent.',
@@ -222,9 +241,10 @@ function stripAgentsMdSection(text: string): string {
 }
 
 /**
- * The main agent's system prompt for a model + reasoning effort + reply
- * language. `facts` defaults to the live environment so the normal path needs no
- * arguments.
+ * The main agent's system prompt for a model + reasoning level + reply
+ * language. `model` is the card's display name and `effort` a card level, both
+ * exactly as {@link identityLines} describes them. `facts` defaults to the live
+ * environment so the normal path needs no arguments.
  */
 export function systemPrompt(
   model = '',
@@ -243,9 +263,11 @@ export function systemPrompt(
 }
 
 /**
- * A sub-agent's lean system prompt. `write` decides the permission line; a
- * read-only depth-1 sub-agent is reminded it can fan out read-only children —
- * the same capability that advertises `spawn_readonly_agents`.
+ * A sub-agent's lean system prompt. `model` / `effort` carry the same meaning as
+ * in {@link systemPrompt} (card display name / card level). `write` decides the
+ * permission line; a read-only depth-1 sub-agent is reminded it can fan out
+ * read-only children — the same capability that advertises
+ * `spawn_readonly_agents`.
  */
 export function subAgentSystemPrompt(
   model = '',

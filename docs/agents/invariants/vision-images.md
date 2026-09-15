@@ -1,8 +1,9 @@
 ## Vision / images
-- Image support is **data, not a guess**: `isVisionModel()` reads the catalog —
-  the vendored `deepseek-flash` plus any `vision=true` row the user added in
-  `spinney.modelTable`. Image content blocks are **only allowed in `user`
-  messages** (`system` / `assistant` / `tool` reject them).
+- Image support is **data, not a guess**: `isVisionCard()` reads the active **model
+  card** — the built-in `deepseek-flash`, or any card the user marked
+  `vision.enabled` in `spinney.modelCards` (see `invariants/model-cards.md`). Image
+  content blocks are **only allowed in `user` messages** (`system` / `assistant` /
+  `tool` reject them).
 - A model that is *not* image-capable does **not** return a 400: DeepSeek
   silently replaces the image with an `[Unsupported Image]` text part and answers
   anyway (measured on the vendored base URL — the reply even reasons about the
@@ -10,19 +11,21 @@
   letting the provider do it — a silent placeholder invites the model to invent
   what it cannot see.
 - **User-attached images** (file picker `pickImage` / clipboard paste) and
-  **agent-read images** (`read_image`) are both uploaded to the DeepSeek Files
-  API (`POST /files`, `purpose=user_data`) and referenced by the returned
-  `file-api-…` id via a `file` content block
-  (`{ type: 'file', file_id }`). The `onUserMessage` path uploads each
-  attachment (`ChatViewProvider`) before sending; `read_image` uploads in the
-  Agent (`tryReadImage`). The API auto-resizes to ~800×800 and caps each image
-  at **384 tokens**, so no client-side downscaling is needed.
-- Files-referenced images may be up to **64 MiB** and are **not** subject to the
-  48 MiB request-body limit (inline base64 `image_url` is, but is no longer used
-  for new images). Supported formats: JPEG, PNG, GIF, WebP (detected from
-  content, not the filename). `content` size cap is enforced with a friendly
-  error in the tool; the attach path reports per-image upload failures and omits
-  them.
+  **agent-read images** (`read_image`) both follow the card's `vision.transport`
+  (`invariants/model-cards.md`). The `deepseek` dialect uploads to the Files API
+  (`POST /files`, `purpose=user_data`) and references the returned `file-api-…` id
+  via a `file` content block (`{ type: 'file', file_id }`); `openai` puts a `data:`
+  URL in an `image_url` part instead (see `model-cards.md`). The `onUserMessage` path uploads each
+  attachment (`ChatViewProvider`) before sending when the transport is `deepseek`;
+  `read_image` does it in the Agent (`tryReadImage`). On the DeepSeek endpoint the
+  API auto-resizes to ~800×800 and caps each image at **384 tokens**, so no
+  client-side downscaling is needed.
+- Images may be up to **64 MiB** (`MAX_IMAGE_BYTES`). A `deepseek`-transport image is
+  **not** subject to the 48 MiB request-body limit; an `openai` (inline) one is,
+  because its base64 `data:` URL rides in the body. Supported formats: JPEG, PNG, GIF, WebP
+  (detected from content, not the filename). `content` size cap is enforced with a
+  friendly error in the tool; the attach path reports per-image upload failures and
+  omits them.
 - PNG uploads get a structural check on top of magic-byte detection
   (`imageIntegrityError` in `types.ts`, called by `uploadFile`): every chunk CRC
   and the `IEND` terminator are verified, so a truncated/corrupt PNG is rejected
@@ -35,6 +38,17 @@
   the request does not 400. Switching back to an image-capable model restores the
   image blocks automatically. `read_image` returns a similar friendly error, and
   the provider drops newly attached images with a notice.
+- **An upload cannot cross providers.** A `{ type: 'file', file_id }` block is the
+  *issuing* provider's private handle — another endpoint has never seen that id, so
+  the same hiding rule applies when the card the request runs on is not `deepseek`
+  (`vision.transport !== 'deepseek'`), with its own placeholder
+  (`[image hidden: it was uploaded to a provider that this model cannot read
+  from]`). An `image_url` block has no such problem: a `data:` URL is
+  self-contained, so a history produced under the `openai` dialect is re-sendable
+  anywhere. The harness does not keep the uploaded bytes, so it cannot convert one
+  form into the other after the fact — the fix at the source is the card's
+  `vision.transport`, and the runtime says so in its notice rather than letting the
+  provider answer with a 400.
 - A **provider-rejected image** (a 400 matching `/unsupported image/i`, e.g. a
   file the local integrity check cannot catch) follows the same hide-not-remove
   rule: `Agent.markRejectedImages` records the offending `file_id`/`image_url` in
@@ -54,6 +68,7 @@
   a `hide-images` class on `#messages` / `#attachments`), and refuses to queue a
   pending attachment with an inline hint. The conversation data is kept and the
   thumbnails reappear when an image-capable model is selected again. `main.js`
-  has **no copy of the catalog**: the provider posts `models` + `visionModels`
-  from `src/agent/models.ts` in the `config` message.
+  has **no copy of the catalog**: the provider posts the whole `cards` list (each
+  with its `vision` flag) and the active card's `efforts` in the `config` message,
+  all derived from `src/agent/models.ts`.
 

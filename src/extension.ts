@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { CHAT_VIEW_TYPE } from './chat/ChatPanel';
+import { MODEL_VIEW_TYPE } from './chat/ModelPanel';
 import { ChatViewProvider } from './chat/ChatViewProvider';
 import { SessionsProvider } from './chat/SessionsProvider';
 import { ControlServer } from './http/controlServer';
@@ -53,6 +54,20 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
 
+  // The Model Card Tree page is a second webview editor tab with the same
+  // recovery contract: its view type is listed in package.json as
+  // `onWebviewPanel:spinney.modelTree`, and the controller adopts the panel VS
+  // Code hands back (one page per window — the controller focuses an existing tab
+  // instead of opening a second one).
+  context.subscriptions.push(
+    vscode.window.registerWebviewPanelSerializer(MODEL_VIEW_TYPE, {
+      deserializeWebviewPanel: (panel) => {
+        chatProvider?.restoreModelPanel(panel);
+        return Promise.resolve();
+      },
+    }),
+  );
+
   // Optional local control plane (off by default) for the external supervisor.
   const controlServer = new ControlServer(
     chatProvider,
@@ -93,10 +108,18 @@ export function activate(context: vscode.ExtensionContext): void {
       }
     }),
     // The API key lives in SecretStorage: these two commands are the only way it
-    // is read or written (`getConfig()` reports the live value). Both install the
-    // key into the shared client, so no reload is needed.
-    vscode.commands.registerCommand('spinney.setApiKey', () => void chatProvider?.setApiKeyInteractive()),
-    vscode.commands.registerCommand('spinney.clearApiKey', () => void chatProvider?.clearApiKey()),
+    // is read or written. Both take an optional provider id — the Model Card Tree
+    // page and the chat's nudge pass the provider they mean, the palette and the
+    // `spinney.setApiKey` command default to the built-in one.
+    vscode.commands.registerCommand('spinney.setApiKey', (arg) =>
+      void chatProvider?.setApiKeyInteractive(typeof arg === 'string' ? arg : undefined),
+    ),
+    vscode.commands.registerCommand('spinney.clearApiKey', (arg) =>
+      void chatProvider?.clearApiKey(typeof arg === 'string' ? arg : undefined),
+    ),
+    // The Model Card Tree page: the command and the gear beside the chat's model
+    // dropdown both land on the same window-owned tab.
+    vscode.commands.registerCommand('spinney.openModelCards', () => chatProvider?.openModelTree()),
     vscode.commands.registerCommand('spinney.openSession', (arg) => {
       const id = toSessionId(arg);
       if (id) {

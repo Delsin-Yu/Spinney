@@ -34,16 +34,22 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { Agent } from '../agent/agent';
 import { DEFAULT_REPLY_LANGUAGE } from '../agent/prompt';
-import { DeepSeekBalance, DeepSeekClient } from '../agent/deepseek';
+import { DeepSeekBalance } from '../agent/deepseek';
+import { ClientRegistry } from '../agent/clients';
 import { AgentEvent, ChatMessage, ContentPart, ThinkingEffort, Usage } from '../agent/types';
 import {
-  DEFAULT_MODEL,
-  isKnownModel,
-  isVisionModel,
-  modelIds,
+  ModelCard,
+  cardById,
+  cardDisplayName,
+  cards,
+  defaultCard,
+  effortsFor,
+  isVisionCard,
+  normalizeEffort,
   parseContextLengthError,
-  visionModelIds,
-  visionModelsLabel,
+  providerById,
+  resolveCard,
+  visionCardsLabel,
 } from '../agent/models';
 import {
   AgentSession,
@@ -59,7 +65,6 @@ import {
   nodeUsage,
   pathIds,
   pathMessages,
-  sessionEffortPick,
   sessionModelPick,
   titleFromPrompt,
 } from './tree';
@@ -292,10 +297,14 @@ export function clipMessageForStorage(msg: ChatMessage): ChatMessage {
  * it lives here next to the runtime that consumes most of it.
  */
 export interface HarnessConfig {
-  apiKey: string;
-  model: string;
-  baseUrl: string;
-  thinkingEffort: ThinkingEffort;
+  /**
+   * The **card id** `spinney.model` holds, already healed by
+   * `ChatViewProvider.resolveModel` (a deleted card, or a pre-card model id,
+   * resolves to the first usable card here). It is the card a session with no
+   * pick of its own starts on — never the session's live selection, which lives
+   * on `SessionRuntime.model`.
+   */
+  defaultCardId: string;
   /**
    * Reply language **name** (not the setting's raw value) injected into the main
    * agent's system prompt — `ChatViewProvider.getConfig()` resolves
@@ -315,6 +324,11 @@ export interface HarnessConfig {
 
 /** One sub-agent run: its dispatch spec plus the tree node that owns it. */
 export interface SubAgentJob {
+  /**
+   * The dispatch as the caller wrote it. `model` is an optional **card id**
+   * (already resolved from whatever the caller typed — see `parseModelOverride`);
+   * absent means "the card of the session that dispatched this sub-agent".
+   */
   spec: { instruction: string; write: boolean; model?: string };
   node: TreeNode;
   resume?: boolean;
@@ -441,12 +455,14 @@ export interface RuntimeHost {
   persistNow(): void;
   stateChanged(): void;
   /**
-   * Remember an explicit per-session pick as the **default for future sessions**:
-   * the persisted `spinney.runtimeConfig` record plus the provider's
-   * `defaultModel` / `defaultThinkingEffort` seeds. P4 moved the live selection
-   * onto the session (`session.model` / `session.effort`, written by `setModel` /
-   * `setThinkingEffort` and saved with `persist()`), so this call must never
-   * overwrite another session's own choice — it only seeds the next one.
+   * Remember an explicit dropdown pick as the **default for future sessions**: the
+   * persisted `spinney.runtimeConfig` record plus the provider's
+   * `defaultCardId` / `defaultThinkingEffort` seeds. The live model of a
+   * conversation is per **node** (`TreeNode.model`, resolved by ancestry — see
+   * `SessionRuntime.cardIdForNode`), and an explicit pick is a pending choice for
+   * the node in view written back onto the session as its seed, so this call must
+   * never overwrite another session's own choice: it only seeds the next one.
+   * `model` is a card id.
    */
   persistRuntimeConfig(model: string, thinkingEffort: ThinkingEffort): void;
   postTo(sessionId: string, message: unknown): void;
@@ -460,9 +476,16 @@ export interface RuntimeHost {
     summary: string,
     startedAt: number,
   ): string | undefined;
+  /** The context window in tokens for a card id (the card table's own value). */
   getContextWindow(model: string): number;
   systemPrompt(): string;
   requestAutoTitle(session: AgentSession): void;
+  /**
+   * Heal a user-facing model value to a **card id**: a card's name or `oaiModel`
+   * (what the `spawn_agents` tool's `model` argument may hold) and a stale
+   * pre-card id both land on a real card; an empty/unknown value lands on the
+   * first usable card.
+   */
   resolveModel(candidate: string): string;
   handleHopSession(rt: SessionRuntime, node: TreeNode, args: Record<string, unknown>): string;
   handleRenameSession(args: Record<string, unknown>): string;
@@ -486,7 +509,13 @@ export class SessionRuntime {
   readonly sessionId: string;
   readonly session: AgentSession;
 
-  private readonly client: DeepSeekClient;
+  /**
+   * The provider-facing client registry every request of this session goes
+   * through. It is shared (one per window): a *card* names the provider, its
+   * `baseUrl`, its key and the wire model, so the runtime never talks to an
+   * endpoint or a model directly — see `ClientRegistry`.
+   */
+  private readonly clients: ClientRegistry;
 
   // ---- per-run / per-session state (moved off the provider in P1) ----
   /**
@@ -571,15 +600,41 @@ export class SessionRuntime {
   private streamFlushWindow = 0;
 
   /**
-   * The model/thinking-effort of this session. Seeded at construction from the
-   * session's own pick when it still shadows the setting it was made under, else
-   * from the provider's defaults (`spinney.runtimeConfig`, then the
-   * settings); a change made here is written back onto `this.session` and saved
-   * with it (P4). Every node worker is seeded/pushed from these two fields, so a
-   * session's branches all run the same selection.
+   * The **session seed**: the card id and the level a session whose nodes recorded
+   * no card of their own starts from. It is *not* the wire model name: the card's
+   * `oaiModel` is filled in by `ClientRegistry.stream`, and the display name comes
+   * from {@link cardDisplayName} — a rename never invalidates a stored session.
+   * Seeded at construction from the session's own pick when it still shadows the
+   * setting it was made under, else from the provider's defaults
+   * (`spinney.runtimeConfig`, then `spinney.model`); an explicit dropdown pick still
+   * writes the session's own pick back onto `this.session` (saved with it) and onto
+   * the record for future sessions, so a reload and a *new* session start where the
+   * user left off.
+   *
+   * The seed is only the **last** link of the resolution chain — a node's own card,
+   * else the nearest ancestor's, else this (see `cardIdForNode`): what a session
+   * with no node history at all begins with, which is exactly what the old
+   * per-session pick meant (the first turn of a fresh conversation).
    */
-  model: string;
-  thinkingEffort: ThinkingEffort;
+  private seedCardId: string;
+  /** The level half of the seed (see {@link seedCardId}), clamped onto the seed
+   * card's own menu wherever the seed card moves. */
+  private seedEffort: ThinkingEffort;
+  /**
+   * The dropdown's **pending** pick for the node it was made on: the card and the
+   * level the **next send from that node** must use. It is deliberately a pending
+   * choice and not a new session-wide value — a conversation node belongs to one
+   * branch that was produced under one card, so moving the dropdown while standing
+   * on an older node must not retarget anything that already ran.
+   *
+   * `nodeId` is the node the pick was made on (`null` for an empty session) and is
+   * compared by identity against the node a request is sent from: a pick made on one
+   * node is invisible from another, and a checkout forgets it outright, so the
+   * dropdown follows the node you click (`checkoutNode`). A send consumes it — the
+   * node that turn creates records the card and carries it from then on (`beginTurn`).
+   */
+  private pending: { nodeId: string | null; cardId: string; effort: ThinkingEffort } | null = null;
+
   /**
    * The language the main agent replies in, as the **name** the prompt carries
    * ("Japanese"), not the setting's raw value. It has **no** per-session pick — it
@@ -589,7 +644,12 @@ export class SessionRuntime {
    * property of the reader, not of one conversation.
    */
   replyLanguage: string = DEFAULT_REPLY_LANGUAGE;
-  contextWindow: number;
+  /**
+   * The context window last reported by {@link recheckContextWindow}, so a settings
+   * change that did not move the window of the node in view does not repaint the
+   * indicator (the live value is the {@link contextWindow} getter).
+   */
+  private lastContextWindow: number;
 
   /** Set by `dispose()`: a deleted session's runtime must stop delivering. */
   private disposed = false;
@@ -597,20 +657,26 @@ export class SessionRuntime {
   constructor(
     private readonly host: RuntimeHost,
     session: AgentSession,
-    client: DeepSeekClient,
-    model: string,
+    clients: ClientRegistry,
+    cardId: string,
     thinkingEffort: ThinkingEffort,
     hub: BackgroundHub,
   ) {
     this.session = session;
     this.sessionId = session.id;
-    this.client = client;
-    this.model = model;
-    this.thinkingEffort = thinkingEffort;
+    this.clients = clients;
+    this.seedCardId = cardId;
+    // The session's stored level is clamped to the seed card's own menu (a card the
+    // user edited in the meantime may have dropped it), so the very first request
+    // never names a level the provider never heard of.
+    this.seedEffort = normalizeEffort(this.cardForCardId(cardId), thinkingEffort);
     // The reply language is not a per-session pick, so it is read straight from
     // the setting; a later edit arrives through `applyReplyLanguage`.
     this.replyLanguage = host.getConfig().replyLanguage;
-    this.contextWindow = host.getContextWindow(model);
+    // The readout `recheckContextWindow` compares against, seeded from what the node
+    // in view reports (a restored session may already stand on an older node with a
+    // card of its own, which is not the constructor's seed).
+    this.lastContextWindow = this.contextWindow;
     this.hub = hub;
 
     // A fresh sub-agent pool + budget for this session.
@@ -627,13 +693,180 @@ export class SessionRuntime {
     this.drainSignals();
   }
 
+  // ---- Model selection: a node owns the card that produced it ----
+
+  /**
+   * The card id the **next request** would use: the pending dropdown pick when it
+   * was made on the node in view, else that node's own resolved card (its own
+   * `model`, else the nearest ancestor's, else the session seed). Public because the
+   * coordinator reads it: the control plane's per-session readout, a transcript's
+   * model label and every "what is this session running" surface are about the
+   * **checked-out node**, so this is what `rt.model` must answer — never one
+   * session-wide setting. {@link effectiveEffort} is the same read for the level.
+   */
+  effectiveCardId(): string {
+    return this.requestCardId(this.viewNode());
+  }
+
+  /** See {@link effectiveCardId}: the level the next request would name. */
+  effectiveEffort(): ThinkingEffort {
+    return this.requestEffort(this.viewNode());
+  }
+
+  /**
+   * {@link effectiveCardId} as the coordinator reads it (`rt.model`) — the same value
+   * under the name the coordinator and the control plane compile against, so the
+   * per-session readout reports the checked-out node's card with no change on their
+   * side.
+   */
+  get model(): string {
+    return this.effectiveCardId();
+  }
+
+  /** See {@link model}: the level the next request from the node in view would name. */
+  get thinkingEffort(): ThinkingEffort {
+    return this.effectiveEffort();
+  }
+
+  /**
+   * The context window of the card {@link model} names. A window is a property of
+   * the card, so it follows the node in view (and a pending pick on it) exactly
+   * like the model does: a switch to an older node reports that node's own card's
+   * window, not the one the session last used.
+   */
+  get contextWindow(): number {
+    return this.host.getContextWindow(this.model);
+  }
+
+  /**
+   * The card {@link model} names. Always defined: when that card id no longer names
+   * a card (the Model Card Tree page deleted it, or a hand-edited session holds a
+   * pre-card id), the fallback is the configured default card, and `cards()` itself
+   * never returns an empty list — so the harness degrades to a usable model instead
+   * of failing a request. Everything user-facing reads the card from here
+   * (`cardDisplayName`, `isVisionCard`, `vision.transport`, `efforts`).
+   */
+  get card(): ModelCard {
+    return this.cardForCardId(this.model);
+  }
+
+  /** A card id healed to a real card: the configured default when it names nothing. */
+  private cardForCardId(id: string): ModelCard {
+    return cardById(id) ?? (defaultCard(this.host.getConfig().defaultCardId) as ModelCard);
+  }
+
+  /** The node the **view focus** stands on (`undefined` for an empty session). */
+  private viewNode(): TreeNode | undefined {
+    const id = this.session.activeNodeId;
+    return id ? this.session.nodes[id] : undefined;
+  }
+
+  /**
+   * The card id a node's branch runs on, resolved **by ancestry**: the node's own
+   * `model`, else the nearest ancestor that has one, else the session seed
+   * ({@link seedCardId}). A node that recorded no card therefore lands on the card
+   * of the branch it grew out of — which is what makes a resumed or replayed node
+   * run on the model its own history was produced under instead of on whatever the
+   * dropdown showed last. The walk is cycle-safe and returns the seed for an unknown
+   * node (the first turn of a session, whose basis is `null`).
+   */
+  private cardIdForNode(node: TreeNode | undefined): string {
+    let cur = node;
+    const seen = new Set<string>();
+    while (cur && !seen.has(cur.id)) {
+      seen.add(cur.id);
+      if (cur.model) {
+        return cur.model;
+      }
+      cur = cur.parentId ? this.session.nodes[cur.parentId] : undefined;
+    }
+    return this.seedCardId;
+  }
+
+  /**
+   * The level a node's branch stores, resolved by the same walk as
+   * {@link cardIdForNode}: the node's own `effort`, else the nearest ancestor's,
+   * else the seed level. The raw stored name is returned — it is a free-form level
+   * and is only clamped by {@link effortForNode}, against **the card that node runs
+   * on**, which is the whole reason the two resolutions are separate.
+   */
+  private effortNameForNode(node: TreeNode | undefined): ThinkingEffort {
+    let cur = node;
+    const seen = new Set<string>();
+    while (cur && !seen.has(cur.id)) {
+      seen.add(cur.id);
+      if (cur.effort) {
+        return cur.effort;
+      }
+      cur = cur.parentId ? this.session.nodes[cur.parentId] : undefined;
+    }
+    return this.seedEffort;
+  }
+
+  /**
+   * The card {@link cardIdForNode} names, healed to a real card — what a request
+   * built from this node's history must be sent with (`buildPath`'s identity line,
+   * a node worker's seed, a sub-agent's inherited card).
+   */
+  private cardForNode(node: TreeNode | undefined): ModelCard {
+    return this.cardForCardId(this.cardIdForNode(node));
+  }
+
+  /**
+   * The level a node runs at: the stored name clamped onto **that node's card's**
+   * own menu. Clamping per node is what keeps a level a card once offered from
+   * reaching a provider that never heard of it, while a level shared by both cards
+   * survives a switch — the same rule the session seed's level follows.
+   */
+  private effortForNode(node: TreeNode | undefined): ThinkingEffort {
+    return normalizeEffort(this.cardForNode(node), this.effortNameForNode(node));
+  }
+
+  /** The pending pick, but only when it was made on this node (identity, not content). */
+  private pendingFor(node: TreeNode | undefined): { cardId: string; effort: ThinkingEffort } | null {
+    if (!this.pending || this.pending.nodeId !== (node?.id ?? null)) {
+      return null;
+    }
+    return this.pending;
+  }
+
+  /** The card id the next request **sent from this node** would use. */
+  private requestCardId(node: TreeNode | undefined): string {
+    return this.pendingFor(node)?.cardId ?? this.cardIdForNode(node);
+  }
+
+  /** The level the next request **sent from this node** would name. */
+  private requestEffort(node: TreeNode | undefined): ThinkingEffort {
+    return this.pendingFor(node)?.effort ?? this.effortForNode(node);
+  }
+
+  /**
+   * Seed the worker of the node in view with a pick, without ever creating one
+   * (a node that never ran a turn has no worker) and without touching a node that
+   * is **streaming**: its agent is assembling a request from the old card, so
+   * swapping the card under it would invalidate what it is about to send. Nothing
+   * is lost by not pushing now — `beginTurn` re-checks the node's card before every
+   * request, so the pick reaches the next send either way.
+   */
+  private pushNodeCard(node: TreeNode | undefined, card: ModelCard, effort: ThinkingEffort): void {
+    if (!node || this.runs.has(node.id)) {
+      return;
+    }
+    const worker = this.nodeWorkers.get(node.id);
+    if (worker) {
+      worker.agent.setCard(card);
+      worker.agent.setThinkingEffort(effort);
+    }
+  }
+
   /**
    * The worker for a node, created on first use (P3, §2.3). Its tools register
    * background jobs under **this** node, and its agent's provider hooks all close
    * over the same node, so a `spawn_agents` / `send_agent_message` / `hop_session`
    * call made during node X's turn always acts for X — never for "the active
-   * turn", which no longer exists once two branches may run at once. Model and
-   * thinking effort are seeded from this runtime's current (per-session) values.
+   * turn", which no longer exists once two branches may run at once. The card and
+   * the thinking effort are seeded **from this node** (its own, else an ancestor's,
+   * else the session seed), never from the tab's current dropdown.
    */
   private workerFor(node: TreeNode): { agent: Agent; tools: ToolRegistry } {
     let worker = this.nodeWorkers.get(node.id);
@@ -649,9 +882,9 @@ export class SessionRuntime {
         currentOwner: () => ({ sessionId: this.sessionId, nodeId: node.id }),
         hub: this.hub,
       });
-      const agent = new Agent(this.client, tools, (event) => this.handleAgentEventFor(node, event));
-      agent.setModel(this.model);
-      agent.setThinkingEffort(this.thinkingEffort);
+      const agent = new Agent(this.clients, tools, (event) => this.handleAgentEventFor(node, event));
+      agent.setCard(this.cardForNode(node));
+      agent.setThinkingEffort(this.effortForNode(node));
       agent.setReplyLanguage(this.replyLanguage);
       // This agent can spawn sub-agents: hand it this runtime's orchestrator,
       // bound to the same node.
@@ -793,9 +1026,20 @@ export class SessionRuntime {
     return this.runningSubAgents.has(id);
   }
 
-  /** The system prompt this session would send on its next request. */
+  /** The system prompt this session would send on its next request (the node in
+   * view, with any pending pick on it). */
   systemPromptText(): string {
-    return Agent.systemPrompt(this.model, this.thinkingEffort, this.replyLanguage);
+    return Agent.systemPrompt(cardDisplayName(this.card), this.thinkingEffort, this.replyLanguage);
+  }
+
+  /**
+   * The system prompt for one node's branch: its identity line names the card
+   * **that node resolves to** and the level it runs at, so a request built from an
+   * older node's history tells the model which model is about to answer it — the
+   * card of that branch, not the dropdown's current value.
+   */
+  private systemPromptFor(node: TreeNode | undefined): string {
+    return Agent.systemPrompt(cardDisplayName(this.cardForNode(node)), this.effortForNode(node), this.replyLanguage);
   }
 
   /** Tear down: kill background jobs, abort sub-agents, cancel timers. */
@@ -835,148 +1079,217 @@ export class SessionRuntime {
   // ---- Configuration ----
 
   /**
-   * The tab's own model pick (P4). Refused while a turn streams (a mid-turn swap
-   * invalidates the request the agent is building) and while the selection is
-   * unchanged, exactly like the old provider-side handler.
+   * The dropdown picked a card: a **pending** pick for the node in view, i.e. what
+   * the next send from that node will run on. `model` is a card id (the webview's
+   * dropdown carries ids, never names).
+   *
+   * Nothing that already ran is retargeted — a branch's history was produced under
+   * one card and must keep running on it — so no other node's worker is touched;
+   * only the worker of the node in view is, and only when it exists and is idle
+   * (`pushNodeCard`). `beginTurn` re-checks the node's card before every request,
+   * so the pick reaches the next send even when it cannot be pushed now.
+   *
+   * The bookkeeping the pick still carries is unchanged: it is written onto the
+   * session as this session's own seed (saved with the session) and remembered as
+   * the default for **future** sessions; but a pick that merely re-selects the card
+   * the node in view already runs is a **no-op** — nothing said, nothing persisted —
+   * which is exactly the case a per-session comparison used to get wrong.
    */
   setModel(model: string): void {
-    this.changeModel(model, true);
-  }
-
-  /**
-   * Adopt a changed `spinney.model` setting. Only a session with no
-   * effective pick follows it — an explicit per-tab pick keeps winning, exactly
-   * like the old "dropdown pick shadows the setting" rule — with the same caveat
-   * as the global record: editing the setting is an explicit choice too, so a
-   * pick anchored to the previous setting value is retired here and the setting
-   * takes over (see `loadRuntimeConfig` in the provider).
-   */
-  applyDefaultModel(model: string): void {
-    this.changeModel(model, false);
-  }
-
-  /**
-   * The one model path, for both a dropdown pick (`explicit`) and a setting that
-   * changed on its own. `explicit` is what decides the *bookkeeping*: a pick is
-   * written onto the session and remembered as the default for future sessions,
-   * while an adopted setting simply follows the session's "no pick" state.
-   */
-  private changeModel(model: string, explicit: boolean): void {
-    if (this.busy) {
+    // A card id, a card name or a wire name (`resolveModel` accepts all three) is
+    // healed to a real card id here: a stale value from an older catalog resolves
+    // to a usable card rather than silently mis-sizing the indicator, hiding
+    // images or sending a model the provider never heard of.
+    const nextCardId = this.host.resolveModel(model);
+    if (!nextCardId) {
       return;
     }
-    if (!explicit && sessionModelPick(this.session, this.host.getConfig().model) !== undefined) {
-      // This tab picked a model itself and the setting it was picked against has
-      // not changed: the per-session selection wins over the settings value.
+    const view = this.viewNode();
+    // What the node in view was produced under (its own card/level, else an
+    // ancestor's, else the session seed) versus what its next request would use.
+    const nodeCardId = this.cardIdForNode(view);
+    const nodeEffort = this.effortForNode(view);
+    const beforeCardId = this.requestCardId(view);
+    const beforeEffort = this.requestEffort(view);
+    const nextCard = this.cardForCardId(nextCardId);
+    // The level travels with the card: one the picked card does not offer is
+    // repaired to the picked card's own default, so a pick never leaves a level
+    // behind that this provider has never heard of.
+    const nextEffort = normalizeEffort(nextCard, beforeEffort);
+
+    if (nextCardId === nodeCardId) {
+      // The pick names the card this node already runs, so the next request does not
+      // move: the dropdown is a **no-op** here — no notice, no notice text change and
+      // nothing persisted. This is the case a per-session comparison used to get
+      // wrong: the session's last pick (made on another node) was what it compared
+      // against, so switching back to the card the node was already using warned
+      // about a change the next request never makes. A stale pending override is
+      // dropped, because what the dropdown must show is this node's own card and
+      // level again; the dropdowns and the context-usage indicator are repainted only
+      // when that override really was in force.
+      this.pending = null;
+      if (nodeCardId !== beforeCardId || nodeEffort !== beforeEffort) {
+        this.postConfig();
+        this.postContext();
+      }
+      this.host.output.appendLine(`[config] model=${nextCardId} (card in view; no change)`);
+      return;
+    }
+
+    // A real pick: pending for the node in view, and forgotten the moment the view
+    // focus moves (`checkoutNode`) — the dropdown then follows the node that was
+    // clicked instead of dragging a stale override along.
+    this.pending = { nodeId: view?.id ?? null, cardId: nextCardId, effort: nextEffort };
+    // The pick is also this session's own seed, exactly as before: written onto the
+    // session (saved with it) and remembered as the default for future sessions. The
+    // session's stored level is updated with it so a reload reconstructs the same
+    // seed instead of re-deriving it from a level that belonged to the old card.
+    this.session.model = nextCardId;
+    this.session.modelFromSettings = this.host.getConfig().defaultCardId;
+    this.session.effort = nextEffort;
+    this.session.effortFromSettings = nextCard.defaultEffort;
+    this.seedCardId = nextCardId;
+    this.seedEffort = nextEffort;
+    // The one agent a pick may touch: the worker of the node in view (no broadcast
+    // loop — a worker is seeded from its own node, and `beginTurn` re-checks the
+    // node's card anyway).
+    this.pushNodeCard(view, nextCard, nextEffort);
+    this.host.persist();
+    this.host.persistRuntimeConfig(nextCardId, nextEffort);
+    this.postConfig();
+    this.postContext();
+    if (this.hasHistory()) {
+      // Only reached when the card differs from the one this node was produced
+      // under: the warning is about the **next request**, never about a
+      // session-wide value that another branch's pick had moved.
+      this.postModelChangeNotice(nextCard);
+    }
+    // The id, not the display name: this is a diagnostic line, and the id is what
+    // the stored session, the transcripts and the sub-agent nodes all carry.
+    this.host.output.appendLine(
+      `[config] model=${nextCardId} (pending for ${view ? `node ${view.id}` : 'an empty session'})`,
+    );
+  }
+
+  /**
+   * Adopt a changed `spinney.model` setting (`spinney.model` is a card id). The
+   * setting is the **seed** — what a session with no node history starts from — so
+   * it moves the nodes that resolve to the seed (nothing on their path recorded a
+   * card) and leaves every branch that recorded its own card exactly where it is: a
+   * branch keeps running on the card its history was produced under, however the
+   * setting changes afterwards.
+   *
+   * The arbitration is the old one: only a session with no effective pick of its own
+   * follows the setting (an explicit pick keeps winning), and a pick anchored to the
+   * previous setting value is retired here, because editing the setting is an
+   * explicit choice too (see `loadRuntimeConfig` in the provider).
+   */
+  applyDefaultModel(model: string): void {
+    if (sessionModelPick(this.session, this.host.getConfig().defaultCardId) !== undefined) {
+      // This session picked a model itself and the setting it was picked against has
+      // not changed: the session's own seed wins over the settings value.
       return;
     }
     // A pick anchored to an older `spinney.model` value loses to the edited
     // setting, so it is dropped here rather than being resurrected on the next
     // reload (where `sessionModelPick` would ignore it anyway).
     const hadPick = this.session.model !== undefined;
-    // A stale id (settings left over from an older catalog) resolves to the
-    // default rather than silently mis-sizing the indicator or hiding images.
     const next = this.host.resolveModel(model);
     if (!next) {
       return;
     }
-    if (explicit) {
-      this.session.model = next;
-      this.session.modelFromSettings = this.host.getConfig().model;
-    } else {
-      delete this.session.model;
-      delete this.session.modelFromSettings;
-    }
-    if (next === this.model) {
-      // Nothing to push to the agents, but the session's stored pick may still
-      // have moved (a fresh pick, or a stale one being retired).
-      if (explicit || hadPick) {
+    delete this.session.model;
+    delete this.session.modelFromSettings;
+    const beforeCardId = this.model;
+    const moved = next !== this.seedCardId;
+    this.seedCardId = next;
+    this.seedEffort = normalizeEffort(this.cardForCardId(next), this.seedEffort);
+    if (!moved) {
+      // The seed itself did not move; only the session's stored pick may have (a
+      // stale one being retired).
+      if (hadPick) {
         this.host.persist();
       }
       return;
     }
-    this.model = next;
-    // The selection is per session, so it is pushed to every node worker (a
-    // worker created later is seeded from `this.model` in `workerFor`).
-    for (const worker of this.nodeWorkers.values()) {
-      worker.agent.setModel(next);
+    // Every node whose card comes from the seed follows it. A node that recorded a
+    // card of its own is left alone, and a node that is streaming keeps the card its
+    // running request was built with — its next turn re-checks it (`beginTurn`).
+    for (const [id, worker] of this.nodeWorkers) {
+      const node = this.session.nodes[id];
+      if (!node || this.cardIdForNode(node) !== next || this.runs.has(id)) {
+        continue;
+      }
+      worker.agent.setCard(this.cardForNode(node));
+      worker.agent.setThinkingEffort(this.effortForNode(node));
     }
-    this.contextWindow = this.host.getContextWindow(next);
-    // The session owns the selection: save it with the session …
     this.host.persist();
-    if (explicit) {
-      // … and only an explicit pick also becomes the seed for future sessions.
-      this.host.persistRuntimeConfig(this.model, this.thinkingEffort);
-    }
     this.postConfig();
     this.postContext();
-    if (this.hasHistory()) {
-      let notice = vscode.l10n.t(
-        'Model changed to {0}. Existing conversation history was produced under a different model, so the next request may miss the prompt cache and reprocess the full context.',
-        next,
-      );
-      if (!isVisionModel(next) && this.activeSessionHasImages()) {
-        notice +=
-          ' ' +
-          vscode.l10n.t(
-            'Image blocks are hidden for this text-only model (the image data is kept) and will be restored when you switch back to a vision model.',
-          );
-      }
-      this.postNotice('warning', notice);
+    // The notice is only about a request whose card really moved: a seed change is
+    // invisible to a branch that recorded its own card.
+    if (this.model !== beforeCardId && this.hasHistory()) {
+      this.postModelChangeNotice(this.card);
     }
-    this.host.output.appendLine(`[config] model=${next}${explicit ? ' (session pick)' : ' (settings)'}`);
+    this.host.output.appendLine(`[config] model=${next} (settings; the session seed)`);
   }
 
-  /** The tab's own thinking-effort pick (P4); see `setModel`. */
+  /**
+   * The dropdown picked a level: a **pending** level for the node in view, on the
+   * card that node's next request will use (a pending card pick included). The card
+   * owns the menu of levels, so the value is passed through `normalizeEffort` first:
+   * one the card does not offer is repaired to that card's own default instead of
+   * being sent to a provider that never heard of it.
+   *
+   * Like {@link setModel} this is a pending choice for the next send from the node in
+   * view, it touches no other node's worker, and picking the level this node already
+   * runs is a no-op: no notice, nothing persisted. There is no
+   * `spinney.thinkingEffort` setting any more, so the anchor a pick shadows is the
+   * **card's** `defaultEffort` (a card the user re-pointed at a different default
+   * therefore retires the pick, exactly as an edited setting used to).
+   */
   setThinkingEffort(effort: ThinkingEffort): void {
-    this.changeEffort(effort, true);
-  }
+    const view = this.viewNode();
+    const nodeCardId = this.cardIdForNode(view);
+    const nodeEffort = this.effortForNode(view);
+    const nextCardId = this.requestCardId(view);
+    const beforeEffort = this.requestEffort(view);
+    // The card the next request uses (a pending card pick included) owns the menu.
+    const nextCard = this.cardForCardId(nextCardId);
+    const next = normalizeEffort(nextCard, effort);
 
-  /** Adopt a changed `spinney.thinkingEffort` setting; see `applyDefaultModel`. */
-  applyDefaultEffort(effort: ThinkingEffort): void {
-    this.changeEffort(effort, false);
-  }
-
-  private changeEffort(effort: ThinkingEffort, explicit: boolean): void {
-    if (this.busy) {
-      return;
-    }
-    if (!explicit && sessionEffortPick(this.session, this.host.getConfig().thinkingEffort) !== undefined) {
-      return; // this tab picked an effort itself and its anchor setting is unchanged
-    }
-    const hadPick = this.session.effort !== undefined;
-    if (explicit) {
-      this.session.effort = effort;
-      this.session.effortFromSettings = this.host.getConfig().thinkingEffort;
-    } else {
-      delete this.session.effort;
-      delete this.session.effortFromSettings;
-    }
-    if (effort === this.thinkingEffort) {
-      if (explicit || hadPick) {
-        this.host.persist();
+    if (next === nodeEffort && nextCardId === nodeCardId) {
+      // The level this node already runs: a no-op (see `setModel`); a stale pending
+      // level is dropped and the dropdown repainted only if it really was in force.
+      this.pending = null;
+      if (next !== beforeEffort) {
+        this.postConfig();
       }
+      this.host.output.appendLine(`[config] thinkingEffort=${next} (level in view; no change)`);
       return;
     }
-    this.thinkingEffort = effort;
-    for (const worker of this.nodeWorkers.values()) {
-      worker.agent.setThinkingEffort(effort);
-    }
+
+    this.pending = { nodeId: view?.id ?? null, cardId: nextCardId, effort: next };
+    // The session-level bookkeeping is the old one: the pick is the session's own
+    // level, written onto the session (saved with it) and remembered as the default
+    // for future sessions. It is anchored to the **seed card's** default, because
+    // `session.model` / `session.effort` are the pair a reload reads back as the
+    // seed (`effectiveEffort` in the coordinator), and the seed card need not be the
+    // card in view — the seed level is the pick clamped onto the seed card.
+    const seedCard = this.cardForCardId(this.seedCardId);
+    this.session.effort = next;
+    this.session.effortFromSettings = seedCard.defaultEffort;
+    this.seedEffort = normalizeEffort(seedCard, next);
+    this.pushNodeCard(view, nextCard, next);
     this.host.persist();
-    if (explicit) {
-      this.host.persistRuntimeConfig(this.model, this.thinkingEffort);
-    }
+    this.host.persistRuntimeConfig(this.seedCardId, this.seedEffort);
     this.postConfig();
     if (this.hasHistory()) {
-      this.postNotice(
-        'warning',
-        vscode.l10n.t(
-          'Thinking effort changed to "{0}". This affects the next request; the prompt cache may be missed.',
-          effort,
-        ),
-      );
+      this.postEffortChangeNotice(next);
     }
-    this.host.output.appendLine(`[config] thinkingEffort=${effort}${explicit ? ' (session pick)' : ' (settings)'}`);
+    this.host.output.appendLine(
+      `[config] thinkingEffort=${next} (pending for ${view ? `node ${view.id}` : 'an empty session'})`,
+    );
   }
 
   /**
@@ -1019,11 +1332,12 @@ export class SessionRuntime {
     this.subAgentPool.setMaxConcurrent(maxConcurrent);
   }
 
-  /** Re-read the context window for the current model and repaint if it moved. */
+  /** Re-read the context window for the card the node in view reports (and the
+   * pending pick on it) and repaint if it moved. */
   recheckContextWindow(): void {
-    const contextWindow = this.host.getContextWindow(this.model);
-    if (contextWindow !== this.contextWindow) {
-      this.contextWindow = contextWindow;
+    const contextWindow = this.contextWindow;
+    if (contextWindow !== this.lastContextWindow) {
+      this.lastContextWindow = contextWindow;
       this.postContext();
     }
   }
@@ -1044,6 +1358,74 @@ export class SessionRuntime {
     );
   }
 
+  /**
+   * True if the checked-out branch's history carries an **uploaded** image block
+   * (`{ type: 'file', file_id }`) — the DeepSeek Files API shape. Its `file_id` is
+   * the issuing provider's private handle, so only a card whose image transport is
+   * `deepseek` can serve it; every other endpoint has never seen that id, and the
+   * request-side rewrite that keeps such a block from being sent there lives in
+   * `Agent.messagesForCurrentModel` (`src/agent/agent.ts`). This is only the
+   * "tell the user" half of that rule.
+   */
+  private activeSessionHasFileBlocks(): boolean {
+    const session = this.session;
+    return pathMessages(session, session.activeNodeId).some(
+      (m) => m.role === 'user' && Array.isArray(m.content) && m.content.some((p) => p.type === 'file'),
+    );
+  }
+
+  /**
+   * The "the next request is built from another card than this branch was produced
+   * under" notice. Callers post it only when that is **really** the case: a pick
+   * that names the card in view never moves the next request, so it never warns
+   * (see `setModel` — a per-session comparison used to warn about exactly that).
+   *
+   * The card the request moves to decides which extra sentence is true:
+   *  - a text-only card hides every image block (the bytes are kept), and
+   *  - a card whose image transport is not `deepseek` cannot serve a file id that
+   *    was uploaded to a DeepSeek endpoint, so the uploaded images of this history
+   *    are hidden too even when the card does accept images.
+   * Both are consequences of the same rewrite (`Agent.messagesForCurrentModel`),
+   * so they are said here, beside the cache warning, rather than being left for the
+   * user to discover in a request that silently lost its images.
+   */
+  private postModelChangeNotice(card: ModelCard): void {
+    let notice = vscode.l10n.t(
+      'Model changed to {0}. Existing conversation history was produced under a different model, so the next request may miss the prompt cache and reprocess the full context.',
+      cardDisplayName(card),
+    );
+    if (!isVisionCard(card) && this.activeSessionHasImages()) {
+      notice +=
+        ' ' +
+        vscode.l10n.t(
+          'Image blocks are hidden for this text-only model (the image data is kept) and will be restored when you switch back to a vision model.',
+        );
+    }
+    if (card.vision.transport !== 'deepseek' && this.activeSessionHasFileBlocks()) {
+      // The same sentence shape as the text-only one, for the other reason an image
+      // can disappear: the images of this history were uploaded to a Files API that
+      // this card's endpoint cannot read from.
+      notice +=
+        ' ' +
+        vscode.l10n.t(
+          'The images in this history were uploaded to a DeepSeek Files API, and this model cannot read an uploaded file id, so those image blocks are hidden too (the image data is kept and will be restored when you switch back to a card that serves DeepSeek uploads).',
+        );
+    }
+    this.postNotice('warning', notice);
+  }
+
+  /** The level half of the same rule: posted only when the next request really
+   * moves to another level than the node in view was produced under. */
+  private postEffortChangeNotice(level: ThinkingEffort): void {
+    this.postNotice(
+      'warning',
+      vscode.l10n.t(
+        'Thinking effort changed to "{0}". This affects the next request; the prompt cache may be missed.',
+        level,
+      ),
+    );
+  }
+
   // ---- Checkout / view focus ----
 
   /**
@@ -1052,16 +1434,32 @@ export class SessionRuntime {
    * agent to rebase — each node worker's history is rebuilt when a run starts on
    * its node (`beginTurn`), the one safe moment — so a checkout is always
    * view-only and can never disturb a live run. Callers post to the webview.
+   *
+   * The model selection follows this focus: the dropdown's pending pick is forgotten
+   * here, because it was made *for the node the user was standing on* and every node
+   * has its own card — clicking an older node must show that node's card, not drag
+   * the override along. (Workers that were seeded from it are re-seeded by the next
+   * `beginTurn`, which re-checks the node's card before every request.)
    */
   private checkoutNode(session: AgentSession, nodeId: string | null): void {
+    if (nodeId !== session.activeNodeId) {
+      this.pending = null;
+    }
     session.activeNodeId = nodeId;
   }
 
-  /** The flat API history of a branch: a fresh system prompt + the path messages. */
+  /**
+   * The flat API history of a branch: a fresh system prompt + the path messages.
+   * The prompt is built for **that node**, so its identity line and effort sentence
+   * name the card `nodeId` resolves to — a request assembled from an older node's
+   * history announces the model that will really answer it, not the dropdown's
+   * current value.
+   */
   private buildPath(session: AgentSession, nodeId: string | null): ChatMessage[] {
+    const node = nodeId ? session.nodes[nodeId] : undefined;
     const system: ChatMessage = {
       role: 'system',
-      content: this.systemPromptText(),
+      content: this.systemPromptFor(node),
     };
     // sanitizeMessages returns a derived copy; it is never written back into the
     // nodes, so the stored history keeps its original shape.
@@ -1103,6 +1501,10 @@ export class SessionRuntime {
     // the active path in place (no tear-down → no blink), then pans to it.
     this.postPath();
     this.post({ type: 'panTo', id: nodeId });
+    // The model selection is per node, so the checkout **is** a config change: both
+    // dropdowns and the context-usage indicator follow the node that was clicked
+    // (which is why the pending pick had to be dropped above).
+    this.postConfig();
     this.postContext();
     this.postSessionStats();
   }
@@ -1260,6 +1662,12 @@ export class SessionRuntime {
     return node.title.slice(0, 80);
   }
 
+  /**
+   * The context-usage readout of the **node in view**: `total` is that node's card's
+   * window and `model` the card id it reports, both read through the same getters
+   * `postConfig` uses, so a checkout (or a pending pick) moves the indicator with the
+   * dropdown instead of leaving the session's last window on screen.
+   */
   postContext(): void {
     this.post({
       type: 'context',
@@ -1296,16 +1704,30 @@ export class SessionRuntime {
     this.post({ type: 'sessionStats', stats: this.computeSessionStats() });
   }
 
+  /**
+   * Push the model selection of the **node in view** to the webview — the card and
+   * the level its next request would use (a pending dropdown pick on that node
+   * included). The `cards` array is the whole catalog (id, name, provider, vision,
+   * levels) so the two dropdowns and the image affordances are built from one list —
+   * the webview keeps no copy of its own, and a card the Model Card Tree page just
+   * edited shows up on the next repaint. `model` is a card **id**; `efforts` are the
+   * levels *that card* offers, which is what the effort dropdown shows.
+   */
   postConfig(): void {
     const cfg = this.host.getConfig();
     this.post({
       type: 'config',
       model: this.model,
-      // The dropdown offers the vendored model plus whatever the user added in
-      // `spinney.modelTable`, and the image affordances follow the same
-      // list — no second copy of the catalog in the webview.
-      models: modelIds(),
-      visionModels: visionModelIds(),
+      cards: cards().map((c) => ({
+        id: c.id,
+        name: c.name,
+        providerId: c.providerId,
+        providerName: providerById(c.providerId).name,
+        vision: c.vision.enabled,
+        efforts: effortsFor(c),
+        defaultEffort: c.defaultEffort,
+      })),
+      efforts: effortsFor(this.card),
       thinkingEffort: this.thinkingEffort,
       foldToolCalls: cfg.foldToolCalls,
       foldThinking: cfg.foldThinking,
@@ -1332,14 +1754,17 @@ export class SessionRuntime {
   }
 
   /**
-   * Fetch the account's wallet balance and push it to this session's tab.
-   * Best-effort: on failure (no key / network / off-API scope) we log to the
-   * output channel and leave whatever balance the UI already shows. Account-level
-   * (identical across sessions), refreshed at the start and after each turn.
+   * Fetch the balance of the provider **the card in view routes to** and push it to
+   * this session's tab. Best-effort: on failure (no key / network / off-API scope) we
+   * log to the output channel and leave whatever balance the UI already shows. Two
+   * sessions on different providers therefore show different numbers, which is
+   * exactly right — a wallet is a property of the endpoint, not of the harness — and
+   * a checkout to a node of another provider follows it, like the rest of the config
+   * does. Refreshed at the start and after each turn.
    */
   async refreshBalance(): Promise<void> {
     try {
-      const balance: DeepSeekBalance = await this.client.getBalance();
+      const balance: DeepSeekBalance = await this.clients.balance(this.card.providerId);
       this.post({ type: 'balance', balance });
     } catch (err) {
       this.host.output.appendLine(`[balance] ${err instanceof Error ? err.message : String(err)}`);
@@ -1479,6 +1904,17 @@ export class SessionRuntime {
       return null;
     }
     const node = createNode(newId(), parentId, title, 'running');
+    // The card and the level this turn runs with, taken **from the node the request
+    // is sent from** (the basis): the dropdown's pending pick when it was made on
+    // that node, else that node's own resolved values (its own card, else the nearest
+    // ancestor's, else the session seed). Recording them on the new node is what
+    // makes the node own the card its history was produced under — so a later resume
+    // of *this* node runs where this turn ran, however the dropdown moved since.
+    const basis = parentId ? session.nodes[parentId] : undefined;
+    const cardId = this.requestCardId(basis);
+    const effort = this.requestEffort(basis);
+    node.model = cardId;
+    node.effort = effort;
     // A new context window: this node is its own basis, so the run's prefix — built
     // by `buildPath` a few lines below — contains no ancestor message at all. The
     // order is load-bearing: the marker has to be in place *before* `buildPath` reads
@@ -1487,7 +1923,20 @@ export class SessionRuntime {
       node.contextBaseId = node.id;
     }
     attachNode(session, node);
+    // The send consumed the pending pick: the card it named is now this node's own
+    // (`node.model`), so the dropdown reaches the same value through the ancestry
+    // chain and a stale override must not survive into the next checkout.
+    if (this.pending && this.pending.nodeId === (parentId ?? null)) {
+      this.pending = null;
+    }
     const worker = this.workerFor(node);
+    // The turn re-checks the node's card: a worker is seeded when it is created, and
+    // a node that inherited its card (or whose card the session seed decided) may
+    // have a worker built under another card. The agent that sends this request must
+    // run on the card recorded on the node above — never on what the dropdown showed
+    // when its worker happened to be created.
+    worker.agent.setCard(this.cardForCardId(cardId));
+    worker.agent.setThinkingEffort(effort);
     // The interruption notice only makes sense when this turn continues from the
     // turn that was actually interrupted. P3 keys the pending notice per node, so
     // the new node's agent inherits its parent's notice (delivered once) or clears
@@ -1547,7 +1996,23 @@ export class SessionRuntime {
     // ▶ Continue (or an injected turn) on a line the user once stopped is the user
     // continuing it again: normal delivery resumes from here.
     this.stoppedLines.delete(node.id);
+    // The card and the level this turn runs with, recorded on the node it continues:
+    // the pending pick when it belongs to **this** node (a ▶ Continue is a send from
+    // the node the user is looking at), else the node's own resolved values. This is
+    // the in-place half of "a node owns the card that produced it": a turn that does
+    // not create a node still pins the node to the card its reply was produced under.
+    const cardId = this.requestCardId(node);
+    const effort = this.requestEffort(node);
+    node.model = cardId;
+    node.effort = effort;
+    if (this.pending && this.pending.nodeId === node.id) {
+      this.pending = null;
+    }
     const worker = this.workerFor(node);
+    // Same re-check as `beginTurn`: the agent that sends this request runs on the
+    // card the node now records, whatever its worker was created with.
+    worker.agent.setCard(this.cardForCardId(cardId));
+    worker.agent.setThinkingEffort(effort);
     const messages = this.buildPath(this.session, node.id);
     worker.agent.setMessages(messages);
     const run: TurnRun = {
@@ -1637,6 +2102,13 @@ export class SessionRuntime {
     // Stop-not-Send rule; `beginTurn` re-checks the same condition once the basis
     // is known.)
     const basis = this.session.activeNodeId;
+    // The card this send runs on **and** the card the image path below must use are
+    // the ones of the node the send came from (its own, else an ancestor's, else the
+    // session seed), plus a pending pick made on it. Both are read here, once, before
+    // the upload can await: the transport an image travels in is a property of that
+    // one card, so a checkout that lands mid-upload must not build the request for
+    // one card and then run it on another.
+    const sendCard = this.card;
     if (basis && this.runs.has(basis)) {
       return;
     }
@@ -1664,14 +2136,14 @@ export class SessionRuntime {
     }
     const userText = text.trim();
 
-    // Only models declared image-capable (catalog + `spinney.modelTable`) may
-    // carry image blocks. A model that is not would not 400 — DeepSeek silently
+    // Only a card that declares itself image-capable (`card.vision.enabled`) may
+    // carry image blocks. A card that is not would not 400 — DeepSeek silently
     // swaps the image for an "[Unsupported Image]" text part and the model then
     // invents what it cannot see — so drop the attachments, send the text alone,
-    // and tell the user to switch models.
-    if (attachments.length > 0 && !isVisionModel(this.model)) {
-      const vision = visionModelsLabel();
-      const model = this.model || DEFAULT_MODEL;
+    // and tell the user to switch cards.
+    if (attachments.length > 0 && !isVisionCard(sendCard)) {
+      const vision = visionCardsLabel();
+      const model = cardDisplayName(sendCard);
       this.postNotice(
         'warning',
         vision
@@ -1688,56 +2160,73 @@ export class SessionRuntime {
       attachments = [];
     }
 
-    // Upload any attached images to the DeepSeek Files API and reference them by
-    // file_id via a `file` content block, instead of inlining base64. This keeps
-    // the request body under the 48 MiB inline limit and lets each image be up to
-    // 64 MiB. Image blocks are only allowed in user messages.
+    // How the card's images reach its provider is the card's own statement
+    // (`vision.transport`), and it decides this whole block:
+    //
+    //  - `deepseek`: upload each image to the provider's Files API and reference it
+    //    by `file_id` via a `file` content block, instead of inlining base64. That
+    //    keeps the request body under the 48 MiB inline limit and lets each image
+    //    be up to 64 MiB — at the price of a second round-trip, which is why this
+    //    is the only path that shows "Uploading images…" and can be interrupted
+    //    (`uploadController`, the composer's Stop).
+    //  - `openai`: the attachment's own `data:` URL goes straight into an
+    //    `image_url` part (the OpenAI-compatible shape). Nothing leaves the request
+    //    body, so there is no upload to wait for and no busy state to flicker: the
+    //    send goes on to `beginTurn` immediately.
+    //
+    // Image blocks are only allowed in user messages.
     let content: string | ContentPart[];
     if (attachments.length > 0) {
-      this.setBusy(true);
-      this.lastStatus = vscode.l10n.t('Uploading images…');
-      this.post({ type: 'status', text: this.lastStatus });
-      this.uploadController = new AbortController();
-      const uploadSignal = this.uploadController.signal;
       const parts: ContentPart[] = [];
       if (userText) {
         parts.push({ type: 'text', text: userText });
       }
-      const failed: string[] = [];
-      for (const att of attachments) {
-        try {
-          const bytes = dataUrlBytes(att.dataUrl);
-          const uploaded = await this.client.uploadFile(bytes, att.name || 'image', uploadSignal);
-          parts.push({ type: 'file', file_id: uploaded.id });
-        } catch (err) {
-          if (uploadSignal.aborted) {
-            // The user pressed Stop during upload: reset and do not send.
-            this.uploadController = null;
-            // Another branch may still be streaming; only this session's own
-            // upload is ending here.
-            this.syncBusy();
-            this.lastStatus = vscode.l10n.t('Interrupted');
-            this.post({ type: 'status', text: vscode.l10n.t('Interrupted') });
-            this.post({ type: 'interrupted' });
-            return;
-          }
-          failed.push(att.name || 'image');
-          this.host.output.appendLine(`[image] upload failed: ${err instanceof Error ? err.message : String(err)}`);
+      if (sendCard.vision.transport === 'openai') {
+        for (const att of attachments) {
+          parts.push({ type: 'image_url', image_url: { url: att.dataUrl } });
         }
-      }
-      this.uploadController = null;
-      if (failed.length > 0) {
-        this.postNotice(
-          'warning',
-          vscode.l10n.t('Could not upload: {0}. Those images were omitted.', failed.join(', ')),
-        );
-      }
-      if (parts.length === 0) {
-        // Nothing to send (no text and every upload failed).
-        this.syncBusy();
-        this.lastStatus = '';
-        this.post({ type: 'status', text: '' });
-        return;
+      } else {
+        this.setBusy(true);
+        this.lastStatus = vscode.l10n.t('Uploading images…');
+        this.post({ type: 'status', text: this.lastStatus });
+        this.uploadController = new AbortController();
+        const uploadSignal = this.uploadController.signal;
+        const failed: string[] = [];
+        for (const att of attachments) {
+          try {
+            const bytes = dataUrlBytes(att.dataUrl);
+            const uploaded = await this.clients.upload(sendCard, bytes, att.name || 'image', uploadSignal);
+            parts.push({ type: 'file', file_id: uploaded.id });
+          } catch (err) {
+            if (uploadSignal.aborted) {
+              // The user pressed Stop during upload: reset and do not send.
+              this.uploadController = null;
+              // Another branch may still be streaming; only this session's own
+              // upload is ending here.
+              this.syncBusy();
+              this.lastStatus = vscode.l10n.t('Interrupted');
+              this.post({ type: 'status', text: vscode.l10n.t('Interrupted') });
+              this.post({ type: 'interrupted' });
+              return;
+            }
+            failed.push(att.name || 'image');
+            this.host.output.appendLine(`[image] upload failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+        this.uploadController = null;
+        if (failed.length > 0) {
+          this.postNotice(
+            'warning',
+            vscode.l10n.t('Could not upload: {0}. Those images were omitted.', failed.join(', ')),
+          );
+        }
+        if (parts.length === 0) {
+          // Nothing to send (no text and every upload failed).
+          this.syncBusy();
+          this.lastStatus = '';
+          this.post({ type: 'status', text: '' });
+          return;
+        }
       }
       content = parts;
     } else {
@@ -1762,9 +2251,12 @@ export class SessionRuntime {
     }
     session.updatedAt = Date.now();
 
-    // This turn becomes a new node, checked out as a child of the currently
-    // selected node — a branch when that node already had children.
-    const run = this.beginTurn(titleFromPrompt(userText || attachments[0]?.name || ''));
+    // This turn becomes a new node, checked out as a child of the previously
+    // selected node — a branch when that node already had children. The basis is
+    // pinned to the node `basis` captured above, so the card decision this request
+    // was built with (`sendCard`, and therefore the shape its images travel in) is
+    // the card `beginTurn` records on the new node.
+    const run = this.beginTurn(titleFromPrompt(userText || attachments[0]?.name || ''), { parentId: basis });
     if (!run) {
       return;
     }
@@ -2589,7 +3081,7 @@ export class SessionRuntime {
     if (override.error) {
       return Promise.resolve(override.error);
     }
-    return this.resumeSubAgent(session, node, String(args.message ?? ''), String(args.mode ?? 'sync'), write, override.model, signal);
+    return this.resumeSubAgent(session, node, String(args.message ?? ''), String(args.mode ?? 'sync'), write, override.card, signal);
   }
 
   /**
@@ -2614,18 +3106,25 @@ export class SessionRuntime {
       return Promise.resolve(override.error);
     }
     const write = parent.agentWrite === true && node.agentWrite === true;
-    return this.resumeSubAgent(session, node, String(args.message ?? ''), String(args.mode ?? 'sync'), write, override.model, signal);
+    return this.resumeSubAgent(session, node, String(args.message ?? ''), String(args.mode ?? 'sync'), write, override.card, signal);
   }
 
-  /** Validate an optional `model` override; returns `{ model }` or `{ error }`. */
-  private parseModelOverride(value: unknown): { model?: string; error?: string } {
+  /**
+   * Validate an optional `model` override; returns `{ card }` or `{ error }`. The
+   * `model` field of a spec is a **card** value now — a card id, or the card's
+   * name / wire name, exactly like a stored `session.model` — so it is resolved
+   * through `resolveCard` and an unknown value is refused by name rather than
+   * guessed at.
+   */
+  private parseModelOverride(value: unknown): { card?: ModelCard; error?: string } {
     if (typeof value !== 'string' || !value) {
       return {};
     }
-    if (!isKnownModel(value)) {
+    const card = resolveCard(value);
+    if (!card) {
       return { error: `Error: unknown model "${value}".` };
     }
-    return { model: value };
+    return { card };
   }
 
   /** Shared resume path for `send_agent_message` / `send_readonly_agent_message`. */
@@ -2635,7 +3134,7 @@ export class SessionRuntime {
     message: string,
     mode: string,
     write: boolean,
-    model: string | undefined,
+    card: ModelCard | undefined,
     signal: AbortSignal,
   ): Promise<string> {
     if (!message) {
@@ -2649,12 +3148,20 @@ export class SessionRuntime {
         'Error: that sub-agent is still running. Wait for it to finish (or kill it) before sending a follow-up.',
       );
     }
-    const effectiveModel = model ?? node.agentModel ?? this.model;
+    // The follow-up runs on the card the caller named, else on the card this
+    // sub-agent last ran on (`node.agentModel`, a card id), else on the card of the
+    // node that **spawned** it (a sub-agent node carries no card of its own, so its
+    // ancestry walk lands on the turn that spawned it — never on the session's
+    // current dropdown, which belongs to another branch).
+    const subCard = card ?? resolveCard(node.agentModel) ?? this.cardForNode(node);
     node.agentWrite = write;
-    node.agentModel = effectiveModel;
+    node.agentModel = subCard.id;
+    // The spec's `model` is only the *override*: it is stored when it differs from
+    // what the spawning node already gives this sub-agent, so a resume that keeps the
+    // inherited card stays a plain `resume` (the card resolution above reproduces it).
     const job: SubAgentJob = {
       node,
-      spec: { instruction: message, write, model: effectiveModel !== this.model ? effectiveModel : undefined },
+      spec: { instruction: message, write, model: subCard.id !== this.cardIdForNode(node) ? subCard.id : undefined },
       resume: true,
       sessionId: session.id,
     };
@@ -2676,6 +3183,7 @@ export class SessionRuntime {
         ok: r.ok,
         summary: r.summary,
         model: r.model,
+        modelName: r.modelName,
         transcript: node.agentTranscript,
         stats: summarizeTranscript(node.messages),
       });
@@ -2685,7 +3193,10 @@ export class SessionRuntime {
   /** Async resume: deliver the resumed sub-agent's outcome to whoever owns it —
    * the main agent (a card + one signal), or a sub-agent parent (queued for its
    * next tool boundary, or auto-resumed when it is already done). */
-  private deliverResumeAsync(node: TreeNode, result: { ok: boolean; summary: string; model?: string }): void {
+  private deliverResumeAsync(
+    node: TreeNode,
+    result: { ok: boolean; summary: string; model?: string; modelName?: string },
+  ): void {
     const parent = this.session.nodes[node.parentId ?? ''] ?? null;
     if (!parent) {
       return;
@@ -2745,23 +3256,36 @@ export class SessionRuntime {
       const spec = (raw && typeof raw === 'object' ? raw : {}) as Record<string, unknown>;
       const instruction = String(spec.instruction ?? '');
       const write = parentReadOnly ? false : spec.write === true;
+      // The spec's `model` is a card value (id, or the card's name / wire name —
+      // the same spellings `resolveCard` accepts everywhere else).
       const model = typeof spec.model === 'string' ? spec.model : undefined;
       if (!instruction) {
         return 'Error: each agent spec requires an "instruction".';
       }
-      if (model && !isKnownModel(model)) {
+      const modelCard = model === undefined ? undefined : resolveCard(model);
+      if (model !== undefined && modelCard === undefined) {
         return `Error: unknown model "${model}".`;
       }
+      // The sub-agent runs on the card it named, else on the card of the node that
+      // spawned it: a sub-agent inherits its **parent node's** card, never the
+      // session's current selection (the draft pass may sit on another branch).
+      const subCard = modelCard ?? this.cardForNode(parent);
       const node = createNode(newId(), parent.id, `Sub-agent: ${instruction.slice(0, 32)}`, 'running');
       node.kind = 'agent';
       node.agentDepth = childDepth;
       node.agentStatus = 'running';
-      node.agentModel = model || this.model;
+      // The node stores the card **id** (the webview and the transcripts name the
+      // display form; the id is what survives a rename).
+      node.agentModel = subCard.id;
       node.agentWrite = write;
       node.children = [];
       node.displayItems.push({ kind: 'user', text: instruction });
       attachNode(session, node);
-      jobs.push({ spec: { instruction, write, model }, node, sessionId: session.id });
+      jobs.push({
+        spec: { instruction, write, model: modelCard ? subCard.id : undefined },
+        node,
+        sessionId: session.id,
+      });
     }
     // Restore the view focus we captured above: attachNode moved it to the last
     // agent child, and the view must stay where the user left it. The stream
@@ -2823,7 +3347,7 @@ export class SessionRuntime {
   private runSubAgent(
     job: SubAgentJob,
     signal: AbortSignal,
-  ): Promise<{ ok: boolean; summary: string; model?: string }> {
+  ): Promise<{ ok: boolean; summary: string; model?: string; modelName?: string }> {
     return new Promise((resolve) => {
       const abort = new AbortController();
       const onAbort = () => abort.abort();
@@ -2831,6 +3355,16 @@ export class SessionRuntime {
 
       const startedAt = Date.now();
       const subTools = this.subAgentTools(job.node, job.spec.write);
+      // The card this sub-agent runs on: the one its spec named (a card id, or the
+      // name a caller typed — `resolveCard` accepts both), else the card of the node
+      // that spawned it (its ancestry: a sub-agent inherits from its **parent node**,
+      // not from the session's current dropdown). Resolved once, up front, so the
+      // system prompt's identity line, the wire request the agent sends and what the
+      // caller is told cannot disagree about which model answered.
+      const subCard = resolveCard(job.spec.model) ?? this.cardForNode(job.node);
+      // The level, likewise: the spawning node's level, clamped onto the card this
+      // sub-agent actually runs on (the spec may have retargeted it).
+      const subEffort = normalizeEffort(subCard, this.effortNameForNode(job.node));
       let finished = false;
       let subAgent: Agent | null = null;
       // Resolved once this run is fully wound down — the transcript dump included. A
@@ -2869,13 +3403,13 @@ export class SessionRuntime {
         // them at its own tool boundary — see `takeSignalsFor`).
         this.drainSignals();
         settle();
-        resolve({ ok: status === 'done', summary, model: job.spec.model || this.model });
+        resolve({ ok: status === 'done', summary, model: subCard.id, modelName: cardDisplayName(subCard) });
       };
 
-      const sub = new Agent(this.client, subTools, (event) => this.handleSubAgentEvent(job.node, event, finish));
+      const sub = new Agent(this.clients, subTools, (event) => this.handleSubAgentEvent(job.node, event, finish));
       subAgent = sub;
-      sub.setModel(job.spec.model || this.model);
-      sub.setThinkingEffort(this.thinkingEffort);
+      sub.setCard(subCard);
+      sub.setThinkingEffort(subEffort);
       // A sub-agent takes its own children's completion signals at its own tool
       // boundary, exactly like the main agent (D3).
       sub.setSignalHandler(() => this.takeSignalsFor(job.node));
@@ -2898,8 +3432,7 @@ export class SessionRuntime {
         // permission is capped by the caller's.
         sub.setSendMessageHandler((args2, sig2) => this.handleSubAgentSendMessage(job.node, args2, sig2));
       }
-      const effectiveModel = job.spec.model || this.model;
-      const system = Agent.subAgentSystemPrompt(effectiveModel, this.thinkingEffort, depth, job.spec.write);
+      const system = Agent.subAgentSystemPrompt(cardDisplayName(subCard), subEffort, depth, job.spec.write);
       // Lean system prompt (not the full main prompt/AGENTS.md) + dispatched note.
       // On a resume, prepend the stored conversation so the follow-up continues
       // where the sub-agent left off.
@@ -2915,7 +3448,16 @@ export class SessionRuntime {
         job.node.displayItems.push({ kind: 'user', text: job.spec.instruction });
       }
       this.runningSubAgents.set(job.node.id, { agent: sub, abort, settled });
-      this.post({ type: 'agentStart', id: job.node.id, depth, model: effectiveModel, write: job.spec.write });
+      // `model` is the card id (what the stored node and the transcripts carry);
+      // `modelName` is the display form the card's caption prefers.
+      this.post({
+        type: 'agentStart',
+        id: job.node.id,
+        depth,
+        model: subCard.id,
+        modelName: cardDisplayName(subCard),
+        write: job.spec.write,
+      });
       void sub.sendUserMessage(job.spec.instruction);
     });
   }
@@ -3667,6 +4209,8 @@ export class SessionRuntime {
     }
     this.runs.clear();
     this.uploadController = null;
+    // A pending pick belonged to a node of the tree that is about to go.
+    this.pending = null;
     const session = this.session;
     // A cleared conversation keeps its identity but loses the whole tree.
     session.nodes = {};

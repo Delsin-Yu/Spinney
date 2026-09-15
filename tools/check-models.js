@@ -1,14 +1,23 @@
 // check-models.js — fails the build when a model id drifts away from the catalog.
 //
 // The catalog lives in `src/agent/models.ts` (compiled to `out/agent/models.js`).
-// Two rules are enforced, both about *naming a model id*, never about behaviour:
+// It is no longer a list of *models the user may pick*: a model is a **card**
+// (`spinney.modelCards`) bound to a **provider** (`spinney.providers`), both edited
+// by the Model Card Tree page. The one model the extension ships knowledge about
+// is the **fallback card** (`VENDORED_MODEL` / `DEFAULT_MODEL`), which is what a
+// fresh profile runs on before anything is configured.
 //
-//   1. User-facing copy (`package.json`'s enum + settings description, README.md,
-//      docs/**) may name models, but only ones the catalog has. A renamed or
+// The rules are about *naming a model id*, never about behaviour:
+//
+//   1. The manifest may name the fallback: `spinney.model.default` must be it, and
+//      the two catalog settings the page writes must exist as object schemas.
+//   2. User-facing copy (`package.json`'s model description, `README.md`,
+//      `docs/**`) may name models, but only ids the catalog has. A renamed or
 //      dropped model therefore cannot leave a stale id behind in the UI or docs.
-//   2. Plugin text and code (`src/**/*.ts`, minus the catalog itself) may **not**
-//      name a model id at all. The system prompt, tool descriptions and tool
-//      error messages must derive the names at runtime (`visionModelsLabel()`),
+//   3. Plugin text and code (`src/**/*.ts`, minus the catalog itself, and
+//      `media/**/*.js`, minus the vendored bundles) may **not** name a model id at
+//      all. The system prompt, tool descriptions and tool error messages must
+//      derive the names at runtime (`visionCardsLabel()` / `cardDisplayName()`),
 //      so a model swap can never turn shipped prompt text into a lie.
 //
 // Run by `npm run check:models`, which `vsce package` executes through
@@ -36,41 +45,20 @@ const problems = [];
 
 function scan(file, text, { allowAny = false } = {}) {
   const lines = text.split(/\r?\n/);
-  // A fenced block whose info string mentions `model-table` documents the
-  // `spinney.modelTable` syntax, so the ids inside it are *examples of user
-  // configuration*, not copy about the catalog. Everything else is scanned.
-  let fence = false;
-  let modelTableFence = false;
   lines.forEach((line, i) => {
-    const fenceMatch = /^\s*(`{3,})(.*)$/.exec(line);
-    if (fenceMatch) {
-      if (fence) {
-        fence = false;
-        modelTableFence = false;
-      } else {
-        fence = true;
-        modelTableFence = fenceMatch[2].includes('model-table');
-      }
-      return;
-    }
-    if (modelTableFence) {
-      return;
-    }
     for (const match of line.match(MODEL_RE) || []) {
       if (allowAny ? !idSet.has(match) : idSet.has(match)) {
         problems.push(
           allowAny
             ? `${file}:${i + 1}: names an unknown model "${match}" (add it to MODEL_CATALOG or reword)`
-            : `${file}:${i + 1}: hardcodes the model id "${match}" — use DEFAULT_MODEL / visionModelsLabel() from src/agent/models.ts`,
+            : `${file}:${i + 1}: hardcodes the model id "${match}" — use DEFAULT_MODEL / cardDisplayName() from src/agent/models.ts`,
         );
       }
     }
   });
 }
 
-// --- 1. the settings enum must contain exactly the catalog, nothing else ------
-// (`spinney.modelTable` is deliberately *not* scanned: its whole purpose is
-// naming models the catalog does not have.)
+// --- 1. the manifest: the fallback default, and the two catalog settings -------
 const pkgPath = path.join(root, 'package.json');
 const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
 
@@ -89,17 +77,21 @@ function configurationProperties(contributes) {
 
 const configProps = configurationProperties(pkg.contributes);
 const modelProp = configProps['spinney.model'];
-const enumIds = Array.isArray(modelProp?.enum) ? modelProp.enum : [];
-const missing = ids.filter((id) => !enumIds.includes(id));
-const extra = enumIds.filter((id) => !idSet.has(id));
-if (missing.length) {
-  problems.push(`package.json: spinney.model.enum is missing ${missing.join(', ')}`);
-}
-if (extra.length) {
-  problems.push(`package.json: spinney.model.enum lists unknown ${extra.join(', ')}`);
-}
 if (modelProp?.default !== DEFAULT_MODEL) {
   problems.push(`package.json: spinney.model.default is "${modelProp?.default}", expected "${DEFAULT_MODEL}"`);
+}
+for (const key of ['spinney.providers', 'spinney.modelCards']) {
+  const prop = configProps[key];
+  if (!prop) {
+    problems.push(`package.json: ${key} is missing (the Model Card Tree page writes it)`);
+  } else if (prop.type !== 'object') {
+    problems.push(`package.json: ${key} must be an object of id → fields, got "${prop.type}"`);
+  }
+}
+// The dropdown is built from the cards at runtime, so the setting must NOT carry a
+// stale enum any more — an enum is exactly the drift this guard exists to prevent.
+if (Array.isArray(modelProp?.enum)) {
+  problems.push(`package.json: spinney.model must not carry an enum any more (the cards are the list)`);
 }
 
 // --- 2. copy may name models, but only real ones -----------------------------
@@ -139,9 +131,9 @@ function walkCode(dir, ext, skipRel) {
   }
 }
 walkCode(srcRoot, '.ts', (rel) => rel === path.join('src', catalogRel));
-// The webview lives in media/ and must not carry a second copy of the catalog
-// either: it renders the model list the provider posts (`spinney.modelTable`
-// included). Vendored JS is off limits — it is hash-fixed.
+// The webviews live in media/ and must not carry a second copy of the catalog
+// either: they render the card list the provider posts. Vendored JS is off limits
+// — it is hash-fixed.
 walkCode(path.join(root, 'media'), '.js', (rel) => rel.startsWith(path.join('media', 'vendor')));
 
 if (problems.length) {
@@ -149,9 +141,11 @@ if (problems.length) {
   for (const p of problems) {
     console.error('  ' + p);
   }
-  console.error(`\nThe single source of truth is src/agent/models.ts (${ids.length} models: ${ids.join(', ')}).`);
+  console.error(`\nThe single source of truth is src/agent/models.ts (${ids.length} fallback model(s): ${ids.join(', ')}).`);
   process.exit(1);
 }
 
 const vision = MODEL_CATALOG.filter((m) => m.vision).map((m) => m.id);
-console.log(`check-models: OK — ${ids.length} models, ${vision.length} accepting images (${vision.join(', ')}).`);
+console.log(
+  `check-models: OK — fallback default ${DEFAULT_MODEL}, ${vision.length} accepting images (${vision.join(', ')}); cards come from spinney.modelCards.`,
+);

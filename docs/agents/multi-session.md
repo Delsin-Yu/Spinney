@@ -27,8 +27,10 @@
   node (no queueing). When another branch/session is running, the focused node's composer is
   usable and sending starts a *new concurrent run* there.
 - **Stop**: stops only the run of the focused node (and its own sub-agents). Other runs continue.
-- **Model / thinking effort**: **per session** (each tab has its own selection, persisted with
-  the session; settings provide the default for new sessions).
+- **Model / thinking effort**: **per node**, resolved through the node's ancestry (its own
+  recorded card, else the nearest ancestor's, else the tab's seed). A dropdown pick is a
+  pending choice for the next send on the node in view — a checkout forgets it — and it warns
+  only when that pick really differs from the card the node already uses.
 - **Background terminals**: no standalone panel and no dock. A job renders as a `kind:'bg'`
   sidecar card beside the node that spawned it (the same right-hand grid as the sub-agent
   windows), and its completion notice is injected **into that node's own transcript** (a
@@ -104,7 +106,8 @@ nodeWorkers: Map<nodeId, { agent: Agent; tools: ToolRegistry }>
   P's pending notice into M's agent (`Agent.transferInterruptTo`) or clears it
   (`Agent.resetInterruptState`) — the same rule as P1, but keyed by node so concurrent branches do
   not clobber each other.
-- Model / effort changes apply to every node worker of the session (they are per-session settings).
+- Model / effort changes touch **only the node in view**. Every other branch keeps its own card,
+  so two concurrent runs of one session may legitimately talk to two different providers.
 - `stop {nodeId}` cancels that node's agent only; without `nodeId` it cancels every run of the
   session. The control plane exposes the same as `POST /stop {sessionId?, nodeId?}`.
 

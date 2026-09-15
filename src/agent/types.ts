@@ -8,9 +8,16 @@ export type Role = 'system' | 'user' | 'assistant' | 'tool';
 
 /**
  * How much effort the model should spend reasoning before answering.
- * 'none' omits the reasoning_effort parameter entirely (API default).
+ *
+ * Free-form on purpose: each **model card** declares its own menu of levels (the
+ * Model Card Tree page owns that list), so the level a request carries is
+ * whatever the card — and the session's pick on it — says. The one reserved
+ * value is `none` ({@link NO_EFFORT} in `models.ts`), which omits the
+ * `reasoning_effort` parameter entirely (API default) and keeps the effort
+ * sentence out of the system prompt. An unknown string is the provider's to
+ * reject, exactly like an unknown model name.
  */
-export type ThinkingEffort = 'none' | 'low' | 'medium' | 'high';
+export type ThinkingEffort = string;
 
 /** A single content part for multimodal (image) user messages. */
 export type ContentPart =

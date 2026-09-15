@@ -15,7 +15,7 @@ export const spawnReadonlyAgentsTool: InterceptedTool = {
     function: {
       name: 'spawn_readonly_agents',
       description:
-        'Spawn one or more **read-only** sub-agents as parallel worker branches (they can read_file / list_dir / search_files but cannot write files or run commands). `agents` is an array of { instruction (the task), model (optional; only set a different model when the user explicitly asked you to) }. `mode` is "sync" (default: block until all finish, return every summary) or "async" (return immediately with the agent ids; results are delivered to you as a notice when each finishes). Every finished sub-agent also gets `stats` (its `toolCalls` / `deniedToolCalls` counts and token usage) and `transcript`: the absolute path of a JSONL dump of its full conversation.',
+        'Spawn one or more **read-only** sub-agents as parallel worker branches (they can read_file / list_dir / search_files but cannot write files or run commands). `agents` is an array of { instruction (the task), model (optional model card — its id or the name the user gave it; only set it when the user explicitly asked you to use another model) }. `mode` is "sync" (default: block until all finish, return every summary) or "async" (return immediately with the agent ids; results are delivered to you as a notice when each finishes). Every finished sub-agent also gets `stats` (its `toolCalls` / `deniedToolCalls` counts and token usage) and `transcript`: the absolute path of a JSONL dump of its full conversation.',
       parameters: {
         type: 'object',
         properties: {
@@ -25,7 +25,7 @@ export const spawnReadonlyAgentsTool: InterceptedTool = {
               type: 'object',
               properties: {
                 instruction: { type: 'string', description: 'The task for this sub-agent.' },
-                model: { type: 'string', description: 'Optional different model id. Only set it when the user explicitly asked you to use another model.' },
+                model: { type: 'string', description: 'Optional different model card (its id, or the name the user gave it — or the model name the provider is asked for). Only set it when the user explicitly asked you to use another model.' },
               },
               required: ['instruction'],
             },

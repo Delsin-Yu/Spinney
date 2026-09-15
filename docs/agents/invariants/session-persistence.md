@@ -87,17 +87,22 @@
   (`model`, `effort`, and the `modelFromSettings` / `effortFromSettings` retirement
   anchors — all optional, so old state loads unchanged via `normalizeTreeSession`). A
   rename never touches `updatedAt`, so it cannot reorder the sidebar.
-- **Model/effort are per session (P4):** a tab's dropdown pick writes onto the session
-  (`SessionRuntime.setModel` / `setThinkingEffort` → `session.model` / `session.effort`,
-  then `persist()`), so each tab keeps its own selection across a reload.
+- **Model/effort are per node, seeded per session:** the turn a node carries records the
+  card and level it ran with (`TreeNode.model` / `TreeNode.effort`), and a follow-up
+  resolves through the node's ancestry — its own, else the nearest ancestor's, else the
+  session seed. `session.model` / `session.effort` are that seed (a dropdown pick writes
+  them too, so the next session inherits it). `session.model` is a **card id** and
+  `session.effort` a level that card offers (a level it does not offer is clamped to the
+  card's `defaultEffort`, `normalizeEffort`).
   `sessionModelPick` / `sessionEffortPick` (in `tree.ts`) honour a pick only while it
-  still shadows the `spinney.model` / `spinney.thinkingEffort` setting it was
-  made under — editing that setting retires the pick. A session with no pick follows
+  still shadows the `spinney.model` value (the default card id) it was made under, and
+  the card's own `defaultEffort` — editing either retires the pick. A session with no
+  pick follows
   `effectiveModel` / `effectiveEffort` → the persisted `spinney.runtimeConfig`
   record → the setting. An explicit pick also calls `persistRuntimeConfig`, which
   updates that global record as the **seed for sessions created later**; it never
-  touches an existing session's own choice. `applyDefaultModel` / `applyDefaultEffort`
-  are how a changed setting reaches a session that has no pick.
+  touches an existing session's own choice. `applyDefaultModel`
+  is how a changed setting reaches a session that has no pick.
 - **One tab per session** (`PanelManager`, keyed `sessionId → ChatPanel`): opening a
   session focuses its existing tab (`ensure`), a duplicate panel VS Code restores from
   serialization is disposed (`adopt`), and closing a tab only unmaps it (`onClosed`) —

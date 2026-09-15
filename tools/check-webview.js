@@ -81,9 +81,31 @@ const TURN_MESSAGES = [
   { type: 'agentItems', id: NODE_ID, items: [] },
   {
     type: 'config',
-    model: 'smoke-model',
-    models: ['smoke-model', 'smoke-vision-model'],
-    visionModels: ['smoke-vision-model'],
+    // One card per provider group: `card-text` is text-only, `card-vision`
+    // accepts images, and the two have *different* thinking-level menus — the two
+    // things the old `models` / `visionModels` arrays could not express.
+    model: 'card-text',
+    cards: [
+      {
+        id: 'card-text',
+        name: 'smoke-model',
+        providerId: 'smoke-provider',
+        providerName: 'Smoke Provider',
+        vision: false,
+        efforts: ['none', 'low', 'medium', 'high'],
+        defaultEffort: 'medium',
+      },
+      {
+        id: 'card-vision',
+        name: 'smoke-vision-model',
+        providerId: 'smoke-provider',
+        providerName: 'Smoke Provider',
+        vision: true,
+        efforts: ['low', 'high'],
+        defaultEffort: 'low',
+      },
+    ],
+    efforts: ['none', 'low', 'medium', 'high'],
     thinkingEffort: 'medium',
     foldToolCalls: true,
     foldThinking: true,
@@ -182,7 +204,6 @@ function makeElement(id) {
     dataset: {},
     value: '',
     textContent: '',
-    innerHTML: '',
     disabled: false,
     checked: false,
     scrollTop: 0,
@@ -295,9 +316,6 @@ function makeElement(id) {
     },
     getRootNode: () => document,
   };
-  if (id === 'effort-select') {
-    element.options = ['none', 'low', 'medium', 'high'].map((value) => ({ value, selected: false }));
-  }
   // `className` and `classList` must agree: `el()` assigns the former while the
   // webview mutates through the latter, and the checks below read `className`.
   function syncClassName() {
@@ -310,6 +328,20 @@ function makeElement(id) {
     set(value) {
       className = String(value == null ? '' : value);
       element.classList._set = new Set(className.split(/\s+/).filter(Boolean));
+    },
+    configurable: true,
+  });
+  // `innerHTML = ''` really does clear the subtree in a browser, and the webview
+  // relies on that to rebuild the two dropdowns from scratch — so the stub must
+  // clear `children` too, or a rebuilt `<select>` would accumulate options.
+  let innerHtml = '';
+  Object.defineProperty(element, 'innerHTML', {
+    get: () => innerHtml,
+    set(value) {
+      innerHtml = String(value == null ? '' : value);
+      if (innerHtml === '') {
+        element.children.length = 0;
+      }
     },
     configurable: true,
   });
@@ -480,39 +512,112 @@ for (const message of TURN_MESSAGES) {
 
 // --- did the UI follow? ------------------------------------------------------
 
-const effortSelected = elementById('effort-select')
-  .options.filter((option) => option.selected)
-  .map((option) => option.value);
-if (effortSelected.join(',') !== 'medium') {
-  problems.push(
-    `the thinking-effort dropdown shows ${JSON.stringify(effortSelected)} after a config carrying "medium"`,
-  );
+/** Option values of a `<select>`, flattening the per-provider `<optgroup>`s. */
+function optionValues(select) {
+  const out = [];
+  for (const child of select.children) {
+    if (Array.isArray(child.children) && child.children.length > 0) {
+      for (const option of child.children) {
+        out.push(option.value);
+      }
+    } else {
+      out.push(child.value);
+    }
+  }
+  return out;
 }
 
-const modelOptions = elementById('model-select').children.map((child) => child.value);
-if (modelOptions.length === 0) {
-  problems.push('the model dropdown is empty after a config carrying `models`');
+/** The selected option values of a `<select>` (optgroups flattened). */
+function selectedValues(select) {
+  const out = [];
+  for (const child of select.children) {
+    const list = Array.isArray(child.children) && child.children.length > 0 ? child.children : [child];
+    for (const option of list) {
+      if (option.selected) {
+        out.push(option.value);
+      }
+    }
+  }
+  return out;
 }
-notes.push(`model dropdown: ${modelOptions.join(', ') || '(empty)'}`);
+
+const effortSelected = selectedValues(elementById('effort-select'));
+if (effortSelected.join(',') !== 'medium') {
+  problems.push(
+    `the thinking-level dropdown shows ${JSON.stringify(effortSelected)} after a config carrying "medium"`,
+  );
+}
+notes.push(`thinking levels: ${optionValues(elementById('effort-select')).join(', ') || '(empty)'}`);
+
+const modelSelect = elementById('model-select');
+const modelOptions = optionValues(modelSelect);
+// The values are **card ids**, the labels are the cards' names: a dropdown that
+// shows the id (or nothing) means the card list did not arrive.
+if (modelOptions.join(',') !== 'card-text,card-vision') {
+  problems.push(`the model dropdown lists ${JSON.stringify(modelOptions)} after a config carrying two cards`);
+}
+const modelLabels = modelSelect.children.flatMap((child) =>
+  Array.isArray(child.children) && child.children.length > 0
+    ? child.children.map((option) => option.textContent)
+    : [child.textContent],
+);
+if (!modelLabels.includes('smoke-vision-model')) {
+  problems.push('the model dropdown shows ids instead of the cards\u2019 names');
+}
+notes.push(`model dropdown: ${modelLabels.join(', ') || '(empty)'}`);
+
+// Switching the card must switch that card's own level menu (the second card
+// offers `low`/`high` only) — this is what replaced the four static options.
+{
+  const visionConfig = TURN_MESSAGES.find((m) => m.type === 'config');
+  dispatch({
+    ...visionConfig,
+    model: 'card-vision',
+    efforts: ['low', 'high'],
+    thinkingEffort: 'low',
+  });
+  const levels = optionValues(elementById('effort-select'));
+  if (levels.join(',') !== 'low,high') {
+    problems.push(`the thinking-level menu did not follow the card (showed ${JSON.stringify(levels)})`);
+  }
+  dispatch(visionConfig);
+}
 
 const contextLabel = elementById('context-label').textContent;
 if (contextLabel !== 'ctx 50%') {
   problems.push(`the context readout shows ${JSON.stringify(contextLabel)} for 524288/1048576 (expected "ctx 50%")`);
 }
 
-// Image affordances follow the vision list the provider posts.
+// Image affordances follow the vision flag of the *card* the dropdown is on.
 {
   const treeCanvas = elementById('tree-canvas');
-  const withVision = { ...TURN_MESSAGES.find((m) => m.type === 'config'), model: 'smoke-vision-model' };
-  const withoutVision = { ...withVision, model: 'smoke-model' };
+  const base = TURN_MESSAGES.find((m) => m.type === 'config');
+  const withVision = { ...base, model: 'card-vision', efforts: ['low', 'high'], thinkingEffort: 'low' };
+  const withoutVision = { ...base, model: 'card-text' };
   dispatch(withVision);
   const visibleWithVision = !treeCanvas.classList.contains('hide-images');
   dispatch(withoutVision);
   const hiddenWithoutVision = treeCanvas.classList.contains('hide-images');
   if (!visibleWithVision || !hiddenWithoutVision) {
     problems.push(
-      'the image affordances do not follow `visionModels` (thumbnails should show for a vision model and hide otherwise)',
+      'the image affordances do not follow the card\u2019s `vision` flag (thumbnails should show for an image-capable card and hide otherwise)',
     );
+  }
+}
+
+// The gear beside the model dropdown is the page's other entry point: clicking it
+// must ask the host to open the Model Card Tree (the webview never creates a tab
+// itself).
+{
+  const gear = elementById('models-btn');
+  const click = gear && gear._listeners && gear._listeners.click;
+  if (typeof click !== 'function') {
+    problems.push('the model-cards gear button has no click handler');
+  } else {
+    click();
+    if (!posted.some((message) => message && message.type === 'openModelTree')) {
+      problems.push('the model-cards gear button did not ask the host to open the page');
+    }
   }
 }
 

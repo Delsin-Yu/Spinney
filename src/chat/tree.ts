@@ -66,6 +66,32 @@ export interface TreeNode {
   /** Card title, derived from this turn's user prompt. */
   title: string;
   createdAt: number;
+  /**
+   * The **model card id** and the thinking **level name** the turn that created
+   * this node ran with, recorded when the turn starts (`beginTurn`, and the
+   * in-place injected turns — `SessionRuntime`) — the values, never the wire model
+   * name, exactly like every other persisted model surface.
+   *
+   * A conversation node belongs to one branch, and that branch's history was
+   * produced under one card: the card a follow-up from this node must run on. That
+   * is why the model/effort selection is resolved **by ancestry** at use time
+   * (a node's own values, else the nearest ancestor's, else the session's seed) and
+   * not from the tab's current dropdown — switching the dropdown elsewhere must
+   * never retroactively change what an older node runs on.
+   *
+   * Both are optional and were never stored before, so old state loads unchanged
+   * (no version bump); a node without them simply inherits. `effort` is any
+   * non-empty level string (each card declares its own menu, see `ThinkingEffort`);
+   * a level the current card no longer offers is clamped at use time
+   * (`normalizeEffort`), never repaired here.
+   *
+   * Deliberately **not** the same field as {@link agentModel}: that one is a
+   * `kind:'agent'` sidecar's *own* card (the model a sub-agent runs on), while this
+   * one belongs to a turn node and to the ancestry every descendant resolves
+   * through.
+   */
+  model?: string;
+  effort?: string;
   /** Optional user-resized card bounds (px). Absent ⇒ size from CSS defaults. */
   customSize?: { w: number; h: number };
   /**
@@ -133,21 +159,40 @@ export interface AgentSession {
   /** Transcript entries that belong to no turn (e.g. a notice on an empty session). */
   orphanItems: DisplayItem[];
   /**
-   * The session's own model / thinking-effort pick (P4): each tab owns its
-   * selection, so it lives here, persisted with the session. Absent ⇒ the session
-   * follows the global defaults — the persisted `spinney.runtimeConfig`
-   * record, then the `spinney.model` / `spinney.thinkingEffort`
-   * settings. A pick is additionally anchored to the setting value it was made
-   * under (`*FromSettings`), so editing that setting retires the pick: the
-   * setting wins once it changes, exactly like the global record's rule (see
+   * The session's own model / thinking-effort **seed**: the values a session whose
+   * nodes have no card of their own starts from. The live model of a conversation
+   * is a property of the **node** (`TreeNode.model` / `TreeNode.effort`, resolved
+   * by ancestry in `SessionRuntime.cardIdForNode`), because a branch's history was
+   * produced under one card; this pair is only the last link of that chain — the
+   * first turn of a fresh session — and what an explicit dropdown pick still writes
+   * back here (so a reload and a new session start where the user left off).
+   * Absent ⇒ the session follows the global defaults: the persisted
+   * `spinney.runtimeConfig` record, then the `spinney.model` / `spinney.thinkingEffort`
+   * settings. A pick is additionally anchored to the value it was made under
+   * (`*FromSettings`), so editing that value retires the pick: the new value wins
+   * once it changes, exactly like the global record's rule (see
    * `ChatViewProvider.loadRuntimeConfig`). Both fields are optional and were
    * never stored before P4, so old state loads unchanged (no version bump).
+   *
+   * Both values are indirections, never wire spellings: {@link model} is a **model
+   * card id** (a GUID resolved through `src/agent/models.ts`, so renaming a card
+   * or repointing it at another wire name never invalidates a stored pick) and
+   * {@link effort} is a free-form **level string** the card offered at the time.
+   * A level the current card no longer offers is not repaired here, only at use
+   * time (`normalizeEffort`).
    */
   model?: string;
   effort?: ThinkingEffort;
-  /** `spinney.model` in force when `model` was picked (retirement anchor). */
+  /**
+   * The `spinney.model` value in force when `model` was picked (retirement
+   * anchor). It is a card id too — the one the setting named back then.
+   */
   modelFromSettings?: string;
-  /** `spinney.thinkingEffort` in force when `effort` was picked. */
+  /**
+   * The retirement anchor for `effort`: the card's `defaultEffort` in force when
+   * the level was picked. Re-seeding the card's default level therefore retires
+   * an older pick, the same way editing `spinney.model` retires a model pick.
+   */
   effortFromSettings?: string;
 }
 
@@ -199,20 +244,31 @@ export function messageText(content: ChatMessage['content']): string {
     .join(' ');
 }
 
-/** Every accepted effort, mirroring `ThinkingEffort` (used to heal stored state). */
-const THINKING_EFFORTS: readonly ThinkingEffort[] = ['none', 'low', 'medium', 'high'];
-
-/** A stored thinking-effort value, or undefined when it is absent/garbage. */
+/**
+ * A stored reasoning level, or undefined when it is absent/garbage.
+ *
+ * A level is free-form — each model card declares its own menu of them — so this
+ * deliberately keeps **any** non-empty string and never vets the value against a
+ * fixed list. A level the current card does not offer is not an error to drop
+ * here: it is repaired at *use* time by `normalizeEffort` (`src/agent/models.ts`),
+ * which clamps it onto the card's own menu (or that card's `defaultEffort`).
+ * Rejecting unknown-looking levels at load time would instead silently lose a
+ * pick made on a card the user has since switched away from and back.
+ */
 function asThinkingEffort(value: unknown): ThinkingEffort | undefined {
-  return THINKING_EFFORTS.includes(value as ThinkingEffort) ? (value as ThinkingEffort) : undefined;
+  return typeof value === 'string' && value !== '' ? value : undefined;
 }
 
 /**
- * The session's own model pick, or `undefined` when it must follow the defaults
- * (P4). A pick only counts while it still shadows the setting it was made under:
- * editing `spinney.model` is an explicit choice too, so it retires a pick
- * made before the edit — the same rule `loadRuntimeConfig` applies to the global
- * record, here applied per session.
+ * The session's own model seed, or `undefined` when it must follow the defaults.
+ * The seed is what a session whose nodes recorded no card of their own starts
+ * from, so this is the *last* link of the per-node resolution chain — not the
+ * live selection any more (see `SessionRuntime.cardIdForNode`). A pick only counts
+ * while it still shadows the value it was made under: editing `spinney.model` is
+ * an explicit choice too, so it retires a pick made before the edit — the same
+ * rule `loadRuntimeConfig` applies to the global record, here applied per session.
+ * Both the pick and `settingModel` are card ids, so the comparison is an identity
+ * check, never a wire-name match.
  */
 export function sessionModelPick(session: AgentSession, settingModel: string): string | undefined {
   if (!session.model) {
@@ -223,7 +279,14 @@ export function sessionModelPick(session: AgentSession, settingModel: string): s
     : undefined;
 }
 
-/** `sessionModelPick` for the thinking-effort setting. */
+/**
+ * `sessionModelPick` for the reasoning level. `settingEffort` is the anchor to
+ * compare the pick against — the card's `defaultEffort` in force when the level
+ * was picked (`session.effortFromSettings`) — and the returned level is the
+ * free-form string the session chose; the caller clamps it onto the current
+ * card's own menu (`normalizeEffort` in `src/agent/models.ts`), because a level
+ * a card once offered need not be on its menu any more.
+ */
 export function sessionEffortPick(session: AgentSession, settingEffort: string): ThinkingEffort | undefined {
   if (!session.effort) {
     return undefined;
@@ -575,15 +638,24 @@ function normalizeTreeSession(raw: AgentSession): AgentSession {
     activeNodeId: raw.activeNodeId ?? null,
     orphanItems: Array.isArray(raw.orphanItems) ? raw.orphanItems : [],
   };
-  // P4 per-session selection: absent in every state stored before it existed, so
-  // an old session simply follows the global defaults (no version bump needed).
-  // Anything unreadable is dropped instead of being trusted.
+  // The session's model/effort **seed** (the last link of the per-node card
+  // resolution): absent in every state stored before the seed existed, so an old
+  // session simply follows the global defaults (no version bump needed). Anything
+  // unreadable is dropped instead of being trusted: `model` must be a non-empty
+  // string (a card id — a card that is gone simply resolves to the default at use
+  // time), and `effort` any non-empty level. The level is deliberately *not*
+  // checked against the catalog here: a level the current card does not offer is
+  // clamped at use time by `normalizeEffort`, so healing can never throw away a
+  // pick that a card switch (away and back) would restore.
   session.model = typeof raw.model === 'string' && raw.model ? raw.model : undefined;
   session.effort = asThinkingEffort(raw.effort);
   session.modelFromSettings =
     typeof raw.modelFromSettings === 'string' ? raw.modelFromSettings : undefined;
   session.effortFromSettings =
     typeof raw.effortFromSettings === 'string' ? raw.effortFromSettings : undefined;
+  // Both anchors are opaque strings compared for identity only: `modelFromSettings`
+  // is a card id, `effortFromSettings` a card's default level. A value that no
+  // longer matches simply retires the pick — nothing to repair here.
   for (const [id, node] of Object.entries(raw.nodes ?? {})) {
     const n: TreeNode = {
       id,
@@ -601,6 +673,13 @@ function normalizeTreeSession(raw: AgentSession): AgentSession {
       // loads unchanged (no version bump). A value that is not this node's own id
       // is ignored at read time by `contextBase()`, so it needs no repair here.
       contextBaseId: typeof node.contextBaseId === 'string' ? node.contextBaseId : undefined,
+      // The card/level this turn ran with: healed exactly like the other optional
+      // strings on a node, so a state stored before them loads unchanged (no version
+      // bump). A card id that no longer names a card resolves to the default at use
+      // time, and a level the card no longer offers is clamped there too — neither
+      // is dropped here, so a card switch away and back never loses a pick.
+      model: typeof node.model === 'string' && node.model ? node.model : undefined,
+      effort: asThinkingEffort(node.effort),
     };
     n.kind = node.kind === 'agent' ? 'agent' : node.kind === 'bg' ? 'bg' : undefined;
     n.delivered = node.delivered === true ? true : undefined;
@@ -623,9 +702,9 @@ function normalizeTreeSession(raw: AgentSession): AgentSession {
 }
 
 function fromLegacySession(raw: LegacySession): AgentSession {
-  // A pre-tree session has no per-session pick either: `model` / `effort` stay
-  // absent, so the migrated session follows the global defaults (P4) exactly like
-  // a session that never touched the dropdown.
+  // A pre-tree session has no seed either: `model` / `effort` stay absent, so the
+  // migrated session starts from the global defaults exactly like a session that
+  // never touched the dropdown.
   const session: AgentSession = {
     id: raw.id || newId(),
     title: raw.title || 'New session',

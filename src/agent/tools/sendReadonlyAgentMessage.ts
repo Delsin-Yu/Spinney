@@ -19,7 +19,7 @@ export const sendReadonlyAgentMessageTool: InterceptedTool = {
         properties: {
           id: { type: 'string', description: 'The agent node id from a prior spawn_readonly_agents result.' },
           message: { type: 'string', description: 'The follow-up instruction for this sub-agent.' },
-          model: { type: 'string', description: 'Optional different model id. Only set it when the user explicitly asked you to use another model.' },
+          model: { type: 'string', description: 'Optional different model card (its id, or the name the user gave it — or the model name the provider is asked for). Only set it when the user explicitly asked you to use another model.' },
           mode: { type: 'string', enum: ['sync', 'async'], description: 'sync (default) or async.' },
         },
         required: ['id', 'message'],

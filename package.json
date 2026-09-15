@@ -42,7 +42,8 @@
     "Other"
   ],
   "activationEvents": [
-    "onWebviewPanel:spinney.chatTree"
+    "onWebviewPanel:spinney.chatTree",
+    "onWebviewPanel:spinney.modelTree"
   ],
   "main": "./out/extension.js",
   "l10n": "./l10n",
@@ -100,6 +101,11 @@
         "command": "spinney.deleteBranch",
         "title": "%command.spinney.deleteBranch.title%",
         "icon": "$(trash)"
+      },
+      {
+        "command": "spinney.openModelCards",
+        "title": "%command.spinney.openModelCards.title%",
+        "icon": "$(settings-gear)"
       },
       {
         "command": "spinney.clear",
@@ -161,56 +167,103 @@
           "spinney.model": {
             "type": "string",
             "default": "deepseek-flash",
-            "enum": [
-              "deepseek-flash"
-            ],
             "markdownDescription": "%spinney.model.description%",
             "scope": "window"
           },
-          "spinney.modelTable": {
+          "spinney.providers": {
             "type": "object",
             "default": {},
             "additionalProperties": {
               "type": "object",
               "additionalProperties": false,
               "properties": {
-                "vision": {
-                  "type": "boolean",
-                  "default": false,
-                  "description": "%spinney.modelTable.vision.description%"
+                "name": {
+                  "type": "string",
+                  "default": "",
+                  "description": "%spinney.providers.name.description%"
                 },
-                "max_tokens": {
+                "baseUrl": {
+                  "type": "string",
+                  "default": "",
+                  "description": "%spinney.providers.baseUrl.description%"
+                },
+                "concurrency": {
                   "type": "integer",
-                  "minimum": 1,
-                  "default": 1048576,
-                  "description": "%spinney.modelTable.max_tokens.description%"
+                  "minimum": 0,
+                  "default": 0,
+                  "description": "%spinney.providers.concurrency.description%"
                 }
               }
             },
-            "propertyNames": {
-              "pattern": "^[^\\s:]+$",
-              "patternErrorMessage": "%spinney.modelTable.patternErrorMessage%"
+            "markdownDescription": "%spinney.providers.markdownDescription%",
+            "scope": "window"
+          },
+          "spinney.modelCards": {
+            "type": "object",
+            "default": {},
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "default": "",
+                  "description": "%spinney.modelCards.name.description%"
+                },
+                "providerId": {
+                  "type": "string",
+                  "default": "",
+                  "description": "%spinney.modelCards.providerId.description%"
+                },
+                "oaiModel": {
+                  "type": "string",
+                  "default": "",
+                  "description": "%spinney.modelCards.oaiModel.description%"
+                },
+                "contextWindow": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "default": 1048576,
+                  "description": "%spinney.modelCards.contextWindow.description%"
+                },
+                "concurrency": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "default": 0,
+                  "description": "%spinney.modelCards.concurrency.description%"
+                },
+                "vision": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "enabled": {
+                      "type": "boolean",
+                      "default": false,
+                      "description": "%spinney.modelCards.vision.enabled.description%"
+                    },
+                    "transport": {
+                      "type": "string",
+                      "enum": ["openai", "deepseek"],
+                      "default": "deepseek",
+                      "description": "%spinney.modelCards.vision.transport.description%"
+                    }
+                  }
+                },
+                "efforts": {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  },
+                  "description": "%spinney.modelCards.efforts.description%"
+                },
+                "defaultEffort": {
+                  "type": "string",
+                  "default": "",
+                  "description": "%spinney.modelCards.defaultEffort.description%"
+                }
+              }
             },
-            "markdownDescription": "%spinney.modelTable.markdownDescription%",
-            "scope": "window"
-          },
-          "spinney.baseUrl": {
-            "type": "string",
-            "default": "https://api.deepseek.com",
-            "description": "%spinney.baseUrl.description%",
-            "scope": "window"
-          },
-          "spinney.contextWindow": {
-            "type": "number",
-            "default": 0,
-            "description": "%spinney.contextWindow.description%",
-            "scope": "window"
-          },
-          "spinney.thinkingEffort": {
-            "type": "string",
-            "default": "medium",
-            "enum": ["none", "low", "medium", "high"],
-            "description": "%spinney.thinkingEffort.description%",
+            "markdownDescription": "%spinney.modelCards.markdownDescription%",
             "scope": "window"
           }
         }
@@ -367,10 +420,11 @@
     "package": "vsce package && npm run clean:l10n",
     "check:models": "node tools/check-models.js",
     "check:webview": "node tools/check-webview.js",
+    "check:modeltree": "node tools/check-modeltree.js",
     "check:signals": "node tools/check-signal-persist.js",
     "check:rollover": "node tools/check-context-rollover.js",
     "check:l10n": "node tools/check-l10n.js",
-    "vscode:prepublish": "npm run compile && npm run sync:l10n && npm run check:models && npm run check:webview && npm run check:signals && npm run check:l10n && npm run check:rollover"
+    "vscode:prepublish": "npm run compile && npm run sync:l10n && npm run check:models && npm run check:webview && npm run check:modeltree && npm run check:signals && npm run check:l10n && npm run check:rollover"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

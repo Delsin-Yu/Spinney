@@ -53,8 +53,10 @@
   they are observations, not assumptions baked into the text.
 - **Hard rule 2 — no model ids in plugin text.** `src/agent/models.ts` is the only
   place a model id may appear; everything else derives names at runtime
-  (`DEFAULT_MODEL`, `visionModelsLabel()`, `isVisionModel()`,
-  `contextWindowFor()`). `tools/check-models.js` (`npm run check:models`, run by
+  (`DEFAULT_MODEL`, `cardDisplayName()`, `visionCardsLabel()`, `isVisionCard()`).
+  The model the agent runs on is whatever **card** the user configured, so the
+  prompt's identity line carries that card's display name — never a compiled-in id.
+  `tools/check-models.js` (`npm run check:models`, run by
   `vscode:prepublish`) fails the build when a `src/**/*.ts` file other than the
   catalog names a model, or when `package.json` / `README.md` / `docs/**` names one
   the catalog does not have.

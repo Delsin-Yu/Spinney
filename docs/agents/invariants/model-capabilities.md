@@ -1,11 +1,14 @@
 ## Model capabilities: declared, never probed
 
-**Rule:** the harness knows exactly one model's capabilities (the vendored
-`deepseek-flash`) and takes every other model — including a per-model override of
-the vendored one — from the user's `spinney.modelTable` setting. There is no
-capability probe, no self-learning from an error, and no second copy of the
-catalog outside `src/agent/models.ts`. If a model's context window or image
-support is wrong, the fix is one line in the setting, not a network round-trip.
+**Rule:** the harness knows exactly one model's capabilities — the built-in
+fallback card `deepseek-flash` in `src/agent/models.ts` — and takes every other from
+the user's **model cards** (`spinney.modelCards`). There is no capability probe, no
+self-learning from an error, and no second copy of the catalog outside
+`src/agent/models.ts`. If a card's context window, image support or image transport is
+wrong, the fix is one field on that card in the Model Card Tree page, not a network
+round-trip. The declaration lives **on the card** now — `contextWindow`,
+`vision.enabled`, `vision.transport` — where it sits next to the wire model name it
+describes and travels with the session that picked it (see `model-cards.md`).
 
 ### Why not ask the API
 
@@ -15,7 +18,8 @@ Measured against `https://api.deepseek.com` (2026-09):
   documented schema has no context length and no modalities. There is no
   per-model retrieve endpoint that adds anything (`GET /models/<id>` is the same
   three fields, and 404s for an id the listing omits **even when that id is
-  callable** — the listing is not even an availability oracle).
+  callable** — the listing is not even an availability oracle). It therefore cannot
+  fill in a card's `contextWindow` or `vision` even if the harness wanted it to.
 - No tokenizer endpoint exists (`/tokenize`, `/tokens`, `/count_tokens` are 404),
   and no response header carries a limit, so there is nothing to read for free.
 - The only authoritative runtime statement of a context window is the 400 text:
@@ -27,80 +31,66 @@ Measured against `https://api.deepseek.com` (2026-09):
   model's jumps) — but a text-only model does **not** error on an image: the
   provider swaps it for an `[Unsupported Image]` text part and answers anyway.
   A probe would therefore have to be *interpreted*, and would run on every model
-  switch.
+  switch; and it could not tell you which of the two **transports** the endpoint
+  wants.
 
 **Why declared instead:** a probe is a hidden request (cost, latency, and a
 surprise the first time a model is selected), and its answer is only as stable as
-the provider's alias mapping. That mapping provably drifts: DeepSeek's docs say
-the legacy flash ids are still accepted but retired, *their requests are served by
+the provider's alias mapping. That mapping provably drifts: DeepSeek's docs say the
+legacy flash ids are still accepted but retired, *their requests are served by
 V4.1-Flash* (which is image-capable), and the pro id is routed to V4.1-Flash on a
-published date. A name cannot imply a capability, so the user declares it, as
-**structured data** in `settings.json`:
+published date. A name cannot imply a capability — and a card's `oaiModel` is exactly
+such a name — so the user declares it, as **structured data** on the card.
 
-```json model-table
-"spinney.modelTable": {
-  "deepseek-flash":  { "vision": true,  "max_tokens": 1048576 },
-  "deepseek-v4-pro": { "vision": false, "max_tokens": 1048576 }
-}
-```
+### The card is the declaration; the page is its editor
 
-The setting stores data, not a mini-language: `vision` is a boolean, `max_tokens`
-a number, and the key is the model id (`propertyNames.pattern` rejects spaces and
-colons). A missing field keeps the vendored value for that id, or non-vision /
-`DEFAULT_CONTEXT_WINDOW` for a new one. This shape is also what makes the setting
-*self-explanatory in JSON* — the schema is the documentation, and the setting's
-description links straight to it (see below).
+A card is `{ name, providerId, oaiModel, contextWindow, concurrency, vision: {
+enabled, transport }, efforts, defaultEffort }` under `spinney.modelCards`, and its
+provider is a row under `spinney.providers`. Both are **structured data** — an object
+of id → fields — because that is what a hand-edited `settings.json` should contain:
+the schema is the documentation, and the file is where a model list is read, diffed
+and pasted. A field the user leaves out keeps a sane default (non-vision / the
+built-in window), and a row that cannot be parsed is skipped and reported, so the
+settings can never silently half-apply.
 
-### The setting is the only editor
+The editor is the **Model Card Tree page** (`Spinney: Model Cards`,
+`invariants/model-cards.md`): it holds a draft, validates it client-side, and posts
+the whole desired state to the host, which re-validates (`validatePayload`) and
+writes `settings.json` through `configuration.update`. VS Code's Settings UI cannot
+be that editor: it picks a setting's widget from the contributed JSON schema and
+offers no way to add one, so a multi-column editable table is **impossible** there.
+Verified in the shipped bundle's widget factory: `complex` → "Edit in
+settings.json", `boolean`/`integer`/`number`/`string`/`enum`/`array` → one primitive
+control each, `object` → a two-column key/value list, `boolean-object` → checkbox
+rows, `complex-object` → read-only preview plus the JSON button. An array whose
+`items.type` is `object` is classified `complex` (the classifier returns false for
+non-primitive items), and a nested object value is pushed into the same "complex"
+path unless every nested schema is primitive.
 
-VS Code picks a setting's widget from the contributed JSON schema and offers no
-way to add one, so a three-column table (model id / vision / window) is
-**impossible** there. Verified in the shipped bundle's widget factory: `complex`
-→ "Edit in settings.json", `boolean`/`integer`/`number`/`string`/`enum`/`array`
-→ one primitive control each, `object` → a two-column key/value list,
-`boolean-object` → checkbox rows, `complex-object` → read-only preview plus the
-JSON button. An array whose `items.type` is `object` is classified `complex`
-(the classifier returns false for non-primitive items), and a nested object value
-is pushed into the same "complex" path unless every nested schema is primitive.
-
-So the schema deliberately stores **structured data** and accepts VS Code's
-`complex-object` rendering: the settings row shows the entries read-only and hands
-over to JSON through **Edit in settings.json**. Do not "fix" that with a
-hand-rolled webview editor — one was tried (a chat-panel table with a column per
-field, writing back through `workspace.getConfiguration().update`), and the JSON
-view was judged better: the data *is* the UI, there is nothing to keep in sync,
-and `settings.json` is where a model list is read, diffed and pasted.
-
-The setting's description carries the same way in, as a markdown command link —
-allowed, because the settings editor renders descriptions with
-`openerService.open(href, { allowCommands: true })` and resolves `#setting.id` as
-a jump to another setting:
-
-    [settings.json](command:workbench.action.openSettingsJson?%7B%22revealSetting%22%3A%7B%22key%22%3A%22spinney.modelTable%22%2C%22edit%22%3Atrue%7D%7D)
-
-That is the same call VS Code's own button makes (`openSettingsJson` with
-`revealSetting: { key, edit }`), so it opens the file *on that key*, creating it if
-needed.
+So the settings row deliberately stays **a read-only preview plus a link into
+`settings.json`** (VS Code's `complex-object` rendering, handed over via **Edit in
+settings.json**) — it is the fallback view, not the editor. The page is the editor.
+The data *is* the UI on the page: there is nothing to keep in sync, and a save is
+followed by the parsed truth being posted straight back, so a repaired field shows
+up in the page instead of diverging from it.
 
 ### Where it lives
 
 | Piece | File |
 | --- | --- |
-| Catalog (`VENDORED_MODEL`, `DEFAULT_MODEL`, `DEFAULT_CONTEXT_WINDOW`) | `src/agent/models.ts` |
-| `parseModelTable()` — object shape, per-field defaults, error rows | `src/agent/models.ts` |
-| `setModelOverrides()` + `modelSpecs()` (vendored + table, deduped by id) | `src/agent/models.ts` |
-| `applyModelTable()` — read the setting, install, log | `ChatViewProvider` (constructor + `onConfigurationChanged`) |
-| `resolveModel()` — an unknown id falls back to `DEFAULT_MODEL` | `ChatViewProvider` |
-| `getContextWindow()` — precedence: table row → `contextWindow` → catalog → default | `ChatViewProvider` |
-| The runtime gates: `isVisionModel()`, `contextWindowFor()`, `modelIds()`, `visionModelIds()` | `src/agent/models.ts` (consumers: `agent.ts`, `ChatViewProvider`, `main.js` via the `config` message) |
-| The link into `settings.json` (in the setting's own description) | `package.json` `markdownDescription` → `openSettingsJson` with `revealSetting` |
-| Settings (`model`, `modelTable`, `contextWindow`) | `package.json` |
-| The guard: enum == catalog, no model id in `src/**` or `media/*.js`, copy names only catalog ids | `tools/check-models.js` |
+| Catalog (the built-in `VENDORED_MODEL` / `VENDORED_CARD`, `DEFAULT_MODEL`, `DEFAULT_CONTEXT_WINDOW`, `MAX_IMAGE_BYTES`) | `src/agent/models.ts` |
+| `parseCatalog()` (`parseProviderRow` / `parseCardRow` / `parseVision`) — object shape, per-field defaults, error rows | `src/agent/models.ts` |
+| `applyModelCards()` — read the two settings, install the catalog, log | `ChatViewProvider` (constructor + `onConfigurationChanged`) |
+| `resolveModel()` — a card id (or a name, or a wire name) resolves; anything else falls back to the first usable card | `ChatViewProvider` |
+| `getContextWindow()` — a card id's own window, else the default | `ChatViewProvider` → `contextWindowFor()` in `src/agent/models.ts` |
+| The runtime gates: `isVisionCard()`, `contextWindowFor()`, `cards()` / `cardIds()`, `visionCards()`, `visionCardsLabel()` | `src/agent/models.ts` (consumers: `agent.ts`, `ChatViewProvider`, `runtime.ts`, `media/main.js` via the `config` message) |
+| The declaration's editor (the page, its validation, the read-back) | `src/chat/ModelPanel.ts` · `src/chat/modelTree.ts` · `media/modeltree.js` |
+| Settings (`model`, `providers`, `modelCards`) | `package.json` |
+| The guard: default == fallback, the two catalog settings exist, no `enum` on `model`, no model id in `src/**` / `media/*.js`, copy names only catalog ids | `tools/check-models.js` |
 
-A `model-table`-labelled fenced block is the one place a doc may show ids the
-catalog does not have (the checker skips it) — every other mention of a model id
-in README/docs must be `deepseek-flash`, and plugin text that reaches the model
-must call `visionModelsLabel()` instead of naming anything.
+Every mention of a model id in README/docs must be the built-in one, and plugin text
+that reaches the model must call `visionCardsLabel()` / `cardDisplayName()` instead of
+naming anything.
 
 ### The context indicator is API-driven
 
@@ -121,6 +111,6 @@ is **never a trigger, only a readout**: it is the *previous* request's number, a
 it has already lied once — the header read `ctx 65%` while the request that failed
 carried ~1.28 M tokens. When the window named in the 400 disagrees with
 `contextWindowFor()`, that mismatch is **only logged** to the `[config]` line and
-is never written back into `spinney.modelTable`: the declared table is the user's
-data, and a stale window is their one-line fix, not something the harness
-corrects behind them.
+is never written back into the card's `contextWindow`: the declared field is the
+user's data, and a stale window is their one-field fix in the Model Card Tree page,
+not something the harness corrects behind them.

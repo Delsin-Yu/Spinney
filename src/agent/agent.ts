@@ -1,7 +1,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { DeepSeekClient, DeepSeekError, RetryInfo } from './deepseek';
+import { DeepSeekError, RetryInfo } from './deepseek';
+import { ClientRegistry, QueueInfo } from './clients';
 import { ToolRegistry, resolvePath } from '../tools';
 import {
   AgentEvent,
@@ -13,10 +14,20 @@ import {
   Usage,
   detectImageMime,
 } from './types';
-import { DEFAULT_MODEL, isVisionModel, visionModelsLabel } from './models';
+import { MAX_IMAGE_BYTES, ModelCard, cardDisplayName, isVisionCard, visionCardsLabel } from './models';
 import * as prompt from './prompt';
 import { ToolCapabilities, interceptedDefinitions } from './tools';
 import { perf } from '../perf';
+
+/**
+ * One image `read_image` attached this turn: either uploaded to the provider's
+ * Files API (`file_id` — the card's `deepseek` vision transport) or, for a card
+ * whose transport is `openai`, kept as a `data:` URL and sent inside the request
+ * body.
+ */
+type PendingImage =
+  | { kind: 'file'; fileId: string; path: string }
+  | { kind: 'inline'; url: string; path: string };
 
 /**
  * Injected as an extra user message before a follow-up prompt when the previous
@@ -134,6 +145,19 @@ function retryStatus(info: RetryInfo): string {
     info.attempt,
     info.maxAttempts,
     seconds,
+  );
+}
+
+/**
+ * The status line shown while a request waits for a concurrency slot (the
+ * provider's or the model card's cap is reached). Without it a queued request is
+ * indistinguishable from a slow model.
+ */
+function queueStatus(info: QueueInfo): string {
+  return vscode.l10n.t(
+    'Waiting for a free request slot ({0} queued, {1} allowed at once)…',
+    info.queued,
+    info.limit,
   );
 }
 
@@ -257,9 +281,10 @@ export class Agent {
   private cancelled = false;
   private lastTurnInterrupted = false;
   private lastInterruptedTools: InterruptedToolCall[] = [];
-  /** Files uploaded by read_image this turn; flushed as a user content block. */
-  private pendingImageFiles: Array<{ file_id: string; path: string }> = [];
-  private model = '';
+  /** Images attached by read_image this turn; flushed as a user content block. */
+  private pendingImages: PendingImage[] = [];
+  /** The card this agent runs on (provider, wire name, vision, effort levels). */
+  private card?: ModelCard;
   private thinkingEffort: ThinkingEffort = 'none';
   /** Reply language injected as the prompt's `## Language` line. */
   private replyLanguage: string = prompt.DEFAULT_REPLY_LANGUAGE;
@@ -301,20 +326,34 @@ export class Agent {
   private rejectedImageIds = new Set<string>();
 
   constructor(
-    private readonly client: DeepSeekClient,
+    private readonly clients: ClientRegistry,
     private readonly tools: ToolRegistry,
     private readonly onEvent: (event: AgentEvent) => void,
   ) {
     this.reset();
   }
 
-  /** Set the model used for subsequent completions. */
-  setModel(model: string): void {
-    this.model = model;
+  /**
+   * Set the model card this agent runs on: it decides the provider the request
+   * goes to, the wire model name, whether images are allowed and how they travel,
+   * and which reasoning levels exist for it.
+   */
+  setCard(card: ModelCard): void {
+    this.card = card;
     this.refreshSystemIdentity();
   }
 
-  /** Set the reasoning-effort mode for subsequent completions. */
+  /** The card's id ('' before the first {@link setCard}). */
+  get cardId(): string {
+    return this.card?.id ?? '';
+  }
+
+  /** The card's display name, for the prompt's identity line and error texts. */
+  private get modelLabel(): string {
+    return cardDisplayName(this.card);
+  }
+
+  /** Set the reasoning-effort level for subsequent completions. */
   setThinkingEffort(effort: ThinkingEffort): void {
     this.thinkingEffort = effort;
     this.refreshSystemIdentity();
@@ -394,13 +433,13 @@ export class Agent {
    */
   private refreshSystemIdentity(): void {
     if (this.messages[0]?.role === 'system') {
-      this.messages[0].content = prompt.systemPrompt(this.model, this.thinkingEffort, this.replyLanguage);
+      this.messages[0].content = prompt.systemPrompt(this.modelLabel, this.thinkingEffort, this.replyLanguage);
     }
   }
 
   reset(): void {
-    this.messages = Agent.initialMessages(this.model, this.thinkingEffort, this.replyLanguage);
-    this.pendingImageFiles = [];
+    this.messages = Agent.initialMessages(this.modelLabel, this.thinkingEffort, this.replyLanguage);
+    this.pendingImages = [];
   }
 
   /**
@@ -416,7 +455,7 @@ export class Agent {
   /** The capabilities that decide which intercepted tools this agent sees. */
   private toolCapabilities(): ToolCapabilities {
     return {
-      vision: isVisionModel(this.model),
+      vision: isVisionCard(this.card),
       canSpawn: this.canSpawn,
       canSpawnReadOnly: this.canSpawnReadOnly,
       canHop: this.canHop,
@@ -455,16 +494,25 @@ export class Agent {
 
   /**
    * The message history as it should be sent to the API for the current model.
-   * Image content blocks (`image_url` / `file`) are only valid on the vision
-   * model; when a text-only model is active we send a copy in which each image
-   * block is replaced by a short placeholder so the request does not 400.
-   * Images the provider itself rejected are replaced the same way, for every
-   * model. The stored history is never modified, so switching models restores
-   * the original image blocks (a provider-rejected one stays hidden).
+   * Image content blocks are rewritten — never deleted — so the request cannot be
+   * refused for carrying something this endpoint does not understand:
+   *
+   *  - a **text-only** card gets a placeholder where the image was,
+   *  - a card that is not `deepseek` gets a placeholder for a `{ type: 'file' }`
+   *    block, because a Files-API id belongs to the provider that issued it: another
+   *    endpoint has never seen it (DeepSeek's `file_id` is a vendor extension, see
+   *    `docs/agents/invariants/model-cards.md`). An `image_url` block travels fine
+   *    everywhere, so a `data:` URL history survives a switch — only uploads do not,
+   *  - an image the provider itself rejected is hidden the same way, for every model.
+   *
+   * The stored history is never modified, so switching the card back restores the
+   * original blocks (a provider-rejected one stays hidden). The replacements are
+   * model-facing text, like the assistant/tool text around them.
    */
   private messagesForCurrentModel(): ChatMessage[] {
-    const vision = isVisionModel(this.model);
-    if (vision && this.rejectedImageIds.size === 0) {
+    const vision = isVisionCard(this.card);
+    const servesUploads = this.card?.vision.transport === 'deepseek';
+    if (vision && servesUploads && this.rejectedImageIds.size === 0) {
       return this.messages;
     }
     return this.messages.map((m) => {
@@ -484,6 +532,15 @@ export class Agent {
         if (!vision) {
           changed = true;
           return { type: 'text', text: '[image hidden: the current model does not support images]' };
+        }
+        if (p.type === 'file' && !servesUploads) {
+          // A Files-API id is the issuing provider's private handle: this endpoint
+          // has never seen it, so the id (and the bytes behind it) cannot travel.
+          changed = true;
+          return {
+            type: 'text',
+            text: '[image hidden: it was uploaded to a provider that this model cannot read from]',
+          };
         }
         if (this.rejectedImageIds.has(id)) {
           changed = true;
@@ -572,9 +629,9 @@ export class Agent {
 
     this.isRunning = true;
     this.cancelled = false;
-    // Discard any image uploaded in a previously interrupted turn (it was never
+    // Discard any image attached in a previously interrupted turn (it was never
     // flushed as a user block, so it must not leak into this turn).
-    this.pendingImageFiles = [];
+    this.pendingImages = [];
     this.abortController = new AbortController();
     const signal = this.abortController.signal;
 
@@ -642,15 +699,20 @@ export class Agent {
           // message (a tool message cannot carry one), and they must follow the
           // tool responses so the assistant(tool_calls) -> tool(...) ordering
           // stays valid. The model's next turn then sees the image(s).
-          if (this.pendingImageFiles.length > 0) {
+          if (this.pendingImages.length > 0) {
             this.messages.push({
               role: 'user',
               content: [
                 { type: 'text', text: 'Image(s) requested via read_image:' },
-                ...this.pendingImageFiles.map((f) => ({ type: 'file' as const, file_id: f.file_id })),
+                ...this.pendingImages.map(
+                  (f): ContentPart =>
+                    f.kind === 'file'
+                      ? { type: 'file', file_id: f.fileId }
+                      : { type: 'image_url', image_url: { url: f.url } },
+                ),
               ],
             });
-            this.pendingImageFiles.length = 0;
+            this.pendingImages.length = 0;
           }
           // The assistant turn that produced these tool calls is now complete and
           // its tool window is fully built. Emit the turn's usage here so the UI
@@ -671,9 +733,9 @@ export class Agent {
         return;
       }
     } catch (err) {
-      // Any image uploaded this turn but not flushed must be discarded (it would
+      // Any image attached this turn but not flushed must be discarded (it would
       // otherwise leak into the next turn's tool window).
-      this.pendingImageFiles = [];
+      this.pendingImages = [];
       const interrupted = this.isStopped(signal) || err instanceof InterruptedError;
       if (interrupted) {
         // Remember the tool call(s) that were in progress so the per-tool
@@ -895,12 +957,13 @@ export class Agent {
     this.messages.push({ role: 'tool', tool_call_id: call.id, content: result });
   }
 
-  /** Read + validate an image file and upload it, or return a friendly error. */
+  /** Read + validate an image file and attach it, or return a friendly error. */
   private async tryReadImage(filePath: string, signal?: AbortSignal): Promise<string> {
-    if (!isVisionModel(this.model)) {
-      const vision = visionModelsLabel();
+    const card = this.card;
+    if (!isVisionCard(card)) {
+      const vision = visionCardsLabel();
       return (
-        `Error: the current model (${this.model || DEFAULT_MODEL}) does not support images. ` +
+        `Error: the current model (${this.modelLabel}) does not support images. ` +
         (vision
           ? `Switch to a vision model (${vision}) to read image files.`
           : 'No vision model is configured for this harness.')
@@ -921,18 +984,27 @@ export class Agent {
     } catch (err) {
       return `Error: could not read image ${resolved}: ${err instanceof Error ? err.message : String(err)}`;
     }
-    if (buffer.length > 64 * 1024 * 1024) {
-      return `Error: image ${resolved} is ${(buffer.length / 1024 / 1024).toFixed(1)} MiB; the Files API allows at most 64 MiB per image.`;
+    const miB = MAX_IMAGE_BYTES / 1024 / 1024;
+    if (buffer.length > MAX_IMAGE_BYTES) {
+      return `Error: image ${resolved} is ${(buffer.length / 1024 / 1024).toFixed(1)} MiB; the limit is ${miB} MiB per image.`;
     }
-    if (!detectImageMime(buffer)) {
+    const mime = detectImageMime(buffer);
+    if (!mime) {
       return `Error: ${resolved} is not a supported image. Supported formats: JPEG, PNG, GIF, WebP.`;
     }
     try {
-      const uploaded = await this.client.uploadFile(buffer, path.basename(resolved), signal);
-      this.pendingImageFiles.push({ file_id: uploaded.id, path: resolved });
+      if (card?.vision.transport === 'openai') {
+        // The card says its provider takes images inline: keep the bytes in the
+        // request body instead of uploading them first.
+        const url = `data:${mime};base64,${buffer.toString('base64')}`;
+        this.pendingImages.push({ kind: 'inline', url, path: resolved });
+        return `Loaded image ${resolved} inline (${(buffer.length / 1024).toFixed(1)} KiB).`;
+      }
+      const uploaded = await this.clients.upload(card as ModelCard, buffer, path.basename(resolved), signal);
+      this.pendingImages.push({ kind: 'file', fileId: uploaded.id, path: resolved });
       return `Loaded image ${resolved} -> ${uploaded.id} (${uploaded.filename}, ${(uploaded.bytes / 1024).toFixed(1)} KiB).`;
     } catch (err) {
-      return `Error: upload failed: ${err instanceof Error ? err.message : String(err)}`;
+      return `Error: image attach failed: ${err instanceof Error ? err.message : String(err)}`;
     }
   }
 
@@ -948,17 +1020,28 @@ export class Agent {
     let usage: Usage | undefined;
 
     try {
-      for await (const chunk of this.client.stream({
-        messages: this.messagesForCurrentModel(),
-        tools: this.getTools(),
-        signal,
-        model: this.model || undefined,
-        thinkingEffort: this.thinkingEffort,
-        // The client retries transient failures itself (network / 429 / 5xx);
-        // mirror each retry into the status line so a slow retry does not look
-        // like a hung turn.
-        onRetry: (info) => this.onEvent({ type: 'status', text: retryStatus(info) }),
-      })) {
+      const card = this.card;
+      if (!card) {
+        throw new Error('No model card is configured for this agent.');
+      }
+      for await (const chunk of this.clients.stream(
+        card,
+        {
+          messages: this.messagesForCurrentModel(),
+          tools: this.getTools(),
+          signal,
+          // The wire model name and the provider come from the card, never from
+          // this call site — see `ClientRegistry.stream`.
+          thinkingEffort: this.thinkingEffort,
+          // The client retries transient failures itself (network / 429 / 5xx);
+          // mirror each retry into the status line so a slow retry does not look
+          // like a hung turn.
+          onRetry: (info) => this.onEvent({ type: 'status', text: retryStatus(info) }),
+        },
+        // A request that had to wait for a free slot says so instead of looking
+        // like a slow model.
+        (info) => this.onEvent({ type: 'status', text: queueStatus(info) }),
+      )) {
         if (this.isStopped(signal)) {
           throw new Error('interrupted');
         }

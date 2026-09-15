@@ -60,11 +60,13 @@ export interface ControlSessionInfo {
   /** Node ids that own at least one still-running background terminal (P2). */
   backgroundNodes: string[];
   /**
-   * The model / thinking effort this session runs with (P4: the selection is per
-   * session, so each tab may differ). Strings on purpose — the control plane is a
-   * wire readout and never validates a model id.
+   * The model card / thinking level this session runs with (the selection is per
+   * session, so each tab may differ). Both are strings on purpose — the control
+   * plane is a wire readout and never validates them; `model` is a card id,
+   * `modelName` the human name of that card.
    */
   model?: string;
+  modelName?: string;
   effort?: string;
 }
 

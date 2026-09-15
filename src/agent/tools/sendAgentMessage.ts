@@ -34,7 +34,7 @@ export const sendAgentMessageTool: InterceptedTool = {
           },
           model: {
             type: 'string',
-            description: "Optional. Override the model. Only set it when the user explicitly asked for a different model.",
+            description: "Optional. Override the model card (its id, or the name the user gave it). Only set it when the user explicitly asked for a different model.",
           },
           mode: {
             type: 'string',

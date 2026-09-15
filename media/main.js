@@ -39,6 +39,7 @@
   const attachBtn = document.getElementById('attach-btn');
   const contextLabel = document.getElementById('context-label');
   const modelSelect = document.getElementById('model-select');
+  const modelsBtn = document.getElementById('models-btn');
   const effortSelect = document.getElementById('effort-select');
   const tpsMeter = document.getElementById('tps-meter');
   const tpsValue = document.getElementById('tps-value');
@@ -62,8 +63,11 @@
   // it does for a streaming node — pressing it is the host's union kill.
   let lockedNodes = new Set();
   let pendingAttachments = [];
-  let currentModel = 'deepseek-chat';
-  let currentEffort = 'medium';
+  // The selected **model card id** (`config.model`) and its thinking level. Both
+  // are empty until the first `config` message arrives; nothing here invents a
+  // model name.
+  let currentModel = '';
+  let currentEffort = '';
   // Session currently rendered, mirrored into vscode.setState so a reloaded
   // window restores this tab bound to the same conversation.
   let persistedSessionId = '';
@@ -2611,38 +2615,79 @@
     }
   }
 
-  // Filled from the provider's `config` message: the vendored model plus every
-  // model the user declared in `spinney.modelTable`. No catalog copy here.
-  let MODELS = [];
-  let VISION_MODELS = [];
+  // Filled from the provider's `config` message: every **model card** the user
+  // configured, its provider's name, and the thinking levels that card offers.
+  // There is no catalog copy here, and no hardcoded model name anywhere.
+  let CARDS = [];
+  let EFFORTS = [];
+
+  /** The card object the dropdown is currently on (undefined before the first config). */
+  function currentCard() {
+    return CARDS.find((c) => c.id === currentModel);
+  }
+
+  function cardLabel(card) {
+    return card.name || card.id;
+  }
 
   function renderModelSelect(model) {
     currentModel = model;
     modelSelect.innerHTML = '';
-    if (MODELS.length === 0) {
-      // Before the first config message: show the current model so the header is
-      // never empty (the dropdown is disabled while a turn runs anyway).
+    if (CARDS.length === 0) {
+      // Before the first config message: show whatever the host named so the
+      // header is never empty (the dropdown is disabled while a turn runs anyway).
       if (model) {
-        MODELS = [model];
+        const opt = document.createElement('option');
+        opt.value = model;
+        opt.textContent = model;
+        opt.selected = true;
+        modelSelect.appendChild(opt);
       }
+      return;
     }
-    for (const m of MODELS) {
-      const opt = document.createElement('option');
-      opt.value = m;
-      opt.textContent = m;
-      opt.selected = m === model;
-      modelSelect.appendChild(opt);
+    // One group per provider, so two cards with the same wire model on different
+    // endpoints stay tellable apart.
+    const groups = new Map();
+    for (const card of CARDS) {
+      const key = card.providerName || card.providerId || '';
+      if (!groups.has(key)) {
+        groups.set(key, []);
+      }
+      groups.get(key).push(card);
+    }
+    for (const [providerName, list] of groups) {
+      const group = providerName ? document.createElement('optgroup') : modelSelect;
+      if (providerName) {
+        group.label = providerName;
+      }
+      for (const card of list) {
+        const opt = document.createElement('option');
+        opt.value = card.id;
+        opt.textContent = cardLabel(card);
+        opt.selected = card.id === model;
+        group.appendChild(opt);
+      }
+      if (providerName) {
+        modelSelect.appendChild(group);
+      }
     }
   }
 
+  /** True when the card the composer is on accepts images. */
   function hasVisionModel() {
-    return VISION_MODELS.includes(currentModel);
+    const card = currentCard();
+    return !!card && card.vision === true;
   }
 
   function updateImageVisibility() {
     const hasVision = hasVisionModel();
     treeCanvas.classList.toggle('hide-images', !hasVision);
     attachmentsEl.classList.toggle('hide-images', !hasVision);
+  }
+
+  /** The names of the cards that accept images, for the "switch to …" hint. */
+  function visionCardNames() {
+    return CARDS.filter((c) => c.vision === true).map((c) => cardLabel(c));
   }
 
   function showAttachHint(text) {
@@ -2655,10 +2700,30 @@
     }, 3000);
   }
 
+  /**
+   * The thinking levels of the card that is selected. The list is the card's own
+   * (`config.efforts`), so a card with only two levels shows two — and a
+   * free-form level is displayed exactly as the user typed it.
+   */
   function renderEffortSelect(effort) {
     currentEffort = effort;
-    for (const opt of effortSelect.options) {
-      opt.selected = opt.value === effort;
+    effortSelect.innerHTML = '';
+    const levels = EFFORTS.length > 0 ? EFFORTS : effort ? [effort] : [];
+    for (const level of levels) {
+      const opt = document.createElement('option');
+      opt.value = level;
+      opt.textContent = level;
+      opt.selected = level === effort;
+      effortSelect.appendChild(opt);
+    }
+    // A level the dropdown does not list (the host clamped it to something odd)
+    // must still be visible rather than silently mismatched.
+    if (effort && !levels.includes(effort)) {
+      const opt = document.createElement('option');
+      opt.value = effort;
+      opt.textContent = effort;
+      opt.selected = true;
+      effortSelect.appendChild(opt);
     }
   }
 
@@ -2813,10 +2878,11 @@
   // ---- Pending attachments ----
   function addPendingAttachment(dataUrl, name) {
     if (!hasVisionModel()) {
+      const vision = visionCardNames();
       showAttachHint(
-        VISION_MODELS.length > 0
-          ? tr('Switch to a vision model ({0}) to attach an image.', VISION_MODELS.join(' / '))
-          : tr('No image-capable model is configured — declare one in spinney.modelTable to attach an image.'),
+        vision.length > 0
+          ? tr('Switch to an image-capable model ({0}) to attach an image.', vision.join(' / '))
+          : tr('No image-capable model is configured — add vision to a model card to attach an image.'),
       );
       return;
     }
@@ -2990,10 +3056,11 @@
       case 'config': {
         const prevFoldToolCalls = foldToolCalls;
         const prevFoldThinking = foldThinking;
-        if (Array.isArray(msg.models) && msg.models.length > 0) {
-          MODELS = msg.models;
-        }
-        VISION_MODELS = Array.isArray(msg.visionModels) ? msg.visionModels : [];
+        // The card list is authoritative and complete on every `config`: a card the
+        // user deleted must disappear from the dropdown, so an empty list is a real
+        // answer (the host never sends one — it always has a fallback card).
+        CARDS = Array.isArray(msg.cards) ? msg.cards : [];
+        EFFORTS = Array.isArray(msg.efforts) ? msg.efforts : [];
         renderModelSelect(msg.model);
         renderEffortSelect(msg.thinkingEffort);
         foldToolCalls = msg.foldToolCalls !== false;
@@ -3203,7 +3270,14 @@
       renderModelSelect(currentModel);
       return;
     }
+    // Switching the card also switches its thinking levels: the host answers with
+    // a fresh `config`, which re-renders both dropdowns from that card.
     vscode.postMessage({ type: 'setModel', model: modelSelect.value });
+  });
+  modelsBtn.addEventListener('click', () => {
+    // The page itself is a host-owned tab (one per window), so the webview only
+    // asks for it — the host creates or focuses it.
+    vscode.postMessage({ type: 'openModelTree' });
   });
   effortSelect.addEventListener('change', () => {
     if (busy) {

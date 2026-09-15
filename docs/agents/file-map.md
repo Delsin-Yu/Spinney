@@ -2,8 +2,10 @@
 
 - `src/extension.ts` — activation; registers the webview provider + commands.
 - `src/chat/ChatViewProvider.ts` — the window coordinator: session/persistence,
-  config, image attachment, titles, transcripts, the global hop bookkeeping, the
-  control-plane host, the HTML shell, and webview message routing. It owns the
+  config (including `applyModelCards` / `refreshKeys`),
+  image attachment, titles, transcripts, the global hop bookkeeping, the
+  control-plane host, the HTML shell, the Model Card Tree page controller, and
+  webview message routing. It owns the
   `runtimes: Map<sessionId, SessionRuntime>` and a `PanelManager` (tabs); the editor
   `WebviewPanel` lifecycle is `restorePanel` (serializer) + `postAllState`.
 - `src/chat/ChatPanel.ts` — a thin wrapper around a `WebviewPanel` (one chat tab).
@@ -36,6 +38,20 @@
   `onRegistered` / `onUpdated` / `onFinish` hooks, and the
   removal lifecycles (`removeNode` / `removeSession` / `killAll`); exposes the
   `BackgroundAccess` the tools register through. Pure module, no `vscode`.
+- `src/chat/ModelPanel.ts` — the **Model Card Tree** page's webview wrapper (view
+  type `spinney.modelTree`): its HTML shell (the vendored layout engine +
+  `media/modeltree.js` + `media/modeltree.css`, all carrying the CSP nonce, the l10n
+  catalog injected as `window.__spinneyL10n`) and the `ChatPanel` lifecycle — hold
+  messages before the page's first `ready`, drop the superseded `modelTree`
+  snapshots on `ready`, and one `ModelPanel` per window. `create` makes a new tab;
+  `revive` adopts one VS Code restored from serialization.
+- `src/chat/modelTree.ts` — `ModelTreeController`: the page's host half and the only
+  place that reads or writes `spinney.providers` / `spinney.modelCards` /
+  `spinney.model` from it. `validatePayload` is the host-side authority (a rejected
+  save writes nothing), `apiKeySecretName` maps a provider id to its SecretStorage
+  entry, and a successful save re-reads, reinstalls the catalog and pushes the change
+  to every live session (`onModelCardsSaved`). The protocol is frozen in
+  `ModelPanel.ts` and replayed by `tools/check-modeltree.js`.
 - `src/chat/SessionsProvider.ts` — the native sidebar `TreeDataProvider` listing
   session titles; it re-reads items from `ChatViewProvider` on every refresh.
 - `src/chat/tree.ts` — the Chat Tree data model: `TreeNode` / `AgentSession`,
@@ -72,7 +88,8 @@
   `health`, `sessions`, `concurrency`, `navigation`, `background`, `branch`,
   `selftest`). Dev tooling: `.vscodeignore` excludes `tools/**`, so it is never shipped.
 - `src/agent/agent.ts` — the agent loop: message sanitizing, interrupt/rollback,
-  model/effort switching, the completion-signal injection hook
+  card/effort switching (`setCard(card)` / `setThinkingEffort(level)`, which rewrite
+  the identity line in place), the completion-signal injection hook
   (`setSignalHandler`; consulted after each whole tool batch, like the `read_image`
   image block) and the interception of the provider-orchestrated tools
   (`spawn_*` / `send_*` / `hop_session` / `list_nodes` / `rename_session` /
@@ -94,12 +111,27 @@
   `zh-Hant`, then the rest) and its `enumDescriptions` are these same names, so the
   dropdown reads like the prompt does; `zh-cn`/`zh-tw` stay aliased because
   `vscode.env.language` reports the region tags.
-- `src/agent/models.ts` — the model catalog (id / context window / accepts images)
-  and its accessors (`DEFAULT_MODEL`, `isVisionModel`, `contextWindowFor`,
-  `visionModelsLabel`), plus `parseContextLengthError()` — the reader of the
-  provider's context-length 400, which is what triggers a context rollover. The
-  **only** place a model id may appear;
-  `tools/check-models.js` enforces that on every package.
+- `src/agent/models.ts` — the model configuration module: the `ProviderSpec` /
+  `ModelCard` shapes, the built-in fallback provider and card (`deepseek-flash`),
+  `parseCatalog()` (the object-shape parser with per-field defaults and error rows),
+  the accessors everything derives from (`cards`, `cardById`, `resolveCard`,
+  `contextWindowFor`, `isVisionCard`, `cardDisplayName`, `effortsFor`,
+  `normalizeEffort`, `visionCardsLabel`), and `parseContextLengthError()` — the
+  reader of the provider's context-length 400, which is what triggers a context
+  rollover. See `invariants/model-cards.md`. It is the **only** place a model id may
+  appear; `tools/check-models.js` enforces that on every package.
+- `src/agent/clients.ts` — `ClientRegistry`, the one place that turns a card into a
+  request: one `DeepSeekClient` per provider (created lazily, re-pointed when the
+  provider's `baseUrl` is edited), the per-provider API key (cached until
+  `ChatViewProvider.refreshKeys` invalidates it), the two `RequestGate`s, and the
+  routing (`stream(card, request)` fills in `body.model` from the card's `oaiModel`,
+  so no caller can name a model the card did not declare). Chat completions and file
+  uploads take a slot; session-title requests and the wallet readout deliberately do
+  not. See `invariants/model-cards.md`.
+- `src/agent/requestGate.ts` — `RequestGate`: the FIFO, abort-aware slot gate used
+  per provider and per card (`0` = unlimited; a limit that drops below the running
+  count never kills a request in flight; `acquire(signal)` rejects while queued, so
+  Stop works on a request that is only waiting for a slot).
 - `src/i18n.ts` — the UI localisation entry point: which display language
   (`vscode.env.language`, normalized) the host is in, the `l10n/bundle.l10n.<locale>.json`
   reader behind the webview's injected dictionary (`webviewL10n`,
@@ -120,14 +152,20 @@
   tree, cleaned up by `build-deploy.ps1`'s `finally` and `npm run clean:l10n`; the
   four names are gitignored. See `docs/agents/invariants/i18n.md`.
 - `tools/check-models.js` · `tools/check-webview.js` · `tools/check-signal-persist.js`
-  · `tools/check-l10n.js` · `tools/check-context-rollover.js` — the packaging guards
+  · `tools/check-l10n.js` · `tools/check-context-rollover.js` ·
+  `tools/check-modeltree.js` — the packaging guards
   (`npm run check:models` / `check:webview` / `check:signals` / `check:l10n` /
-  `check:rollover`, run by `vscode:prepublish`):
-  model-id drift, "does the chat webview still survive every message the provider
+  `check:rollover` / `check:modeltree`, run by `vscode:prepublish`):
+  model-config drift (the default is the fallback card, `providers` / `modelCards`
+  exist as object schemas, no `enum` on `model`, no model id in the code or the
+  webviews), "does the chat webview still survive every message the provider
   posts" (including the rollover button's label and click), the completion-signal
-  persistence contract, the UI catalogs drifting from the code, and the
+  persistence contract, the UI catalogs drifting from the code, the
   context-rollover contract (`contextBaseId` / the prefix cut / the error-text
-  parse — pure functions, no DOM). See `testing.md`.
+  parse — pure functions, no DOM), and "does the Model Card Tree page still
+  understand the host" (`media/modeltree.js` into a stub DOM: the `ready` handshake,
+  a snapshot drawn as a tree, a failed save that keeps the draft, an add-card → save
+  round trip). See `testing.md`.
 - `src/agent/tools/` — one file per intercepted tool (`readImage`, `spawnAgents`,
   `spawnReadonlyAgents`, `sendAgentMessage`, `sendReadonlyAgentMessage`,
   `hopSession`, `listNodes`, `renameSession`) plus the barrel that filters them.
@@ -192,6 +230,30 @@
   node the pane is **hidden entirely** (`setComposerVisible(false)`); there is
   no floating/docked fallback. The pane keeps one fixed size: nothing about the
   host card's width (or its resize handle) scales it.
+  It also owns the two **model dropdowns**: the card list comes from the `config`
+  message (no catalog copy here), the model `<select>` is grouped per provider with
+  an `optgroup` per provider name, and the thinking-level `<select>` is built from
+  the **active card's** `efforts` — so switching a card switches its levels with it.
+  The gear beside the model dropdown (`#models-btn`) only posts `openModelTree`; the
+  page itself is a host-owned tab. No model id is ever hardcoded here.
+- `media/modeltree.js` — the **Model Card Tree** page's script: providers as roots
+  with their cards branching off them (the same vendored layout engine, drawn the
+  chat tree's way — the connector layer is a sized `<svg>`). The gesture set is the
+  chat tree's with **one deliberate difference: the wheel scales** — anchored on the
+  pointer, with or without ctrl/cmd, because this page is a handful of cards and the
+  wheel *is* its zoom (the chat tree pans on a plain wheel); dragging (LMB/MMB) pans,
+  RMB-hold autoscroll pans towards the cursor, and fit-to-view is on the toolbar.
+  **There is no side panel**: the selected node's card
+  expands in place into its own form (that is where every parameter is edited),
+  while the other cards stay compact. A two-pass layout measures the rendered node
+  before handing its size to the engine, so a card full of effort levels still lays
+  out correctly. It also owns a draft/save/revert model that posts the whole desired
+  state at once, client-side validation mirroring the host's `validatePayload`,
+  per-provider write-only API-key fields, and the read-only request preview. Every
+  string goes through its own `tr()` (fed by `window.__spinneyL10n`), and the page
+  keeps no model name of its own — the names come from the host's snapshot.
+- `media/modeltree.css` — the Model Card Tree page's styling (tree cards, the
+  provider/model card kinds, the in-card form fields, the request preview).
 - `media/tree.js` — the Chat Tree layout algorithm (`window.treeLayout`), a pure
   function with no DOM; `main.js` positions cards with it. The tidy-tree geometry
   is delegated to the vendored, pinned engine (below); this file only maps our two

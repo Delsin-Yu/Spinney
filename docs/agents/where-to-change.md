@@ -7,6 +7,26 @@
   its `requires` capability tag and, if it is intercepted, its execution branch in
   `Agent.executeToolCall`). The description string is handed to the model — keep
   it accurate; optionally update `media/main.js` rendering.
+- **Change what a model is / add a provider / add a model card** → the frozen
+  contract is `docs/agents/invariants/model-cards.md`; the shapes, the parser and the
+  accessors are in `src/agent/models.ts` (`ModelCard` /
+  `ProviderSpec`, `parseCatalog`), the page that edits them
+  is `src/chat/ModelPanel.ts` + `src/chat/modelTree.ts` + `media/modeltree.js` +
+  `media/modeltree.css` (change `validatePayload` and its client mirror together),
+  the host glue is `ChatViewProvider.applyModelCards` /
+  `onModelCardsSaved` / `resolveModel` / `refreshKeys`, the routing and the two
+  concurrency gates are `src/agent/clients.ts` + `src/agent/requestGate.ts`, and the
+  settings are contributed in `package.json`. A per-provider API key is
+  `apiKeySecretName()` in `src/chat/modelTree.ts` plus `ChatViewProvider.storeKeyFor`
+  / `clearKeyFor`. The guards are `tools/check-models.js` and
+  `tools/check-modeltree.js`.
+- **Change the chat's model dropdown (or its thinking-level list)** → the host builds
+  the `config` message in `SessionRuntime.postConfig()` (`src/chat/runtime.ts`: the
+  whole `cards` list + the active card's `efforts` + `model` as a card id), and
+  `renderModelSelect` / `renderEffortSelect` in `media/main.js` render it (one
+  `optgroup` per provider; the levels follow the active card). The webview must keep
+  **no copy of the catalog** — `tools/check-models.js` and `check:webview` both watch
+  it.
 - **Change the agent prompt** → `src/agent/prompt.ts` only (templates +
   placeholders); the loop and tool interception are in
   `src/agent/agent.ts`. See `docs/agents/invariants/system-prompt.md`.
@@ -15,8 +35,10 @@
   reload**: read it at its point of use (the preferred shape), or, if some live
   owner caches it, push it from `ChatViewProvider.onConfigurationChanged()`
   (wired in `extension.ts` from `onDidChangeConfiguration`), which pushes it to the
-  live owners (`SessionRuntime.applyDefaultModel` / `applyDefaultEffort` /
-  `applyReplyLanguage`); a value read only once at activation is a bug. Extend the table in
+  live owners (`SessionRuntime.applyDefaultModel` for a card change /
+  `applyReplyLanguage`); a value read only once at activation is a bug. A key the
+  page and the host both understand (`providers` / `modelCards`) belongs there too,
+  not only in the page's save path. Extend the table in
   `docs/agents/invariants/config-keys.md` with the new key.
 - **Change the UI** → `media/main.js` (behavior) and/or `media/style.css`
   (styling); the HTML shell is in `getHtml()` in `ChatViewProvider.ts`.
@@ -56,11 +78,14 @@
   `src/chat/runtime.ts` (the `kind:'bg'` card, notice injection, `postBackgrounds`), the tools in
   `src/tools/background.ts` / `backgroundTools.ts` / `execCommand.ts`, and each job's flying card
   (`renderBgBody`) in `media/main.js` — the in-card dock and `#bg-panel` are both gone.
-- **Per-session model / effort** → the `model` / `effort` (and `modelFromSettings` /
-  `effortFromSettings`) fields on `AgentSession` in `src/chat/tree.ts`, their resolution
-  in `ChatViewProvider.effectiveModel` / `effectiveEffort`, and the write path
-  `SessionRuntime.setModel` / `setThinkingEffort` (`applyDefaultModel` /
-  `applyDefaultEffort` for a settings change).
+- **Per-session model / effort** → the `model` (a **card id**) / `effort` (and
+  `modelFromSettings` / `effortFromSettings`, the anchors) fields on `AgentSession` in
+  `src/chat/tree.ts`, their resolution in `ChatViewProvider.effectiveModel` /
+  `effectiveEffort` (the level is clamped against the card that lands, via
+  `normalizeEffort`), and the write path `SessionRuntime.setModel` /
+  `setThinkingEffort` (`applyDefaultModel` for a `spinney.model` / card change, which
+  a session with no pick of its own adopts and re-clamps). The anchors are the default
+  card id and that card's `defaultEffort`, so editing either wins over an older pick.
 - **Verify a phase (P1–P4)** → `node tools/harness-test.mjs <suite...|all>` drives the
   live control plane; the suites and what each proves are in
   `docs/agents/multi-session.md` §5.1.

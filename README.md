@@ -64,15 +64,46 @@ If the workspace root holds an `AGENTS.md` file, Spinney reads it once at start 
 
 ## Models
 
-The default model is `deepseek-flash`. It accepts image input. Add other models to `spinney.modelTable`, with a context window and a `vision` flag. Set `spinney.baseUrl` to point at another endpoint.
+The default model is the built-in `deepseek-flash`, which accepts image input. It is
+what a fresh profile runs on before anything is configured.
+
+Everything else is configured as **model cards**. Run `Spinney: Model Cards` from the
+Command Palette, or click the gear beside the model dropdown in the chat. The page
+draws your providers as a tree with their model cards branching off them, and it is
+the editor of the model configuration:
+
+- `spinney.providers` — one entry per OpenAI-compatible endpoint: a name, a base URL
+  (`https://api.deepseek.com` for the built-in provider), and a concurrency cap
+  (`0` = unlimited requests in flight).
+- `spinney.modelCards` — one entry per selectable model: the name you see in the chat,
+  the provider it branches off, the wire model name sent to the provider, its context
+  window, its own concurrency cap, whether it takes images and which dialect their
+  bytes travel in (`deepseek` = upload to the provider's Files API and reference the
+  returned id, `openai` = an inline `data:` URL, the OpenAI-compatible shape), and the
+  thinking levels it offers with the one a session starts on.
+- `spinney.model` — the card a new conversation starts on.
+
+The page holds your edits as a draft until you press Save; it validates there and
+again in the host, and a save it rejects writes nothing. Your API key never goes into
+`settings.json` — each provider's key lives in VS Code SecretStorage, entered on the
+page or with `Spinney: Set API Key`.
+
+The chat's model dropdown groups the cards per provider, and switching a card
+switches its thinking levels with it.
 
 ## API key
 
-Run `Spinney: Set API Key` from the Command Palette. Spinney keeps the key in VS Code SecretStorage. Run `Spinney: Clear API Key` to erase it. You can also set the `DEEPSEEK_API_KEY` environment variable.
+Run `Spinney: Set API Key` from the Command Palette. Spinney keeps the key in VS Code
+SecretStorage, one entry per provider (the built-in provider also accepts the
+`DEEPSEEK_API_KEY` environment variable). Run `Spinney: Clear API Key` to erase it.
+With more than the built-in provider, set each key from that provider's row on the
+`Spinney: Model Cards` page.
 
 ## Privacy and data
 
-Spinney sends no telemetry. It connects only to `https://api.deepseek.com`. A request carries your messages, tool results, and images.
+Spinney sends no telemetry. It connects only to the provider endpoints you configure
+(by default `https://api.deepseek.com`). A request carries your messages, tool
+results, and images.
 
 The local HTTP control plane is off by default. Turn it on only if you need it. It then listens on `127.0.0.1` and needs a bearer token. The `/continue` endpoint makes the agent run an instruction, so treat it as a local trust boundary.
 
@@ -84,7 +115,6 @@ Uninstall Spinney from the Extensions view. Then delete the folder `<globalStora
 
 ## Roadmap
 
-- A multi-provider abstraction, not only the DeepSeek endpoint.
 - More built-in model presets.
 
 ## Development
@@ -95,9 +125,9 @@ Uninstall Spinney from the Extensions view. Then delete the folder `<globalStora
    manifest and host strings English in this window (`docs/agents/invariants/i18n.md`).
 3. Press F5. This opens an Extension Development Host window.
 
-Five build guards run before packaging: `npm run check:models`, `npm run check:webview`, `npm run check:signals`, `npm run check:l10n`, and `npm run check:rollover`.
+Six build guards run before packaging: `npm run check:models`, `npm run check:webview`, `npm run check:modeltree`, `npm run check:signals`, `npm run check:l10n`, and `npm run check:rollover`.
 
-Dev tooling lives in `tools/`: the guards, `sync-l10n-aliases.js` (the generated l10n aliases), the acceptance driver `harness-test.mjs`, `rollover-acceptance.js` (a windowless acceptance run for the context rollover), the `hvsc` supervisor, and one migration script. A change under `tools/` needs no build and no reload; that folder is not shipped in the `.vsix`.
+Dev tooling lives in `tools/`: the guards, `sync-l10n-aliases.js` (the generated l10n aliases), the acceptance driver `harness-test.mjs`, `rollover-acceptance.js` (a windowless acceptance run for the context rollover), `modeltree-acceptance.js` (a windowless acceptance run for the Model Card Tree page's host half), `gate-acceptance.js` (a windowless acceptance run for the provider/card request gate), the `hvsc` supervisor, and one migration script. A change under `tools/` needs no build and no reload; that folder is not shipped in the `.vsix`.
 
 ## Migrating data from an older build
 

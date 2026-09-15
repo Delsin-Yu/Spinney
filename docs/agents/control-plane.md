@@ -19,7 +19,7 @@ Control plane routes (all require `Authorization: Bearer <token>`):
 | Route | Behaviour |
 | --- | --- |
 | `GET /health` | `{ok, instanceId, pid, port, startedAt, busy, sessionId}` |
-| `GET /state` | window `busy` + active session/node + the session list; each session carries `id`, `title`, `nodes`, `active`, `titleSource`, `titleLocked`, `running`, `runningNodes`, `lockedNodes`, `runningBackgrounds`, `backgroundNodes`, `model`, `effort` |
+| `GET /state` | window `busy` + active session/node + the session list; each session carries `id`, `title`, `nodes`, `active`, `titleSource`, `titleLocked`, `running`, `runningNodes`, `lockedNodes`, `runningBackgrounds`, `backgroundNodes`, `model`/`modelName`/`effort` — the **checked-out node's** card and level, not a session-wide value (`SessionRuntime.model` is a getter over the node's own card, its nearest ancestor's, else the session seed) |
 | `POST /wait-for-finish` | block until idle (`scope:'turn'` default = the active session's run; `scope:'all'` also waits for every sub-agent / background job), then flush the last persist. `holdMs` arms a **hold** (`isHeld()`) that refuses every turn start for that long; `interrupt:true` is the escape hatch |
 | `POST /navigate` | check out a node (and open/focus that session's tab) |
 | `POST /continue` | send a caller-supplied message (`{sessionId?, nodeId?, message}`) that continues from a node — node-scoped, so a run on another branch does not block it |

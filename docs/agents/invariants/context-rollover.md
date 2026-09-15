@@ -332,7 +332,7 @@ token), and the `[config]` / `[perf]` diagnostics.
 - **The new node does not adopt the old node's background jobs.** Ownership is
   `(session, node)` by design (`background-terminals.md`); the rollover kills them
   and records them instead.
-- **The provider's window number never writes `spinney.modelTable`.** A mismatch
-  between the 400's window and `contextWindowFor()` is logged to the `[config]`
-  line only — the setting is the user's, and a wrong window is the user's one-line
-  fix (`model-capabilities.md`).
+- **The provider's window number never writes a card.** A mismatch between the 400's
+  window and `contextWindowFor()` (the active card's `contextWindow`) is logged to the
+  `[config]` line only — the field is the user's, and a wrong window is their
+  one-field fix on the card (`model-capabilities.md`, `model-cards.md`).

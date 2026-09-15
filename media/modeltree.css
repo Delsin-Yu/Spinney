@@ -1,0 +1,520 @@
+/*
+ * The Model Card Tree page (src/chat/ModelPanel.ts + media/modeltree.js).
+ *
+ * Colours follow the active VS Code theme — the same `:root` map the chat webview
+ * uses (media/style.css), copied here because this page loads its own stylesheet
+ * and its own script and must not depend on the chat document. The hex values are
+ * fallbacks for the (unlikely) case where the webview does not inject --vscode-*
+ * variables, so the page matches the editor in light, dark and high-contrast
+ * themes alike.
+ *
+ * There is no side panel: the page is the tree, and the selected node's card expands
+ * into its own form (`.mt-form`), so the form's styles live next to the card's.
+ */
+:root {
+  --bg:           var(--vscode-sideBar-background, #1e1e1e);
+  --bg2:          var(--vscode-sideBarSectionHeader-background, #252526);
+  --bg3:          var(--vscode-input-background, #2d2d30);
+  --border:       var(--vscode-panel-border, #3c3c3c);
+  --text:         var(--vscode-foreground, #e8e8e8);
+  --text-dim:     var(--vscode-descriptionForeground, #9d9d9d);
+  --accent:       var(--vscode-textLink-foreground, #4fc3f7);
+  --focus:        var(--vscode-focusBorder, #4fc3f7);
+  --accent-dim:   var(--vscode-button-background, #2b7a99);
+  --user-bg:      var(--vscode-button-background, #0e639c);
+  --user-fg:      var(--vscode-button-foreground, #ffffff);
+  --assistant-bg: var(--vscode-editorWidget-background, #2d2d30);
+  --tool-bg:      var(--vscode-textBlockQuote-background, #1f1f1f);
+  --error-bg:     var(--vscode-inputValidation-errorBackground, #5a1d1d);
+  --error-text:   var(--vscode-errorForeground, #ff9e9e);
+  --success:      var(--vscode-charts-green, #4caf50);
+  --warn:         var(--vscode-charts-yellow, #ffb84d);
+  --radius: 8px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-size: 13px;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.hidden {
+  display: none !important;
+}
+
+button {
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 10px;
+  cursor: pointer;
+}
+
+button:hover:not(:disabled) {
+  border-color: var(--focus);
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+input,
+select {
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 3px 6px;
+}
+
+input:focus,
+select:focus {
+  outline: 1px solid var(--focus);
+}
+
+/* ---- toolbar ---- */
+
+#mt-toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg2);
+}
+
+#mt-spacer {
+  flex: 1 1 auto;
+}
+
+#mt-save {
+  background: var(--user-bg);
+  color: var(--user-fg);
+  border-color: var(--user-bg);
+}
+
+/* ---- banners ---- */
+
+.mt-banner {
+  flex: 0 0 auto;
+  max-height: 30vh;
+  overflow: auto;
+  margin: 0;
+  padding: 8px 12px;
+  white-space: pre-wrap;
+  background: var(--error-bg);
+  color: var(--error-text);
+  border-bottom: 1px solid var(--border);
+}
+
+/* ---- the tree ---- */
+
+#mt-main {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+}
+
+#mt-wrap {
+  flex: 1 1 auto;
+  min-width: 0;
+  position: relative;
+  overflow: hidden;
+  cursor: grab;
+  background: var(--bg);
+}
+
+#mt-wrap:active {
+  cursor: grabbing;
+}
+
+#mt-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* The connector layer. It is sized by the script (`width`/`height` attributes = the
+   laid-out box in px, see renderTree) because `#mt-canvas` has no size of its own —
+   without that, `100%` of an unsized parent is a 0×0 viewport and every stroke is
+   invisible. `overflow: visible` keeps a stroke from being clipped at the edge. */
+#mt-edges {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  overflow: visible;
+}
+
+#mt-edges path {
+  fill: none;
+  stroke: var(--text-dim);
+  stroke-width: 1.5;
+}
+
+/* The empty state: nothing to select, so nothing can host a form. It floats over the
+   canvas (and never takes a press — panning still works under it). */
+.mt-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-dim);
+  pointer-events: none;
+}
+
+.mt-card {
+  position: absolute;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  padding: 8px 10px;
+  overflow: hidden;
+  background: var(--assistant-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+/* A provider is the root of a branch: the accent border is what makes it read as
+   one, exactly like the chat tree's active card. */
+.mt-card-provider {
+  border-left: 3px solid var(--accent);
+}
+
+.mt-card-card {
+  border-left: 3px solid var(--accent-dim);
+}
+
+.mt-card:hover {
+  border-color: var(--focus);
+}
+
+.mt-card.selected {
+  border-color: var(--focus);
+  box-shadow: 0 0 0 1px var(--focus) inset;
+  /* The selected card is a form, not a centred label: its content starts at the top
+     and the measured box is the form's own height. */
+  justify-content: flex-start;
+  cursor: default;
+}
+
+/* An unselected card stays compact: title / subtitle / badges, nothing else. */
+.mt-card-summary {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+}
+
+.mt-card-title {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.mt-card-sub {
+  color: var(--text-dim);
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+/* ---- badges ---- */
+
+.mt-badge {
+  align-self: flex-start;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: var(--bg3);
+  color: var(--text-dim);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+}
+
+.mt-badge-ok {
+  background: var(--success);
+  color: var(--bg);
+}
+
+.mt-badge-accent {
+  background: var(--accent-dim);
+  color: var(--user-fg);
+}
+
+.mt-badge-kind {
+  background: transparent;
+  border: 1px solid var(--border);
+}
+
+/* ---- the selected card's form ---- */
+
+.mt-form {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  /* Text inside an editor has to be selectable, and the tree canvas below turns
+     selection off for the whole document. */
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* The title row: the name is edited here, and the badges say what the node is. */
+.mt-card-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.mt-name-input {
+  flex: 1 1 60px;
+  min-width: 0;
+  font-weight: 600;
+}
+
+.mt-field {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-bottom: 8px;
+}
+
+.mt-label {
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.mt-input {
+  width: 100%;
+}
+
+/* A field's control and its reset button, on one line: the input keeps the row's
+   width and the ↺ takes only what it needs, so the row is exactly as tall as its
+   input was — the button can never change what the card was measured at. */
+.mt-field-line {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.mt-field-line .mt-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* The reset button of one property (`media/modeltree.js`, `resetButton`). One small
+   dot-free ↺ for every one of them, quiet until it is the only thing to do: it sits
+   inside a field row, so it must stay one line tall and take no width the control
+   needs. */
+.mt-reset-btn {
+  flex: 0 0 auto;
+  padding: 1px 6px;
+  line-height: 1.2;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+.mt-reset-btn:hover:not(:disabled) {
+  color: var(--text);
+}
+
+.mt-readonly {
+  color: var(--text-dim);
+  font-family: "Consolas", "Courier New", monospace;
+  font-size: 11px;
+}
+
+.mt-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 8px;
+}
+
+.mt-danger:hover:not(:disabled) {
+  border-color: var(--error-text);
+  color: var(--error-text);
+}
+
+.mt-hint {
+  margin: 4px 0;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+.mt-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+/* The vision toggle and the image transport share one line: the transport is the
+   toggle's companion (it only matters when images are accepted), so it sits next to
+   the checkbox and is greyed out — not hidden — while the toggle is off. The row is a
+   single fixed-height line, which is what keeps the measured card height stable — and
+   the two ↺ buttons of the two properties that line holds (the toggle, then the
+   transport) ride its right end, in that order, for the same reason: a row of their
+   own would make the vision row two lines. */
+.mt-toggle-row {
+  display: flex;
+  align-items: center;
+  /* The label takes the slack, so the transport and its resets stay grouped at the
+     right end of the line however wide the checkbox's sentence is. */
+  gap: 6px;
+}
+
+.mt-toggle-row .mt-toggle {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.mt-toggle-row .mt-toggle-text {
+  white-space: nowrap;
+}
+
+.mt-transport {
+  display: flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+
+.mt-transport-select {
+  width: auto;
+  min-width: 108px;
+  padding: 2px 4px;
+}
+
+.mt-transport-select:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* ---- the effort-level editor ---- */
+
+.mt-efforts {
+  margin: 4px 0 8px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+
+.mt-effort-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+
+.mt-radio-label {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex: 0 0 auto;
+  cursor: pointer;
+}
+
+.mt-radio-text {
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.mt-effort-input {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.mt-icon-btn {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  line-height: 1;
+}
+
+/* ---- the request preview (inside the selected card's form) ---- */
+
+.mt-preview {
+  margin: 0 0 2px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: var(--tool-bg);
+  color: var(--text-dim);
+  font-family: "Consolas", "Courier New", monospace;
+  font-size: 11px;
+  /* `pre`, NOT `pre-wrap`: the preview is four fixed lines, and a long id or base URL
+     must scroll sideways rather than wrap. A wrapped line would change the card's
+     height *while the user types*, which is exactly the one thing the layout must
+     never do (see the re-layout rules in media/modeltree.js). */
+  white-space: pre;
+  overflow-x: auto;
+}
+
+/* ---- right-button autoscroll (copied from media/style.css) ----
+
+   The marker is pinned to the viewport and the canvas travels underneath it, so it is
+   `fixed` and not part of #mt-canvas. The cursor is `all-scroll`: the 4-way glyph
+   Chrome uses for its own autoscroll — CSS has no diagonal *pan* cursor, and the two
+   diagonal glyphs it does have (nesw/nwse-resize) read as "resize this card". The
+   `!important` is needed to beat `#mt-wrap:active { cursor: grabbing }`, which is
+   engaged for the whole press, and the descendant selector so it holds over card
+   contents. */
+#mt-wrap.autoscrolling,
+#mt-wrap.autoscrolling * {
+  cursor: all-scroll !important;
+}
+
+.autoscroll-origin {
+  position: fixed;
+  width: 30px;
+  height: 30px;
+  margin: -15px 0 0 -15px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--bg3);
+  color: var(--text);
+  opacity: 0.9;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+  pointer-events: none;
+  z-index: 1000;
+}
+
+.autoscroll-origin svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+  fill: currentColor;
+}

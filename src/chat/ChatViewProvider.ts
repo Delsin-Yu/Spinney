@@ -4,16 +4,20 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { Agent } from '../agent/agent';
 import { replyLanguageName } from '../agent/languages';
-import { DeepSeekClient } from '../agent/deepseek';
+import { ClientRegistry } from '../agent/clients';
 import { ChatMessage, ThinkingEffort } from '../agent/types';
 import {
+  DEFAULT_EFFORT,
   DEFAULT_MODEL,
+  DEFAULT_PROVIDER_ID,
+  cardDisplayName,
+  cards,
   contextWindowFor,
-  isKnownModel,
-  isTableModel,
-  modelIds,
-  parseModelTable,
-  setModelOverrides,
+  normalizeEffort,
+  parseCatalog,
+  providerSpecs,
+  resolveCard,
+  setCatalog,
 } from '../agent/models';
 import {
   AgentSession,
@@ -63,6 +67,7 @@ import {
   clipMessageForStorage,
 } from './runtime';
 import { SessionTreeItem } from './SessionsProvider';
+import { ModelTreeController, apiKeySecretName } from './modelTree';
 import {
   removeTranscriptDir,
   removeTranscriptFile,
@@ -74,8 +79,9 @@ import {
 import { ControlHost, ControlResult, ControlState, WaitForFinishOptions } from '../http/controlServer';
 import { beginOp, logWebviewReport, opMark, perf, setPerfSink, startLagWatch, startRepaintOp, timedSync } from '../perf';
 
-// Model ids, context windows and image support all live in one place:
-// `src/agent/models.ts` (verified against `package.json` by tools/check-models.js).
+// Model cards, providers, context windows and image support all live in one
+// place: `src/agent/models.ts` (their editor is the Model Card Tree page,
+// `src/chat/modelTree.ts`).
 const STORAGE_KEY = 'spinney.state';
 /**
  * The active-session pointer, in its **own** memento key. A session switch only
@@ -109,14 +115,6 @@ const STORAGE_BACKUP_KEY = 'spinney.state.v1backup';
 const V1_BACKUP_FILE = 'state-v1-backup.json';
 const CONFIG_KEY = 'spinney.runtimeConfig';
 /**
- * The SecretStorage entry holding the DeepSeek API key. It is **not** a setting:
- * a key in `settings.json` is plain text in a file that gets synced, diffed and
- * pasted around, so `spinney.apiKey` was retired in favour of
- * `spinney.setApiKey` → `context.secrets.store(...)`.
- */
-const API_KEY_SECRET = 'spinney.apiKey';
-
-/**
  * The last assistant text a finished turn produced (used to carry a hopped
  * session's answer back to the session that dispatched it). Reasoning-only
  * turns fall back to the reasoning text so the caller is not left with nothing.
@@ -140,10 +138,12 @@ function lastAssistantText(node: TreeNode): string {
 }
 
 /**
- * Locally persists the active model + thinking-effort selection. The two
- * `*FromSettings` fields record the `spinney.*` values that were in force
- * when the selection was stored, so a later edit of the *setting* (an explicit
- * choice too) can win over an older dropdown pick — see `loadRuntimeConfig`.
+ * Locally persists the active model card + thinking-level selection. The two
+ * `*FromSettings` fields record the values that were in force when the selection
+ * was stored (`spinney.model`, i.e. the default card id; and that card's own
+ * `defaultEffort`), so a later edit of either can win over an older dropdown pick
+ * — see `loadRuntimeConfig`. `model` is a **card id**, `thinkingEffort` a level
+ * name; both are free-form strings to the API layer.
  */
 interface RuntimeConfig {
   model: string;
@@ -180,8 +180,16 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   private readonly backgroundHub = new BackgroundHub();
   /** One runtime per session, created on demand (see `runtimeFor`). */
   private readonly runtimes = new Map<string, SessionRuntime>();
-  /** Shared DeepSeek client; every runtime's agent + sub-agents use it. */
-  private readonly client: DeepSeekClient;
+  /**
+   * One API client per provider, plus the provider/card concurrency gates. Every
+   * runtime's agent and every sub-agent reaches the network through it, so
+   * routing a request is "which card is this?" and nothing else.
+   */
+  private readonly clients: ClientRegistry;
+  /** The Model Card Tree page: a second editor tab, created on demand. */
+  private readonly modelTree: ModelTreeController;
+  /** Last value `resolveModel` could not place, so the output line is logged once. */
+  private lastUnknownModel = '';
   /** Last `storage.update` write; the control plane awaits it before a reboot. */
   private lastPersist: Promise<void> = Promise.resolve();
   /** Pointer last written to its own key, so a switch writes it exactly once. */
@@ -211,21 +219,21 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   /** Cache-busting suffix for media URLs; changes per extension session. */  private readonly mediaVersion: string;
   readonly output: vscode.OutputChannel;
   /**
-   * The persisted **default** model/effort selection, used to seed a session that
-   * has no pick of its own (P4: each session's own selection lives on
-   * `session.model` / `session.effort`). Kept in step with the settings by
-   * `onConfigurationChanged`, and updated by `persistRuntimeConfig` whenever a tab
-   * picks a value explicitly.
+   * The persisted **default** model card/level, used to seed a session that has
+   * no pick of its own (each session's own choice lives on `session.model` /
+   * `session.effort`). `defaultModel` is a **card id** — what `spinney.model`
+   * holds — and `defaultThinkingEffort` a level name that card offers. Kept in
+   * step with the settings by `onConfigurationChanged`, and updated by
+   * `persistRuntimeConfig` whenever a tab picks a value explicitly.
    */
   private defaultModel = DEFAULT_MODEL;
-  private defaultThinkingEffort: ThinkingEffort = 'medium';
+  private defaultThinkingEffort: ThinkingEffort = '';
   /**
-   * The live DeepSeek API key: the SecretStorage value when one is stored, else
-   * `DEEPSEEK_API_KEY`, else ''. Written by {@link installApiKey} only, and read
-   * by `getConfig()` into the shared client.
+   * The live API key of a provider is **not** cached here: `ClientRegistry`
+   * caches it per provider and re-reads through `readApiKeyFor` when it is
+   * invalidated. This flag only remembers that the single "no key yet" nudge was
+   * shown, so a send only nags once.
    */
-  private apiKey = '';
-  /** True once the "no API key" nudge was shown, so a send only nags once. */
   private missingKeyNotified = false;
   private sessions: AgentSession[] = [];
   private activeSessionId = '';
@@ -274,10 +282,11 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     // host (persist, a tree rebuild) shows up as a late timer, which no `perf()`
     // line can report while it is blocked.
     this.stopLagWatch = startLagWatch();
-    // The user's model table must be installed before anything derives a model
-    // list, a context window or an image capability from the catalog.
-    this.applyModelTable();
-    // Resolve the active model/effort before loading sessions so the restored
+    // The user's providers and model cards must be installed before anything
+    // derives a model list, a context window or an image capability from the
+    // catalog.
+    this.applyModelCards();
+    // Resolve the active card/level before loading sessions so the restored
     // system prompt carries the correct identity.
     const runtime = this.loadRuntimeConfig();
     this.defaultModel = runtime.model;
@@ -285,13 +294,25 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     // Snapshot AGENTS.md before building the prompts so the workspace
     // instructions are fixed for the whole session.
     this.loadAgentsMd();
-    // The shared client must exist before any runtime builds its agent.
-    const cfg = this.getConfig();
-    this.client = new DeepSeekClient({ apiKey: cfg.apiKey, baseUrl: cfg.baseUrl, model: this.defaultModel });
-    // SecretStorage is asynchronous, so the key is read once here and installed
-    // into that shared client a tick later; `getConfig().apiKey` reports the live
-    // value from then on. Nothing can send a turn before the user types one.
-    void this.loadApiKey('startup');
+    // The client registry must exist before any runtime builds its agent: it is
+    // what turns a card into a provider, its `baseUrl` and its API key.
+    this.clients = new ClientRegistry({ apiKeyFor: (providerId) => this.readApiKeyFor(providerId) });
+    this.clients.applyCatalog();
+    // SecretStorage is asynchronous, so keys are read lazily; this first pass
+    // warms them (and logs which providers have one). Nothing can send a turn
+    // before the user types one.
+    void this.refreshKeys('startup');
+    // The Model Card Tree page: its own editor tab, the editor of
+    // `spinney.providers` / `spinney.modelCards` / `spinney.model`.
+    this.modelTree = new ModelTreeController({
+      extensionUri: this.extensionUri,
+      mediaVersion: this.mediaVersion,
+      hasKey: (providerId) => this.clients.hasKey(providerId),
+      storeKey: (providerId, key) => this.storeKeyFor(providerId, key),
+      clearKey: (providerId) => this.clearKeyFor(providerId),
+      onSaved: () => this.onModelCardsSaved(),
+      log: (line) => this.output.appendLine(line),
+    });
     // The panel manager needs only callbacks, so it can be built before the
     // sessions (runtimes post into it lazily).
     this.panels = new PanelManager({
@@ -322,13 +343,9 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
 
   getConfig(): HarnessConfig {
     const cfg = vscode.workspace.getConfiguration('spinney');
-    // The API key is NOT a setting: it is read from SecretStorage (or the
-    // environment) by `readApiKey` and cached here — see `loadApiKey`.
-    const apiKey = this.apiKey;
-    const model = cfg.get<string>('model') ?? DEFAULT_MODEL;
-    // A blank base URL means "use the default" rather than a relative URL.
-    const baseUrl = (cfg.get<string>('baseUrl') ?? '').trim() || 'https://api.deepseek.com';
-    const thinkingEffort = (cfg.get<string>('thinkingEffort') ?? 'medium') as ThinkingEffort;
+    // `spinney.model` holds a **card id**. `resolveModel` heals a stale value
+    // (a deleted card, or a pre-card model id) back to the first usable card.
+    const defaultCardId = this.resolveModel((cfg.get<string>('model') ?? '').trim());
     // The reply-language setting is a dropdown of VS Code language tags plus
     // `auto`; the prompt wants a language *name*, so `auto` is resolved here
     // against the display language of this window (`replyLanguageName` also maps
@@ -342,37 +359,30 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     const saveSessionTranscripts = cfg.get<boolean>('saveSessionTranscripts') ?? true;
     const subAgentTranscriptDir = (cfg.get<string>('subAgentTranscriptDir') ?? '').trim();
     const autoSessionTitles = cfg.get<boolean>('autoSessionTitles') ?? true;
-    return { apiKey, model, baseUrl, thinkingEffort, replyLanguage, foldToolCalls, foldThinking, maxConcurrentSubagents, maxLevel2Subagents, saveSubAgentTranscripts, saveSessionTranscripts, subAgentTranscriptDir, autoSessionTitles };
+    return { defaultCardId, replyLanguage, foldToolCalls, foldThinking, maxConcurrentSubagents, maxLevel2Subagents, saveSubAgentTranscripts, saveSessionTranscripts, subAgentTranscriptDir, autoSessionTitles };
   }
 
-  // ---- API key (SecretStorage) ----
+  // ---- API keys (SecretStorage: one entry per provider) ----
 
   /**
-   * Read the key out of SecretStorage, falling back to `DEEPSEEK_API_KEY`, and
-   * install it into the shared client. Called once at activation and again after
-   * `spinney.setApiKey` / `spinney.clearApiKey`, so this window never needs a
-   * reload to pick a key up (the client is shared, so the main agent and every
-   * sub-agent use the new one on their very next request).
+   * A provider's API key: its own SecretStorage entry (`spinney.apiKey` for the
+   * built-in provider, `spinney.apiKey.<providerId>` for every other one — see
+   * `apiKeySecretName` in `modelTree.ts`), with `DEEPSEEK_API_KEY` as the
+   * fallback for the built-in provider. A key is **not** a setting: a key in
+   * `settings.json` is plain text in a file that gets synced, diffed and pasted
+   * around.
+   *
+   * Called by the `ClientRegistry`, which caches the answer; `refreshKeys`
+   * invalidates that cache. A SecretStorage read can fail (a locked keyring, a
+   * headless host) — that is not fatal: the environment variable is still a
+   * valid home for a key.
    */
-  async loadApiKey(reason: string): Promise<void> {
-    const { key, source } = await this.readApiKey();
-    this.installApiKey(key);
-    this.output.appendLine(
-      `[config] api key (${reason}): ${key ? `loaded from ${source}` : 'missing — run "spinney.setApiKey"'}`,
-    );
-  }
-
-  /**
-   * Resolve the key and say where it came from. A SecretStorage read can fail
-   * (a locked keyring, a headless host) — that is not fatal: the environment
-   * variable is still a valid home for a key.
-   */
-  private async readApiKey(): Promise<{ key: string; source: 'SecretStorage' | 'DEEPSEEK_API_KEY' | 'none' }> {
+  private async readApiKeyFor(providerId: string): Promise<string> {
     if (this.secrets) {
       try {
-        const stored = ((await this.secrets.get(API_KEY_SECRET)) ?? '').trim();
+        const stored = ((await this.secrets.get(apiKeySecretName(providerId))) ?? '').trim();
         if (stored) {
-          return { key: stored, source: 'SecretStorage' };
+          return stored;
         }
       } catch (err) {
         this.output.appendLine(
@@ -380,36 +390,68 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         );
       }
     }
-    const env = (process.env.DEEPSEEK_API_KEY ?? '').trim();
-    return env ? { key: env, source: 'DEEPSEEK_API_KEY' } : { key: '', source: 'none' };
+    return providerId === DEFAULT_PROVIDER_ID ? (process.env.DEEPSEEK_API_KEY ?? '').trim() : '';
   }
 
   /**
-   * Install a key as the live one: cache it, hand it to the shared client (which
-   * reads its options when each request is built, so the next one already uses
-   * it) and let every open tab refresh its wallet readout — the key may be
-   * exactly what was missing.
+   * Re-read every provider's key (the registry caches them) and say in the output
+   * channel which ones are configured. Called once at activation and again after
+   * a key is set or cleared — by the `spinney.setApiKey` / `spinney.clearApiKey`
+   * commands or by the Model Card Tree page — so this window never needs a reload
+   * to pick a key up. Every open tab then refreshes its wallet readout: the new
+   * key may be exactly what that provider's balance line was missing.
    */
-  private installApiKey(key: string): void {
-    this.apiKey = key;
-    this.client.configure({ apiKey: key });
-    if (!key) {
-      return;
+  async refreshKeys(reason: string): Promise<void> {
+    this.clients.invalidateKeys();
+    const parts: string[] = [];
+    for (const provider of providerSpecs()) {
+      const key = await this.clients.keyFor(provider.id);
+      parts.push(`${provider.name}=${key ? 'set' : 'missing'}`);
+      if (key) {
+        this.missingKeyNotified = true; // a nudge is pointless once a key exists
+      }
     }
-    this.missingKeyNotified = true; // a nudge is pointless once a key exists
+    this.output.appendLine(`[config] api keys (${reason}): ${parts.join(', ')}`);
     for (const rt of this.runtimes.values()) {
       void rt.refreshBalance();
     }
   }
 
+  /** Store a key for one provider (the page's key field, and the command). */
+  private async storeKeyFor(providerId: string, key: string): Promise<void> {
+    const value = (key ?? '').trim();
+    if (!value) {
+      return;
+    }
+    if (!this.secrets) {
+      void vscode.window.showErrorMessage(
+        vscode.l10n.t(
+          'Spinney: this host has no secret storage; set the DEEPSEEK_API_KEY environment variable instead.',
+        ),
+      );
+      return;
+    }
+    await this.secrets.store(apiKeySecretName(providerId), value);
+    await this.refreshKeys(`setApiKey:${providerId}`);
+  }
+
+  /** Forget one provider's key (`DEEPSEEK_API_KEY` may still serve the built-in one). */
+  private async clearKeyFor(providerId: string): Promise<void> {
+    await this.secrets?.delete(apiKeySecretName(providerId));
+    await this.refreshKeys(`clearApiKey:${providerId}`);
+  }
+
   /**
    * `spinney.setApiKey`: ask for the key (masked), store it in SecretStorage and
-   * install it live. The value never touches `settings.json`.
+   * install it live. The provider defaults to the built-in one; the Model Card
+   * Tree page passes the provider it is editing.
    */
-  async setApiKeyInteractive(): Promise<void> {
+  async setApiKeyInteractive(providerId = DEFAULT_PROVIDER_ID): Promise<void> {
+    const provider = providerSpecs().find((p) => p.id === providerId);
     const value = await vscode.window.showInputBox({
       prompt: vscode.l10n.t(
-        'DeepSeek API key — stored in the OS-encrypted secret storage, not in settings.json.',
+        'API key for {0} — stored in the OS-encrypted secret storage, not in settings.json.',
+        provider?.name ?? providerId,
       ),
       placeHolder: 'sk-…',
       password: true,
@@ -420,47 +462,46 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     if (!key) {
       return; // cancelled
     }
-    if (!this.secrets) {
-      void vscode.window.showErrorMessage(
-        vscode.l10n.t(
-          'Spinney: this host has no secret storage; set the DEEPSEEK_API_KEY environment variable instead.',
-        ),
-      );
-      return;
-    }
-    await this.secrets.store(API_KEY_SECRET, key);
-    await this.loadApiKey('setApiKey');
+    await this.storeKeyFor(providerId, key);
     void vscode.window.showInformationMessage(vscode.l10n.t('Spinney: API key saved.'));
   }
 
-  /** `spinney.clearApiKey`: drop the stored key (`DEEPSEEK_API_KEY` may still serve requests). */
-  async clearApiKey(): Promise<void> {
-    await this.secrets?.delete(API_KEY_SECRET);
-    await this.loadApiKey('clearApiKey');
+  /** `spinney.clearApiKey`: drop the stored key of one provider. */
+  async clearApiKey(providerId = DEFAULT_PROVIDER_ID): Promise<void> {
+    await this.clearKeyFor(providerId);
     void vscode.window.showInformationMessage(
-      this.apiKey
+      this.missingKeyNotified
         ? vscode.l10n.t('Spinney: stored API key cleared — still using the DEEPSEEK_API_KEY environment variable.')
         : vscode.l10n.t('Spinney: API key cleared.'),
     );
+    this.missingKeyNotified = false;
   }
 
   /**
    * The one nudge for a missing key, shown *before* a send is accepted. It is a
    * non-modal notification with a button, deliberately not awaited: a missing key
    * must never block the composer (the request itself reports the real error).
-   * Shown at most once per window.
+   * Shown at most once per window, for the provider the default card routes to.
    */
-  private warnMissingApiKey(): void {
-    if (this.apiKey || this.missingKeyNotified) {
+  private async warnMissingApiKey(): Promise<void> {
+    if (this.missingKeyNotified) {
+      return;
+    }
+    const card = resolveCard(this.defaultModel) ?? cards()[0];
+    if (!card) {
+      return;
+    }
+    if (await this.clients.hasKey(card.providerId)) {
+      this.missingKeyNotified = true;
       return;
     }
     this.missingKeyNotified = true;
     const SET_API_KEY = vscode.l10n.t('Set API Key');
     void vscode.window
-      .showWarningMessage(vscode.l10n.t('Spinney: no DeepSeek API key is configured yet.'), SET_API_KEY)
+      .showWarningMessage(vscode.l10n.t('Spinney: no API key is configured for this provider yet.'), SET_API_KEY)
       .then((pick) => {
         if (pick === SET_API_KEY) {
-          void vscode.commands.executeCommand('spinney.setApiKey');
+          void vscode.commands.executeCommand('spinney.setApiKey', card.providerId);
         }
       });
   }
@@ -506,22 +547,22 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    * Apply a settings change to the live objects, so editing `spinney.*`
    * takes effect in this window instead of only after a reload.
    *
-   * - **base URL** is re-read into the shared `DeepSeekClient`. The main agent and
-   *   every sub-agent hold that same instance, so a new base URL works on the very
-   *   next request. This is deliberately applied even while a turn is running: the
-   *   options are read when each request is built. The **API key** takes the same
-   *   path, but it is not a setting — it is installed by `loadApiKey` (the
-   *   `spinney.setApiKey` / `spinney.clearApiKey` commands), so a settings event
-   *   never touches it.
+   * - **base URL** and the **API key** of a provider are read into that
+   *   provider's `DeepSeekClient` through `ClientRegistry`: the first by
+   *   `applyCatalog()`, the second by `refreshKeys` (a key is not a setting — it
+   *   lives in SecretStorage, installed by `spinney.setApiKey`, so a settings
+   *   event only invalidates the cache). Every runtime's agent and every
+   *   sub-agent reaches the network through that registry, so a new provider URL
+   *   works on the very next request, even mid-turn.
    * - The **context window** and the **sub-agent pool limit** are
    *   pushed to their live owners (every runtime).
-   * - **`model`** / **`thinkingEffort`** are applied only when those two keys
-   *   actually changed, and then only to sessions that have **no pick of their
-   *   own**: P4 makes the selection per session, so a tab's explicit dropdown pick
-   *   wins over the setting (exactly like the old "dropdown pick shadows the
-   *   setting" rule, read per session — a pick anchored to the *previous* setting
-   *   value is retired, see `loadRuntimeConfig`). Like the dropdowns, the value is
-   *   skipped while that session is running.
+   * - **`spinney.model`** (the default card) and **`spinney.modelCards`** are
+   *   applied only when those keys actually changed, and then only to sessions
+   *   that have **no pick of their own**: the selection is per session, so a tab's
+   *   explicit dropdown pick wins over the setting (a pick anchored to the
+   *   *previous* default card is retired, see `loadRuntimeConfig`). Like the
+   *   dropdowns, the value is skipped while that session is running. A card edit
+   *   also re-clamps every session's thinking level against the card's own menu.
    * - **`replyLanguage`** is written into the system prompt, so it is pushed to
    *   every runtime (`SessionRuntime.applyReplyLanguage`) when its key changed
    *   — again skipped for a session that is mid-turn. Without a per-session pick
@@ -535,17 +576,18 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    */
   public onConfigurationChanged(event?: vscode.ConfigurationChangeEvent): void {
     const cfg = this.getConfig();
-    // Re-read the model table first: it decides the recognized model list, every
-    // context window and every image capability derived below.
-    this.applyModelTable();
-    this.client.configure({ baseUrl: cfg.baseUrl });
+    // Re-read the provider/card catalog first: it decides the recognized model
+    // list, every context window and every image capability derived below.
+    this.applyModelCards();
+    this.clients.applyCatalog();
     const modelChanged = !event || event.affectsConfiguration('spinney.model');
-    const effortChanged = !event || event.affectsConfiguration('spinney.thinkingEffort');
+    const catalogChanged =
+      !event || event.affectsConfiguration('spinney.modelCards') || event.affectsConfiguration('spinney.providers');
     // The reply language is written into the system prompt, so a change to it is
-    // pushed to every live session exactly like a model/effort change — including
+    // pushed to every live session exactly like a model change — including
     // the cache-miss warning the runtime posts.
     const languageChanged = !event || event.affectsConfiguration('spinney.replyLanguage');
-    if (modelChanged || effortChanged) {
+    if (modelChanged || catalogChanged) {
       // A settings edit also moves the default for sessions created from now on
       // (and retires a persisted record made against an older setting value).
       // Recompute it *before* the loop below, so the sessions without a pick adopt
@@ -558,20 +600,13 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     for (const rt of this.runtimes.values()) {
       rt.setSubAgentPoolLimit(cfg.maxConcurrentSubagents);
       rt.recheckContextWindow();
-      if (modelChanged) {
+      if (modelChanged || catalogChanged) {
         if (rt.busy) {
           skippedBusy = true;
         } else {
-          // The runtime applies it only when this session has no effective pick.
+          // The runtime applies it only when this session has no effective pick,
+          // and re-clamps the session's level against the card it lands on.
           rt.applyDefaultModel(this.defaultModel);
-        }
-      }
-      if (effortChanged) {
-        if (rt.busy) {
-          skippedBusy = true;
-        } else {
-          // Same rule as the model: an explicit per-tab effort wins.
-          rt.applyDefaultEffort(this.defaultThinkingEffort);
         }
       }
       if (languageChanged) {
@@ -588,139 +623,174 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       rt.postConfig();
     }
     if (skippedBusy) {
-      this.output.appendLine('[config] model/thinkingEffort/replyLanguage change skipped: a turn is running');
+      this.output.appendLine('[config] model/reply-language change skipped: a turn is running');
     }
-    if (!event || event.affectsConfiguration('spinney.baseUrl')) {
-      // The endpoint changed: the credit line it answers comes from that host.
+    if (!event || event.affectsConfiguration('spinney.providers')) {
+      // The endpoints changed: the credit line answers from that host.
       for (const rt of this.runtimes.values()) {
         void rt.refreshBalance();
       }
     }
     this.output.appendLine(
-      `[config] settings changed live: key=${this.apiKey ? 'set' : 'missing'} baseUrl=${cfg.baseUrl} maxSubagents=${cfg.maxConcurrentSubagents}`,
+      `[config] settings changed live: providers=${providerSpecs().length} cards=${cards().length} default=${this.defaultModel} maxSubagents=${cfg.maxConcurrentSubagents}`,
     );
   }
 
+  /**
+   * The context window of a model card. The card carries its own window (the Model
+   * Card Tree page is the editor of record), so there is no global override left:
+   * an id the catalog does not know falls back to the built-in window.
+   */
   getContextWindow(model: string): number {
-    // A row in `spinney.modelTable` is the most specific answer there is —
-    // the user asked for that model explicitly, so it beats the global fallback.
-    if (!isTableModel(model)) {
-      const override = vscode.workspace
-        .getConfiguration('spinney')
-        .get<number>('contextWindow');
-      if (override && override > 0) {
-        return override;
-      }
-    }
     return contextWindowFor(model);
   }
 
   /**
-   * Read `spinney.modelTable`, install it as the model catalog's override
-   * layer, and report what it did. Bad rows are skipped (never half-applied)
-   * and written to the output channel — the setting's syntax is documented in
-   * `package.json`, and silence would make a typo look like a harness bug.
+   * Read `spinney.providers` / `spinney.modelCards`, install them as the catalog,
+   * and report what was installed. Those two keys plus `spinney.model` are the only
+   * model configuration there is: a profile with neither gets the vendored
+   * fallback card, so there is always exactly one usable model.
+   *
+   * Bad rows are skipped (never half-applied) and written to the output channel —
+   * the page shows the same lines in its banner, and silence would make a typo
+   * look like a harness bug.
    */
-  private applyModelTable(): void {
-    const raw = vscode.workspace.getConfiguration('spinney').get<unknown>('modelTable');
-    const { specs, errors } = parseModelTable(raw);
-    setModelOverrides(specs);
-    this.output.appendLine(
-      `[config] modelTable: ${specs.length} model(s) — ${modelIds().length} recognized in total`,
-    );
-    for (const spec of specs) {
-      this.output.appendLine(
-        `[config] modelTable: ${spec.id} vision=${spec.vision ? 'yes' : 'no'} max_tokens=${spec.contextWindow}`,
-      );
+  private applyModelCards(): void {
+    const cfg = vscode.workspace.getConfiguration('spinney');
+    const parsed = parseCatalog(cfg.get<unknown>('providers'), cfg.get<unknown>('modelCards'));
+    setCatalog(parsed.providers, parsed.cards);
+    for (const error of parsed.errors) {
+      this.output.appendLine(`[config] model cards: ${error}`);
     }
-    for (const error of errors) {
-      this.output.appendLine(`[config] modelTable: ${error}`);
+    this.output.appendLine(
+      `[config] installed ${parsed.providers.length} provider(s), ${parsed.cards.length} card(s)`,
+    );
+  }
+
+  /**
+   * A save from the Model Card Tree page. The page already wrote the settings; this
+   * is what makes the change live in exactly the same way a settings edit does —
+   * new catalog, new limits, new keys, and every session that has no pick of its
+   * own adopting the new default.
+   */
+  private onModelCardsSaved(): void {
+    this.applyModelCards();
+    this.clients.applyCatalog();
+    this.clients.invalidateKeys();
+    const defaults = this.loadRuntimeConfig();
+    this.defaultModel = defaults.model;
+    this.defaultThinkingEffort = defaults.thinkingEffort;
+    for (const rt of this.runtimes.values()) {
+      if (!rt.busy) {
+        rt.applyDefaultModel(this.defaultModel);
+      }
+      rt.recheckContextWindow();
+      rt.postConfig();
     }
   }
 
   /**
-   * Accept a model id only if the catalog (vendored + `spinney.modelTable`)
-   * knows it; anything else falls back to the default and says so. A stale id in
-   * settings must not silently hide images or mis-size the context indicator.
+   * Accept a value the catalog knows: a card id first, then a card name and its
+   * wire model name (so a hand-typed `spinney.model`, a card's name and the
+   * `model` argument of `spawn_agents` all resolve). Anything else falls back to
+   * the first usable card and says so — a stale id must not silently hide images
+   * or mis-size the context indicator. The line is logged once per distinct
+   * value, because this runs on every `getConfig()`.
    */
   resolveModel(candidate: string): string {
-    if (!candidate || isKnownModel(candidate)) {
-      return candidate || DEFAULT_MODEL;
+    const card = resolveCard(candidate);
+    if (card) {
+      return card.id;
     }
-    this.output.appendLine(
-      `[config] unknown model "${candidate}": not in the catalog and not in spinney.modelTable — using ${DEFAULT_MODEL}`,
-    );
-    return DEFAULT_MODEL;
+    const fallback = cards()[0];
+    const value = (candidate ?? '').trim();
+    if (value && value !== this.lastUnknownModel) {
+      this.lastUnknownModel = value;
+      this.output.appendLine(
+        `[config] unknown model "${value}": not a model card — using "${fallback.id}" (${cardDisplayName(fallback)})`,
+      );
+    }
+    return fallback.id;
   }
 
   /** The system prompt the active (last-focused) session would send next. */
   systemPrompt(): string {
     const rt = this.runtimes.get(this.activeSessionId);
+    const card = resolveCard(this.defaultModel);
     return rt
       ? rt.systemPromptText()
-      : Agent.systemPrompt(this.defaultModel, this.defaultThinkingEffort, this.getConfig().replyLanguage);
+      : Agent.systemPrompt(
+          cardDisplayName(card),
+          normalizeEffort(card, this.defaultThinkingEffort),
+          this.getConfig().replyLanguage,
+        );
   }
 
   /**
-   * The **default** model/effort: the persisted `spinney.runtimeConfig`
-   * record falling back to the settings. A session's own pick is layered on top
-   * of this by `effectiveModel` / `effectiveEffort` (P4) — this method only
-   * answers "what would a session with no pick start from?".
+   * The **default** card/level: the persisted `spinney.runtimeConfig` record
+   * falling back to the settings. A session's own pick is layered on top of this
+   * by `effectiveModel` / `effectiveEffort` — this method only answers "what would
+   * a session with no pick start from?".
    */
   private loadRuntimeConfig(): RuntimeConfig {
     const defaults = this.getConfig();
     const stored = this.readSmall<Partial<RuntimeConfig>>(CONFIG_KEY) ?? {};
     // A dropdown pick shadows the setting only while that setting is unchanged:
-    // editing `spinney.model` in settings.json is an explicit choice as
-    // well, so it wins over a pick made *before* the edit (a pick made after it
-    // is persisted together with the new setting value and keeps winning). A
-    // record without the snapshot fields predates this rule, so it is trusted.
+    // editing `spinney.model` — in settings.json or in the Model Card Tree page —
+    // is an explicit choice as well, so it wins over a pick made *before* the edit
+    // (a pick made after it is persisted together with the new setting value and
+    // keeps winning). A record without the snapshot fields predates this rule, so
+    // it is trusted.
     const picked =
-      stored.model && (stored.modelFromSettings === undefined || stored.modelFromSettings === defaults.model)
+      stored.model && (stored.modelFromSettings === undefined || stored.modelFromSettings === defaults.defaultCardId)
         ? stored.model
-        : defaults.model;
+        : defaults.defaultCardId;
     const model = this.resolveModel(picked);
-    const thinkingEffort =
-      stored.thinkingEffort &&
-      (stored.effortFromSettings === undefined || stored.effortFromSettings === defaults.thinkingEffort)
-        ? stored.thinkingEffort
-        : defaults.thinkingEffort;
+    // The level has no setting of its own any more: each card declares its own
+    // default, and a stored pick only has to survive until the runtime clamps it
+    // against that card's menu (`normalizeEffort`). `effortFromSettings` records
+    // the card default a pick was made against; it is informational.
+    const card = resolveCard(model);
+    const thinkingEffort = normalizeEffort(card, stored.thinkingEffort ?? card?.defaultEffort ?? DEFAULT_EFFORT);
     return { model, thinkingEffort };
   }
 
   /**
-   * The model/effort a session runs with (P4): its own pick when that pick still
-   * shadows the setting it was made under (`sessionModelPick`), else the persisted
-   * default above — which itself falls back to the `spinney.model` /
-   * `spinney.thinkingEffort` settings. Resolved here, once, and handed to the
-   * runtime at construction; the runtime keeps the live value from then on and
-   * writes a change back onto the session (`setModel` / `setThinkingEffort`).
+   * The card/level a session runs with: its own pick when that pick still shadows
+   * the setting it was made under (`sessionModelPick`), else the persisted default
+   * above — which itself falls back to `spinney.model`. The level is always clamped
+   * against the card that lands: a session whose stored level is not on that card's
+   * menu runs on the card's default. Resolved here, once, and handed to the runtime
+   * at construction; the runtime keeps the live value from then on and writes a
+   * change back onto the session (`setModel` / `setThinkingEffort`).
    */
   private effectiveModel(session: AgentSession): string {
-    const pick = sessionModelPick(session, this.getConfig().model);
+    const pick = sessionModelPick(session, this.getConfig().defaultCardId);
     return pick ? this.resolveModel(pick) : this.defaultModel;
   }
 
-  private effectiveEffort(session: AgentSession): ThinkingEffort {
-    return sessionEffortPick(session, this.getConfig().thinkingEffort) ?? this.defaultThinkingEffort;
+  private effectiveEffort(session: AgentSession, cardId: string): ThinkingEffort {
+    const card = resolveCard(cardId);
+    return normalizeEffort(card, sessionEffortPick(session, card?.defaultEffort ?? DEFAULT_EFFORT));
   }
 
   /**
-   * Remember an explicit per-tab pick as the **default for future sessions**. P4
-   * moved the live selection onto the session itself (a runtime writes
-   * `session.model` / `session.effort` and persists that with the session), so
-   * this memento write is only the seed for sessions created later — it never
-   * touches an existing session's own choice.
+   * Remember an explicit per-tab pick as the **default for future sessions**. The
+   * live selection lives on the session itself (a runtime writes `session.model` /
+   * `session.effort` and persists that with the session), so this memento write is
+   * only the seed for sessions created later — it never touches an existing
+   * session's own choice.
    */
-  persistRuntimeConfig(model: string, thinkingEffort: ThinkingEffort): void {
-    this.defaultModel = model;
+  persistRuntimeConfig(cardId: string, thinkingEffort: ThinkingEffort): void {
+    this.defaultModel = cardId;
     this.defaultThinkingEffort = thinkingEffort;
     const cfg = this.getConfig();
+    const card = resolveCard(cardId);
     void this.writeSmall(CONFIG_KEY, {
-      model,
+      model: cardId,
       thinkingEffort,
-      modelFromSettings: cfg.model,
-      effortFromSettings: cfg.thinkingEffort,
+      modelFromSettings: cfg.defaultCardId,
+      effortFromSettings: card?.defaultEffort,
     } satisfies RuntimeConfig);
   }
 
@@ -732,6 +802,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   private runtimeFor(session: AgentSession): SessionRuntime {
     let rt = this.runtimes.get(session.id);
     if (!rt) {
+      const cardId = this.effectiveModel(session);
       // Building a runtime seeds the view-derived counters from the stored tree, so
       // the first switch to a session that has never run in this window pays for it.
       rt = timedSync(
@@ -740,9 +811,9 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
           new SessionRuntime(
             this,
             session,
-            this.client,
-            this.effectiveModel(session),
-            this.effectiveEffort(session),
+            this.clients,
+            cardId,
+            this.effectiveEffort(session, cardId),
             this.backgroundHub,
           ),
         `session=${session.id} nodes=${Object.keys(session.nodes).length}`,
@@ -1294,17 +1365,19 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     const t0 = Date.now();
     let title = '';
     let how = 'model';
+    const card = resolveCard(this.effectiveModel(session)) ?? cards()[0];
     try {
-      const { text, usage } = await this.client.complete({
+      // Titles are bookkeeping: they go through the *card's* provider but take no
+      // concurrency slot, so a batch of them can never starve the conversation.
+      const { text, usage } = await this.clients.complete(card, {
         messages: buildTitleMessages(digest, session.title),
-        model: this.defaultModel,
         maxTokens: TITLE_MAX_TOKENS,
         temperature: 0.3,
         signal: controller.signal,
       });
       title = sanitizeTitle(text, '');
       if (usage) {
-        this.outputLog(`[title] ${session.id} model=${this.defaultModel} tokens=${usage.total_tokens}`);
+        this.outputLog(`[title] ${session.id} model=${cardDisplayName(card)} tokens=${usage.total_tokens}`);
       }
     } catch (err) {
       how = 'heuristic';
@@ -1401,10 +1474,11 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     const timer = setTimeout(() => controller.abort(), TITLE_REQUEST_TIMEOUT_MS);
     let titles: Array<string | null> = entries.map(() => null);
     let ok = true;
+    const card = resolveCard(this.defaultModel) ?? cards()[0];
     try {
-      const { text, usage } = await this.client.complete({
+      // Ungated like the single title request (see `generateSessionTitle`).
+      const { text, usage } = await this.clients.complete(card, {
         messages: buildBatchTitleMessages(entries),
-        model: this.defaultModel,
         maxTokens: TITLE_BATCH_MAX_TOKENS,
         temperature: 0.3,
         signal: controller.signal,
@@ -1497,7 +1571,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         // why the prefix it describes has no ancestor history.
         contextBaseId: node.contextBaseId,
         title: node.title,
-        model: this.runtimes.get(session.id)?.model ?? this.defaultModel,
+        model: this.modelLabelFor(this.runtimes.get(session.id)?.model ?? this.defaultModel),
         status,
         prompt,
         summary: this.summaryPreview(node),
@@ -1582,7 +1656,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         sessionId: session.id,
         depth: node.agentDepth ?? 1,
         write: !!node.agentWrite,
-        model: node.agentModel || this.runtimes.get(session.id)?.model || this.defaultModel,
+        model: this.modelLabelFor(node.agentModel || this.runtimes.get(session.id)?.model || this.defaultModel),
         status: node.agentStatus ?? node.status,
         resumed: false,
         instruction: node.title,
@@ -1606,7 +1680,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       parentId: node.parentId,
       pathIds: pathIds(session, node.id),
       title: node.title,
-      model: this.runtimes.get(session.id)?.model ?? this.defaultModel,
+      model: this.modelLabelFor(this.runtimes.get(session.id)?.model ?? this.defaultModel),
       status: node.status,
       prompt,
       summary: this.summaryPreview(node),
@@ -1646,7 +1720,9 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         sessionId,
         depth: job.node.agentDepth ?? 1,
         write: job.spec.write,
-        model: job.spec.model || job.node.agentModel || this.runtimes.get(sessionId)?.model || this.defaultModel,
+        model: this.modelLabelFor(
+          job.spec.model || job.node.agentModel || this.runtimes.get(sessionId)?.model || this.defaultModel,
+        ),
         status,
         resumed: !!job.resume,
         instruction: job.spec.instruction,
@@ -1663,6 +1739,16 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       this.output.appendLine(`[transcript] write failed for ${job.node.id}: ${String(err)}`);
       return undefined;
     }
+  }
+
+  /**
+   * What a transcript's `model` field should say. A transcript dumps what the API
+   * actually received, but the meta line is read by humans and by
+   * `search_transcripts`, so it carries the **card's display name** (name, or
+   * `name (oaiModel)`) rather than the GUID that `session.model` holds.
+   */
+  private modelLabelFor(value: string | undefined): string {
+    return cardDisplayName(resolveCard(value ?? '') ?? resolveCard(this.defaultModel));
   }
 
   /** First line of a turn's answer, used as a collapsed-card / transcript summary. */
@@ -1910,6 +1996,36 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     adopted.setTitle(this.panelTitle(session.id));
     this.output.appendLine(`[panel] restored chat tab for session ${session.id}`);
     // The webview posts 'ready' once its script loads; that repaints it.
+  }
+
+  // ---- Model Card Tree page ----
+
+  /**
+   * Open (or focus) the Model Card Tree tab — the `Spinney: Model Cards` command
+   * and the gear button beside the chat's model dropdown both land here. There is
+   * one page per window: the controller owns it and focuses the existing tab
+   * instead of opening a second one.
+   */
+  openModelTree(): void {
+    if (this.disposed) {
+      return;
+    }
+    this.modelTree.open();
+    this.output.appendLine('[model-tree] page opened');
+  }
+
+  /**
+   * Window recovery for the page: VS Code hands the serialized panel back (its
+   * view type is registered in `extension.ts`), and the controller adopts it so
+   * the tab survives a reload exactly like a chat tab does.
+   */
+  restoreModelPanel(panel: vscode.WebviewPanel): void {
+    if (this.disposed) {
+      panel.dispose();
+      return;
+    }
+    this.modelTree.restore(panel);
+    this.output.appendLine('[panel] restored the model-cards tab');
   }
 
   // ---- Commands ----
@@ -2389,10 +2505,13 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
           // Which branch owns each running job: a controller can verify that a job
           // stayed with the node that spawned it while the view moved elsewhere.
           backgroundNodes: rt ? rt.backgroundNodes() : [],
-          // P4: the per-session model/effort, straight off the session's runtime
-          // (an unloaded session reports the selection it would start from).
+          // The per-session card/level, straight off the session's runtime (an
+          // unloaded session reports the selection it would start from). `model` is
+          // the card id — the wire readout a controller correlates on, never a
+          // validation of it; `modelName` says what a human calls that card.
           model: rt ? rt.model : this.effectiveModel(s),
-          effort: rt ? rt.thinkingEffort : this.effectiveEffort(s),
+          modelName: cardDisplayName(resolveCard(rt ? rt.model : this.effectiveModel(s))),
+          effort: rt ? rt.thinkingEffort : this.effectiveEffort(s, this.effectiveModel(s)),
         };
       }),
     };
@@ -2690,7 +2809,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     }
     // A send is the moment a key matters: nudge once (never block — the request
     // itself reports the real error).
-    this.warnMissingApiKey();
+    void this.warnMissingApiKey();
     await rt.onUserMessage(text, attachments);
   }
 
@@ -2812,10 +2931,18 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         rt.stop(typeof message.nodeId === 'string' && message.nodeId ? message.nodeId : undefined);
         return;
       case 'setModel':
+        // The value is a card id (the dropdown's option value); `setModel` heals
+        // anything else through `resolveModel`.
         rt.setModel(String(message.model ?? ''));
         return;
       case 'setThinkingEffort':
-        rt.setThinkingEffort(String(message.effort ?? 'none') as ThinkingEffort);
+        // A free-form level: the session clamps it against its card's menu.
+        rt.setThinkingEffort(String(message.effort ?? ''));
+        return;
+      case 'openModelTree':
+        // The gear beside the model dropdown. Opening the page is a host concern
+        // (one tab per window), so the webview only asks for it.
+        this.openModelTree();
         return;
       case 'openExternal': {
         const url = String(message.url ?? '');
@@ -2953,12 +3080,10 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
           <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
         </button>
         <select id="model-select" title="${vscode.l10n.t('Model')}"></select>
-        <select id="effort-select" title="${vscode.l10n.t('Thinking effort')}">
-          <option value="none">${vscode.l10n.t('none')}</option>
-          <option value="low">${vscode.l10n.t('low')}</option>
-          <option value="medium">${vscode.l10n.t('medium')}</option>
-          <option value="high">${vscode.l10n.t('high')}</option>
-        </select>
+        <button id="models-btn" class="icon-btn" title="${vscode.l10n.t('Manage model cards…')}" aria-label="${vscode.l10n.t('Manage model cards…')}">
+          <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        </button>
+        <select id="effort-select" title="${vscode.l10n.t('Thinking effort')}"></select>
         <div id="actions">
           <button id="stop-btn" class="hidden">${vscode.l10n.t('Stop')}</button>
           <button id="send-btn">${vscode.l10n.t('Send')}</button>
