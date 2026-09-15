@@ -25,14 +25,21 @@
   turns. Splits the view focus (`session.activeNodeId`) from a turn's basis
   (`run.nodeId`), keys runs by node (`runs: Map<nodeId, TurnRun>`), keeps one node
   worker (its own `Agent` + `ToolRegistry`) per node (`workerFor`), puts an explicit
-  `nodeId` on every streaming message, bookkeeps interrupts per node, holds the
-  per-session model/effort, and delivers the completion signals (background terminals /
+  `nodeId` on every streaming message, bookkeeps interrupts per node, resolves the
+  model / effort per node (`cardForNode` / `effortForNode`, over the session's seed),
+  and delivers the completion signals (background terminals /
   async sub-agents) — a `kind:'bg'` card per job (`onBackgroundRegistered`) plus the
   per-node `signals` queue, handed to a running turn at its next tool boundary or
   injected into the idle owning node. Reaches the provider through the narrow `RuntimeHost`.
   A full context window is continued rather than compressed by `rolloverContext()` (the
   union kill + settle + flush + re-dump, `beginTurn({ freshContext })`, the harness resume
   text and the `contextFull` flag it ships) — see `invariants/context-rollover.md`.
+- `src/chat/SubAgentPool.ts` — `SubAgentPool`: the per-session concurrency limit for
+  level-1 sub-agents (`spinney.maxConcurrentSubagents`), a FIFO queue that runs the
+  rest as slots free. `setMaxConcurrent` is the live settings path (raising it wakes
+  queued tasks; lowering it never kills a running one) and depth-2 sub-agents are
+  **not** pooled (they are capped by the per-parent `maxLevel2Subagents`). Pure
+  logic, no `vscode`.
 - `src/chat/backgroundHub.ts` — `BackgroundHub` (one per window): background terminals
   keyed by `(session, node)`, session-local task ids, an `id → owner` index, the
   `onRegistered` / `onUpdated` / `onFinish` hooks, and the
@@ -92,8 +99,20 @@
 - `tools/hyper-vscode/` — the `hvsc` supervisor (CLI + daemon + `serve.ps1`),
   **not** shipped in the `.vsix`.
 - `tools/harness-test.mjs` — the control-plane acceptance harness for P1–P4 (suites
-  `health`, `sessions`, `concurrency`, `navigation`, `background`, `branch`,
-  `selftest`). Dev tooling: `.vscodeignore` excludes `tools/**`, so it is never shipped.
+  `health`, `sessions`, `concurrency`, `navigation`, `background`, `signals`,
+  `branch`, `selftest`). Dev tooling: `.vscodeignore` excludes `tools/**`, so it is never shipped.
+- `tools/rollover-acceptance.js` · `tools/modeltree-acceptance.js` ·
+  `tools/model-switch-acceptance.js` · `tools/gate-acceptance.js` — the four
+  **windowless acceptance drivers** (dev-only, not build guards, not shipped): the
+  context rollover's runtime half, the Model Card Tree page's host half, the
+  per-node model selection, and the request gate through `ClientRegistry`. Each
+  stubs the `vscode` module and needs `out/` (`npm run compile` first); no window,
+  no network. See `testing.md`.
+- `tools/migrate-state.mjs` — the one migration this repo carries: an install that
+  only ever ran Minimal Agent Harness (`minimal-host.minimal-agent-harness`) moves
+  to Spinney (`DE-YU.spinney`) — the memento row key keeps the case the manifest
+  declared, the `globalStorage` folder is that id lowercased. Dev-only; run it with
+  VS Code closed. See `invariants/session-persistence.md`.
 - `src/agent/agent.ts` — the agent loop: message sanitizing, interrupt/rollback,
   card/effort switching (`setCard(card)` / `setThinkingEffort(level)`, which rewrite
   the identity line in place), the completion-signal injection hook
@@ -160,9 +179,9 @@
   four names are gitignored. See `docs/agents/invariants/i18n.md`.
 - `tools/check-models.js` · `tools/check-webview.js` · `tools/check-signal-persist.js`
   · `tools/check-l10n.js` · `tools/check-context-rollover.js` ·
-  `tools/check-modeltree.js` — the packaging guards
+  `tools/check-modeltree.js` · `tools/check-tree-grid.js` — the packaging guards
   (`npm run check:models` / `check:webview` / `check:signals` / `check:l10n` /
-  `check:rollover` / `check:modeltree`, run by `vscode:prepublish`):
+  `check:rollover` / `check:modeltree` / `check:grid`, run by `vscode:prepublish`):
   model-config drift (the default is the fallback card, `providers` / `modelCards`
   exist as object schemas, no `enum` on `model`, no model id in the code or the
   webviews), "does the chat webview still survive every message the provider
@@ -172,10 +191,15 @@
   parse — pure functions, no DOM), and "does the Model Card Tree page still
   understand the host" (`media/modeltree.js` into a stub DOM: the `ready` handshake,
   a snapshot drawn as a tree, a failed save that keeps the draft, an add-card → save
-  round trip). See `testing.md`.
+  round trip), and the Chat Tree's sidecar lattice (`media/tree.js` into node: each
+  column its own stack ending flush and evenly filled, a `stretch` map covering every
+  sidecar card, card-free corridors, over ~18 topologies plus the real session
+  `mu2zn79jlv7b23`; and `relayout()` in `media/main.js` clearing the stretch before
+  measuring and applying the new one after). See `testing.md`.
 - `src/agent/tools/` — one file per intercepted tool (`readImage`, `spawnAgents`,
   `spawnReadonlyAgents`, `sendAgentMessage`, `sendReadonlyAgentMessage`,
-  `hopSession`, `listNodes`, `renameSession`) plus the barrel that filters them.
+  `hopSession`, `listNodes`, `renameSession`) plus `index.ts`, the barrel that
+  filters them.
   Each declares its `requires` capability tag, so the advertised tools and the
   prompt's capability wording cannot drift apart.
 - `src/agent/deepseek.ts` — `DeepSeekClient` (stream SSE over `fetch`,
@@ -233,7 +257,7 @@
   active node's input dock: `setActiveLeaf` moves `#composer` into the
   checked-out card's bottom. It has no other home — with an empty session the
   placeholder card hosts it, and with a focused sidecar card (a sub-agent window or
-  a background job card — `isSidecarKind`, `main.js:111`) or no active
+  a background job card — `isSidecarKind`, `media/main.js:303`) or no active
   node the pane is **hidden entirely** (`setComposerVisible(false)`); there is
   no floating/docked fallback. The pane keeps one fixed size: nothing about the
   host card's width (or its resize handle) scales it.
@@ -267,14 +291,19 @@
   child kinds onto it (turn = below, sidecar = right, where a sidecar is a
   `kind:'agent'` sub-agent window or a `kind:'bg'` job card) and reserves each node's
   sidecar **grid** inside the node's engine box. A node's sidecar children are packed
-  **column-major** into an aligned lattice — at most `agentMaxRows` (4) rows per
-  column, a new column to the right for every further window — with the lattice
-  lines anchored on the window *cards* (not on their subtree boxes, which the engine
-  centres its card over) and each column/row reserving the largest card overhang, so
-  every card in a column shares an x and every card in a row shares a y. Returns, in
-  addition to `pos`/`width`/`height`, a `cells` **routing table** (per agent child:
-  `busX` / `chanX` / `corrY`, the card-free corridors `main.js` draws the connectors
-  through). `agentMaxRows: 1` reproduces the old single-column ribbon.
+  **column-major** into a lattice — at most `agentMaxRows` (4) cells per column, with
+  the next cell opening a new column to the right. Rows are **not** aligned across
+  columns: each column is its own stack of cells, its extent is the sum of its cells'
+  own subtree box heights, and the block's height is the maximum over the columns;
+  the free space of a shorter column (`blockHeight − that column's stack`) is spread
+  **evenly** over that column's cards (the integer remainder to the topmost cards
+  first), so every column ends flush at the block's bottom line and no hole is left
+  between a parent's cards. Returns, in addition to `pos`/`width`/`height`, a
+  `stretch` map (id → pixel height, every sidecar card) that `main.js` applies as the
+  card's exact height (`height` + `max-height`, since `.node` caps at 600px), and a
+  `cells` **routing table** (per agent child: `busX` / `chanX` / `corrY`, the
+  card-free corridors `main.js` draws the connectors through). `agentMaxRows: 1`
+  reproduces the old single-column ribbon.
 - `media/vendor/non-layered-tidy-tree-layout/` — **vendored, pinned** tree layout
   engine (`@2.0.2`, MIT): `dist/` (the file the webview loads), `src/` (readable
   source for offline re-audit), `LICENSE`, `PROVENANCE.md` (hashes + audit record).
@@ -291,5 +320,7 @@
   `docs/agents/invariants/vendored-deps.md`. It replaced the old
   `media/markdown-it.min.js`, which sat outside the `media/vendor/** -text` rule and
   had drifted to CRLF.
+- `media/activity.svg` · `media/icon.png` — the Activity Bar entry icon and the
+  extension icon (`package.json`: `contributes.viewsContainers.activitybar` / `icon`).
 - `build-deploy.ps1` — compile + package + install helper.
 

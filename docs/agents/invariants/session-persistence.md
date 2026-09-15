@@ -69,8 +69,12 @@
   `controlWaitForFinish`, `controlReloadWindow`, and `deactivate` →
   `ChatViewProvider.shutdown()`. **A new must-write call site has to opt in
   explicitly** — that is the whole point of the split.
-- `persist()` reports `chars≈N` — an estimate over the payload's string fields
-  (`estimateStateChars`), **not** a `JSON.stringify`: serializing 111 M chars inside
+- `persistNow()` reports `chars≈N` on its `[perf]` lines — a size estimate
+  accumulated **inline while the payload is built** (a local `chars` counter and an
+  `addText()` closure inside `persistNow()`, fed by its `clipItem()` / `clipMsg()`
+  helpers over every string field of the stored items, messages, titles and `bg*`
+  text; `src/chat/ChatViewProvider.ts` ~:1005-1014 and ~:1088-1092), **not** a
+  `JSON.stringify`: serializing 111 M chars inside
   the operation being measured cost more than most of what those `[perf]` lines were
   about. See `invariants/streaming-perf.md`.
 - Which Memento holds those keys depends on the window (`src/extension.ts`):

@@ -1,11 +1,17 @@
 ## System prompt (single template + two hard rules)
 
-- **One file owns the text.** `src/agent/prompt.ts` holds `SYSTEM_PROMPT_TEMPLATE`
+- **One file owns the system-prompt text.** `src/agent/prompt.ts` holds
+  `SYSTEM_PROMPT_TEMPLATE`
   (main agent) and `SUB_AGENT_SYSTEM_PROMPT_TEMPLATE` (sub-agents). Static text is
   written literally, top to bottom, so the file reads as the prompt itself; runtime
   values are `{{placeholder}}` holes. `agent.ts` contains no prompt text — its
   `Agent.systemPrompt` / `Agent.subAgentSystemPrompt` / `Agent.setAgentsMd` are
   thin wrappers kept for their callers.
+  The one other shipped, model-facing instruction text is
+  `SHIPPED_PROMPT_SNIPPETS` in `src/chat/promptSnippets.ts` (the `Plan` /
+  `Implement Parallel` snippets). It is **user-turn** text: the composer inserts it
+  into the input box, the user may edit it, and it travels as the message they
+  send — so it never reaches the system prompt and is not part of the template.
 - Placeholders: `{{identity}}` (harness name + model + reasoning effort, from
   `identityLines()`), `{{environment}}` (OS / shell / agent root + its kind, from
   `process.platform` + `getShell()` + `agentRootInfo()` — `EnvironmentFacts` is
@@ -19,8 +25,8 @@
   the floor when nothing resolves) and
   `{{agentsMd}}` (the session's snapshot). The
   sub-agent template adds `{{depth}}`, `{{permissions}}`
-  and `{{fanOut}}`; it stays lean — identity + environment + three behaviour lines
-  — and never repeats the main template.
+  and `{{fanOut}}`; it stays lean — identity + environment + its dispatch line and
+  two behaviour lines — and never repeats the main template.
 - `renderPromptTemplate()` fills them. An unknown placeholder name or a malformed
   `{{` **throws and logs to the "Spinney" output channel** (the guard for a
   typo'd name; `src/perf.ts`'s `harnessLog` is the sink). It scans the *template*,
@@ -38,8 +44,9 @@
 - **Capabilities are one judgement, used twice.** Each intercepted tool declares a
   `requires` tag (`vision` / `spawn` / `spawnReadOnly` / `hop`) in
   `src/agent/tools/*`; `interceptedDefinitions(capabilities)` filters that single
-  list for `getTools()`, and those same flags are what the prompt's `## 分工`
-  guidance assumes. A non-vision model therefore never sees `read_image` in `tools`
+  list for `getTools()`, and those same flags are what the prompt's
+  `## Delegation (when to hand work off)` guidance assumes. A non-vision model
+  therefore never sees `read_image` in `tools`
   (the runtime guard in `executeReadImage` stays as a fallback), and switching the
   model updates the identity line and the tool list together.
 - **Hard rule 1 — no workspace facts in plugin text.** Text that ships with the

@@ -6,7 +6,7 @@ a bare model id any more: a card is what the user picks in the chat, what a sess
 stores, what a transcript records, and what a request is built from. The settings are
 `spinney.providers` (an object of provider id → `{ name, baseUrl, concurrency }`),
 `spinney.modelCards` (an object of card id → card fields), and `spinney.model` (the
-**card id** of the default card). The Model Card Tree page (`Spinney: Model Cards`)
+**card id** of the default card). The Model Card Tree page (`Spinney: Open Model Cards`)
 is the editor of those three keys.
 
 ### The two shapes
@@ -115,7 +115,7 @@ is no workspace scope to write to.
 
 A second webview editor tab (`spinney.modelTree`, `src/chat/ModelPanel.ts` +
 `src/chat/modelTree.ts` + `media/modeltree.js` + `media/modeltree.css`), opened by
-`Spinney: Model Cards` (`spinney.openModelCards`) and by the gear beside the chat's
+`Spinney: Open Model Cards` (`spinney.openModelCards`) and by the gear beside the chat's
 model dropdown. It draws providers as roots with their cards branching off them —
 the chat tree's visual language and the same vendored layout engine — with:
 
@@ -207,7 +207,7 @@ in opposite orders and deadlock.
 | `session.model`, `spinney.runtimeConfig.model` | Card ids — the **seed** for a session with no node history, and the default for sessions created later. An explicit dropdown pick still writes them (`persistRuntimeConfig`). |
 | The dropdown pick | A **pending** choice for the next send on the node in view: it is consumed by that turn (which records it on the new node) and **forgotten on a checkout**, so the dropdown follows the node you click. Picking the card the node already uses is a **no-op** — no "Model changed" notice, no persist. |
 | `spawn_agents`' `model` argument | A card id, a card name, or a wire model name — `resolveCard` accepts all three, case-insensitively for the two spellings. |
-| The `config` message | `{ model: <card id>, cards: [{ id, name, providerId, providerName, vision, efforts, defaultEffort }], efforts, thinkingEffort, foldToolCalls, foldThinking }` — the webview keeps no copy of the catalog. |
+| The `config` message (`SessionRuntime.postConfig`) | `{ model: <card id>, cards: [{ id, name, providerId, providerName, vision, efforts, defaultEffort }], efforts, thinkingEffort, foldToolCalls, foldThinking, snippets }` — a card's `vision` is the boolean `vision.enabled`, and `snippets` is the composer's prompt-snippet list (`cfg.promptSnippets`), so the webview keeps no copy of either. |
 | Control plane `sessions[]` | `model` (card id) and `modelName` (the display form). |
 | Transcript meta | The card's display name (`cardDisplayName`). |
 
@@ -231,8 +231,9 @@ apart), and the thinking-level dropdown is built from the **active card's** `eff
 | The command (`spinney.openModelCards`) and the gear the webview asks for (`openModelTree`) | `src/extension.ts` · `media/main.js` |
 | The chat's dropdowns (`postConfig`) | `src/chat/runtime.ts` |
 | Settings (`model`, `providers`, `modelCards`) | `package.json` |
-| Guards: no model-id drift / no enum / catalog settings present; the page protocol replay | `tools/check-models.js` · `tools/check-modeltree.js` |
+| Guards (`npm run check:models` / `check:modeltree`): `spinney.model.default` == the fallback, the two catalog settings exist, no `enum` on `spinney.model`, no model id in `src/**/*.ts` (the catalog module excepted) or `media/*.js` (the vendored bundles excepted), README/docs name only ids the catalog has; the page protocol replay | `tools/check-models.js` · `tools/check-modeltree.js` |
 
-Every mention of a model id in README/docs must be the built-in one, and plugin text
-that reaches the model must call `visionCardsLabel()` / `cardDisplayName()` instead of
-naming anything.
+Every mention of a model id in README/docs must be one the catalog has — today that is
+only the built-in one (`tools/check-models.js` fails an id `MODEL_CATALOG` does not
+carry) — and plugin text that reaches the model must call `visionCardsLabel()` /
+`cardDisplayName()` instead of naming anything.

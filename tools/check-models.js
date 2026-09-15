@@ -36,10 +36,21 @@ if (!fs.existsSync(catalogPath)) {
 
 const { MODEL_CATALOG, DEFAULT_MODEL } = require(catalogPath);
 const ids = MODEL_CATALOG.map((m) => m.id);
-const idSet = new Set(ids);
+// Lowercased: a `DeepSeek-Flash` typo in code is the same drift as the real id.
+const idSet = new Set(ids.map((id) => id.toLowerCase()));
 
-// Matches the harness's model ids but not hostnames such as api.deepseek.com.
-const MODEL_RE = /deepseek-(?:chat|reasoner|v[0-9][0-9a-zA-Z.\-]*)/g;
+// Matches the harness's model ids but not hostnames such as api.deepseek.com: it
+// needs the `deepseek-` prefix plus one more name character. The catalog ids are
+// listed explicitly too, so a card on another vendor cannot slip past the check,
+// and a typo of a real id (`deepseek-flashx`) still fails as an unknown model.
+const MODEL_RE = new RegExp(
+  [...new Set([...ids.map(escapeRegex), 'deepseek-[a-z0-9][a-z0-9.\\-]*'])].join('|'),
+  'gi',
+);
+
+function escapeRegex(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 const problems = [];
 
@@ -47,7 +58,8 @@ function scan(file, text, { allowAny = false } = {}) {
   const lines = text.split(/\r?\n/);
   lines.forEach((line, i) => {
     for (const match of line.match(MODEL_RE) || []) {
-      if (allowAny ? !idSet.has(match) : idSet.has(match)) {
+      const id = match.toLowerCase();
+      if (allowAny ? !idSet.has(id) : idSet.has(id)) {
         problems.push(
           allowAny
             ? `${file}:${i + 1}: names an unknown model "${match}" (add it to MODEL_CATALOG or reword)`

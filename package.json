@@ -2,7 +2,7 @@
   "name": "spinney",
   "displayName": "Spinney",
   "description": "%description%",
-  "version": "0.0.1",
+  "version": "0.0.2",
   "publisher": "DE-YU",
   "license": "MIT",
   "author": {
@@ -18,7 +18,6 @@
   },
   "homepage": "https://github.com/Delsin-Yu/Spinney#readme",
   "icon": "media/icon.png",
-  "private": true,
   "keywords": [
     "agent",
     "agent harness",
@@ -244,7 +243,7 @@
                     "transport": {
                       "type": "string",
                       "enum": ["openai", "deepseek"],
-                      "default": "deepseek",
+                      "default": "openai",
                       "description": "%spinney.modelCards.vision.transport.description%"
                     }
                   }
@@ -433,7 +432,8 @@
     "check:signals": "node tools/check-signal-persist.js",
     "check:rollover": "node tools/check-context-rollover.js",
     "check:l10n": "node tools/check-l10n.js",
-    "vscode:prepublish": "npm run compile && npm run sync:l10n && npm run check:models && npm run check:webview && npm run check:modeltree && npm run check:signals && npm run check:l10n && npm run check:rollover"
+    "check:grid": "node tools/check-tree-grid.js",
+    "vscode:prepublish": "npm run compile && npm run sync:l10n && npm run check:models && npm run check:webview && npm run check:modeltree && npm run check:signals && npm run check:l10n && npm run check:rollover && npm run check:grid"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

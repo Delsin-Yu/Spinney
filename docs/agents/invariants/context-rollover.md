@@ -65,7 +65,10 @@ basis from that same array inside the same block (`prefixLen` / `prefixTail` in
 Two side effects worth knowing (both wanted):
 
 - `activeSessionHasImages()` now asks about the messages that are actually sent.
-- The `[persist] msgCount` diagnostic now reports the sent prefix's size.
+- The `persist-queued … msgs=N` diagnostic (prefixed `[perf]`, *not* `[persist]`) now
+  reports the sent prefix's size: `persistNow()` counts
+  `pathMessages(session, session.activeNodeId).length`, not the active node's own
+  `messages.length` (`src/chat/ChatViewProvider.ts` ~:1072-1088).
 
 `contextBaseId` participates in `pathIds`, so it decides which nodes' messages are
 *sent*; it never moves a card.
@@ -217,7 +220,9 @@ transcript first — do not guess.
 Rules for building it:
 
 - **The pointer degrades.** If `spinney.saveSessionTranscripts` is off, or the
-  file is missing (`fs.existsSync(path.join(host.transcriptDir(session), prevId + '.jsonl'))`),
+  file is missing (`rolloverTranscriptOnDisk(prevId)` →
+  `fs.existsSync(path.join(host.transcriptDir(sessionId), prevId + '.jsonl'))`, the path
+  builder being `rolloverTranscriptPath`; `src/chat/runtime.ts` ~:2474-2494),
   the pointer lines are replaced by: *"The previous window's transcript is not
   available on disk; rely on the carried-over text and ask the user when a detail
   is missing."*
@@ -332,7 +337,10 @@ token), and the `[config]` / `[perf]` diagnostics.
 - **The new node does not adopt the old node's background jobs.** Ownership is
   `(session, node)` by design (`background-terminals.md`); the rollover kills them
   and records them instead.
-- **The provider's window number never writes a card.** A mismatch between the 400's
-  window and `contextWindowFor()` (the active card's `contextWindow`) is logged to the
-  `[config]` line only — the field is the user's, and a wrong window is their
+- **The provider's window number never writes a card — and nothing compares it.**
+  `parseContextLengthError(...)` is used only as a **boolean** (does this failure text
+  name a context-length error?); its `window` / `requested` fields are never read, so a
+  mismatch between the 400's window and `contextWindowFor()` (the active card's
+  `contextWindow`) is neither detected nor logged — not on `[config]`, not on `[perf]`.
+  That is fine by design: the field is the user's, and a wrong window is their
   one-field fix on the card (`model-capabilities.md`, `model-cards.md`).

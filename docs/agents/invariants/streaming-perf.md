@@ -75,9 +75,11 @@ by id (`src/perf.ts`):
 
 What the marks are, in the order a cold switch produces them:
 `panel-ensure` (existing vs. create) → `panel-create` (the webview window) →
-`panel-html` (+ bytes) → `panel-focus` → `runtime-create` → `persist-queued`/`-done`
-(+ `bytes=` when measured, i.e. only inside an op) → `post-all-state`, `post-tree` /
-`post-path` (+ payload bytes) → `deliver-*` (the host's `postMessage` resolved — this
+`panel-html` (+ bytes) → `panel-focus` → `runtime-create` → `persist-queued` / `-done`
+(+ `sessions=` `nodes=` `items=` `msgs=` and `chars≈` — `chars≈` is the same pass that
+builds the payload — plus `coalesced=n` when a burst was folded into one write) →
+`post-all-state`, `post-tree` / `post-path` (+ `bytes=`, which only `opPayload` emits,
+i.e. only inside an op) → `deliver-*` (the host's `postMessage` resolved — this
 is VS Code's ack, which for a webview that is still loading its scripts lags the
 webview's own handling by hundreds of ms: that gap *is* the cold-tab cost, so read it
 next to `webview-paint since=`) → `webview-paint` (`since=` from the burst's first
@@ -114,7 +116,7 @@ A measured cold switch (`op#9`, 81 sessions / 751 nodes, ~111 M chars persisted)
 
 ```
 op#9 +0ms panel-HTML/CREATE/FOCUS          ← the tab comes up instantly
-[perf] persist-queued 821ms … bytes=116927140   ← a pointer move re-serialized the world
+[perf] persist-queued 821ms … chars≈116927140   ← a pointer move re-serialized the world
 [perf] lag blocked 751ms (2 late ticks)         ← …and blocked the host doing it
 [perf] persist-done 2348ms                      ← VS Code wrote the 131 M-char memento
 op#9 +1634ms post-tree bytes=2325344            ← 2.3 MB: every sidecar's transcript

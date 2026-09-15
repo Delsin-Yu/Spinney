@@ -14,8 +14,11 @@
   into an `InterruptedError` carrying the partial `content`/`reasoning`.
 - `exec_command` on Windows uses `taskkill /T /F` to kill the whole process tree
   (a plain `child.kill()` only kills the shell and leaves grandchildren alive).
-- If the previous turn was interrupted, a `user`-role `INTERRUPT_NOTICE` message
-  is injected before the user's next message. When the stop landed while a tool
+- If the previous turn was interrupted, a `user`-role interruption notice — the text
+  `buildInterruptNotice()` composes from `INTERRUPT_NOTICE_GENERIC` /
+  `INTERRUPT_NOTICE_TAIL` (`src/agent/agent.ts` ~:45-52 and ~:127-133), pushed at the
+  top of `Agent.sendUserMessage` (~:642-646) — is injected before the user's next
+  message. When the stop landed while a tool
   call was being streamed, the notice is prefixed with the exact tool that was in
   progress (e.g. `` `write_file` tool call that writes to `path` ``) via
   `buildInterruptNotice`, so the model knows what it was doing and can re-issue or
@@ -23,7 +26,9 @@
   partial output was discarded and leaves it to the model to decide whether the
   new message is a steering correction (continue) or a fresh request (restart) —
   it does **not** force a restart.
-- `Agent.sanitizeMessages` (applied on session restore) treats an assistant
+- `Agent.sanitizeMessages` is applied where a history is assembled, **not** on session
+  restore: `SessionRuntime.buildPath` (`src/chat/runtime.ts` ~:1475) and a sub-agent
+  resume in `runSubAgent` (~:3455). It treats an assistant
   message without `tool_calls` as valid, so a preserved checkpoint message
   followed by a `user` message is safe on resume.
 - A turn that ended in `interrupted` (or `error`) also offers the ▶ Continue

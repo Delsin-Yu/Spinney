@@ -105,8 +105,8 @@ a rollover instead, whose whole point is a *new* card.
   re-derived:
   - interrupted → the checkpoint `preservePartialTurn` stored is already in that
     node's history, and the node's own agent still holds the pending
-    `INTERRUPT_NOTICE` (which names the interrupted tool), so `sendUserMessage`
-    prepends it; the harness text is just `CONTINUE_MESSAGE`
+    `buildInterruptNotice()`'s notice (which names the interrupted tool), so
+    `sendUserMessage` prepends it; the harness text is just `CONTINUE_MESSAGE`
     ("Continue from where you stopped.").
   - failed → the history the rollback restored, i.e. right after the last
     completed tool call, plus `buildFailureContinue(error)`: a `[Harness continue] …`

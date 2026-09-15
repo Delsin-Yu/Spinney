@@ -2,7 +2,9 @@
 
 Throwaway agent output goes in the workspace-local, gitignored `.spinney/`
 (excluded from the `.vsix` too). It is disposable by design — nothing tracked may
-point into it:
+**depend** on it: a tracked doc may *name* a scratch path in passing (this one does,
+and so does `no-repo-mode.md`), but no tracked file needs the folder or its contents
+to exist:
 
 | Path | Contents |
 | --- | --- |

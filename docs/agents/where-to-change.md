@@ -25,8 +25,8 @@
   whole `cards` list + the active card's `efforts` + `model` as a card id), and
   `renderModelSelect` / `renderEffortSelect` in `media/main.js` render it (one
   `optgroup` per provider; the levels follow the active card). The webview must keep
-  **no copy of the catalog** — `tools/check-models.js` and `check:webview` both watch
-  it.
+  **no copy of the catalog** — `tools/check-models.js` scans `media/**/*.js` for a
+  model id and fails packaging when one appears.
 - **Change the agent prompt** → `src/agent/prompt.ts` only (templates +
   placeholders); the loop and tool interception are in
   `src/agent/agent.ts`. See `docs/agents/invariants/system-prompt.md`.
@@ -65,8 +65,9 @@
   check:l10n` fails packaging when the two sides drift. See
   `docs/agents/invariants/i18n.md`.
 - **Change session persistence** → `loadSessions`/`persist`/`runtimeFor` in
-  `ChatViewProvider.ts` and the `StorageKey`s; a session's shape (including the P4
-  `model`/`effort` fields) is in `src/chat/tree.ts` (`normalizeTreeSession` keeps old
+  `ChatViewProvider.ts` and the memento keys (`spinney.state` plus the small
+  `spinney.activeSession` / backfill markers); a session's shape (including the P4
+  `model`/`effort` seed fields) is in `src/chat/tree.ts` (`normalizeTreeSession` keeps old
   state loadable — no `StoredState` version bump).
 - **Change the multi-session / branch model** → `docs/agents/multi-session.md` is the
   frozen contract; the implementation is `src/chat/runtime.ts` (`SessionRuntime`,
@@ -88,14 +89,18 @@
   `src/chat/runtime.ts` (the `kind:'bg'` card, notice injection, `postBackgrounds`), the tools in
   `src/tools/background.ts` / `backgroundTools.ts` / `execCommand.ts`, and each job's flying card
   (`renderBgBody`) in `media/main.js` — the in-card dock and `#bg-panel` are both gone.
-- **Per-session model / effort** → the `model` (a **card id**) / `effort` (and
-  `modelFromSettings` / `effortFromSettings`, the anchors) fields on `AgentSession` in
-  `src/chat/tree.ts`, their resolution in `ChatViewProvider.effectiveModel` /
-  `effectiveEffort` (the level is clamped against the card that lands, via
-  `normalizeEffort`), and the write path `SessionRuntime.setModel` /
-  `setThinkingEffort` (`applyDefaultModel` for a `spinney.model` / card change, which
-  a session with no pick of its own adopts and re-clamps). The anchors are the default
-  card id and that card's `defaultEffort`, so editing either wins over an older pick.
+- **Model / effort (per node, seeded per session)** → the live selection is a
+  property of the **node**: `TreeNode.model` / `TreeNode.effort` in `src/chat/tree.ts`,
+  resolved by ancestry (the nearest ancestor's card, else the session **seed**) — see
+  `tools/model-switch-acceptance.js`. The session-level seed and its retirement
+  anchors (`model` a **card id**, `effort` a level name, plus `modelFromSettings` /
+  `effortFromSettings`) are the `AgentSession` fields in the same file; the host half
+  is `ChatViewProvider.effectiveModel` / `effectiveEffort` (the level is clamped
+  against the card that lands, via `normalizeEffort`) and the write path is
+  `SessionRuntime.setModel` / `setThinkingEffort` (`applyDefaultModel` on a
+  `spinney.model` / card change, which a session with no pick of its own adopts and
+  re-clamps). The anchors are the default card id and that card's `defaultEffort`, so
+  editing either wins over an older pick.
 - **Verify a phase (P1–P4)** → `node tools/harness-test.mjs <suite...|all>` drives the
   live control plane; the suites and what each proves are in
   `docs/agents/multi-session.md` §5.1.

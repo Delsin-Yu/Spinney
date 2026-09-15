@@ -98,6 +98,11 @@
   // `cells`): id -> { col, row, busX, chanX, corrY, ... }. drawEdges() routes each
   // parent → sub-agent connector through those card-free corridors.
   let layoutCells = Object.create(null);
+  // Sidecar cards the last layout pass stretched (media/tree.js `stretch`): id ->
+  // the height in canvas px `relayout()` forced onto that card. It is the record of
+  // what has to be undone before the next measurement — see `clearStretchHeights()`
+  // and `relayout()`.
+  let layoutStretch = Object.create(null);
   let pan = { x: 0, y: 0 };
   let zoom = 1;
   let follow = true;
@@ -1673,7 +1678,38 @@
     relayout();
   }
 
+  /**
+   * Undo the stretch the previous layout pass applied, before anything is measured.
+   *
+   * A stretched card carries an inline `height` **and** a matching `max-height`
+   * (`.node` caps every card at 600px, so `height` alone would be clipped). Both
+   * have to be gone before `relayout()` reads `offsetHeight`: an inline height is
+   * what the browser would report back as the card's height, so measuring it as the
+   * *natural* height and then stretching that card again would add the grid's free
+   * space a second time — the layout would creep taller on every frame.
+   *
+   * `max-height` is restored from `treeNodes[id].size.h` when it exists: that value
+   * is a *manual* resize the user owns (set by `createNodeCard` and committed by
+   * `endResize`, which persists it as `setNodeSize`), not something a layout pass
+   * may wipe. Everything else falls back to the CSS default ('').
+   */
+  function clearStretchHeights() {
+    for (const id of Object.keys(layoutStretch)) {
+      const card = nodeEls[id];
+      if (card) {
+        const meta = treeNodes[id];
+        card.style.height = '';
+        card.style.maxHeight = meta && meta.size && meta.size.h ? meta.size.h + 'px' : '';
+      }
+      delete layoutStretch[id];
+    }
+  }
+
   function relayout() {
+    // Clear first (see `clearStretchHeights`): every pass measures the cards'
+    // NATURAL heights, so no card may still carry the previous pass's stretch when
+    // the measurement below runs.
+    clearStretchHeights();
     // No-node mode: the placeholder card is the entire tree.
     if (composerCard) {
       layoutCells = Object.create(null);
@@ -1692,11 +1728,16 @@
       drawEdges();
       return;
     }
+    // Measure the cards' own, natural heights (the clear above took every inline
+    // height off): these are what the layout stretches from, and the baseline a
+    // `stretch` entry has to beat to be applied below.
     const heights = {};
     const widths = {};
     for (const id in nodeEls) {
-      heights[id] = nodeEls[id].offsetHeight || 120;
-      widths[id] = nodeEls[id].offsetWidth || NODE_W;
+      const card = nodeEls[id];
+      if (!card) continue;
+      heights[id] = card.offsetHeight || 120;
+      widths[id] = card.offsetWidth || NODE_W;
     }
     const result = window.treeLayout.layoutTree(treeNodes, treeRootId, heights, {
       nodeW: NODE_W,
@@ -1710,6 +1751,25 @@
       agentTopPad: AGENT_TOP_PAD,
     });
     layoutCells = result.cells || Object.create(null);
+    // Stretch the sidecar cells to the heights the layout reserved for them. This
+    // can only run *after* `layoutTree` (the heights are the layout's answer) and it
+    // must run *after* the measurement above (only a card the layout wants taller
+    // than it measured may be stretched). `height` alone is not enough: `.node` caps
+    // every card at 600px, and a clipped card would leave the grid's column short
+    // again — the inline `max-height` is what lifts that cap for this one card.
+    const stretch = result.stretch || Object.create(null);
+    for (const id in stretch) {
+      const card = nodeEls[id];
+      if (!card) continue;
+      const target = stretch[id];
+      // Absent ids and targets at (or below) the card's natural height are left
+      // exactly as they are: the layout only ever grows a card, and a sub-pixel
+      // difference is measurement noise, not a stretch.
+      if (!(target > (heights[id] || 0) + 0.5)) continue;
+      card.style.height = target + 'px';
+      card.style.maxHeight = target + 'px';
+      layoutStretch[id] = target;
+    }
     treeCanvas.style.width = result.width + 'px';
     treeCanvas.style.height = result.height + 'px';
     for (const id in result.pos) {
@@ -1932,7 +1992,13 @@
       }
     }
     for (const id in nodeEls) {
-      if (!treeNodes[id]) { nodeEls[id].remove(); delete nodeEls[id]; }
+      if (!treeNodes[id]) {
+        nodeEls[id].remove();
+        delete nodeEls[id];
+        // The card is gone, so its stretch record has nothing to restore — and a
+        // record left behind would only keep a dead id alive between passes.
+        delete layoutStretch[id];
+      }
     }
 
     for (const id in nodeEls) {
@@ -2140,12 +2206,24 @@
   function startResize(id, card, e) {
     e.preventDefault();
     e.stopPropagation();
+    const meta = treeNodes[id];
+    const draggedH = meta && meta.size && meta.size.h ? meta.size.h : 0;
     resizing = {
       id,
       startX: e.clientX,
       startY: e.clientY,
       startW: card.offsetWidth,
       startH: card.offsetHeight,
+      // The drag's own ceiling. `MAX_H` is the base, but a card can legitimately be
+      // taller than it: the layout stretches a sidecar card to its grid cell
+      // (tree.js `stretch`, set as an inline `max-height`), and a `size.h` the user
+      // dragged earlier is a height they asked for. Clamping to `MAX_H` alone would
+      // snap such a card — and the preview with it — down to 1200 the moment the
+      // handle is touched, and store that 1200 as the card's size. So the ceiling is
+      // the largest of the three: the base, the height the card has right now, and
+      // the drag height it remembers. One number for both the wireframe and the
+      // commit (see `onResizeMove` / `endResize`).
+      ceilH: Math.max(MAX_H, card.offsetHeight, draggedH),
       target: { w: card.offsetWidth, h: card.offsetHeight },
     };
     try { e.target.setPointerCapture(e.pointerId); } catch { /* noop */ }
@@ -2165,7 +2243,9 @@
     const dw = (e.clientX - resizing.startX) / zoom;
     const dh = (e.clientY - resizing.startY) / zoom;
     const w = clamp(resizing.startW + dw, MIN_W, MAX_W);
-    const h = clamp(resizing.startH + dh, MIN_H, MAX_H);
+    // `startH + dh` is clamped at `resizing.ceilH` (see `startResize`), so the
+    // wireframe can never advertise a height the commit would not store.
+    const h = clamp(resizing.startH + dh, MIN_H, resizing.ceilH);
     resizing.target = { w, h };
     // Throttle to one paint per frame; only the wireframe moves.
     if (resizeRaf != null) return;

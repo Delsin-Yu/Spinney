@@ -53,7 +53,8 @@ SessionRuntime (1 per session)
 ├─ session (tree) + activeNodeId = VIEW focus
 ├─ runs: Map<nodeId, TurnRun>          (P1: at most one; P3: many)
 ├─ subAgentPool (per-session budget) / runningSubAgents
-├─ background: Map<nodeId, BackgroundRegistry> + id index (P2) + bgNodes (task → card)
+├─ hub: BackgroundHub (one per window; the per-(session,node) registries and the
+│      id → owner index live there) + bgNodes: Map<taskId, cardNodeId> (P2)
 ├─ completion signals: Map<nodeId, SignalNotice[]> (hop returns: RuntimeHost.queueHopReturn)
 └─ model / thinkingEffort (P4)
 
@@ -61,8 +62,9 @@ TurnRun (1 per send = 1 new node; an injected completion-signal turn reuses its 
 ├─ nodeId + the node it appends to (turn basis, independent of the view)
 ├─ agent: Agent                        (P1: session-level agent reused; P3: dedicated per run)
 ├─ stream coalescing buffers + live tool deltas
-├─ uploadController (image attachments)
-└─ interrupt bookkeeping for the node it wrote
+├─ prefixLen / prefixTail (the slice boundary + the identity guard)
+└─ interrupt bookkeeping for the node it wrote (SessionRuntime.interruptedNodes,
+   not on the run; the image-upload abort is a SessionRuntime field too)
 ```
 
 ### 2.1 View focus vs turn basis (the load-bearing rule)
@@ -77,7 +79,8 @@ TurnRun (1 per send = 1 new node; an injected completion-signal turn reuses its 
   only bind a worker whose node has no live run, which is the safe moment in each case.
 - A completion signal is therefore delivered one of two ways, and neither follows the view:
   injected into the node's **running** turn at its next tool boundary (`Agent.setSignalHandler`,
-  `agent.ts:625-634`), or as an injected turn on that same node when it is idle
+  consulted after each whole tool batch — `src/agent/agent.ts` ~:687-696; the setter is ~:402),
+  or as an injected turn on that same node when it is idle
   (`drainSignals` → `beginInjectedTurn`, `fresh:false`). It never creates a node under the owner
   and never moves `session.activeNodeId`.
 - Therefore `mainStreamNodeId()` is replaced by explicit routing: **every** streaming message
@@ -97,10 +100,12 @@ nodeWorkers: Map<nodeId, { agent: Agent; tools: ToolRegistry }>
   `exec_command` from node X's turn always registers under X (no "which run is this?" ambiguity),
   and the sub-agent handlers (`spawn_agents` / `send_agent_message` / `list_nodes`) close over the
   same node instead of consulting "the active turn".
-- A run is `runs.set(nodeId, run)`; `isRunning()` = `runs.size > 0`; `runningNodes()` = the keys.
-  A new turn is refused only when **that node** already has a live run — which is exactly what the
-  composer's Stop-not-Send rule enforces in the UI. Two *different* nodes of one session may stream
-  at once.
+- A run is `runs.set(nodeId, run)`; `isRunning()` = `this.busy || this.runs.size > 0`
+  (`busy` is also raised while an image upload is in flight); `runningNodes()` = the keys.
+  A new turn is refused when **that node** already has a live run (`runs.has(basis)`), when it
+  still owns unfinished work (`lockedWorkCount(basis) > 0`, the send-side half of the
+  Stop-not-Send rule), and while the `/wait-for-finish` hold is armed — two *different* nodes of
+  one session may stream at once.
 - Interrupt bookkeeping is per node: `interruptedNodes: Map<nodeId, Agent>` records which node's
   agent holds a pending interruption notice; starting a run on node M with parent P either transfers
   P's pending notice into M's agent (`Agent.transferInterruptTo`) or clears it
@@ -125,20 +130,20 @@ nodeWorkers: Map<nodeId, { agent: Agent; tools: ToolRegistry }>
 
 | message | shape | notes |
 | --- | --- | --- |
-| `state` | `{ sessionId, busy, status, runningNodes: string[], lockedNodes: string[] }` | `busy` = any run in the session; `runningNodes` = nodes with a live run. Composer shows Stop iff `runningNodes.includes(viewFocusId)` **or** `lockedNodes.includes(viewFocusId)`, and Send otherwise. `lockedNodes` = nodes that are *not* streaming but still own unfinished work (a running background job / async sub-agent batch, or a notice about to be injected into them): Stop there is the union kill (`POST /stop {nodeId}` — turn + jobs + sub-agents, with the notices written back into the node instead of opening a turn). Only the owner is listed — its existing descendants stay usable. |
+| `state` | `{ sessionId, busy, status, runningNodes: string[], lockedNodes: string[] }` | `busy` = `isRunning()` (a live run, or an image upload in flight); `runningNodes` = nodes with a live run. Composer shows Stop iff `runningNodes.includes(viewFocusId)` **or** `lockedNodes.includes(viewFocusId)`, and Send otherwise. `lockedNodes` = nodes that still own unfinished work — a running background job / async sub-agent batch, or a notice about to be injected into them. It applies **no run filter**, so a streaming node that also owns a running job is listed in *both* `runningNodes` and `lockedNodes`: Stop there is the union kill (`POST /stop {nodeId}` — turn + jobs + sub-agents, with the notices written back into the node instead of opening a turn). Only the owner is listed — its existing descendants stay usable. |
 | `tree` | `{ activeId, viewId, rootId, nodes[] }` | `activeId` = stream target; `viewId` = view focus. Each node carries `kind` (`'turn' \| 'agent' \| 'bg'`), `delivered` (sidecars only) and, for a `kind:'bg'` card, its terminal snapshot (`bgTaskId` / `bgCommand` / `bgExitCode` / `bgKilled` / `bgElapsedMs` / `bgOutputTail`) so the card re-renders without asking the in-memory hub. A `kind:'agent'` node carries **`itemCount` and no `items`**: its transcript is fetched with `loadAgentItems` when the card is expanded (a session switch used to ship 2.3 MB of sidecar transcripts, and 10 k DOM elements for 8 cards). |
 | `path` | `{ ids, nodes[] }` | the **view** path. Its `nodes[].items` are complete (a checked-out node — including a sidecar — must render immediately). |
 | `agentItems` | `{ id, items }` | answer to `loadAgentItems`: that sub-agent card's transcript (`clipDisplayItem`-ed). |
-| `nodeUpdate` | `{ id, status, title, usage }` | unchanged. |
+| `nodeUpdate` | `{ id, status, title, usage, contextFull }` | the one patch shape (`nodeStatePatch`); `contextFull` picks the card's `⧉ Continue in a new window` / `↻ Retry` variant. |
 | `panTo` | `{ id }` | unchanged (host pans the view, not the stream target). |
 | `delta` / `thinkingDelta` | `{ nodeId, text }` | **`nodeId` now always present.** |
 | `usage` | `{ nodeId, usage }` | idem. |
 | `toolCallDelta` | `{ nodeId, index, id, name, args }` | idem. |
 | `toolStart` / `toolEnd` | `{ nodeId, ... }` | idem. |
 | `done` / `interrupted` / `error` | `{ nodeId, ... }` | idem: clears that node's live tool cards / tps meter. |
-| `backgrounds` | `{ tasks: Array<Task & { nodeId, cardNodeId, pendingDelivery }> }` | replaces `background`: flat list, each task tagged with its owning node **and** with the `kind:'bg'` card that mirrors it (`cardNodeId`, null when the branch is gone). The webview keys it by `task.id` and patches that card instead of grouping by `nodeId`; `#bg-panel` and the in-card dock are gone. |
+| `backgrounds` | `{ tasks: Array<Task & { nodeId, cardNodeId, pendingDelivery }> }` | replaces `background`: flat list, each task tagged with its owning node **and** with the `kind:'bg'` card that mirrors it (`cardNodeId`, null when the branch is gone). The webview never reads `cardNodeId`: it keeps the snapshot keyed by `task.id` and re-renders **every** `kind:'bg'` card from that card's own `bgTaskId`; `#bg-panel` and the in-card dock are gone. |
 | `backgroundNotice` | `{ nodeId, item }` | appended inside that node's card as a `.msg.bgnotify` block (`item.kind: 'background' \| 'subagent'` picks the `BG` / `SUB` badge). Injected at a tool boundary of a running turn, so the webview finalizes the streaming answer before it adds the block. |
-| `status`, `notice`, `config`, `context`, `sessionStats`, `balance`, `user`, `imagePicked`, `reset` | unchanged | `reset` is per-tab (each tab is its own webview). |
+| `status`, `notice`, `config`, `context`, `sessionStats`, `balance`, `user`, `imagePicked`, `harnessNote`, `agentStart`, `agentDone`, `reset` | unchanged | `reset` is per-tab (each tab is its own webview); the three sidecar messages carry their node id (`harnessNote` `{ nodeId, text }`, `agentStart` / `agentDone` `{ id, ... }`) so they land in that card. |
 
 ### 3.2 webview → host
 
@@ -149,7 +154,7 @@ nodeWorkers: Map<nodeId, { agent: Agent; tools: ToolRegistry }>
 | `stop` | `{ nodeId? }` | stop that node's run (omit ⇒ every run of this session). |
 | `killBackground` | `{ id }` | resolved in this session (session-local ids). |
 | `loadAgentItems` | `{ id }` | that sub-agent card was expanded and wants its transcript (`tree` sent only `itemCount`); the host answers with `agentItems`. |
-| `deleteBranch`, `setNodeSize`, `killAgent`, `clear`, `pickImage`, `setModel`, `setThinkingEffort`, `openExternal`, `layoutDiagnostic`, `ready` | unchanged | `clear` clears **this session**. |
+| `continueTurn`, `rolloverTurn`, `deleteBranch`, `setNodeSize`, `killAgent`, `copyNodeId`, `pickImage`, `setModel`, `setThinkingEffort`, `openModelTree`, `openExternal`, `layoutDiagnostic`, `ready` | unchanged | the ▶ button posts `continueTurn` (in-place retry) or `rolloverTurn` (new context window) for `{ id }`. `clear` is **not** posted by `media/main.js` any more; the host still handles it. |
 
 All webview→host messages are handled **in the context of the panel's session**
 (`handlePanelMessage(panel, message)`), never "the active session".
@@ -193,9 +198,10 @@ export interface BackgroundAccess {
 }
 ```
 
-`makeExecCommandTool(access, ...)` / `makeCheckBackgroundTool(access)` /
-`makeKillBackgroundTool(access)` / `makeJoinBackgroundTool(access)`. `ToolRegistry` keeps a
-`BackgroundAccess` (set once per session runtime) instead of a single `BackgroundRegistry`.
+`makeExecCommandTool(getAccess, ...)` / `makeCheckBackgroundTool(getAccess)` /
+`makeKillBackgroundTool(getAccess)` / `makeJoinBackgroundTool(getAccess)`. `ToolRegistry` keeps a
+`BackgroundAccess` (set once per node worker through `setBackgroundAccess`) instead of a single
+`BackgroundRegistry`.
 
 ## 5. Phases & acceptance
 
@@ -236,7 +242,9 @@ invariant:
 | suite | proves |
 | --- | --- |
 | `concurrency` | two sessions report a live run in the **same** `/state` sample (P1). |
+| `sessions` | two `POST /session/start` sessions are distinct, listed with their titles, and each prompt's marker lands in its own transcript (P1). |
 | `background` | a `start_in_background` job's ownership (`sessions[].backgroundNodes`) survives a `/navigate` that moves the **view** to another node (P2). |
+| `signals` | a finished job's notice lands **inside** the owning node: no new node, unchanged node count, `backgroundNodes` still the turn node (P2). |
 | `branch` | two nodes of **one** session stream at once; a second send on a live node is refused; `POST /stop {nodeId}` stops only that node (P3). |
 | `navigation` | `/navigate` + `/continue` on one session leave another session's run undisturbed (P1). |
 | `health` | `/health` + `/state` shape and the session list. |
@@ -252,7 +260,8 @@ Rules that keep a reboot verifiable (the self-driving loop):
 
 - `POST /wait-for-finish {holdMs}` arms a hold (`ChatViewProvider.isHeld()`), and **every** turn
   start is refused while it is armed — `beginTurn` and `beginInjectedTurn` both gate on it, and
-  the completion-signal hook returns nothing while it is held (`runtime.ts:2502-2506`) — injected
+  the completion-signal hook `takeSignalsFor()` returns nothing while it is held
+  (`src/chat/runtime.ts` ~:3987-3999, hold check ~:3995) — injected
   background/sub-agent notice turns included. `/reload-window` itself refuses while a
   turn runs, so the hold is what closes the race: once idle, nothing new can start.
 - Restore the **focus before** the reboot: `wait-for-finish`'s `{sessionId, nodeId}` is what the

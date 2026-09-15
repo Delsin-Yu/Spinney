@@ -5,9 +5,18 @@ reload. So the reload lifecycle lives **outside** the extension:
 
 - `src/http/controlServer.ts` — an opt-in local HTTP control plane
   (`spinney.httpApi.enabled`, default **off**; loopback only; bearer token
-  written to `<globalStorage>/http/<instanceId>.json`, mode 0600). Its discovery
-  file's `workspace` field is the workspace folder path, or `null` when no folder
-  is open.
+  written to `<globalStorage>/http/<instanceId>.json`, mode 0600). It listens on
+  `spinney.httpApi.port`, whose default **`0`** means "let the OS pick an
+  ephemeral port" — the real port is only ever in the discovery file. That
+  file's name is `<instanceId>.json`, the instance id being `pid-<pid>` by
+  default; its `workspace` field is the workspace folder path, or `null` when no
+  folder is open.
+- **Four env vars bypass the settings entirely** (`src/http/controlServer.ts`):
+  `SPINNEY_HTTP=1` enables the plane even when `spinney.httpApi.enabled` is off,
+  `SPINNEY_HTTP_PORT` (a positive number) wins over `spinney.httpApi.port`,
+  `SPINNEY_HTTP_TOKEN` replaces the per-process random bearer token, and
+  `SPINNEY_INSTANCE_ID` replaces the instance id — and therefore the discovery
+  file's name.
 - `tools/hyper-vscode/hvsc.mjs` + `serve.ps1` — a workspace-local supervisor
   (excluded from the `.vsix` via `.vscodeignore`) that launches/supervises `code`
   windows and drives the reboot. State lives in `tools/hyper-vscode/.state/`:
@@ -19,8 +28,8 @@ Control plane routes (all require `Authorization: Bearer <token>`):
 | Route | Behaviour |
 | --- | --- |
 | `GET /health` | `{ok, instanceId, pid, port, startedAt, busy, sessionId}` |
-| `GET /state` | window `busy` + active session/node + the session list; each session carries `id`, `title`, `nodes`, `active`, `titleSource`, `titleLocked`, `running`, `runningNodes`, `lockedNodes`, `runningBackgrounds`, `backgroundNodes`, `model`/`modelName`/`effort` — the **checked-out node's** card and level, not a session-wide value (`SessionRuntime.model` is a getter over the node's own card, its nearest ancestor's, else the session seed) |
-| `POST /wait-for-finish` | block until idle (`scope:'turn'` default = the active session's run; `scope:'all'` also waits for every sub-agent / background job), then flush the last persist. `holdMs` arms a **hold** (`isHeld()`) that refuses every turn start for that long; `interrupt:true` is the escape hatch |
+| `GET /state` | `{busy, sessionId, activeNodeId, runningSubAgents, runningBackgrounds, sessions}` — the window's `busy`, its active session, its checked-out node, how many sub-agents it is running and whether it owns a running background terminal, plus the session list; each session carries `id`, `title`, `nodes`, `active`, `titleSource`, `titleLocked`, `running`, `runningNodes`, `lockedNodes`, `runningBackgrounds`, `backgroundNodes`, `model`/`modelName`/`effort` — the **checked-out node's** card and level, not a session-wide value (`SessionRuntime.model` is a getter over the node's own card, its nearest ancestor's, else the session seed) |
+| `POST /wait-for-finish` | block until idle (`scope:'turn'` default = the active session's run; `scope:'all'` also waits for every sub-agent / background job), then flush the last persist. `timeoutMs` defaults to **30000** ms (the host clamps it to ≤600000); when it expires the reply is **408** `{ok:false, error:'timeout', busy, runningSubAgents, runningBackgrounds, sessionId, nodeId}`. `holdMs` arms a **hold** (`isHeld()`) that refuses every turn start for that long; `interrupt:true` is the escape hatch |
 | `POST /navigate` | check out a node (and open/focus that session's tab) |
 | `POST /continue` | send a caller-supplied message (`{sessionId?, nodeId?, message}`) that continues from a node — node-scoped, so a run on another branch does not block it |
 | `POST /stop` | `{sessionId?, nodeId?}` — with `nodeId` a **union kill**: that node's live run, every background terminal it owns and every sub-agent it is still running, and nothing continues (the notices are written back into that node's history, so they ride the next request instead of opening a turn); without `nodeId`, cancel every run of the session (else the active session) and leave background jobs alone. Returns `{ok, sessionId, nodeId, stopped}`. Nothing running is `stopped: 0`; an unknown session is 409. Never touches the reload hold |
@@ -69,12 +78,14 @@ weaken it.
 `hop_session` / `list_nodes` tools): the queued fresh session is started with an
 armed `hopReturn` record, so when its turn finishes the provider queues the
 *return* trip — a `session/start` back to the origin session carrying that turn's
-final assistant text (`[会话跳转回执] …`, clipped to 8 KB, plus the child's
-`sessionId` for `search_transcripts`). With `returnNodeId` the return first checks
-out that node, so the answer lands as a **new branch** off it instead of
-continuing the current line of conversation; without it the origin's checked-out
-node is used. The origin agent therefore resumes in a new turn with the child's
-answer. `list_nodes` renders the active session's tree (node ids, status, parent,
+final assistant text in a `[session hop receipt] The task you dispatched to the
+new session "…" (…) has finished (status: …).` prompt (the reply itself clipped
+to 8 KB, plus the child's `sessionId` for `search_transcripts`). With
+`returnNodeId` the return first checks out that node, so the answer lands as a
+**new branch** off it instead of continuing the current line of conversation;
+without it the origin's checked-out node is used. The origin agent therefore
+resumes in a new turn with the child's answer. `list_nodes` renders the active
+session's tree (node ids, status, parent,
 title) so the agent can name that node — node ids are otherwise invisible to the
 model. Guards: one hop at a time (`hopReturn` armed), the origin and the return
 node must exist, a hop is refused while its session owns a running background terminal
@@ -115,14 +126,18 @@ Operational rules:
   `Start-Process`): a VS Code task and a harness background terminal both die
   with the window (the latter via `dispose()` → `killAll()`).
 - Profile **passthrough** is the default (`code -n`, no `--user-data-dir`), so the
-  new window shares the user's `workspaceState`. Its env vars do **not** reach
-  that window, so the control plane must be enabled in settings
-  (`spinney.httpApi.enabled`, workspace or user scope). `--isolated` keeps a
+  new window shares the user's `workspaceState`. When `code -n` merely attaches to
+  an already-running main process, its env vars do **not** reach the new window, so
+  the control plane must be enabled in settings (`spinney.httpApi.enabled`,
+  workspace or user scope); `hvsc` therefore also sets `SPINNEY_HTTP=1` and
+  `SPINNEY_INSTANCE_ID` on every `code` it launches itself. `--isolated` keeps a
   separate profile and allows a hard kill/relaunch.
 - Never pass `--wait` to `hvsc reboot` from inside a turn: the supervisor's
   `/wait-for-finish` would wait for that very turn (deadlock). Fire it without
   `--wait` and let the supervisor `/continue` the agent afterwards.
 - `/continue` makes the agent run a caller-supplied instruction — a
   **local-trust RCE boundary**. Keep `spinney.httpApi.enabled` off unless a
-  controller needs it, and never log the token.
+  controller needs it, and never log the token. `SPINNEY_HTTP=1` opens the very
+  same boundary without the setting, so an env var that reaches a window is just
+  as much a trust decision as the setting is.
 

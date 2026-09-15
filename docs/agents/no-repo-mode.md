@@ -49,10 +49,10 @@ modules have no `ExtensionContext`).
   to be mode-neutral ("the harness root — the workspace folder, or the harness
   scratch folder when none is open").
 - **P1 — prompt** (`src/agent/prompt.ts`): `EnvironmentFacts` carries the agent
-  root; in no-repo mode `{{environment}}` renders two lines — the facts plus
-  "relative paths and the default cwd are based on the harness root `<path>`; use
-  absolute paths for real files and do not assume a repository layout". The
-  template's path bullet stops claiming a workspace root.
+  root; in no-repo mode `{{environment}}` renders two lines — the facts, then
+  "Relative paths and the default cwd for commands are based on the harness root
+  `<path>`; pass absolute paths to touch real files, and do not assume a repository
+  layout exists." The template's path bullet stops claiming a workspace root.
 - **P2 — session/config + workspace changes** (`src/extension.ts`,
   `src/chat/ChatViewProvider.ts`, `package.json`):
   - `storage = workspaceFolders?.length ? context.workspaceState : context.globalState`
@@ -86,8 +86,10 @@ modules have no `ExtensionContext`).
 - No `AGENTS.md` means the project-instructions section is dropped from the
   prompt (existing `stripAgentsMdSection` behavior). A *global* instructions file
   (`<globalStorage>/AGENTS.md`) is deliberately **not** part of this change.
-- `read_image` and any screenshot tool need absolute paths; `--path .spinney/screenshots`
-  still works because the shell cwd is the agent root.
+- `read_image` needs no absolute path: like the other file tools it resolves
+  through `resolvePath()` against the agent root, so a relative path works in
+  no-repo mode too. `--path .spinney/screenshots` passed to a command still works
+  because the shell cwd is the agent root.
 
 ## Status
 

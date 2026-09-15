@@ -58,7 +58,7 @@ to **≥ 1** (a non-positive limit would otherwise deadlock every sub-agent).
 - **Models are cards.** Exactly one card is built in — `deepseek-flash` (the
   fallback, used before anything is configured). Everything else is the user's
   `spinney.providers` + `spinney.modelCards`, structured data: the Model Card Tree
-  page (`Spinney: Model Cards`) is the editor, and the settings row is a read-only
+  page (`Spinney: Open Model Cards`) is the editor, and the settings row is a read-only
   preview plus a link into `settings.json`. There is no model list in the Settings UI
   (an object setting renders read-only there) and no chat-side **Models** panel — the
   page is the only editor. The page writes the whole desired state through

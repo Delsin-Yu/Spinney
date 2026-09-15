@@ -12,78 +12,90 @@
   renders beside that node's card — never another branch or session. `listForNode`,
   `listForSession` (each hit tagged with its owner), `runningForNode`, `kill`, `waitFor` all take
   `sessionId`, so a task id never leaks across sessions. `register` also fires the
-  `onRegistered` hook (`backgroundHub.ts:46`, called at `backgroundHub.ts:104-107`) once per job,
+  `onRegistered` hook (`backgroundHub.ts:46`, called at `backgroundHub.ts:106`) once per job,
   synchronously, so the coordinator can create the job's card.
 - The tools reach the hub through a `BackgroundAccess` set on the `ToolRegistry`
   (`setBackgroundAccess`): `currentOwner()` is the running turn's **node** — for a node worker it
   closes over `{ sessionId, nodeId }` (`SessionRuntime.workerFor`) — so `exec_command` from node
   X's turn always registers under X. There is no "which run is this?" ambiguity (P3).
-- Three tools manage an id: `check_background_terminal(id)`, `kill_background(id)`,
-  `join_background(id)` (`join` blocks until it finishes, honours Stop). All resolve the id
-  through `hub.lookup` in the calling session.
+- Three tools manage a job: `check_background_terminal(pid)`, `kill_background(pid)`,
+  `join_background(pid)` — the argument is a numeric **`pid`** in all three, not `id`
+  (`src/tools/backgroundTools.ts`), even though what `exec_command` hands back is a
+  **session-local** id, not an OS pid. `join` blocks until the job finishes and honours Stop. All
+  three resolve the id through `hub.lookup` in the calling session — and none of them is in a
+  **sub-agent's** tool registry: `subAgentTools` (`src/chat/runtime.ts:3042-3052`) exposes only
+  `read_file` / `list_dir` / `search_files` / `search_transcripts` (+ `write_file` /
+  `replace_in_file` / `exec_command` when writable), so a sub-agent that backgrounds a job gets an
+  id it cannot itself manage — a call to any of the three answers `Error: unknown tool "…"`. The
+  job registers under the sub-agent's own node, its notice still reaches the sub-agent, and only
+  the user (the job card's kill button / Stop on that line) can kill it.
 - **A job's card is a flying `kind:'bg'` node, not a dock.** `SessionRuntime.onBackgroundRegistered`
-  (`runtime.ts:2360`) creates it under the owning turn node once per job: `bgTaskId` = the
+  (`runtime.ts:3847`) creates it under the owning turn node once per job: `bgTaskId` = the
   session-local id, `bgCommand` = the command, title = the command clipped to 60 chars
-  (`runtime.ts:2371-2377`). It is a **sidecar** exactly like a sub-agent window: `attachNode`
-  keeps sidecars after the turn spine (`tree.ts:249-262`), and `isSidecar` (`tree.ts:349-351`,
+  (`runtime.ts:3858-3861`). It is a **sidecar** exactly like a sub-agent window: `attachNode`
+  keeps sidecars after the turn spine (`tree.ts:321-338`), and `isSidecar` (`tree.ts:462`,
   `kind === 'agent' || kind === 'bg'`) keeps it out of the API path (`pathMessages`,
-  `tree.ts:302-311`) and out of the checkout chain (`leafOf`, `tree.ts:328-340`). The create path
-  saves and restores `session.activeNodeId` (`runtime.ts:2368-2376`), so a job never moves the
+  `tree.ts:416`) and out of the checkout chain (`leafOf`, `tree.ts:443`). The create path
+  saves and restores `session.activeNodeId` (`runtime.ts:3857-3863`), so a job never moves the
   view focus. The card lives in the same right-hand column-major grid as the sub-agent windows
-  (`media/tree.js` `isSidecarKind` `tree.js:53-56`, `agentKids` `tree.js:99-101`).
+  (`media/tree.js` `isSidecarKind` `tree.js:54-56`, `agentKids` `tree.js:101`).
 - **Webview rendering:** there is no standalone panel and no dock at the bottom of a card any more
   (`#bg-panel`, `.node-bg`, `.bg-dock-*`, `.bg-item*` are gone). `renderBgBody`
-  (`main.js:821-861`) fills a `kind:'bg'` card from the tree node's own meta plus the latest
-  snapshot: head = `#taskId` + status + elapsed, body = the command and the output tail, and a
-  `kill` button (`main.js:852-858`, posts `killBackground { id }`) only while the job runs.
+  (`media/main.js:1131-1171`) fills a `kind:'bg'` card from the tree node's own meta plus the latest
+  snapshot: a status row of `#taskId` + status + elapsed (and the card head's status chip), then the
+  command and the output tail, plus a
+  `kill` button (`media/main.js:1161-1170`; built by `killBackgroundButton`, `media/main.js:1098-1107`,
+  which posts `killBackground { id }`) only while the job runs.
 - **Snapshot:** `postBackgrounds` sends one flat `{ type: 'backgrounds', tasks }` list, every task
-  (`BackgroundInfo`, `runtime.ts:139-157`) tagged with `nodeId` (its owner), `cardNodeId` (the
-  `kind:'bg'` card mirroring it, `runtime.ts:2284`) and `pendingDelivery`. The list carries running
-  jobs plus finished ones still awaiting delivery (`runtime.ts:2320-2323`); a delivered job drops
+  (`BackgroundInfo`, `runtime.ts:349-367`) tagged with `nodeId` (its owner), `cardNodeId` (the
+  `kind:'bg'` card mirroring it, `runtime.ts:3771`) and `pendingDelivery`. The list carries running
+  jobs plus finished ones still awaiting delivery (`runtime.ts:3807-3810`); a delivered job drops
   out, but its card keeps the persisted terminal state. The webview keys the snapshot by `task.id`
-  and patches the card of each tree node with a `bgTaskId` (`main.js:868-887`); the host coalesces
-  the snapshot (~200 ms, `runtime.ts:2301-2311`) so a chatty process cannot freeze the webview.
-- **Completion → injected into the owning node.** `onBackgroundFinished` (`runtime.ts:2390`) first
-  snapshots the terminal state onto the card (`snapshotBackgroundCard`, `runtime.ts:2406-2421`:
+  and patches the card of each tree node with a `bgTaskId` (`renderBackgrounds`,
+  `media/main.js:1178-1197`); the host coalesces
+  the snapshot (~200 ms, `runtime.ts:3788-3797`) so a chatty process cannot freeze the webview.
+- **Completion → injected into the owning node.** `onBackgroundFinished` (`runtime.ts:3877`) first
+  snapshots the terminal state onto the card (`snapshotBackgroundCard`, `runtime.ts:3894-3908`:
   `bgExitCode`, `bgKilled`, `bgElapsedMs`, `bgOutputTail` (≤800 chars), `bgCommand`, node status
   `done`/`interrupted`) — the hub is in-memory, the card must outlive it — then queues one
-  `SignalNotice` (`runtime.ts:2442-2458`, `pushSignal` `runtime.ts:2465`, 75 ms debounce
-  `runtime.ts:2479`) keyed by the **owner** node (`nodeId: owner.nodeId`, never the view focus).
+  `SignalNotice` (`buildBackgroundSignal` `runtime.ts:3929-3945`; `pushSignal` `runtime.ts:3952`;
+  75 ms debounce `scheduleSignalDrain` `runtime.ts:3972`) keyed by the **owner** node
+  (`nodeId: owner.nodeId`, never the view focus).
 - Delivery has two paths, and neither creates a node:
-  - owner turn still running → the agent hook `Agent.setSignalHandler` (`agent.ts:261`,
-    `agent.ts:344`; wired in `workerFor`, `runtime.ts:433`) is called after the **whole** tool batch
-    of an assistant round (`agent.ts:625-634`) and pushes one combined `user` message
-    (`combineSignalText`, `runtime.ts:166-178`), so the model sees the notice on its **next
-    request**, mid-turn (`takeSignalsFor`, `runtime.ts:2494-2513`);
-  - owner node idle → `drainSignals` (`runtime.ts:2524-2591`) delivers the same text as an
-    **injected turn on that same node** (`beginInjectedTurn`, `runtime.ts:1110`, `fresh:false`:
-    no node is created, no view focus moves), gated per node (`isNodeLive`, `runtime.ts:2057`) and
+  - owner turn still running → the agent hook `Agent.setSignalHandler` (`agent.ts:402`; wired in
+    `workerFor` at `runtime.ts:908`, and per sub-agent at `runtime.ts:3429`) is called after the **whole** tool batch
+    of an assistant round (`agent.ts:687-696`) and pushes one combined `user` message
+    (`combineSignalText`, `runtime.ts:376-388`), so the model sees the notice on its **next
+    request**, mid-turn (`takeSignalsFor`, `runtime.ts:3987-4006`);
+  - owner node idle → `drainSignals` (`runtime.ts:4017-4089`) delivers the same text as an
+    **injected turn on that same node** (`beginInjectedTurn`, `runtime.ts:2000`, `fresh:false`:
+    no node is created, no view focus moves), gated per node (`isNodeLive`, `runtime.ts:3539`) and
     by `host.isHeld()`.
-- **The notice block renders inside the owning card:** `renderSignalCards` (`runtime.ts:2646-2677`)
+- **The notice block renders inside the owning card:** `renderSignalCards` (`runtime.ts:4147-4168`)
   pushes `DisplayItem.kind:'background'` into that node's own `displayItems` (so a reload re-renders
   it) and posts `backgroundNotice { nodeId, item }`; the webview's `addBackgroundNotice`
-  (`main.js:694-712`) appends a `.msg.bgnotify` block whose badge is `BG` for a job and `SUB` for a
+  (`media/main.js:1002-1022`) appends a `.msg.bgnotify` block whose badge is `BG` for a job and `SUB` for a
   sub-agent batch. An injected signal is deliberately **never** a `kind:'user'` display item — a
   replayed user item would be skipped or would clobber the pinned prompt. Because a job can be
   delivered mid-stream, `backgroundNotice` first finalizes the streaming answer
-  (`main.js:2451-2457`). `N` notices queued at the same boundary merge into **one** message (D2).
-- **`Delivered` / terminal snapshot (D1).** `TreeNode.delivered` (`tree.ts:75`) means the
+  (`media/main.js:3227-3229`). `N` notices queued at the same boundary merge into **one** message (D2).
+- **`Delivered` / terminal snapshot (D1).** `TreeNode.delivered` (`tree.ts:110`) means the
   completion signal reached its reader: the card is settled when the notice is delivered
-  (`settleSignals`, `runtime.ts:2679-2695`, followed by a `postTree()`), the job leaves the
+  (`settleSignals`, `runtime.ts:4172-4186`, followed by a `postTree()`), the job leaves the
   `backgrounds` snapshot, and the card stays as a record with a `Delivered` badge
-  (`main.js:896-911`, `.node-delivered-badge`) plus its persisted `bg*` terminal fields. A
+  (`media/main.js:1206-1219`, `.node-delivered-badge`) plus its persisted `bg*` terminal fields. A
   tool-initiated kill/join (`notifyAgent=false`) skips the notice and settles the card directly
-  (`runtime.ts:2395-2402`). After a restart the card survives `pruneSession` (`tree.ts:454-463`),
+  (`runtime.ts:3882-3889`). After a restart the card survives `pruneSession` (`tree.ts:531-590`),
   but never claims to be live: the generic normalization turns a stored `running` into
-  `interrupted` (`tree.ts:437-441`) and `delivered` is forced true (`tree.ts:447-453`), because the
+  `interrupted` (`tree.ts:550-554`) and `delivered` is forced true (`tree.ts:564-566`), because the
   hub is in-memory and the process was torn down. Its body is then rendered from the node's `bg*`
-  snapshot (`main.js:799-818`).
-- Stale notices are dropped, not delivered: `signalStale` (`runtime.ts:2632-2641`) discards a
+  snapshot (`outputTailFor`, `media/main.js:1121-1124`).
+- Stale notices are dropped, not delivered: `signalStale` (`runtime.ts:4130-4139`) discards a
   signal whose task was joined/killed through a tool (`notifyAgent !== true`) or whose owning node
-  is gone. `onKillBackground` (`runtime.ts:2699-2711`, a card's kill button) asks for
+  is gone. `onKillBackground` (`runtime.ts:4191-4203`, a card's kill button) asks for
   `notifyAgent: true`, so the model is told about the kill at the next delivery point.
 - While an external controller holds the window (`host.isHeld()`), the hook returns `[]` and the
-  idle drain backs off (500 ms, `runtime.ts:2343-2349`) instead of starting a turn — the reload
+  idle drain backs off (500 ms, `runtime.ts:3830-3836`) instead of starting a turn — the reload
   must not be refused with "agent is busy".
 - **Stop is a union kill, and it never continues the conversation.**
   The composer's bottom-right button is Stop while a node runs *or* while it still owns
@@ -125,9 +137,9 @@
   `runningBackgroundsForNodes(branchIds)`) — and only then kills the jobs (the process trees are
   torn down). Nothing is killed behind the user's back. A *turn* still streaming refuses the
   delete/clear outright instead of confirming (`rt.isRunning()`). Clearing drops the queue and the
-  card index (`runtime.ts:2744-2745`); detaching a branch drops the signals queued for the removed
+  card index (`runtime.ts:4238-4239`); detaching a branch drops the signals queued for the removed
   nodes, calls `hub.removeNode(..., { kill: true })` and forgets the cards whose nodes are gone
-  (`runtime.ts:2766-2791`). A `bg` card has no children, so its own delete button
+  (`runtime.ts:4274-4285`). A `bg` card has no children, so its own delete button
   (`deleteBranch`) is equivalent to deleting that one record.
 - **Lifecycles** (`src/tools/background.ts` owns the process plumbing):
   `hub.removeNode(session, node, {kill})` drops one node's jobs + registry (the session counter is
@@ -137,6 +149,6 @@
   `taskkill /T /F`, otherwise the detached POSIX process group), keep draining output past
   `OUTPUT_CAP` (a per-stream `StringDecoder` keeps a multi-byte character split across pipe chunks
   intact). `ControlSessionInfo.backgroundNodes` is unchanged: it reports the **owning turn nodes**
-  (from the hub's per-`(session, node)` registries, `runtime.ts:482-490`), so the control plane —
+  (from the hub's per-`(session, node)` registries, `runtime.ts:1008-1015`), so the control plane —
   and the `background` acceptance suite — can verify ownership survived a view move. The `kind:'bg'`
   cards are display-only and never appear there.

@@ -4,7 +4,7 @@ Spinney is a VS Code extension. It puts an agent harness in an editor tab, and t
 
 ## Install
 
-Install Spinney from the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=de-yu.spinney).
+Install Spinney from the [Visual Studio Marketplace](https://marketplace.visualstudio.com/items?itemName=DE-YU.spinney).
 
 Spinney works with a folder open and with no folder open. With no folder, a relative path resolves against a scratch folder in the extension storage.
 
@@ -15,7 +15,7 @@ Spinney works with a folder open and with no folder open. With no folder, a rela
 - The agent edits the working tree, runs shell commands, and can keep a long command in a background terminal while the turn continues.
 - Sub-agents run as parallel branches and report back to the parent that spawned them.
 - Press Stop to abort the turn at an active head.
-- A prompt-snippet button beside the message box fills it with a pre-written
+- A prompt-snippet button at the left of the composer fills it with a pre-written
   instruction — the shipped `Plan` / `Implement Parallel`, or your own rows from
   `spinney.promptSections` — so a routine instruction is one click and still editable
   before you send it.
@@ -32,7 +32,7 @@ Files and search:
 | `write_file` | Write a file and create parent folders. |
 | `replace_in_file` | Replace an exact substring. The substring must be unique. |
 | `list_dir` | List directory entries. |
-| `search_files` | Search files for a regex. A large result spills to a temp file. |
+| `search_files` | Search files for a regex. A large result spills to a file under `<agentRoot>/.spinney/tool-output/` (the workspace root, or the no-folder scratch root); `os.tmpdir()` is only a fallback. |
 
 Shell and background terminals:
 
@@ -71,7 +71,7 @@ If the workspace root holds an `AGENTS.md` file, Spinney reads it once at start 
 The default model is the built-in `deepseek-flash`, which accepts image input. It is
 what a fresh profile runs on before anything is configured.
 
-Everything else is configured as **model cards**. Run `Spinney: Model Cards` from the
+Everything else is configured as **model cards**. Run `Spinney: Open Model Cards` from the
 Command Palette, or click the gear beside the model dropdown in the chat. The page
 draws your providers as a tree with their model cards branching off them, and it is
 the editor of the model configuration:
@@ -101,7 +101,7 @@ Run `Spinney: Set API Key` from the Command Palette. Spinney keeps the key in VS
 SecretStorage, one entry per provider (the built-in provider also accepts the
 `DEEPSEEK_API_KEY` environment variable). Run `Spinney: Clear API Key` to erase it.
 With more than the built-in provider, set each key from that provider's row on the
-`Spinney: Model Cards` page.
+`Spinney: Open Model Cards` page.
 
 ## Privacy and data
 
@@ -111,7 +111,7 @@ results, and images.
 
 The local HTTP control plane is off by default. Turn it on only if you need it. It then listens on `127.0.0.1` and needs a bearer token. The `/continue` endpoint makes the agent run an instruction, so treat it as a local trust boundary.
 
-Spinney writes sessions and tool output to disk as plaintext JSONL. The default folder is the extension global storage. Set `spinney.subAgentTranscriptDir` to choose another folder.
+The sessions themselves are not files: they are Memento rows in `state.vscdb`, under the extension's `spinney.state` key (see below). What does reach disk is a finished turn's transcript (JSONL, one API message per line) and an oversized tool result spilled as a text file. Transcripts go to the extension global storage by default — set `spinney.subAgentTranscriptDir` to choose another folder — and spilled output goes to the agent root (see the tools table above).
 
 ## Uninstall and clear data
 
@@ -131,7 +131,7 @@ Uninstall Spinney from the Extensions view. Then delete the folder `<globalStora
 
 Six build guards run before packaging: `npm run check:models`, `npm run check:webview`, `npm run check:modeltree`, `npm run check:signals`, `npm run check:l10n`, and `npm run check:rollover`.
 
-Dev tooling lives in `tools/`: the guards, `sync-l10n-aliases.js` (the generated l10n aliases), the acceptance driver `harness-test.mjs`, `rollover-acceptance.js` (a windowless acceptance run for the context rollover), `modeltree-acceptance.js` (a windowless acceptance run for the Model Card Tree page's host half), `gate-acceptance.js` (a windowless acceptance run for the provider/card request gate), the `hvsc` supervisor, and one migration script. A change under `tools/` needs no build and no reload; that folder is not shipped in the `.vsix`.
+Dev tooling lives in `tools/`: the guards, `sync-l10n-aliases.js` (the generated l10n aliases), the acceptance driver `harness-test.mjs`, `rollover-acceptance.js` (a windowless acceptance run for the context rollover), `modeltree-acceptance.js` (a windowless acceptance run for the Model Card Tree page's host half), `gate-acceptance.js` (a windowless acceptance run for the provider/card request gate), `model-switch-acceptance.js` (a windowless acceptance run for the per-node model selection), the `hvsc` supervisor, and one migration script. A change under `tools/` needs no build and no reload; that folder is not shipped in the `.vsix`.
 
 ## Migrating data from an older build
 
@@ -148,4 +148,4 @@ The script moves no Secrets. Run `Spinney: Set API Key` again after the migratio
 
 The license is MIT. See `LICENSE`. Third-party notices live in `THIRD_PARTY_NOTICES.md` in the repository root.
 
-The package ships markdown-it, with linkify-it, mdurl, uc.micro, and punycode.js inlined. It also ships non-layered-tidy-tree-layout. Both are MIT licensed.
+The package ships markdown-it, with linkify-it, mdurl, uc.micro, punycode.js, and entities inlined. It also ships non-layered-tidy-tree-layout. markdown-it, linkify-it, mdurl, uc.micro, punycode.js, and non-layered-tidy-tree-layout are MIT licensed; entities is BSD-2-Clause.

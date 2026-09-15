@@ -6,11 +6,13 @@ harness (dev tooling, never shipped) that drives the running extension over HTTP
 host behaviour: `node tools/harness-test.mjs <suite...|all>` (suites `health`, `sessions`,
 `concurrency`, `navigation`, `background`, `signals`, `branch`, `selftest`; see
 `multi-session.md` §5.1). Manual F5 checks still cover what the harness cannot see — the F5
-flow exercises read/write/exec against a scratch file (`_e2e.txt` is a leftover scratch
-fixture, safe to ignore or delete). Before a release, confirm `npm run compile` is clean and
-`build-deploy.ps1` succeeds.
+flow exercises read/write/exec against a scratch file (keep it in `.spinney/`, which is
+gitignored, so a leftover is harmless). Before a release, confirm `npm run compile` is clean and
+`build-deploy.ps1` succeeds. CI (`.github/workflows/ci.yml`) runs only a subset of the guards
+below — `compile` + `check:models` + `check:webview` + `check:signals` — so green CI is not the
+same as a green release gate.
 
-Six build-time guards are the exception, all run by `vscode:prepublish` so a
+Seven build-time guards are the exception, all run by `vscode:prepublish` so a
 regression fails *packaging* instead of the user's session:
 
 - `npm run check:models` (`tools/check-models.js`) — the model configuration:
@@ -21,10 +23,12 @@ regression fails *packaging* instead of the user's session:
   `invariants/model-cards.md`.
 - `npm run check:webview` (`tools/check-webview.js`) — the chat webview script:
   `media/main.js` is neither compiled nor linted, so it loads the script into an
-  in-memory DOM (no browser, no VS Code), dispatches one message per type
-  `ChatViewProvider.post()` sends, and asserts that no handler throws *and* that
-  the UI follows (effort dropdown, model list, image affordances, context
-  readout). It exists because a stale identifier inside a message handler throws
+  in-memory DOM (no browser, no VS Code), dispatches a sample per message shape in
+  `TURN_MESSAGES` — a **superset** of the types `ChatViewProvider.post()` sends
+  (it still replays the retired `background` shape alongside the live
+  `backgrounds`) — and asserts that no handler throws *and* that the UI follows
+  (effort dropdown, model list, image affordances, context readout). It exists
+  because a stale identifier inside a message handler throws
   silently in the real webview — the UI just keeps its previous values, which is
   how the Thinking-effort dropdown once stuck on "none" after the chat-side model
   panel was deleted while the `config` handler still called into it. Its last step
@@ -88,24 +92,43 @@ regression fails *packaging* instead of the user's session:
   real window fills up — a wrong cut silently sends the entire dead history, or nothing
   at all — so they are pinned here. Like `check:signals` it is pure node against `out/`,
   and therefore also runs after `compile` in `vscode:prepublish`.
+- `npm run check:grid` (`tools/check-tree-grid.js`) — the Chat Tree's sidecar lattice
+  (`media/tree.js` plus the vendored tidy-tree engine into node with `vm`, no DOM and no
+  VS Code): over ~18 topologies (flat 1..9, nesting two and three levels deep, a card
+  taller than its own sub-grid, mixed `agent` / `bg`, plus the real session
+  `mu2zn79jlv7b23` as a golden case) it asserts the per-column sums — each column its
+  own stack, ending flush at the block's bottom line, the shorter column's free space
+  spread evenly with the integer remainder to the topmost cells — the `stretch` map
+  (covering every sidecar card, never a turn node, ≥ the card's measured height and
+  filling its slot, the one documented exception aside), no overlapping card rectangles
+  inside the parent's reserved block (≤ `agentMaxRows` cells per column,
+  `col = floor(i / R)`), card-free `busX` / `chanX` / `corrY` corridors (measured from
+  the card's *rendered* bottom), and a strict one-pass fixpoint for every reachable
+  shape. It also pins `media/main.js`'s `relayout()` order — clear the previously
+  applied stretch **before** measuring the cards, apply `result.stretch` after — the one
+  way this layout could creep every frame. Drift in any of the four `media/tree.js`
+  invariants just named — the per-column stacks, the even fill, the `stretch` map, the
+  corridors — fails packaging here instead of shipping.
 
-`tools/rollover-acceptance.js` is one of the two acceptance runs that need neither a
-window nor a provider — dev-only, **not** in `vscode:prepublish`. The guards above can
-only reach the pure modules, while the risky half of a context rollover lives in
-`SessionRuntime`: it stubs the `vscode` module (a `Module._load` hook) plus an offline
-client and drives `rolloverContext()` for real. What it pins: the new window's first
-request is `[system, harness]` with no ancestor message in it, the old node's
-background terminal is killed while another node's job is left alone, the kill notice
-lands in that node's history *and* in its re-dumped transcript, the carried-over
-request/answer plus the clip note and attachment count are in the message, the window
-is numbered per branch, and a node that is not context-full falls back to the in-place
+`tools/rollover-acceptance.js` is the first of the four acceptance runs that need
+neither a window nor a provider — dev-only, **not** in `vscode:prepublish`. The
+guards above can only reach the pure modules, while the risky half of a context
+rollover lives in `SessionRuntime`: it stubs the `vscode` module (a `Module._load`
+hook) plus an offline client and drives `rolloverContext()` for real. What it pins:
+the new window's first request is `[system, harness]` with no ancestor message in
+it, the old node's background terminal is killed while another node's job is left
+alone, the kill notice lands in that node's history *and* in its re-dumped
+transcript, the harness message carries the user's last request and the last answer
+verbatim **and** names and counts the killed background terminal, the window is
+numbered per branch, and a node that is not context-full falls back to the in-place
 continue. `node tools/rollover-acceptance.js` after `npm run compile`; it reads a few
 private fields, so a refactor may break the script while the product stays fine.
 
-`tools/modeltree-acceptance.js` is the same shape for the Model Card Tree page's host
-half — dev-only, **not** in `vscode:prepublish`, no window and no provider. It stubs
-the `vscode` module and drives `ModelTreeController` for real: a `ready` produces
-exactly one snapshot, an **invalid** save writes nothing at all and answers with the
+`tools/modeltree-acceptance.js` is the second of the four, the same shape for the
+Model Card Tree page's host half — dev-only, **not** in `vscode:prepublish`, no
+window and no provider. It stubs the `vscode` module and drives
+`ModelTreeController` for real: a `ready` produces exactly one snapshot, an
+**invalid** save writes nothing at all and answers with the
 reasons, a valid save writes the two settings at Global scope, stores or clears the
 per-provider keys and calls back once, and the SecretStorage naming rule holds
 (`spinney.apiKey` for the built-in provider, `spinney.apiKey.<id>` for the rest).
@@ -113,7 +136,7 @@ per-provider keys and calls back once, and the SecretStorage naming rule holds
 fields, so a refactor may break the script while the product stays fine. It is the
 complement of `check:modeltree` — that one is the page, this one is the host.
 
-`tools/model-switch-acceptance.js` is the fourth windowless acceptance run, for the
+`tools/model-switch-acceptance.js` is the third windowless acceptance run, for the
 **per-node model selection**. It stubs `vscode`, runs a real `SessionRuntime` against a
 catalog of three cards (two dialects on two providers) and an offline client that records
 every request, then asserts what would go on the wire: a follow-up from a node runs on
@@ -125,7 +148,7 @@ node's own card; and a history's DeepSeek upload block is hidden behind a placeh
 the request runs on a non-`deepseek` card while passing through untouched on a `deepseek`
 one. `node tools/model-switch-acceptance.js` after `npm run compile`.
 
-`tools/gate-acceptance.js` is the third windowless acceptance run, for the request
+`tools/gate-acceptance.js` is the fourth windowless acceptance run, for the request
 gate (`src/agent/requestGate.ts`) that `ClientRegistry` puts in front of every
 provider and every card. Waiting code is the kind that looks right and deadlocks in
 practice, so it drives the gate directly — FIFO order, `0 = unlimited`, an abort while

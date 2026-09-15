@@ -45,9 +45,17 @@
   worker — its own `Agent` (history = `buildPath(session, nodeId)`, and its sub-agent / hop /
   rename / event hooks all close over that node) plus its own `ToolRegistry` (whose
   `BackgroundAccess.currentOwner()` is that node). A run is `runs.set(nodeId, run)`
-  (`runs: Map<nodeId, TurnRun>`), so a new turn is refused only when **that node** already has a
+  (`runs: Map<nodeId, TurnRun>`), so a new turn is refused when **that node** already has a
   live run — `beginTurn` checks `runs.has(parentId)`, `beginInjectedTurn` checks `runs.has(node.id)`
-  — which is the composer's Stop-not-Send rule in the UI. Two *different* nodes of one session may
+  — which is one half of the composer's Stop-not-Send rule in the UI. Two further
+  refusals: `SessionRuntime.onUserMessage` also refuses while the **basis node still owns
+  unfinished work** (`lockedWorkCount(basis) > 0` — a running background terminal, a
+  running sub-agent batch, or a completion notice already queued for that node; the same set
+  `lockedNodes()` exposes in `state`, which is why the composer shows Stop for such a node, and
+  pressing Stop is the union kill `stopNode` that takes that node's turn, its background
+  terminals and its whole sub-agent subtree), and **every** turn start is additionally gated by
+  `host.isHeld()` (`beginTurn` / `beginInjectedTurn` return `null` while an external controller
+  holds the window for a reload; the callers re-queue). Two *different* nodes of one session may
   stream at once. `isRunning()` = `busy || runs.size > 0`; `runningNodes()` = `runs.keys()`.
 - Who owns the node: `beginTurn` creates a fresh node, so its run **assigns**
   (`node.messages = added`, `run.fresh = true`). `beginInjectedTurn` continues a node that already
@@ -59,8 +67,9 @@
   A branch switch costs only a prefix cache miss — the shared prefix stays cached.
 - `attachNode` repairs a missing parent by attaching the node to the **root**
   instead of leaving it unreachable (an orphan would still become the checkout
-  point and silently blank the history); `leafOf` skips `kind:'agent'` children,
-  so a restored checkout point can never land on a sub-agent sidecar.
+  point and silently blank the history); `leafOf` skips both sidecar kinds via
+  `isSidecar` (`kind:'agent'` sub-agents and `kind:'bg'` background cards), so a
+  restored checkout point can never land on a sidecar.
 - Interrupt bookkeeping is **per node** (`interruptedNodes: Map<nodeId, Agent>`): an interrupted
   run records its worker (`interruptedNodes.set(run.nodeId, run.agent)`), whose `Agent` already
   captured the aborted tool call via `Agent.markInterrupted`. When a new run starts on

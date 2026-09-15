@@ -7,8 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.2] - 2026-09-16
+
+The first public release. No earlier build was ever shipped, so this entry covers
+everything the extension contains — the baseline the project had reached at the
+`v0.0.1` tag, and the work done on top of it.
+
 ### Added
 
+- Branchable chat tree: click any turn to fork a new branch and keep the old chain.
+- File and command tools: `read_file`, `write_file`, `replace_in_file`, `list_dir`,
+  `exec_command`, `read_image`.
+- Parallel sub-agents.
+- Background terminals.
+- Vision (image input).
+- An optional local HTTP control plane.
+- API key storage in VS Code SecretStorage.
+- A state migration script for older builds; see the migration section of the README.
 - `spinney.replyLanguage` (dropdown, default `auto` = follow the VS Code display
   language, plus the languages VS Code ships display translations for): the language
   the agent replies in, injected as the system prompt's `## Language` line. The
@@ -48,14 +63,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   first stops what that node still owned — its background terminals and its sub-agent
   subtree, behind one modal confirmation — writes the kill notices into that node's own
   history and re-dumps its transcript, which is what the new window is told to read.
-
-- The Model Card Tree page (`Spinney: Model Cards`, `spinney.openModelCards`, and the
-  gear beside the chat's model dropdown): a second editor tab that draws provider
+- The Model Card Tree page (`Spinney: Open Model Cards`, `spinney.openModelCards`, and
+  the gear beside the chat's model dropdown): a second editor tab that draws provider
   nodes as roots with their model cards branching off them — the chat tree's visual
   language, the same vendored layout engine and the same gesture set — with one
   deliberate difference: **the wheel scales**, anchored on the pointer, with or without
   ctrl/cmd (the chat tree pans on a plain wheel), plus drag pan, RMB autoscroll pan and
-  fit to view). **The
+  fit to view. **The
   selected node's card is the editor**: it expands in place into its own form (no
   side panel), a draft/save/revert model posts the whole desired state at once,
   client-side validation is mirrored by host-side validation (a rejected save writes
@@ -152,7 +166,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `spinney.model.default` is the fallback card, that `spinney.providers` /
   `spinney.modelCards` exist as object schemas, and that no model id is hardcoded.
   `tools/check-webview.js` feeds the new `config` shape.
-
 - The block that is live right now is always expanded, and it lets go on its own. A
   thinking block receiving deltas, and a tool call between its first delta and its
   result, are expanded whatever `spinney.foldThinking` / `spinney.foldToolCalls` say —
@@ -183,14 +196,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   placeholder card) resized the input, buttons and metrics along with it. Every size in
   the pane is now a fixed px value, and the pane ignores the card and panel size
   entirely.
-
 - The settings are grouped in the Settings UI: `contributes.configuration` is now one
   section per topic — **Model & API**, **Chat & Display**, **Tools & Execution**,
   **Sub-agents**, **Sessions & Transcripts**, **Control Plane** — in a logical order
   within each group. The existing keys and their defaults are unchanged; an entry that lived
   in the middle of the old flat list (say `spinney.autoSessionTitles`) simply moved next
   to its neighbours.
-
 - A card's drag handle now sits **outside** the bottom-right corner instead of on top of
   it: a short wire (3px, round-capped, `r=13` bend, two equal 10px arms) 8px clear of
   the card, drawn as an SVG stroke masked over a plain background so the ends and the
@@ -201,7 +212,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   background round their own corners (`.node-head` at the top, `#composer` at the
   bottom); and the handle is painted below the card (`z-index: -1`), so the part of its
   box that reaches back over the card cannot swallow clicks meant for the Send button.
-
 - The green auto-scroll light (`.scroll-lock-dot`) is a 16px target instead of an 8px
   one: an invisible `::before` pad sits 4px past the dot on every side, so the click
   that toggles follow — and the hover glow that advertises it — reaches twice as far
@@ -209,6 +219,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   handler, the title and the `locked` state are untouched, and it grows inward, inside
   the 20px strip the scroll container reserves below itself, clear of the scrollbar and
   of the content above it.
+- Sub-agent windows and background job cards now fill their grid cell. The sidecar grid
+  no longer shares row lines across columns: each column is its own stack, a shorter
+  column's free space is spread evenly over its own cards, and every card is stretched
+  to its cell — so a sub-agent that spawned sub-agents ends flush with its own sub-grid
+  instead of stopping early beside it, and a deep branch costs only its own column
+  instead of leaving a dead gap under the cards of a shallower one.
 
 ### Removed
 
@@ -235,21 +251,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   channel also gained `request-headers pending/slow`, `request-first-chunk`,
   `request-timeout` and `request-stall` lines, so a request that has not produced
   its first byte is now visible *while* it waits.
-
-## [0.0.1] - 2026-09-14
-
-### Added
-
-- Branchable chat tree: click any turn to fork a new branch and keep the old chain.
-- File and command tools: `read_file`, `write_file`, `replace_in_file`, `list_dir`, `exec_command`, `read_image`.
-- Parallel sub-agents.
-- Background terminals.
-- Vision (image input).
-- An optional local HTTP control plane.
-- API key storage in VS Code SecretStorage.
-- A state migration script for older builds.
-
-### Notes
-
-- First public release.
-- Sessions from the old extension id need a migration; see the migration section of the README.

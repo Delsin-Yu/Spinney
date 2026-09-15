@@ -235,6 +235,7 @@ export class ControlServer implements vscode.Disposable {
         token: this.token,
         workspace: vscode.workspace.workspaceFolders?.[0]?.uri.fsPath ?? null,
         startedAt: this.startedAt,
+        // NEVER EVER CHANGE THIS ID, as the change destroys the state cache
         version: vscode.extensions.getExtension('de-yu.spinney')?.packageJSON?.version ?? '',
       };
       fs.writeFileSync(file, JSON.stringify(payload, null, 2), { encoding: 'utf8', mode: 0o600 });

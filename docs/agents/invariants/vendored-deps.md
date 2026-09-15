@@ -52,9 +52,10 @@ tarballs, shipped inside the `.vsix`:
 
 The engine has **no concept of an arbitrary obstacle / fixed-position node**: no way to
 feed it a rectangle to avoid, and no coordinate input. `grep -i "obstacle|collision|avoid|
-forbid|fixed|pin"` over `src/*.js` matches nothing; `algorithm.js` is 16 functions of pure
-contour separation between the nodes' own boxes (`seperate`, `updateIYL`,
-`nextLeft/RightContour`, `moveSubtree`, `distributeExtra`). The only geometry lever is a
+forbid|fixed|pin"` over `src/*.js` matches nothing; `algorithm.js` declares 15 top-level
+functions of pure contour separation between the nodes' own boxes (`seperate`, `updateIYL`,
+`nextLeft/RightContour`, `moveSubtree`, `distributeExtra`) — plus the two classes `Tree` and
+`IYL`. The only geometry lever is a
 node's own box size (plus the two global scalars). `d3-flextree` is the same (only
 `nodeSize`/`spacing`; `extents` is a read-only output getter).
 

@@ -15,15 +15,16 @@
   (`invariants/model-cards.md`). The `deepseek` dialect uploads to the Files API
   (`POST /files`, `purpose=user_data`) and references the returned `file-api-…` id
   via a `file` content block (`{ type: 'file', file_id }`); `openai` puts a `data:`
-  URL in an `image_url` part instead (see `model-cards.md`). The `onUserMessage` path uploads each
-  attachment (`ChatViewProvider`) before sending when the transport is `deepseek`;
+  URL in an `image_url` part instead (see `model-cards.md`). The `onUserMessage`
+  path uploads each attachment (`SessionRuntime.onUserMessage` in
+  `src/chat/runtime.ts`) before sending when the transport is `deepseek`;
   `read_image` does it in the Agent (`tryReadImage`). On the DeepSeek endpoint the
   API auto-resizes to ~800×800 and caps each image at **384 tokens**, so no
   client-side downscaling is needed.
 - Images may be up to **64 MiB** (`MAX_IMAGE_BYTES`). A `deepseek`-transport image is
   **not** subject to the 48 MiB request-body limit; an `openai` (inline) one is,
   because its base64 `data:` URL rides in the body. Supported formats: JPEG, PNG, GIF, WebP
-  (detected from content, not the filename). `content` size cap is enforced with a
+  (detected from content, not the filename). The 64 MiB cap is enforced with a
   friendly error in the tool; the attach path reports per-image upload failures and
   omits them.
 - PNG uploads get a structural check on top of magic-byte detection
@@ -64,10 +65,10 @@
   mid-upload rejects with `DeepSeekError('Upload aborted.')` and is treated as an
   interruption rather than a failed upload.
 - The webview hides image thumbnails (history and the composer preview) when the
-  active model is not image-capable (`updateImageVisibility` in `main.js` toggles
-  a `hide-images` class on `#messages` / `#attachments`), and refuses to queue a
-  pending attachment with an inline hint. The conversation data is kept and the
-  thumbnails reappear when an image-capable model is selected again. `main.js`
+  active model is not image-capable (`updateImageVisibility` in `media/main.js`
+  toggles a `hide-images` class on `#tree-canvas` / `#attachments`), and refuses
+  to queue a pending attachment with an inline hint. The conversation data is kept and the
+  thumbnails reappear when an image-capable model is selected again. `media/main.js`
   has **no copy of the catalog**: the provider posts the whole `cards` list (each
   with its `vision` flag) and the active card's `efforts` in the `config` message,
   all derived from `src/agent/models.ts`.

@@ -53,7 +53,7 @@ and pasted. A field the user leaves out keeps a sane default (non-vision / the
 built-in window), and a row that cannot be parsed is skipped and reported, so the
 settings can never silently half-apply.
 
-The editor is the **Model Card Tree page** (`Spinney: Model Cards`,
+The editor is the **Model Card Tree page** (`Spinney: Open Model Cards`,
 `invariants/model-cards.md`): it holds a draft, validates it client-side, and posts
 the whole desired state to the host, which re-validates (`validatePayload`) and
 writes `settings.json` through `configuration.update`. VS Code's Settings UI cannot
@@ -86,16 +86,17 @@ up in the page instead of diverging from it.
 | The runtime gates: `isVisionCard()`, `contextWindowFor()`, `cards()` / `cardIds()`, `visionCards()`, `visionCardsLabel()` | `src/agent/models.ts` (consumers: `agent.ts`, `ChatViewProvider`, `runtime.ts`, `media/main.js` via the `config` message) |
 | The declaration's editor (the page, its validation, the read-back) | `src/chat/ModelPanel.ts` · `src/chat/modelTree.ts` · `media/modeltree.js` |
 | Settings (`model`, `providers`, `modelCards`) | `package.json` |
-| The guard: default == fallback, the two catalog settings exist, no `enum` on `model`, no model id in `src/**` / `media/*.js`, copy names only catalog ids | `tools/check-models.js` |
+| The guard (`npm run check:models`): `spinney.model.default` == the fallback, the two catalog settings exist, no `enum` on `spinney.model`, no model id in `src/**/*.ts` / `media/*.js` (the catalog module and the vendored bundles excepted), and README/docs may name only ids the catalog has | `tools/check-models.js` |
 
-Every mention of a model id in README/docs must be the built-in one, and plugin text
-that reaches the model must call `visionCardsLabel()` / `cardDisplayName()` instead of
-naming anything.
+Every mention of a model id in README/docs must be one the catalog has — today that is
+only the built-in one (`tools/check-models.js` fails an id `MODEL_CATALOG` does not
+carry) — and plugin text that reaches the model must call `visionCardsLabel()` /
+`cardDisplayName()` instead of naming anything.
 
 ### The context indicator is API-driven
 
-`postContext()` sends `{used: <last request's usage.prompt_tokens>, total:
-<window>}`; the webview renders `used/total`. Nothing counts tokens locally
+`postContext()` sends `{ type: 'context', used: <last request's usage.prompt_tokens>,
+total: <window>, model: <card id> }`; the webview renders `used/total`. Nothing counts tokens locally
 (`media/main.js`'s `estimateTokens` is the tok/s readout, unrelated). So
 `remaining = total - used` is real but **lagging**: it is what the API reported
 for the *previous* request, and the turn in progress can add messages on top of
@@ -110,7 +111,8 @@ the window is full and would therefore have to summarise. `usage.prompt_tokens`
 is **never a trigger, only a readout**: it is the *previous* request's number, and
 it has already lied once — the header read `ctx 65%` while the request that failed
 carried ~1.28 M tokens. When the window named in the 400 disagrees with
-`contextWindowFor()`, that mismatch is **only logged** to the `[config]` line and
-is never written back into the card's `contextWindow`: the declared field is the
+`contextWindowFor()`, nothing is compared and nothing is logged — only the fact of
+the refusal is used — and the mismatch is never written back into the card's
+`contextWindow`: the declared field is the
 user's data, and a stale window is their one-field fix in the Model Card Tree page,
 not something the harness corrects behind them.

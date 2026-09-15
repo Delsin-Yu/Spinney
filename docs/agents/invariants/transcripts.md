@@ -9,8 +9,9 @@
   there).
 - **Why main-agent turns are dumped:** session history lives only in the Memento
   (`spinney.state`, a sqlite blob) and is clipped to 64 KiB per message on
-  persist, so no tool can grep it. `ChatViewProvider.finishTurn` calls
-  `dumpSessionTranscript(node, session, status)` → `writeSessionTranscript`, which
+  persist, so no tool can grep it. `SessionRuntime.finishTurn` (in
+  `src/chat/runtime.ts`) calls the provider's `dumpSessionTranscript(node,
+  session, status)` → `writeSessionTranscript`, which
   mirrors the node's stored messages (so a turn a later injected notice turn
   reuses is rewritten, exactly like the node). Gated by
   `spinney.saveSessionTranscripts` (default true); skipped for `kind:'agent'`
