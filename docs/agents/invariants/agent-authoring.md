@@ -23,6 +23,16 @@ Where the text lives, the template/placeholder mechanics and the two hard rules
 - **Ask instead of guessing**: one short clarifying question when a request is
   genuinely ambiguous (listing the most likely readings, so the user can answer in
   one line) instead of silently settling on a reading.
+- **The approval gate is the first behavioural section** (`## Approval before
+  work`): the agent discusses a topic and waits for an explicit go-ahead before
+  any state-changing work; it auto-starts only when the user said so in the
+  instruction itself ("just do it"). Two boundaries are load-bearing: the gate
+  covers *state-changing* work only, so read-only investigation while discussing
+  is untouched, and it is **main-agent only** — a sub-agent has no user to ask and
+  would either stall or invent the approval. The gate also owns the "don't re-ask
+  per file once the topic is approved" half, which is why the old "when the intent
+  is clear, just do it" clause is gone from `## Ask when it matters`: with the gate
+  in place a clear request still waits. Do not reintroduce it.
 - There is deliberately **no tone/persona section** and no "correctness always
   wins" clause: an earlier version of this doc described both as living in the
   prompt, but they never did. Style lives in the template's `## 风格` bullets and
