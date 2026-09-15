@@ -1,4 +1,18 @@
 ## Config keys (`spinney.*`)
+The settings are contributed in **groups**: `contributes.configuration` is an array of
+`{ title, properties }` sections — Model & API (`model`, `modelTable`, `baseUrl`,
+`contextWindow`, `thinkingEffort`) · Chat & Display (`replyLanguage`, `foldThinking`,
+`foldToolCalls`) · Tools & Execution (`commandTimeout`, `maxInlineToolOutput`) ·
+Sub-agents (`maxConcurrentSubagents`, `maxLevel2Subagents`) · Sessions & Transcripts
+(`autoSessionTitles`, `saveSessionTranscripts`, `saveSubAgentTranscripts`,
+`subAgentTranscriptDir`) · Control Plane (`httpApi.*`). The Settings UI renders one
+section per entry and keeps the order the properties are declared in, so the array *is*
+the grouping and the order; the keys themselves never move, which is why
+`getConfiguration('spinney')`, `affectsConfiguration` and every stored value are
+unaffected. A reader that wants a property out of the manifest has to flatten the
+sections first (`tools/check-models.js`).
+
+The keys are:
 `model`, `modelTable`, `baseUrl`, `commandTimeout`
 (seconds, default 600 = 10 minutes — the default for `exec_command` when the tool
 call does not pass its own `timeout`; a non-positive/absent value falls back to

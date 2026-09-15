@@ -73,7 +73,22 @@ function scan(file, text, { allowAny = false } = {}) {
 // naming models the catalog does not have.)
 const pkgPath = path.join(root, 'package.json');
 const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf8'));
-const modelProp = pkg.contributes?.configuration?.properties?.['spinney.model'];
+
+/**
+ * `contributes.configuration` is contributed as one entry per Settings-UI group
+ * (an array of `{ title, properties }`), so flatten it before looking a key up:
+ * the sections are presentation, the property set is what this guard checks.
+ */
+function configurationProperties(contributes) {
+  const sections = contributes?.configuration;
+  return (Array.isArray(sections) ? sections : sections ? [sections] : []).reduce(
+    (all, section) => Object.assign(all, section?.properties ?? {}),
+    {},
+  );
+}
+
+const configProps = configurationProperties(pkg.contributes);
+const modelProp = configProps['spinney.model'];
 const enumIds = Array.isArray(modelProp?.enum) ? modelProp.enum : [];
 const missing = ids.filter((id) => !enumIds.includes(id));
 const extra = enumIds.filter((id) => !idSet.has(id));
@@ -88,7 +103,7 @@ if (modelProp?.default !== DEFAULT_MODEL) {
 }
 
 // --- 2. copy may name models, but only real ones -----------------------------
-scan('package.json', JSON.stringify(pkg.contributes.configuration.properties['spinney.model'], null, 1), { allowAny: true });
+scan('package.json', JSON.stringify(configProps['spinney.model'], null, 1), { allowAny: true });
 scan('README.md', fs.readFileSync(path.join(root, 'README.md'), 'utf8'), { allowAny: true });
 
 for (const dir of ['docs']) {

@@ -34,6 +34,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `[i18n]` line naming the display language it resolved, the catalog it read, and the
   copy VS Code reads for the host strings.
 
+### Changed
+
+- The settings are grouped in the Settings UI: `contributes.configuration` is now one
+  section per topic — **Model & API**, **Chat & Display**, **Tools & Execution**,
+  **Sub-agents**, **Sessions & Transcripts**, **Control Plane** — in a logical order
+  within each group. The 18 keys and their defaults are unchanged; an entry that lived
+  in the middle of the old flat list (say `spinney.autoSessionTitles`) simply moved next
+  to its neighbours.
+
 ## [0.0.1] - 2026-09-14
 
 ### Added

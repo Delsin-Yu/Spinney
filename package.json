@@ -154,182 +154,209 @@
         }
       ]
     },
-    "configuration": {
-      "title": "Spinney",
-      "properties": {
-        "spinney.model": {
-          "type": "string",
-          "default": "deepseek-flash",
-          "enum": [
-            "deepseek-flash"
-          ],
-          "markdownDescription": "%spinney.model.description%",
-          "scope": "window"
-        },
-        "spinney.modelTable": {
-          "type": "object",
-          "default": {},
-          "additionalProperties": {
+    "configuration": [
+      {
+        "title": "%spinney.config.model.title%",
+        "properties": {
+          "spinney.model": {
+            "type": "string",
+            "default": "deepseek-flash",
+            "enum": [
+              "deepseek-flash"
+            ],
+            "markdownDescription": "%spinney.model.description%",
+            "scope": "window"
+          },
+          "spinney.modelTable": {
             "type": "object",
-            "additionalProperties": false,
-            "properties": {
-              "vision": {
-                "type": "boolean",
-                "default": false,
-                "description": "%spinney.modelTable.vision.description%"
-              },
-              "max_tokens": {
-                "type": "integer",
-                "minimum": 1,
-                "default": 1048576,
-                "description": "%spinney.modelTable.max_tokens.description%"
+            "default": {},
+            "additionalProperties": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "vision": {
+                  "type": "boolean",
+                  "default": false,
+                  "description": "%spinney.modelTable.vision.description%"
+                },
+                "max_tokens": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "default": 1048576,
+                  "description": "%spinney.modelTable.max_tokens.description%"
+                }
               }
-            }
+            },
+            "propertyNames": {
+              "pattern": "^[^\\s:]+$",
+              "patternErrorMessage": "%spinney.modelTable.patternErrorMessage%"
+            },
+            "markdownDescription": "%spinney.modelTable.markdownDescription%",
+            "scope": "window"
           },
-          "propertyNames": {
-            "pattern": "^[^\\s:]+$",
-            "patternErrorMessage": "%spinney.modelTable.patternErrorMessage%"
+          "spinney.baseUrl": {
+            "type": "string",
+            "default": "https://api.deepseek.com",
+            "description": "%spinney.baseUrl.description%",
+            "scope": "window"
           },
-          "markdownDescription": "%spinney.modelTable.markdownDescription%",
-          "scope": "window"
-        },
-        "spinney.baseUrl": {
-          "type": "string",
-          "default": "https://api.deepseek.com",
-          "description": "%spinney.baseUrl.description%",
-          "scope": "window"
-        },
-        "spinney.commandTimeout": {
-          "type": "number",
-          "default": 600,
-          "description": "%spinney.commandTimeout.description%",
-          "scope": "window"
-        },
-        "spinney.contextWindow": {
-          "type": "number",
-          "default": 0,
-          "description": "%spinney.contextWindow.description%",
-          "scope": "window"
-        },
-        "spinney.thinkingEffort": {
-          "type": "string",
-          "default": "medium",
-          "enum": ["none", "low", "medium", "high"],
-          "description": "%spinney.thinkingEffort.description%",
-          "scope": "window"
-        },
-        "spinney.replyLanguage": {
-          "type": "string",
-          "default": "auto",
-          "enum": [
-            "auto",
-            "en",
-            "zh-Hans",
-            "zh-Hant",
-            "ja",
-            "ko",
-            "es",
-            "pt-br",
-            "fr",
-            "de",
-            "ru",
-            "it",
-            "pl",
-            "tr",
-            "cs",
-            "hu",
-            "bg"
-          ],
-          "enumDescriptions": [
-            "Follow the VS Code display language.",
-            "English",
-            "Simplified Chinese",
-            "Traditional Chinese",
-            "Japanese",
-            "Korean",
-            "Spanish",
-            "Brazilian Portuguese",
-            "French",
-            "German",
-            "Russian",
-            "Italian",
-            "Polish",
-            "Turkish",
-            "Czech",
-            "Hungarian",
-            "Bulgarian"
-          ],
-          "description": "%spinney.replyLanguage.description%",
-          "scope": "window"
-        },
-        "spinney.foldToolCalls": {
-          "type": "boolean",
-          "default": true,
-          "description": "%spinney.foldToolCalls.description%",
-          "scope": "window"
-        },
-        "spinney.foldThinking": {
-          "type": "boolean",
-          "default": true,
-          "description": "%spinney.foldThinking.description%",
-          "scope": "window"
-        },
-        "spinney.maxConcurrentSubagents": {
-          "type": "number",
-          "default": 15,
-          "description": "%spinney.maxConcurrentSubagents.description%",
-          "scope": "window"
-        },
-        "spinney.maxLevel2Subagents": {
-          "type": "number",
-          "default": 2,
-          "description": "%spinney.maxLevel2Subagents.description%",
-          "scope": "window"
-        },
-        "spinney.saveSubAgentTranscripts": {
-          "type": "boolean",
-          "default": true,
-          "description": "%spinney.saveSubAgentTranscripts.description%",
-          "scope": "window"
-        },
-        "spinney.saveSessionTranscripts": {
-          "type": "boolean",
-          "default": true,
-          "description": "%spinney.saveSessionTranscripts.description%",
-          "scope": "window"
-        },
-        "spinney.subAgentTranscriptDir": {
-          "type": "string",
-          "default": "",
-          "description": "%spinney.subAgentTranscriptDir.description%",
-          "scope": "window"
-        },
-        "spinney.autoSessionTitles": {
-          "type": "boolean",
-          "default": true,
-          "description": "%spinney.autoSessionTitles.description%",
-          "scope": "window"
-        },
-        "spinney.maxInlineToolOutput": {
-          "type": "number",
-          "default": 32768,
-          "description": "%spinney.maxInlineToolOutput.description%",
-          "scope": "window"
-        },
-        "spinney.httpApi.enabled": {
-          "type": "boolean",
-          "default": false,
-          "description": "%spinney.httpApi.enabled.description%",
-          "scope": "window"
-        },
-        "spinney.httpApi.port": {
-          "type": "number",
-          "default": 0,
-          "description": "%spinney.httpApi.port.description%",
-          "scope": "window"
+          "spinney.contextWindow": {
+            "type": "number",
+            "default": 0,
+            "description": "%spinney.contextWindow.description%",
+            "scope": "window"
+          },
+          "spinney.thinkingEffort": {
+            "type": "string",
+            "default": "medium",
+            "enum": ["none", "low", "medium", "high"],
+            "description": "%spinney.thinkingEffort.description%",
+            "scope": "window"
+          }
+        }
+      },
+      {
+        "title": "%spinney.config.chat.title%",
+        "properties": {
+          "spinney.replyLanguage": {
+            "type": "string",
+            "default": "auto",
+            "enum": [
+              "auto",
+              "en",
+              "zh-Hans",
+              "zh-Hant",
+              "ja",
+              "ko",
+              "es",
+              "pt-br",
+              "fr",
+              "de",
+              "ru",
+              "it",
+              "pl",
+              "tr",
+              "cs",
+              "hu",
+              "bg"
+            ],
+            "enumDescriptions": [
+              "Follow the VS Code display language.",
+              "English",
+              "Simplified Chinese",
+              "Traditional Chinese",
+              "Japanese",
+              "Korean",
+              "Spanish",
+              "Brazilian Portuguese",
+              "French",
+              "German",
+              "Russian",
+              "Italian",
+              "Polish",
+              "Turkish",
+              "Czech",
+              "Hungarian",
+              "Bulgarian"
+            ],
+            "description": "%spinney.replyLanguage.description%",
+            "scope": "window"
+          },
+          "spinney.foldThinking": {
+            "type": "boolean",
+            "default": true,
+            "description": "%spinney.foldThinking.description%",
+            "scope": "window"
+          },
+          "spinney.foldToolCalls": {
+            "type": "boolean",
+            "default": true,
+            "description": "%spinney.foldToolCalls.description%",
+            "scope": "window"
+          }
+        }
+      },
+      {
+        "title": "%spinney.config.tools.title%",
+        "properties": {
+          "spinney.commandTimeout": {
+            "type": "number",
+            "default": 600,
+            "description": "%spinney.commandTimeout.description%",
+            "scope": "window"
+          },
+          "spinney.maxInlineToolOutput": {
+            "type": "number",
+            "default": 32768,
+            "description": "%spinney.maxInlineToolOutput.description%",
+            "scope": "window"
+          }
+        }
+      },
+      {
+        "title": "%spinney.config.subAgents.title%",
+        "properties": {
+          "spinney.maxConcurrentSubagents": {
+            "type": "number",
+            "default": 15,
+            "description": "%spinney.maxConcurrentSubagents.description%",
+            "scope": "window"
+          },
+          "spinney.maxLevel2Subagents": {
+            "type": "number",
+            "default": 2,
+            "description": "%spinney.maxLevel2Subagents.description%",
+            "scope": "window"
+          }
+        }
+      },
+      {
+        "title": "%spinney.config.sessions.title%",
+        "properties": {
+          "spinney.autoSessionTitles": {
+            "type": "boolean",
+            "default": true,
+            "description": "%spinney.autoSessionTitles.description%",
+            "scope": "window"
+          },
+          "spinney.saveSessionTranscripts": {
+            "type": "boolean",
+            "default": true,
+            "description": "%spinney.saveSessionTranscripts.description%",
+            "scope": "window"
+          },
+          "spinney.saveSubAgentTranscripts": {
+            "type": "boolean",
+            "default": true,
+            "description": "%spinney.saveSubAgentTranscripts.description%",
+            "scope": "window"
+          },
+          "spinney.subAgentTranscriptDir": {
+            "type": "string",
+            "default": "",
+            "description": "%spinney.subAgentTranscriptDir.description%",
+            "scope": "window"
+          }
+        }
+      },
+      {
+        "title": "%spinney.config.controlPlane.title%",
+        "properties": {
+          "spinney.httpApi.enabled": {
+            "type": "boolean",
+            "default": false,
+            "description": "%spinney.httpApi.enabled.description%",
+            "scope": "window"
+          },
+          "spinney.httpApi.port": {
+            "type": "number",
+            "default": 0,
+            "description": "%spinney.httpApi.port.description%",
+            "scope": "window"
+          }
         }
       }
-    }
+    ]
   },
   "scripts": {
     "compile": "tsc -p ./",
