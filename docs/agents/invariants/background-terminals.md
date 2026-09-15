@@ -105,6 +105,20 @@
   (`finishTurn` flushes again, and the signal drain retries), so the text can never slip
   past a request built in between. The fine-grained path is unchanged: a card's ✕ kills
   that one job *and* tells the model (`notifyAgent: true`).
+- **A context rollover is the union kill's third caller** (`SessionRuntime.rolloverContext`,
+  see `context-rollover.md`). It begins with the *same* path a Stop takes — the node's
+  background terminals, its whole sub-agent subtree (with the terminals the sub-agents own)
+  and any notice already queued for it, all converted into **writebacks** into that node's
+  own card and history — and only the aftermath differs: P is flushed and explicitly
+  **re-dumped**, so the kill notices and the jobs' terminal state survive on disk even
+  though a `kind:'bg'` card has no dump of its own (that is why the kill record has to
+  carry the job's command, final state and output tail), and the new window's harness text
+  points at that file as the copy to read. Leaving the jobs running would be wrong twice
+  over: their completion notices are addressed to a line nobody continues from, and their
+  results could never reach the new window, which by construction sends none of the old
+  history — the model would be told about work it cannot see. The rollover also awaits each
+  killed sub-agent's settle promise (~2 s, bounded) before composing the message, because a
+  sub-agent's dump is written inside its own `finish` handler.
 - **Delete / clear / branch deletion:** a session, a cleared conversation or a branch that owns
   *running* jobs asks a modal confirmation first — `confirmKillBackgrounds` for delete/clear,
   `deleteBranchInteractive` for a branch (its count comes from

@@ -41,6 +41,7 @@ import {
   isKnownModel,
   isVisionModel,
   modelIds,
+  parseContextLengthError,
   visionModelIds,
   visionModelsLabel,
 } from '../agent/models';
@@ -53,6 +54,7 @@ import {
   attachNode,
   createNode,
   isSidecar,
+  messageText,
   newId,
   nodeUsage,
   pathIds,
@@ -136,6 +138,139 @@ function lastFailureText(node: TreeNode): string | undefined {
     }
   }
   return undefined;
+}
+
+/**
+ * True when this node's card is a **context-window overflow**: the turn ended in
+ * `error` and the failure text it shows is the provider refusing the request as too
+ * big. That 400 is the only authoritative statement that the window is full
+ * (`model-capabilities.md`); `usage.prompt_tokens` is a lagging readout of the
+ * *previous* request — it once read `ctx 65%` while the request actually carried
+ * ~1.28 M tokens — so it is deliberately **not** a trigger. Reading the refusal back
+ * off the node's own `⚠️ …` item (`lastFailureText`) is what makes the judgement
+ * survive a reload: the card, the button and the model all agree on one text.
+ */
+function nodeContextFull(node: TreeNode): boolean {
+  if (node.status !== 'error') {
+    return false;
+  }
+  const failure = lastFailureText(node);
+  return !!failure && parseContextLengthError(failure) !== undefined;
+}
+
+/**
+ * The caps on the tail a rollover carries over (§6). Carrying it is deliberate — both
+ * messages are already in memory, so it costs no extra API call — but a 200 k-char
+ * request would eat the new, empty window on its first request, so it is clipped and
+ * the clip is announced.
+ */
+const ROLLOVER_REQUEST_CAP = 2000;
+const ROLLOVER_ANSWER_CAP = 1000;
+/**
+ * How long a rollover waits for the sub-agents its union kill aborted (their finish
+ * handler writes the dump the message points at). Long enough for a `persistNow` and a
+ * JSONL write, short enough that a stuck job cannot hold the button.
+ */
+const ROLLOVER_SETTLE_TIMEOUT_MS = 2000;
+
+/**
+ * The resume text of a rollover: the single `role:'user'` message the new window
+ * stores, i.e. everything it sends besides the synthesized system prompt
+ * (§5/§6 of `docs/agents/invariants/context-rollover.md`).
+ *
+ * Model-facing, therefore deliberately **English** and built by plain string
+ * concatenation, never through `vscode.l10n.t` — the `CONTINUE_MESSAGE` /
+ * `buildFailureContinue` precedent. The user does see this text (the card renders it
+ * verbatim in a `HARNESS` block), but it is an instruction to the model, and a
+ * translated instruction is a different instruction.
+ *
+ * The shape, including its three degradations, is fixed by the contract: no
+ * transcript on disk (the pointer is replaced by "rely on what was carried over"), a
+ * clipped request (announced with its total size) and attachments (counted, never
+ * carried — a `file_id`'s validity across windows is not guaranteed). The
+ * killed-work list at the end is composed from what §7 actually stopped.
+ */
+function buildContextRolloverMessage(input: {
+  sessionId: string;
+  previousNodeId: string;
+  /** Absolute path of the previous window's dump — the pointer the model is given. */
+  transcriptPath: string;
+  /** False when that file is not on disk (dump disabled / never written): the pointer degrades. */
+  transcriptExists: boolean;
+  /** The user's last request, raw: clipped here, and the clip is announced. */
+  request: string;
+  /** How many `image_url` / `file` parts that request carried (they cannot come along). */
+  attachments: number;
+  /** The last answer the previous window produced, raw (clipped here). */
+  answer: string;
+  /** One entry per background terminal the rollover killed (id, clipped command, final state). */
+  killedBackground: Array<{ id: number; command: string; state: string }>;
+  /** One entry per sub-agent node it killed: its dump path once its finish handler wrote it. */
+  killedSubAgents: Array<{ nodeId: string; transcript?: string }>;
+}): string {
+  const paragraphs: string[] = [];
+  paragraphs.push(
+    '[Harness: context window reset]\n' +
+      'The previous conversation could not be sent to the model any more (the provider refused it: the context ' +
+      'window is full), so this turn continues in a new, empty window of the same session. Nothing above was ' +
+      'carried over: do not claim to remember it.',
+  );
+  // The display path is not cut (the tree stays connected), so "previous window"
+  // names the overflowing node the new one hangs below — not its whole chain.
+  paragraphs.push(`Previous window: node ${input.previousNodeId} of session ${input.sessionId}.`);
+  paragraphs.push(
+    input.transcriptExists
+      ? 'Its full transcript — every message, tool call and result — is on disk:\n' +
+        `  ${input.transcriptPath}\n` +
+        'Read it when you need a detail: read_file on that path, or search_transcripts with sessionId=' +
+        `${input.sessionId} (line 1 is the meta record). Earlier windows of this session have their own files ` +
+        'in the same folder.'
+      : "The previous window's transcript is not available on disk; rely on the carried-over text and ask the " +
+        'user when a detail is missing.',
+  );
+  const request =
+    input.request.length > ROLLOVER_REQUEST_CAP ? input.request.slice(0, ROLLOVER_REQUEST_CAP) : input.request;
+  const answer =
+    input.answer.length > ROLLOVER_ANSWER_CAP ? input.answer.slice(0, ROLLOVER_ANSWER_CAP) : input.answer;
+  const notes = [
+    // Clipping is announced: a model that reads a truncated request as the whole
+    // request would silently redo only part of the work.
+    input.request.length > ROLLOVER_REQUEST_CAP
+      ? `(truncated: ${input.request.length} chars total, the full text is in the transcript)`
+      : '',
+    input.attachments > 0 ? `(the original request had ${input.attachments} attachment(s))` : '',
+  ].filter(Boolean);
+  // The tail is what stops the pointer from being useless: a model that does not know
+  // what it does not know never looks anything up.
+  paragraphs.push(
+    'Carried over verbatim:\n' +
+      `- the user's last request: ${request || '(none found)'}${notes.length > 0 ? ` ${notes.join(' ')}` : ''}\n` +
+      `- the last answer you gave: ${answer || '(none)'}`,
+  );
+  paragraphs.push(
+    `Still running from the previous window: none — ${input.killedBackground.length} background terminal(s) and ` +
+      `${input.killedSubAgents.length} sub-agent(s) were stopped when this window was opened, because their ` +
+      "results could not be delivered into a full window. They are recorded in the previous window's transcript, " +
+      "including each job's command, final state and output tail; a sub-agent has its own file (kind=subagent). " +
+      'Read those records before redoing any of that work.',
+  );
+  if (input.killedBackground.length > 0 || input.killedSubAgents.length > 0) {
+    paragraphs.push(
+      'Stopped when this window was opened:\n' +
+        [
+          ...input.killedBackground.map((job) => `- background terminal #${job.id} \`${job.command}\` — ${job.state}`),
+          ...input.killedSubAgents.map(
+            (agent) =>
+              `- sub-agent node ${agent.nodeId}${agent.transcript ? ` — transcript: ${agent.transcript}` : ''}`,
+          ),
+        ].join('\n'),
+    );
+  }
+  paragraphs.push(
+    "Redo the user's last request here. If it depends on earlier work, fetch that from the transcript first — do " +
+      'not guess.',
+  );
+  return paragraphs.join('\n\n');
 }
 
 /**
@@ -389,8 +524,12 @@ export class SessionRuntime {
   readonly subAgentPool: SubAgentPool;
   /** Per-parent count of level-2 sub-agents spawned (budgeted by maxLevel2Subagents). */
   readonly level2Counts = new Map<string, number>();
-  /** Running sub-agents: agentNodeId -> { agent, abort } for individual kill. */
-  readonly runningSubAgents = new Map<string, { agent: Agent; abort: AbortController }>();
+  /**
+   * Running sub-agents: agentNodeId -> { agent, abort } for individual kill (plus the
+   * promise its own `finish` handler resolves, so a rollover can wait for the dump the
+   * kill produces before it writes the new window's message).
+   */
+  readonly runningSubAgents = new Map<string, { agent: Agent; abort: AbortController; settled: Promise<void> }>();
 
   /**
    * Completion signals waiting to be delivered, keyed by the node that owns the
@@ -992,6 +1131,31 @@ export class SessionRuntime {
 
   // ---- Repaints ----
 
+  /**
+   * The one `nodeUpdate` patch shape: the card's status/title/usage plus the derived
+   * fact the webview cannot compute for itself — `contextFull`, which decides the
+   * button variant (`⧉ Continue in a new window` vs `↻ Retry`). It is built in one
+   * place because hand-built payloads drift apart, and a turn that ends **after** the
+   * tree was drawn only ever arrives as a `nodeUpdate`: a patch that forgot the flag
+   * would leave the card offering a retry of the very request the provider just
+   * refused.
+   */
+  private nodeStatePatch(node: TreeNode): {
+    id: string;
+    status: TurnStatus;
+    title: string;
+    usage: Usage | undefined;
+    contextFull: boolean;
+  } {
+    return {
+      id: node.id,
+      status: node.status,
+      title: node.title,
+      usage: nodeUsage(node),
+      contextFull: nodeContextFull(node),
+    };
+  }
+
   /** Structural summary of the session tree + the view/stream ids (no items). */
   postTree(): void {
     const session = this.session;
@@ -1004,6 +1168,11 @@ export class SessionRuntime {
       createdAt: node.createdAt,
       preview: this.nodePreview(node),
       usage: nodeUsage(node),
+      // The webview never re-derives a model fact from error text: the provider's
+      // refusal is judged once, here, and shipped as a boolean. `contextBaseId` is
+      // what it draws the dashed edge and the `CTX` badge from.
+      contextFull: nodeContextFull(node),
+      contextBaseId: node.contextBaseId,
       size: node.customSize ?? null,
       kind: node.kind,
       delivered: node.delivered === true,
@@ -1273,8 +1442,16 @@ export class SessionRuntime {
    * based on the node that *owns* the job, not on the view focus, and passes
    * `pan: false` so the arrival of a notice never yanks what the user is
    * looking at.
+   *
+   * `opts.freshContext` opens a **new context window**: the node is marked as its own
+   * context base, so the API prefix of this run (and of everything below it) contains
+   * no ancestor message at all — the rollover's whole point. It also drops the parent's
+   * pending interruption notice (see below).
    */
-  private beginTurn(title: string, opts?: { parentId?: string | null; pan?: boolean }): TurnRun | null {
+  private beginTurn(
+    title: string,
+    opts?: { parentId?: string | null; pan?: boolean; freshContext?: boolean },
+  ): TurnRun | null {
     const session = this.session;
     if (this.host.isHeld()) {
       // An external controller is reloading the window (`/wait-for-finish` with a
@@ -1302,13 +1479,24 @@ export class SessionRuntime {
       return null;
     }
     const node = createNode(newId(), parentId, title, 'running');
+    // A new context window: this node is its own basis, so the run's prefix — built
+    // by `buildPath` a few lines below — contains no ancestor message at all. The
+    // order is load-bearing: the marker has to be in place *before* `buildPath` reads
+    // it, and `finishTurn` records the basis from that same call.
+    if (opts?.freshContext) {
+      node.contextBaseId = node.id;
+    }
     attachNode(session, node);
     const worker = this.workerFor(node);
     // The interruption notice only makes sense when this turn continues from the
     // turn that was actually interrupted. P3 keys the pending notice per node, so
     // the new node's agent inherits its parent's notice (delivered once) or clears
-    // any stale one of its own.
-    const source = parentId != null ? this.interruptedNodes.get(parentId) : undefined;
+    // any stale one of its own. A fresh window never inherits it: the notice names a
+    // tool call from a context that is not being sent any more. The parent's own
+    // entry is left alone — its line can still be continued later, with its own
+    // history intact.
+    const source =
+      opts?.freshContext || parentId == null ? undefined : this.interruptedNodes.get(parentId);
     if (source) {
       worker.agent.transferInterruptTo(source);
     } else {
@@ -1433,13 +1621,7 @@ export class SessionRuntime {
     // message can only be appended now (the turn's own slice was just stored).
     this.flushWritebacks();
     if (node && session.nodes[node.id]) {
-      this.post({
-        type: 'nodeUpdate',
-        id: node.id,
-        status: node.status,
-        title: node.title,
-        usage: nodeUsage(node),
-      });
+      this.post({ type: 'nodeUpdate', ...this.nodeStatePatch(node) });
     }
     // A hopped session's turn just ended: queue the trip back to the session
     // that dispatched it, carrying this turn's final answer (the provider also
@@ -1650,9 +1832,219 @@ export class SessionRuntime {
     this.post({ type: 'status', text: this.lastStatus });
     // Patch just this card: the chip follows the run, and the ▶ button goes away
     // for the duration (the webview hides it while the node has a live run).
-    this.post({ type: 'nodeUpdate', id: node.id, status: 'running', title: node.title, usage: nodeUsage(node) });
+    this.post({ type: 'nodeUpdate', ...this.nodeStatePatch(node) });
     void run.agent.sendUserMessage(message);
     return true;
+  }
+
+  /**
+   * True when this node is a rollover candidate: a conversational node that is not
+   * streaming and whose last turn died on the provider's context-length refusal
+   * (`nodeContextFull`). It is the same predicate the webview's `⧉` button reflects,
+   * and it is public so `ChatViewProvider` can decide whether the kill-confirmation
+   * is needed *before* anything has changed.
+   */
+  canRollover(nodeId: string): boolean {
+    const node = this.session.nodes[nodeId];
+    if (!node || isSidecar(node) || this.runs.has(nodeId)) {
+      return false;
+    }
+    // A node that already has a conversational child has been rolled over (or the
+    // user went on from it): the button is gone, so a second window must not start
+    // from the same card. This is the host half of the webview's "tip of the branch"
+    // rule — the two must agree, or a replayed click would open a sibling window.
+    if (node.children.some((id) => !isSidecar(this.session.nodes[id]))) {
+      return false;
+    }
+    return nodeContextFull(node);
+  }
+
+  /**
+   * Continue the conversation in a **new, empty context window** — the `⧉` button on
+   * a card whose request the provider refused as too big. See
+   * `docs/agents/invariants/context-rollover.md`; in short:
+   *
+   *  - the new node is an ordinary child of this one (`freshContext`), so the tree
+   *    stays connected and a dashed edge marks the window break — only the *message
+   *    prefix* is cut, which is exactly what `contextBaseId` does;
+   *  - the message is harness-written and carries a pointer to this node's on-disk
+   *    transcript plus the last request and answer verbatim, so nothing has to be
+   *    summarised and nothing is lost when a detail is needed;
+   *  - this node is **also** union-killed first (the composer's Stop path): its
+   *    background terminals and its whole sub-agent subtree cannot deliver into a
+   *    full window, and their results would never reach the new one, so leaving them
+   *    running would be work nobody can read. Their notices are written back into
+   *    this node (the existing mechanism) and the transcript is re-dumped, so the new
+   *    window really can read what happened.
+   *
+   * A node that is *not* a context-window failure is continued **in place** instead
+   * (`continueFrom`): one behaviour, no new failure mode, so a stale card can never
+   * dead-end the button.
+   *
+   * When it returns true the new node is checked out and running, and this node keeps
+   * its full history on its stopped line.
+   */
+  async rolloverContext(nodeId: string): Promise<boolean> {
+    const node = this.session.nodes[nodeId];
+    if (!node || isSidecar(node)) {
+      return false;
+    }
+    if (!this.canRollover(nodeId)) {
+      return this.continueFrom(nodeId);
+    }
+    if (this.host.isHeld()) {
+      this.postNotice(
+        'warning',
+        vscode.l10n.t('An external controller is rebooting the window; please wait a moment.'),
+      );
+      return false;
+    }
+    // Capture the tail the message carries BEFORE the kill: the kill appends its
+    // notices to this node as `role:'user'` messages, and one of those must never be
+    // mistaken for the request the user actually made.
+    const carry = this.carriedOver(node);
+    // Leftover work: the same union kill the composer's Stop uses, so "nothing
+    // continues" holds for the old line while the conversation moves on. The tasks
+    // are captured first because the hub forgets the *running* snapshot once they are
+    // settled — and their final state is what the new window's message has to name.
+    const killedJobs = this.hub.listForNode(this.sessionId, nodeId).filter((task) => task.status === 'running');
+    const killedAgents = this.subAgentSubtree(nodeId);
+    this.stopNode(nodeId);
+    await this.settleSubAgents();
+    // `flushWritebacks` appends the kill notices to this node's history but never
+    // dumps it (only `finishTurn` does), and a `kind:'bg'` card has no dump of its
+    // own. Without this explicit re-dump, the record of the killed work — the only
+    // durable copy of what those terminals produced — would never reach the file the
+    // new window is told to read.
+    this.flushWritebacks();
+    this.host.dumpSessionTranscript(node, this.session, node.status);
+    // Windows are numbered per branch: the session's first window is window 1, and
+    // every window below it adds one, so the first rollover of a session is 2.
+    const windows = pathIds(this.session, nodeId).filter(
+      (id) => this.session.nodes[id]?.contextBaseId === id,
+    ).length;
+    const windowNo = windows + 2;
+    const message = buildContextRolloverMessage({
+      sessionId: this.sessionId,
+      previousNodeId: node.id,
+      transcriptPath: this.rolloverTranscriptPath(node.id),
+      transcriptExists: this.rolloverTranscriptOnDisk(node.id),
+      request: carry.request,
+      attachments: carry.attachments,
+      answer: carry.answer,
+      killedBackground: killedJobs.map((task) => ({
+        id: task.id,
+        command: task.command.length > 80 ? `${task.command.slice(0, 80)}…` : task.command,
+        state: task.killed
+          ? 'stopped by the rollover'
+          : `finished with exit code ${task.exitCode ?? 'unknown'}`,
+      })),
+      killedSubAgents: killedAgents.map((id) => ({
+        nodeId: id,
+        transcript: this.session.nodes[id]?.agentTranscript,
+      })),
+    });
+    const run = this.beginTurn(vscode.l10n.t('Context window {0}', windowNo), {
+      parentId: nodeId,
+      freshContext: true,
+    });
+    if (!run) {
+      return false;
+    }
+    // `beginTurn` treats the basis node as "the user is continuing this line" and
+    // clears its stopped line; here the conversation continues in the *new* node, so
+    // the old one stays killed — nothing produced under it may open a turn there.
+    this.stoppedLines.add(nodeId);
+    run.items.push({ kind: 'harness', text: message });
+    this.post({ type: 'harnessNote', nodeId: run.node.id, text: message });
+    this.setBusy(true);
+    this.lastStatus = vscode.l10n.t('Thinking…');
+    this.post({ type: 'status', text: this.lastStatus });
+    this.post({ type: 'nodeUpdate', ...this.nodeStatePatch(run.node) });
+    void run.agent.sendUserMessage(message);
+    return true;
+  }
+
+  /** Where this node's transcript dump lives (the pointer the new window is given). */
+  private rolloverTranscriptPath(nodeId: string): string {
+    return path.join(this.host.transcriptDir(this.sessionId), `${nodeId}.jsonl`);
+  }
+
+  /**
+   * Whether that dump is actually on disk. It usually is — `finishTurn` dumps the
+   * failed turn too — but `spinney.saveSessionTranscripts` can be off, and then the
+   * message must degrade to "rely on what was carried over" instead of pointing at a
+   * file that does not exist.
+   */
+  private rolloverTranscriptOnDisk(nodeId: string): boolean {
+    if (!this.host.getConfig().saveSessionTranscripts) {
+      return false;
+    }
+    try {
+      return fs.existsSync(this.rolloverTranscriptPath(nodeId));
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * The tail a rollover carries verbatim: the user's last real request and the last
+   * answer. Both are already in memory (so they cost no extra request) and both are
+   * what stops the pointer from being useless — a model that does not know what it
+   * does not know never looks anything up. Harness and writeback notices are skipped:
+   * they are `role:'user'` messages too, but the user did not write them.
+   */
+  private carriedOver(node: TreeNode): { request: string; answer: string; attachments: number } {
+    let request = '';
+    let attachments = 0;
+    let answer = '';
+    for (let i = node.messages.length - 1; i >= 0 && (!request || !answer); i--) {
+      const message = node.messages[i];
+      if (!request && message.role === 'user') {
+        const text = messageText(message.content);
+        if (text.trim() && !text.startsWith('[Harness')) {
+          request = text;
+          if (Array.isArray(message.content)) {
+            attachments = message.content.filter(
+              (part) => part.type === 'image_url' || part.type === 'file',
+            ).length;
+          }
+        }
+      } else if (!answer && message.role === 'assistant') {
+        const text = messageText(message.content);
+        if (text.trim()) {
+          answer = text;
+        }
+      }
+    }
+    return { request, answer, attachments };
+  }
+
+  /**
+   * Wait (bounded) for the sub-agents a kill just aborted. A killed sub-agent writes
+   * its own transcript *inside* its finish handler, so a rollover that did not wait
+   * would name nodes whose dump path it cannot know yet — while a job that never
+   * settles must not hang the button, hence the timeout.
+   */
+  private async settleSubAgents(): Promise<void> {
+    const pending = [...this.runningSubAgents.values()].map((entry) => entry.settled);
+    if (pending.length === 0) {
+      return;
+    }
+    await Promise.race([
+      Promise.allSettled(pending),
+      new Promise<void>((resolve) => {
+        setTimeout(resolve, ROLLOVER_SETTLE_TIMEOUT_MS);
+      }),
+    ]);
+    // One macrotask tick: an async sub-agent's *batch* notice is queued by a
+    // continuation chained after its own promise, so a writeback flush placed
+    // immediately after the settle could still miss it (and with the line stopped, the
+    // notice would then never reach a dump). A timer callback only runs once the
+    // microtask queue is empty, which is exactly what that continuation needs.
+    await new Promise<void>((resolve) => {
+      setTimeout(resolve, 0);
+    });
   }
 
   /**
@@ -2441,6 +2833,14 @@ export class SessionRuntime {
       const subTools = this.subAgentTools(job.node, job.spec.write);
       let finished = false;
       let subAgent: Agent | null = null;
+      // Resolved once this run is fully wound down — the transcript dump included. A
+      // context rollover kills its node's sub-agents and then has to *name* them (and
+      // point at their dumps) in the new window's message, so it waits on this rather
+      // than guessing. `finish` early-returns, so it settles exactly once.
+      let settle!: () => void;
+      const settled = new Promise<void>((resolveSettled) => {
+        settle = resolveSettled;
+      });
       const finish = (status: 'done' | 'killed' | 'error', summary: string) => {
         if (finished) return;
         finished = true;
@@ -2468,6 +2868,7 @@ export class SessionRuntime {
         // an idle sub-agent node is resumed with them (a live one would have taken
         // them at its own tool boundary — see `takeSignalsFor`).
         this.drainSignals();
+        settle();
         resolve({ ok: status === 'done', summary, model: job.spec.model || this.model });
       };
 
@@ -2513,7 +2914,7 @@ export class SessionRuntime {
         // The follow-up becomes a new user card in this sub-agent's transcript.
         job.node.displayItems.push({ kind: 'user', text: job.spec.instruction });
       }
-      this.runningSubAgents.set(job.node.id, { agent: sub, abort });
+      this.runningSubAgents.set(job.node.id, { agent: sub, abort, settled });
       this.post({ type: 'agentStart', id: job.node.id, depth, model: effectiveModel, write: job.spec.write });
       void sub.sendUserMessage(job.spec.instruction);
     });
@@ -3207,13 +3608,7 @@ export class SessionRuntime {
     this.settleSignals(batch);
     this.host.persist();
     if (node) {
-      this.post({
-        type: 'nodeUpdate',
-        id: node.id,
-        status: node.status,
-        title: node.title,
-        usage: nodeUsage(node),
-      });
+      this.post({ type: 'nodeUpdate', ...this.nodeStatePatch(node) });
     }
   }
 

@@ -368,8 +368,9 @@
     "check:models": "node tools/check-models.js",
     "check:webview": "node tools/check-webview.js",
     "check:signals": "node tools/check-signal-persist.js",
+    "check:rollover": "node tools/check-context-rollover.js",
     "check:l10n": "node tools/check-l10n.js",
-    "vscode:prepublish": "npm run compile && npm run sync:l10n && npm run check:models && npm run check:webview && npm run check:signals && npm run check:l10n"
+    "vscode:prepublish": "npm run compile && npm run sync:l10n && npm run check:models && npm run check:webview && npm run check:signals && npm run check:l10n && npm run check:rollover"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

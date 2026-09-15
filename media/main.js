@@ -1213,6 +1213,33 @@
     card.classList.toggle('delivered', wanted);
   }
 
+  /**
+   * The `CTX` badge on a card head: this node *starts* a new context window — it
+   * and the dashed edge above it are the whole visual story of a context rollover
+   * (`docs/agents/invariants/context-rollover.md`). A compact dock token,
+   * deliberately untranslated like `SUB` / `BG`; the explanation is the tooltip,
+   * and that one *is* translated. Created lazily, like every other head badge, so
+   * a repaint never accumulates them, and placed the way `SUB` / `Delivered` are:
+   * just before the status chip.
+   */
+  function syncCtxBadge(card, meta) {
+    if (!card) return;
+    // Self-equality is the contract's own validity test (`tree.ts contextBase()`): a
+    // stored marker that does not name this node opens no window at all, so the card
+    // must not claim one either.
+    const wanted = !!(meta && meta.contextBaseId && meta.contextBaseId === meta.id);
+    let badge = byClass(card, 'node-ctx-badge');
+    if (wanted && !badge) {
+      badge = el('span', 'node-ctx-badge', 'CTX');
+      badge.title = tr('This node starts a new context window; the branch above it is not sent to the model any more');
+      const head = card.querySelector('.node-head');
+      const status = head.querySelector('.node-status');
+      if (status) head.insertBefore(badge, status); else head.appendChild(badge);
+    } else if (!wanted && badge) {
+      badge.remove();
+    }
+  }
+
   function pathIdsFromTree(nodes, activeId) {
     const out = [];
     const seen = new Set();
@@ -1260,6 +1287,9 @@
     });
     head.appendChild(del);
     card.appendChild(head);
+    // A window-starting node carries the `CTX` marker from the moment its card
+    // exists (it is created once, here, and never rebuilt).
+    syncCtxBadge(card, meta);
 
     // Pinned user prompt (sticky at the top of an expanded card).
     const prompt = el('div', 'node-prompt');
@@ -1375,16 +1405,31 @@
     if (treeNodes[msg.id]) {
       if (msg.status) treeNodes[msg.id].status = msg.status;
       if (msg.title) treeNodes[msg.id].title = msg.title;
+      // Which variant of the button `syncContinueButton` below has to show depends
+      // on this flag, and a turn that dies on a provider context-length error ends
+      // *after* the tree was drawn — so the patch has to carry the judgement with
+      // it, or the card would keep offering `↻ Retry` for an oversized request.
+      if (typeof msg.contextFull === 'boolean') treeNodes[msg.id].contextFull = msg.contextFull;
     }
     if (card) syncContinueButton(card, treeNodes[msg.id] || { id: msg.id, status: msg.status, children: [] });
   }
 
   /**
-   * The ▶ Continue (or ↻ Retry) button on a card whose turn ended without an
-   * answer: interrupted by the user, or failed — an API error that outlived the
-   * client's transparent retries. Clicking it asks the harness to run a turn from
-   * that node with a message the harness writes itself, so the user never has to
-   * type "continue".
+   * The ▶ Continue (or ↻ Retry, or ⧉ Continue in a new window) button on a card
+   * whose turn ended without an answer: interrupted by the user, or failed — an
+   * API error that outlived the client's transparent retries. Clicking it asks the
+   * harness to run a turn from that node with a message the harness writes itself,
+   * so the user never has to type "continue".
+   *
+   * One button, one meaning at a time — the *variant* follows the node's state:
+   *  - `error` + `contextFull` → rollover: the turn died because the provider
+   *    refused an oversized request, which retrying cannot fix, so the harness
+   *    opens a new, empty context window and continues there (`rolloverTurn`).
+   *  - `error` (any other failure) → `↻ Retry`, in place.
+   *  - `interrupted` → `▶ Continue`, in place.
+   * The element is created once and only its text used to change; a sync now also
+   * fixes its class list and `dataset.action`, so a card that goes Retry → rollover
+   * (or back) is correct, and the click handler reads the action at click time.
    *
    * Shown only where continuing makes sense: a conversational turn node (never a
    * sidecar — a sub-agent window or job card has no conversation of its own here),
@@ -1401,7 +1446,18 @@
       const child = treeNodes[c];
       return child && !isSidecarKind(child.kind);
     });
-    const label = meta && meta.status === 'error' ? tr('↻ Retry') : tr('▶ Continue');
+    const rollover = !!meta && meta.status === 'error' && meta.contextFull === true;
+    const label = rollover
+      ? tr('⧉ Continue in a new window')
+      : meta && meta.status === 'error'
+        ? tr('↻ Retry')
+        : tr('▶ Continue');
+    const title = rollover
+      ? tr('Ask the harness to continue this turn in a new, empty context window (the current one is full)')
+      : meta && meta.status === 'error'
+        ? tr('Ask the harness to retry this turn (it sends the message for you)')
+        : tr('Ask the harness to continue from here (it sends the message for you)');
+    const action = rollover ? 'rollover' : meta && meta.status === 'error' ? 'retry' : 'continue';
     const show = !!id && terminal && !hasTurnChild && !isSidecarKind(meta.kind) && !runningNodes.has(id);
     if (!show) {
       if (btn) btn.remove();
@@ -1409,16 +1465,21 @@
     }
     if (btn) {
       btn.textContent = label;
+      btn.title = title;
+      btn.classList.toggle('node-rollover', rollover);
+      btn.dataset.action = action;
       return;
     }
-    const button = el('button', 'node-continue', label);
-    button.title =
-      meta.status === 'error'
-        ? tr('Ask the harness to retry this turn (it sends the message for you)')
-        : tr('Ask the harness to continue from here (it sends the message for you)');
+    const button = el('button', 'node-continue' + (rollover ? ' node-rollover' : ''), label);
+    button.title = title;
+    button.dataset.action = action;
     button.addEventListener('click', (ev) => {
       ev.stopPropagation();
-      vscode.postMessage({ type: 'continueTurn', id });
+      // Read the variant *now*: this one element is reused as the node's state
+      // changes (Retry ⇄ rollover), so a captured action would go stale and post
+      // the wrong request.
+      const kind = button.dataset.action;
+      vscode.postMessage(kind === 'rollover' ? { type: 'rolloverTurn', id } : { type: 'continueTurn', id });
     });
     const head = byClass(card, 'node-head');
     // Keep the delete button at the far right of the head.
@@ -1822,7 +1883,12 @@
         const parentBottomX = px + pw / 2;
         const parentBottomY = py + ph;
         const mx = (parentBottomX + childMidX) / 2;
-        parts.push('<path d="M ' + parentBottomX + ' ' + parentBottomY + ' C ' + mx + ' ' + parentBottomY + ', ' + mx + ' ' + cy + ', ' + childMidX + ' ' + cy + '" />');
+        // A dashed connector is the visual mark of a context-window boundary, and
+        // it belongs to the window-starting node's *own* connector: only the child
+        // carrying `contextBaseId` is dashed, its descendants are ordinary turn
+        // edges again.
+        const cls = meta.contextBaseId && meta.contextBaseId === meta.id ? ' class="edge-context"' : '';
+        parts.push('<path' + cls + ' d="M ' + parentBottomX + ' ' + parentBottomY + ' C ' + mx + ' ' + parentBottomY + ', ' + mx + ' ' + cy + ', ' + childMidX + ' ' + cy + '" />');
       }
     }
     treeEdges.innerHTML = parts.join('');
@@ -1853,6 +1919,10 @@
         const statusEl = card.querySelector('.node-status');
         if (statusEl) statusEl.textContent = n.status || '';
         syncContinueButton(card, n);
+        // A card `renderPath` created from a node the `tree` had not described yet
+        // still has to pick the `CTX` marker up here (never in a streaming patch:
+        // the head exists once).
+        syncCtxBadge(card, n);
       }
     }
     for (const id in nodeEls) {
@@ -1868,6 +1938,10 @@
         collapsedCard(id, meta);
       }
       applyDeliveredBadge(nodeEls[id], meta);
+      // Same reason as in `renderTree`: the `CTX` marker belongs to the card's
+      // whole life, not to one repaint, and this pass may have created the card
+      // before the node's own `tree` entry described it.
+      syncCtxBadge(nodeEls[id], meta);
       // A job card has no conversation: its body mirrors the live job.
       if (meta.kind === 'bg') {
         renderBgBody(nodeEls[id], meta);
@@ -1933,6 +2007,9 @@
         collapsedCard(id, meta);
       }
       applyDeliveredBadge(nodeEls[id], meta);
+      // Same story as in `renderTree`: the `CTX` marker belongs to the card, not to
+      // one repaint — and this pass can be the one that creates the card.
+      syncCtxBadge(nodeEls[id], meta);
       // A job card has no conversation: its body mirrors the live job.
       if (meta.kind === 'bg') {
         renderBgBody(nodeEls[id], meta);

@@ -14,8 +14,9 @@ powershell -File build-deploy.ps1 -NoInstall # compile + package only           
 
 `npm run package` and `build-deploy.ps1` are the two side-by-side closing paths.
 `npm run package` is the POSIX entry point: it packages the `.vsix`, runs the
-`vscode:prepublish` gate (compile + the four guards) on the way, and takes the
-generated l10n aliases off disk again once it is done.
+`vscode:prepublish` gate (compile + the five guards, the added one being
+`check:rollover`) on the way, and takes the generated l10n aliases off disk again
+once it is done.
 `build-deploy.ps1` is the Windows path, and it also installs the newest `.vsix`
 with `code --install-extension --force`. Use one of them for quick iteration,
 then reload the window. This is the **mandatory last step** of any code change —

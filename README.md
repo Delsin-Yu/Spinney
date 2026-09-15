@@ -95,9 +95,9 @@ Uninstall Spinney from the Extensions view. Then delete the folder `<globalStora
    manifest and host strings English in this window (`docs/agents/invariants/i18n.md`).
 3. Press F5. This opens an Extension Development Host window.
 
-Four build guards run before packaging: `npm run check:models`, `npm run check:webview`, `npm run check:signals`, and `npm run check:l10n`.
+Five build guards run before packaging: `npm run check:models`, `npm run check:webview`, `npm run check:signals`, `npm run check:l10n`, and `npm run check:rollover`.
 
-Dev tooling lives in `tools/`: the guards, `sync-l10n-aliases.js` (the generated l10n aliases), the acceptance driver `harness-test.mjs`, the `hvsc` supervisor, and one migration script. A change under `tools/` needs no build and no reload; that folder is not shipped in the `.vsix`.
+Dev tooling lives in `tools/`: the guards, `sync-l10n-aliases.js` (the generated l10n aliases), the acceptance driver `harness-test.mjs`, `rollover-acceptance.js` (a windowless acceptance run for the context rollover), the `hvsc` supervisor, and one migration script. A change under `tools/` needs no build and no reload; that folder is not shipped in the `.vsix`.
 
 ## Migrating data from an older build
 

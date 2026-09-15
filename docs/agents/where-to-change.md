@@ -40,6 +40,16 @@
   frozen contract; the implementation is `src/chat/runtime.ts` (`SessionRuntime`,
   `TurnRun`, `runs`, `workerFor`) plus `src/chat/panels.ts` (`PanelManager`, one tab per
   session) and the per-panel routing in `ChatViewProvider.handlePanelMessage` / `postTo`.
+- **Change what a full context window does** (a context rollover) → the frozen contract is
+  `docs/agents/invariants/context-rollover.md`; the pieces are `contextBaseId` +
+  `contextBase()` and the `pathMessages` cut in `src/chat/tree.ts`,
+  `parseContextLengthError()` in `src/agent/models.ts`, `rolloverContext()` /
+  `beginTurn({ freshContext })` / the harness resume text / the `contextFull` flag in
+  `src/chat/runtime.ts`, the `rolloverTurn` route and its confirm gate in
+  `ChatViewProvider.ts`, the meta field in `src/chat/transcript.ts`, the button variant in
+  `media/main.js` with `.node-rollover` / `.edge-context` / `.node-ctx-badge` in
+  `media/style.css`, the seven strings in `l10n/bundle.l10n.*.json`, and the guard
+  `tools/check-context-rollover.js` (`npm run check:rollover`).
 - **Background terminals** → `src/chat/backgroundHub.ts` (the `(session, node)`
   registries + session-local ids + the `onRegistered` hook), the
   `// ---- Background terminals ----` / `// ---- Completion signals ----` sections of

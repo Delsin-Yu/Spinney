@@ -93,6 +93,12 @@ export interface SessionTranscriptInput {
   parentId: string | null;
   /** Ancestor node ids, root → this node (inclusive). */
   pathIds: string[];
+  /**
+   * Where this turn's context window started (the node whose `contextBaseId` is
+   * its own id), when it is not the session's root. Recorded so a reader of the
+   * dump knows why no ancestor history is in it.
+   */
+  contextBaseId?: string;
   /** The node's card title (derived from the prompt). */
   title: string;
   model: string;
@@ -233,6 +239,7 @@ export function writeSessionTranscript(input: SessionTranscriptInput): Transcrip
     sessionTitle: input.sessionTitle,
     parentId: input.parentId,
     pathIds: input.pathIds,
+    contextBaseId: input.contextBaseId || undefined,
     title: input.title,
     model: input.model,
     status: input.status,

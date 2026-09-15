@@ -1493,6 +1493,9 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         sessionTitle: session.title,
         parentId: node.parentId,
         pathIds: pathIds(session, node.id),
+        // Where this turn's context window started, so a reader of the dump knows
+        // why the prefix it describes has no ancestor history.
+        contextBaseId: node.contextBaseId,
         title: node.title,
         model: this.runtimes.get(session.id)?.model ?? this.defaultModel,
         status,
@@ -1988,11 +1991,14 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    * The one confirmation gate for "this action kills running background
    * terminals". Deleting a session, clearing a conversation and deleting a
    * branch all funnel through it, so no path silently tears down a process the
-   * user is still watching.
+   * user is still watching. The context rollover passes its own `header` because
+   * *its* call kills sub-agents too, not just terminals; the default keeps the
+   * terminal-only wording (and, being a real call site, keeps the key visible to
+   * the l10n extractor).
    */
-  private async confirmKillBackgrounds(detail: string, action: string): Promise<boolean> {
+  private async confirmKillBackgrounds(detail: string, action: string, header = vscode.l10n.t('Background terminals are still running.')): Promise<boolean> {
     const pick = await vscode.window.showWarningMessage(
-      vscode.l10n.t('Background terminals are still running.'),
+      header,
       { modal: true, detail },
       action,
     );
@@ -2743,6 +2749,37 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         // hold and the per-node "already running" refusal stay in that one place.
         void rt.continueFrom(String(message.id ?? ''));
         return;
+      case 'rolloverTurn': {
+        // The rollover variant of the ▶ button: the window is full, so the turn
+        // continues in a new, empty context window (see
+        // `docs/agents/invariants/context-rollover.md`). Starting one STOPS whatever is
+        // still running on that node — its background terminals and its sub-agent
+        // subtree — because their results could never reach the new window. That is the
+        // same destructive step the delete/clear paths gate behind a modal, so it is
+        // gated here too, and only when there is actually something to stop.
+        const id = String(message.id ?? '');
+        if (!rt.canRollover(id)) {
+          // Not a context-window failure after all: the ordinary in-place continue is
+          // the right action, so the button can never dead-end.
+          void rt.continueFrom(id);
+          return;
+        }
+        const work = rt.lockedWorkCount(id);
+        if (work <= 0) {
+          void rt.rolloverContext(id);
+          return;
+        }
+        void this.confirmKillBackgrounds(
+          vscode.l10n.t('{0} piece(s) of work are still running here (background terminals and sub-agents). Continuing in a new window stops them; what they produced stays in the transcript.', work),
+          vscode.l10n.t('Continue and stop them'),
+          vscode.l10n.t('Work is still running in this window.'),
+        ).then((ok) => {
+          if (ok) {
+            void rt.rolloverContext(id);
+          }
+        });
+        return;
+      }
       case 'checkout':
         rt.handleCheckout(String(message.id ?? ''));
         return;

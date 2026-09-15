@@ -70,13 +70,16 @@ no first byte, `request-headers … idle= budget=ms`, `request-first-chunk <ms>`
 yielded=<bool>` for a stream that went quiet. `complete()` (session titles) shares
 the header watchdog but not the body one — its caller already bounds it.
 
-## 2. The ▶ Continue / ↻ Retry button (transparent continue)
+## 2. The ▶ Continue / ↻ Retry button, and its ⧉ Continue in a new window variant (transparent continue)
 
 A turn can end without an answer in two ways: the user pressed Stop
 (`node.status = 'interrupted'`, partial output kept as the checkpoint) or the
 call failed (`node.status = 'error'`, the turn rolled back). Either way the user
-used to have to type "continue" themselves. Now the card offers a button — and it
-resumes **that node in place**: no new card, no visible node split.
+used to have to type "continue" themselves. Now the card offers a button — and in
+the ordinary cases it resumes **that node in place**: no new card, no visible node
+split. One button, one meaning at a time: the third button state is a failure the
+provider caused by refusing the request as too big, and there the same slot offers
+a rollover instead, whose whole point is a *new* card.
 
 - **Webview → host**: `{ type: 'continueTurn', id: <nodeId> }`
   (`main.js` `syncContinueButton`). The host routes it straight into
@@ -84,6 +87,14 @@ resumes **that node in place**: no new card, no visible node split.
   the *only* entry point — it keeps the reboot hold (`host.isHeld()`), the
   per-node refusal (`runs.has(nodeId)`) and the "which message does the model
   get" decision in one place.
+- **Who decides it is a context-length failure**: the host, once, and it ships a
+  boolean — `contextFull` on the `tree` node payload and in every `nodeUpdate`
+  patch, computed from the node's own persisted failure text (`node.status ===
+  'error' && parseContextLengthError(lastFailureText(node)) !== undefined`), so a
+  reload and a live turn agree. The webview therefore never parses an error
+  string, and no second copy of the provider's wording exists in `main.js`. The
+  host entry point is `ChatViewProvider.handlePanelMessage` → `rolloverTurn` →
+  `SessionRuntime.rolloverContext(nodeId)`; what that does is `context-rollover.md`.
 - **In place, not a new node**: `continueFrom` uses `beginInjectedTurn(node)` —
   the same mechanism the background / sub-agent completion notices use. The run is
   bound to the existing node (`fresh: false`), its reply is appended to that
@@ -107,10 +118,19 @@ resumes **that node in place**: no new card, no visible node split.
   conversational branch — status `interrupted`/`error`, no turn child yet (a node
   that already has a conversational continuation is not offered again), not
   `kind:'agent'`/`'bg'` (sidecars have no conversation of their own in this path),
-  and not currently running. The label is `▶ Continue` for an interruption and
-  `↻ Retry` for a failure. It is synced from both entry points of a status change
-  (`renderTree` and `applyNodeUpdate`) — a turn that ends after the tree was drawn
-  arrives as `nodeUpdate`, so both must call it.
+  and not currently running. Those rules are unchanged by the rollover variant —
+  only the **label and the action** follow the failure. Three states: `▶ Continue`
+  for an interruption, `↻ Retry` for any other failure, and `⧉ Continue in a new
+  window` when `contextFull` is set — that variant also adds `node-rollover` and
+  `data-action="rollover"`, and its click posts `{ type: 'rolloverTurn', id }`
+  instead of `{ type: 'continueTurn', id }`. Retry is **replaced**, never offered
+  beside it: the request it would re-send is the same oversized one, so it is
+  guaranteed to fail again, and a second button for one failure would make the
+  card claim two possible outcomes where there is one. It is synced from both
+  entry points of a status change (`renderTree` and `applyNodeUpdate`) — a turn
+  that ends after the tree was drawn arrives as `nodeUpdate`, so both must call it
+  (and `applyNodeUpdate` must merge the flag into `treeNodes[id]` *before* it
+  re-syncs, or that entry point would show the wrong variant).
 - **Honest transcript**: the harness text is a `kind:'harness'` display item,
   pushed into the node's own items and rendered inline by `addHarnessNote` as a
   badged (`HARNESS`) block — never a fabricated user bubble, and never the pinned
@@ -120,7 +140,10 @@ resumes **that node in place**: no new card, no visible node split.
   writes into the right card.
 - **Don't break**: `continueFrom` must keep going through `beginInjectedTurn`
   (hold gate, per-node `runs` gate, `fresh: false` append) rather than `beginTurn`
-  — a new node is exactly the visible split this feature exists to avoid. A
+  — for a continue/retry, a new node is exactly the visible split this feature
+  exists to avoid. (The rollover is the one variant that *does* want a new card, so it
+  goes through `rolloverContext` instead — which still falls back to `continueFrom`
+  when the node turns out not to be context-full, see `context-rollover.md`.) A
   `kind:'user'` item would also be wrong: the webview pins only the *first* user
   item of a node, so it would either be dropped on replay or overwrite the user's
   own prompt.
@@ -128,8 +151,12 @@ resumes **that node in place**: no new card, no visible node split.
 ## Evidence
 
 - `npm run compile`, `npm run check:webview` (the checker asserts the button's
-  show rules, the label, that clicking posts `continueTurn`, and that a
-  harness-authored message is badged).
+  show rules, the labels, that clicking posts `continueTurn` (and `rolloverTurn`
+  for the context-full variant), that the flag arriving by `nodeUpdate` switches
+  the variant, and that a harness-authored message is badged).
+- `npm run check:rollover` — the pure-function guard for the window-starting flag,
+  the prefix cut and the provider error-text parse (what it proves is listed in
+  `context-rollover.md` §10).
 - A throwaway node script against the compiled client (9 checks): network ×2 then
   success, pre-content stream break retried, post-content break *not* retried,
   503 exhausting 10 attempts with the "(after 10 attempts)" text, 401 not

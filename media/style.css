@@ -988,6 +988,17 @@ button.icon-btn {
   opacity: 0.5;
 }
 
+/* A context-window boundary (P4): the connector of the node that *starts* a new
+   window is dashed, so the conversation's break is readable in the tree. Only that
+   node's own connector is dashed — its descendants hang off ordinary turn edges
+   again. Same dim stroke as every other turn edge, deliberately a touch weaker (a
+   dash reads lighter than a solid line): it marks a boundary, not a state. */
+#tree-edges path.edge-context {
+  stroke: var(--text-dim);
+  stroke-dasharray: 5 5;
+  opacity: 0.45;
+}
+
 .node {
   position: absolute;
   width: 320px;
@@ -1215,6 +1226,22 @@ button.icon-btn {
   color: var(--bg);
 }
 
+/* The rollover variant of that button (P4): the turn died on a provider
+   context-length error, which retrying cannot fix, so the click opens a new,
+   empty window instead. Same family and same box as `.node-continue` — only the
+   accent changes (the warning colour), because this is the click that ends the
+   current window and stops whatever is still running in it. */
+.node-rollover {
+  color: var(--warn);
+  border-color: var(--warn);
+}
+
+.node-rollover:hover {
+  background: var(--warn);
+  border-color: var(--warn);
+  color: var(--bg);
+}
+
 /* Manual scroll-lock light: sits in the strip the scroll container reserves
    below itself (`margin-bottom`), docked in the bottom-right corner of the
    transcript area. On by default; click it to release the auto-scroll and hand
@@ -1365,6 +1392,25 @@ button.icon-btn {
   color: #fff;
   letter-spacing: 0.03em;
 }
+
+/* `CTX` badge (P4): this node starts a new context window — the dashed edge above
+   it and this token are together the marker of a rollover. A compact dock token
+   like `SUB` / `BG`, hence the same 9px/Consolas box, and deliberately
+   untranslated (the tooltip carries the sentence); dim rather than filled, because
+   it labels a boundary instead of a state the user has to act on. */
+.node-ctx-badge {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-family: "Consolas", monospace;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: var(--text-dim);
+  background: var(--bg3);
+  border: 1px solid var(--border);
+}
+
 .node-agent-info {
   flex: 0 0 auto;
   min-width: 0;

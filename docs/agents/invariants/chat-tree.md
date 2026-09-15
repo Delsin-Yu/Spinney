@@ -7,8 +7,15 @@
   prompt in any way.
 - `TreeNode.messages` (non-empty) always starts with a `user` role message; the
   system prompt is **never** stored in a node (synthesized per activation).
-- A branch's flat API history is `pathMessages(session, nodeId)` = `[system, ...path
-  nodes' messages]`. `SessionRuntime.buildPath` builds it when a run starts on that node
+- A branch's flat API history is `pathMessages(session, nodeId)` = `[system, ...messages
+  from the node's **context base** down to the node]` — **not** `[system, ...path nodes'
+  messages]`, and that cut is the whole semantic delta. The base is `contextBase()`
+  (`tree.ts`): the nearest ancestor-or-self whose `contextBaseId` equals its own id.
+  `pathIds`, the display path and the transcript meta's `pathIds` are deliberately **not**
+  cut — the tree stays connected and the view keeps expanding the whole line — so the two
+  must diverge: the display path is a reading aid (which cards to expand, what a card
+  describes), the API prefix is what the provider will actually accept. See
+  `context-rollover.md`. `SessionRuntime.buildPath` builds it when a run starts on that node
   (`beginTurn` / `beginInjectedTurn`) and hands it to `agent.setMessages`. `session.activeNodeId`
   is only the **view focus** (which branch the tab shows, where the composer docks): it names the
   path the *next* user turn branches from, not the node a live run is writing to. The history must
@@ -78,6 +85,13 @@
   rename.
 - `node.customSize` (optional `{w,h}`) persists a user-resized card; it survives
   migration via `normalizeTreeSession` and is sent in the `tree` message as `size`.
+- `node.contextBaseId` (optional) is the other persisted per-node field: a **window-starting**
+  node carries it and it is only ever the node's own id, set by `beginTurn(…, { freshContext:
+  true })` right after the node is created and **before** `buildPath()`, or the run's basis
+  would still be the full chain. It is validated at read time (`contextBase()`), so a
+  foreign or unreachable value is simply ignored — a stale one has no effect and needs no
+  migration or repair pass. It never moves a card; it only decides which ancestors'
+  messages are sent. See `context-rollover.md`.
 - **Stream routing (the load-bearing rule):** every streaming message carries an explicit `nodeId`
   — `delta` / `thinkingDelta` / `usage` / `toolCallDelta` / `toolStart` / `toolEnd` / `done` /
   `interrupted` / `error` — and the webview routes each one to *that* node's card. It must

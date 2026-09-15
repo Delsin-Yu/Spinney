@@ -15,6 +15,16 @@
   reuses is rewritten, exactly like the node). Gated by
   `spinney.saveSessionTranscripts` (default true); skipped for `kind:'agent'`
   nodes and empty turns; a failure is logged and never breaks the turn.
+- **A context rollover re-dumps the node it leaves, on purpose.** The rollover's
+  union kill writes its kill notices into that node's history through the
+  writeback path, and `flushWritebacks()` only writes the history — unlike
+  `finishTurn` it never dumps — while the `kind:'bg'` job cards it stopped have no
+  turn and therefore no dump of their own. Without the explicit
+  `dumpSessionTranscript(P, session, P.status)` the only copy of what those
+  terminals produced would be the Memento, and the new window's harness text points
+  at that file; so the kill record must **carry the job's command, final state and
+  output tail**, because it is the only durable copy of them (see
+  `context-rollover.md`).
 - **One-time backfill:** sessions whose turns finished *before* the dumps
   existed have no JSONL, so `search_transcripts` cannot see them (their only
   copy is the Memento). `ChatViewProvider.scheduleTranscriptBackfill` runs once
@@ -32,7 +42,11 @@
   boilerplate including AGENTS.md and would match every file). Sub-agent dumps
   keep it, and `renderTranscriptLine` never renders it, so a search can never be
   drowned by it. Meta fields: `nodeId`, `sessionId`, `sessionTitle`, `parentId`,
-  `pathIds`, `title`, `model`, `status`, `prompt`, `summary`, `stats`.
+  `pathIds`, `title`, `model`, `status`, `prompt`, `summary`, `stats`, plus
+  `contextBaseId` — present **only** when this turn's node starts a new context
+  window, i.e. when no ancestor's messages are sent any more
+  (`context-rollover.md`). `pathIds` stays the full parent chain even then: the
+  meta describes the tree, not the request prefix.
 - **Search:** `searchTranscripts` renders each line (`[role] text → tool(args)`,
   meta as `[meta] key=value …`) and greps the rendered text, so JSON escaping
   never hides a hit; `kind` filtering reads the meta line's `kind` (missing ⇒

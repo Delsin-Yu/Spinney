@@ -33,6 +33,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   generated copy that is missing or stale. The **Spinney** output channel prints an
   `[i18n]` line naming the display language it resolved, the catalog it read, and the
   copy VS Code reads for the host strings.
+- A conversation that fills the model's context window now continues in a **new
+  context window** instead of being compressed. When a turn fails because the provider
+  refused the request as too big, that card offers **⧉ Continue in a new window**: the
+  new node hangs under the same conversation (joined by a dashed edge, marked with a
+  `CTX` badge, titled `Context window 2`), and its first request carries **no ancestor
+  history at all** — a harness-written resume message points at the previous window's
+  on-disk transcript (`read_file` / `search_transcripts`), quotes the user's last
+  request and the last answer verbatim, and lists what was still running. Nothing is
+  summarised, so nothing is lost and no extra model call is spent. The provider's
+  refusal is the only trigger (the `ctx` readout is a lagging number, never a
+  threshold), and a node that is not context-full keeps the ordinary in-place
+  ▶ Continue / ↻ Retry. Because a full window can no longer receive results, a rollover
+  first stops what that node still owned — its background terminals and its sub-agent
+  subtree, behind one modal confirmation — writes the kill notices into that node's own
+  history and re-dumps its transcript, which is what the new window is told to read.
 
 ### Changed
 

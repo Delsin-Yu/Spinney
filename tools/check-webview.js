@@ -844,20 +844,28 @@ if (contextLabel !== 'ctx 50%') {
   }
 }
 
-// --- The ▶ Continue / ↻ Retry button ------------------------------------------
+// --- The ▶ Continue / ↻ Retry / ⧉ rollover button -------------------------------
 // A turn that ended without an answer — interrupted by the user, or failed on an
 // API error that outlived the client's retries — offers a button that asks the
 // harness to run a turn from that node with a message the harness writes itself,
 // so the user never has to type "continue". It may only appear where continuing
-// makes sense, and it must post the node it belongs to.
+// makes sense, and it must post the node it belongs to. One failure is special: a
+// provider context-length error (the host ships `contextFull`, contract §3/§4) is
+// not retryable, so the button is *replaced* by the rollover variant, which posts
+// `rolloverTurn`. The same fixture carries a window-starting node, whose card wears
+// the `CTX` badge and whose own connector — not its descendants' — is dashed.
 {
   const R = 'cont-node-root';
   const A = 'cont-node-a';       // interrupted tip → ▶ Continue
   const B = 'cont-node-b';       // failed tip → ↻ Retry
   const C = 'cont-node-c';       // interrupted, but already continued → no button
   const D = 'cont-node-d';       // the continuation of C (done)
+  const F = 'cont-node-f';       // failed on a full context window → ⧉ rollover
+  const G = 'cont-node-g';       // interrupted *and* contextFull → still ▶ Continue
   const SUB = 'cont-node-sub';   // `kind:'agent'` sidecar, interrupted → no button
-  const node = (id, parentId, children, status, kind) =>
+  const WIN = 'cont-node-win';   // starts a context window → CTX badge + dashed edge
+  const WIN2 = 'cont-node-win2'; // a descendant of WIN → neither of the two
+  const node = (id, parentId, children, status, kind, extra) =>
     Object.assign(
       {
         id,
@@ -871,6 +879,7 @@ if (contextLabel !== 'ctx 50%') {
         size: null,
       },
       kind ? { kind } : {},
+      extra || {},
     );
   const tree = (aStatus) => ({
     type: 'tree',
@@ -878,12 +887,21 @@ if (contextLabel !== 'ctx 50%') {
     activeId: null,
     rootId: R,
     nodes: [
-      node(R, null, [A, B, C, SUB], 'done'),
+      node(R, null, [A, B, C, F, G, SUB, WIN], 'done'),
       node(A, R, [], aStatus),
       node(B, R, [], 'error'),
       node(C, R, [D], 'interrupted'),
       node(D, C, [], 'done'),
+      // `contextFull` arrives on every node (the host computes it once, §3): only a
+      // turn that died on the provider's context-length error carries `true`.
+      node(F, R, [], 'error', undefined, { contextFull: true }),
+      // The flag alone must not roll anything over — `interrupted` keeps ▶ Continue.
+      node(G, R, [], 'interrupted', undefined, { contextFull: true }),
       node(SUB, R, [], 'interrupted', 'agent'),
+      // A window-starting node carries `contextBaseId` (equal to its own id, §2):
+      // only *it* may be badged / joined by the dashed edge, its child may not.
+      node(WIN, R, [WIN2], 'done', undefined, { contextBaseId: WIN }),
+      node(WIN2, WIN, [], 'done'),
     ],
   });
   const cards = new Map();
@@ -965,6 +983,136 @@ if (contextLabel !== 'ctx 50%') {
         `clicking Retry posted ${JSON.stringify(posted)}, expected { type: 'continueTurn', id: '${B}' }`,
       );
     }
+  }
+
+  // --- the rollover variant (contract §4) --------------------------------------
+  // A turn that died because the provider refused an oversized request cannot be
+  // retried: the *same* request is guaranteed to fail again. So the button is
+  // replaced by the rollover one — the user's click is what opens the new window.
+  const ROLLOVER_TOOLTIP =
+    'Ask the harness to continue this turn in a new, empty context window (the current one is full)';
+  dispatch(tree('interrupted'));
+  refresh();
+
+  const rollover = buttonOf(F);
+  if (!rollover || rollover.textContent !== '⧉ Continue in a new window') {
+    problems.push(
+      'a node whose turn died on a full context window (error + contextFull) shows no `⧉ Continue in a new window` button',
+    );
+  } else {
+    if (!hasClass(rollover, 'node-rollover')) {
+      problems.push('the rollover button does not carry the `node-rollover` class the styling and the guard read');
+    }
+    if (rollover.dataset.action !== 'rollover') {
+      problems.push(
+        `the rollover button carries data-action=${JSON.stringify(rollover.dataset.action)}, expected 'rollover'`,
+      );
+    }
+    if (rollover.title !== ROLLOVER_TOOLTIP) {
+      problems.push(
+        `the rollover button's tooltip is ${JSON.stringify(rollover.title)}, expected ${JSON.stringify(ROLLOVER_TOOLTIP)}`,
+      );
+    }
+  }
+  // Retry is *replaced*, not offered beside it — and a plain failure is untouched.
+  if (!buttonOf(B) || buttonOf(B).textContent !== '↻ Retry' || buttonOf(B).dataset.action !== 'retry') {
+    problems.push('a node whose turn failed for any other reason no longer shows ↻ Retry (data-action="retry")');
+  }
+
+  const rolloverClick = rollover && rollover._listeners && rollover._listeners.click;
+  if (typeof rolloverClick !== 'function') {
+    problems.push('the rollover button has no click handler');
+  } else {
+    posted.length = 0;
+    rolloverClick({ stopPropagation() {} });
+    const sent = posted.find((message) => message && message.type === 'rolloverTurn');
+    if (!sent || sent.id !== F) {
+      problems.push(
+        `clicking the rollover button posted ${JSON.stringify(posted)}, expected { type: 'rolloverTurn', id: '${F}' }`,
+      );
+    }
+    if (posted.some((message) => message && message.type === 'continueTurn')) {
+      problems.push('the rollover button also posted continueTurn — the retried request is the oversized one');
+    }
+  }
+
+  // The judgement is made by the host and can arrive *after* the tree was drawn
+  // (that is exactly how a turn dies on a context-length error), so a `nodeUpdate`
+  // has to carry the flag and re-sync the button on the card it already shows.
+  dispatch({ type: 'nodeUpdate', id: B, status: 'error', title: B, contextFull: true });
+  const switched = buttonOf(B);
+  if (
+    !switched ||
+    switched.textContent !== '⧉ Continue in a new window' ||
+    !hasClass(switched, 'node-rollover') ||
+    switched.dataset.action !== 'rollover'
+  ) {
+    problems.push('a `nodeUpdate` carrying contextFull: true did not switch a ↻ Retry card to the rollover button');
+  } else {
+    posted.length = 0;
+    if (typeof switched._listeners?.click === 'function') switched._listeners.click({ stopPropagation() {} });
+    const sent = posted.find((message) => message && message.type === 'rolloverTurn');
+    if (!sent || sent.id !== B) {
+      problems.push(
+        `after the flag arrived by \`nodeUpdate\`, clicking posted ${JSON.stringify(posted)}, expected { type: 'rolloverTurn', id: '${B}' }`,
+      );
+    }
+  }
+  // And the flag is not sticky: a later patch that clears it goes back to Retry.
+  dispatch({ type: 'nodeUpdate', id: B, status: 'error', title: B, contextFull: false });
+  const back = buttonOf(B);
+  if (!back || back.textContent !== '↻ Retry' || hasClass(back, 'node-rollover') || back.dataset.action !== 'retry') {
+    problems.push('a `nodeUpdate` with contextFull: false did not switch the card back to ↻ Retry');
+  }
+
+  // A full window is only a *failure* mode: an interrupted node keeps ▶ Continue
+  // even when the host's flag is set (there is no refused request to roll over).
+  const interruptedFlagged = buttonOf(G);
+  if (!interruptedFlagged || interruptedFlagged.textContent !== '▶ Continue') {
+    problems.push('an interrupted node carrying contextFull: true no longer shows ▶ Continue (only a failed turn rolls over)');
+  }
+
+  // --- the CTX badge and the dashed edge (contract §5) --------------------------
+  // The two marks of a window break: the badge on the node that *starts* a window,
+  // and the dashed connector under it. Both belong to that node alone — a
+  // descendant of a window-starting node is an ordinary turn again.
+  const winCard = cards.get(WIN);
+  const winBadge = winCard ? findByClass(winCard, 'node-ctx-badge') : null;
+  if (!winBadge || winBadge.textContent !== 'CTX') {
+    problems.push('a node carrying contextBaseId shows no CTX badge on its card');
+  }
+  if (cards.get(WIN2) && findByClass(cards.get(WIN2), 'node-ctx-badge')) {
+    problems.push('a CTX badge appeared on a descendant of the window-starting node (only the node that starts a window is badged)');
+  }
+  // `drawEdges()` writes the SVG as one markup string (`treeEdges.innerHTML = …`),
+  // so the paths are read back out of it instead of the stub holding elements. A
+  // turn connector ends at its own child (`… C mx py, mx cy, childMidX cy`), which
+  // is what ties a path to a node — and the stub reports no card width, so that
+  // endpoint is the child card's own top-left corner.
+  const edgeOf = (id) => {
+    const card = cards.get(id);
+    if (!card) return null;
+    const endX = parseFloat(card.style.left);
+    const endY = parseFloat(card.style.top);
+    const markup = String(elementById('tree-edges').innerHTML || '');
+    return (
+      (markup.match(/<path[^>]*>/g) || []).find((tag) => {
+        const end = /([-\d.]+) ([-\d.]+)"\s*\/>$/.exec(tag);
+        return end && parseFloat(end[1]) === endX && parseFloat(end[2]) === endY;
+      }) || null
+    );
+  };
+  const winEdge = edgeOf(WIN);
+  const win2Edge = edgeOf(WIN2);
+  if (!winEdge) {
+    problems.push('no connector path could be found for the window-starting node (the edges are not drawn at all)');
+  } else if (!/\bclass="edge-context"/.test(winEdge)) {
+    problems.push(`the window-starting node's connector is not dashed: ${winEdge}`);
+  }
+  if (!win2Edge) {
+    problems.push('no connector path could be found for a descendant of the window-starting node');
+  } else if (/edge-context/.test(win2Edge)) {
+    problems.push(`a descendant of the window-starting node got a dashed connector too: ${win2Edge}`);
   }
 }
 

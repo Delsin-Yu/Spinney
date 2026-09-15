@@ -28,6 +28,9 @@
   async sub-agents) — a `kind:'bg'` card per job (`onBackgroundRegistered`) plus the
   per-node `signals` queue, handed to a running turn at its next tool boundary or
   injected into the idle owning node. Reaches the provider through the narrow `RuntimeHost`.
+  A full context window is continued rather than compressed by `rolloverContext()` (the
+  union kill + settle + flush + re-dump, `beginTurn({ freshContext })`, the harness resume
+  text and the `contextFull` flag it ships) — see `invariants/context-rollover.md`.
 - `src/chat/backgroundHub.ts` — `BackgroundHub` (one per window): background terminals
   keyed by `(session, node)`, session-local task ids, an `id → owner` index, the
   `onRegistered` / `onUpdated` / `onFinish` hooks, and the
@@ -36,7 +39,9 @@
 - `src/chat/SessionsProvider.ts` — the native sidebar `TreeDataProvider` listing
   session titles; it re-reads items from `ChatViewProvider` on every refresh.
 - `src/chat/tree.ts` — the Chat Tree data model: `TreeNode` / `AgentSession`,
-  path assembly (`pathIds` / `pathMessages`), `attachNode`, `pruneSession`,
+  path assembly (`pathIds` / `pathMessages`), the context basis that cuts the API
+  prefix (`TreeNode.contextBaseId` / `contextBase()` — see
+  `invariants/context-rollover.md`), `attachNode`, `pruneSession`,
   branch removal (`branchIds` / `detachBranch`), the `isSidecar` predicate (a
   sub-agent `kind:'agent'` window vs. a background job `kind:'bg'` card — both
   display-only sidecars) and the v1→v2 state migration. Pure data layer, no VS Code UI.
@@ -91,7 +96,9 @@
   `vscode.env.language` reports the region tags.
 - `src/agent/models.ts` — the model catalog (id / context window / accepts images)
   and its accessors (`DEFAULT_MODEL`, `isVisionModel`, `contextWindowFor`,
-  `visionModelsLabel`). The **only** place a model id may appear;
+  `visionModelsLabel`), plus `parseContextLengthError()` — the reader of the
+  provider's context-length 400, which is what triggers a context rollover. The
+  **only** place a model id may appear;
   `tools/check-models.js` enforces that on every package.
 - `src/i18n.ts` — the UI localisation entry point: which display language
   (`vscode.env.language`, normalized) the host is in, the `l10n/bundle.l10n.<locale>.json`
@@ -113,11 +120,14 @@
   tree, cleaned up by `build-deploy.ps1`'s `finally` and `npm run clean:l10n`; the
   four names are gitignored. See `docs/agents/invariants/i18n.md`.
 - `tools/check-models.js` · `tools/check-webview.js` · `tools/check-signal-persist.js`
-  · `tools/check-l10n.js` — the packaging guards (`npm run check:models` /
-  `check:webview` / `check:signals` / `check:l10n`, run by `vscode:prepublish`):
+  · `tools/check-l10n.js` · `tools/check-context-rollover.js` — the packaging guards
+  (`npm run check:models` / `check:webview` / `check:signals` / `check:l10n` /
+  `check:rollover`, run by `vscode:prepublish`):
   model-id drift, "does the chat webview still survive every message the provider
-  posts", the completion-signal persistence contract, and the UI catalogs drifting
-  from the code. See `testing.md`.
+  posts" (including the rollover button's label and click), the completion-signal
+  persistence contract, the UI catalogs drifting from the code, and the
+  context-rollover contract (`contextBaseId` / the prefix cut / the error-text
+  parse — pure functions, no DOM). See `testing.md`.
 - `src/agent/tools/` — one file per intercepted tool (`readImage`, `spawnAgents`,
   `spawnReadonlyAgents`, `sendAgentMessage`, `sendReadonlyAgentMessage`,
   `hopSession`, `listNodes`, `renameSession`) plus the barrel that filters them.

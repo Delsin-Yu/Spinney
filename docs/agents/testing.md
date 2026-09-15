@@ -10,7 +10,7 @@ flow exercises read/write/exec against a scratch file (`_e2e.txt` is a leftover 
 fixture, safe to ignore or delete). Before a release, confirm `npm run compile` is clean and
 `build-deploy.ps1` succeeds.
 
-Four build-time guards are the exception, all run by `vscode:prepublish` so a
+Five build-time guards are the exception, all run by `vscode:prepublish` so a
 regression fails *packaging* instead of the user's session:
 
 - `npm run check:models` (`tools/check-models.js`) — model ids: the settings enum
@@ -47,6 +47,32 @@ regression fails *packaging* instead of the user's session:
   `%key%` resolves. It depends on the extractor's shape, which is why a
   translatable message has to be a single literal — see
   `invariants/i18n.md`.
+- `npm run check:rollover` (`tools/check-context-rollover.js`) — the context-rollover
+  contract (`invariants/context-rollover.md`): a window break cuts the **API** prefix and
+  nothing else, so the sent history must start at the branch's context base
+  (`contextBaseId` equal to the node's own id) while `pathIds` — the cards, the
+  transcript meta — keeps the full chain, a descendant inherits the base, a marker naming
+  a foreign or missing node must be a *provable* no-op (the self-equality read-time
+  validation, which is why there is no repair pass), each window's own turn sends only
+  its harness message, and `parseContextLengthError` must read the provider's 400 (the
+  real sentence's two numbers, casing and whitespace tolerated, plus reworded fallbacks)
+  while an ordinary failure never becomes a trigger. Both rules are invisible until a
+  real window fills up — a wrong cut silently sends the entire dead history, or nothing
+  at all — so they are pinned here. Like `check:signals` it is pure node against `out/`,
+  and therefore also runs after `compile` in `vscode:prepublish`.
+
+`tools/rollover-acceptance.js` is the one acceptance run that needs neither a window
+nor a provider — dev-only, **not** in `vscode:prepublish`. The guards above can only
+reach the pure modules, while the risky half of a context rollover lives in
+`SessionRuntime`: it stubs the `vscode` module (a `Module._load` hook) plus an offline
+client and drives `rolloverContext()` for real. What it pins: the new window's first
+request is `[system, harness]` with no ancestor message in it, the old node's
+background terminal is killed while another node's job is left alone, the kill notice
+lands in that node's history *and* in its re-dumped transcript, the carried-over
+request/answer plus the clip note and attachment count are in the message, the window
+is numbered per branch, and a node that is not context-full falls back to the in-place
+continue. `node tools/rollover-acceptance.js` after `npm run compile`; it reads a few
+private fields, so a refactor may break the script while the product stays fine.
 
 What `check:webview` can **not** tell you: anything visual (no CSS, no layout, no
 theme) and anything about the provider's TypeScript side. Maintenance: adding a

@@ -4,9 +4,12 @@
  * A session is a tree of turn nodes. One node = one turn: a user prompt plus
  * everything the agent produced for it (answer text, reasoning, tool calls and
  * their results). The flat message history the API needs is the concatenation of
- * the nodes along the path from the root to the checked-out node — see
- * `pathMessages`. The system prompt is never stored in a node; it is synthesized
- * on activation (`Agent.systemPrompt`).
+ * the turn nodes from the checked-out node's **context base** down to it — normally
+ * the path from the root, but a node that starts a new context window
+ * (`contextBaseId`) cuts every ancestor above it out of the request — see
+ * `pathMessages` and `docs/agents/invariants/context-rollover.md`. The system
+ * prompt is never stored in a node; it is synthesized on activation
+ * (`Agent.systemPrompt`).
  *
  * Invariants (also documented in AGENTS.md):
  *  - a non-empty `node.messages` starts with a `user` message;
@@ -48,6 +51,13 @@ export interface TreeNode {
   parentId: string | null;
   /** Creation order; `children[0]` is the continuation of the original chain. */
   children: string[];
+  /**
+   * This branch's context basis: from this node on, the message prefix sent to the
+   * API contains no ancestor message at all. Only ever equal to the node's own id,
+   * which is validated at read time (`contextBase()`), so it cannot go stale: a
+   * foreign or unreachable value simply has no effect and needs no migration.
+   */
+  contextBaseId?: string;
   /** API messages this turn contributed. Non-empty ⇒ starts with a user message. */
   messages: ChatMessage[];
   /** UI transcript for this turn. */
@@ -281,7 +291,14 @@ export function attachNode(session: AgentSession, node: TreeNode): void {
   session.updatedAt = Date.now();
 }
 
-/** Node ids from the root down to `nodeId` (empty when the node is unknown). */
+/**
+ * Node ids from the root down to `nodeId` (empty when the node is unknown).
+ *
+ * This is the **display** path: which cards the view expands, what `path`
+ * describes, what the transcript meta records. `contextBaseId` never cuts it (it
+ * only decides where the *API prefix* starts, see `pathMessages` and
+ * `docs/agents/invariants/context-rollover.md`).
+ */
 export function pathIds(session: AgentSession, nodeId: string | null): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
@@ -298,13 +315,46 @@ export function pathIds(session: AgentSession, nodeId: string | null): string[] 
   return out.reverse();
 }
 
-/** The flat API history of a branch: every turn node's messages along the path.
+/**
+ * The context basis of a branch: the nearest ancestor-or-self that starts a
+ * window. `undefined` when no node on the path (root → `nodeId`) opens one, and
+ * the whole path is sent.
+ *
+ * The self-equality test (`n.contextBaseId === n.id`) **is** the validation, and
+ * that is why no migration or repair pass is ever needed: a stored value that
+ * names a foreign node, a node further down another branch, or a node deleted
+ * since simply never matches, so the cut is a no-op and the full chain goes out —
+ * exactly as if the field were absent. Only a node naming *itself* can open a
+ * window, and that reading is always taken fresh from the data here, so nothing
+ * can go stale (see `docs/agents/invariants/context-rollover.md` §1/§2).
+ */
+export function contextBase(session: AgentSession, nodeId: string | null): string | undefined {
+  const ids = pathIds(session, nodeId);
+  for (let i = ids.length - 1; i >= 0; i--) {
+    const n = session.nodes[ids[i]];
+    if (n && n.contextBaseId === n.id) return n.id;
+  }
+  return undefined;
+}
+
+/** The flat API history of a branch: `[system, ...messages from the context base
+ * down to the node]` — so every turn node's messages from the node's context base
+ * (`contextBase()`, root without a rollover) down to `nodeId`; the ancestors above
+ * a window-starting node are **not** sent (see
+ * `docs/agents/invariants/context-rollover.md` §1).
+ *
+ * `pathIds()` (display: the cards, `path`, the transcript meta) is deliberately
+ * NOT cut — `contextBaseId` decides which nodes' messages are *sent*, it never
+ * moves or hides a card.
+ *
  * Sidecar nodes (`kind === 'agent'` sub-agents, `kind === 'bg'` background cards)
  * are display-only — a sub-agent's conversation is a separate history and must
  * never be concatenated into the parent's, and a background card has none. */
 export function pathMessages(session: AgentSession, nodeId: string | null): ChatMessage[] {
+  const ids = pathIds(session, nodeId);
+  const base = contextBase(session, nodeId);
   const out: ChatMessage[] = [];
-  for (const id of pathIds(session, nodeId)) {
+  for (const id of ids.slice(base ? ids.indexOf(base) : 0)) {
     const node = session.nodes[id];
     if (node && !isSidecar(node)) {
       out.push(...node.messages);
@@ -547,6 +597,10 @@ function normalizeTreeSession(raw: AgentSession): AgentSession {
       customSize: node.customSize && typeof node.customSize.w === 'number' && typeof node.customSize.h === 'number'
         ? { w: node.customSize.w, h: node.customSize.h }
         : undefined,
+      // The context-window marker: optional, so a state stored before it existed
+      // loads unchanged (no version bump). A value that is not this node's own id
+      // is ignored at read time by `contextBase()`, so it needs no repair here.
+      contextBaseId: typeof node.contextBaseId === 'string' ? node.contextBaseId : undefined,
     };
     n.kind = node.kind === 'agent' ? 'agent' : node.kind === 'bg' ? 'bg' : undefined;
     n.delivered = node.delivered === true ? true : undefined;

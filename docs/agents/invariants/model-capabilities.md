@@ -111,3 +111,16 @@ must call `visionModelsLabel()` instead of naming anything.
 for the *previous* request, and the turn in progress can add messages on top of
 it. The ground truth for "too big" stays the API's 400, whose message names both
 the window and the size it refused.
+
+That 400 text now has a **second consumer**: `parseContextLengthError()` in the
+same catalog module reads the window and the refused size back out of it, and that
+is what triggers a context rollover (`context-rollover.md`) — the provider's
+refusal, never a local threshold, because a threshold would have to fire before
+the window is full and would therefore have to summarise. `usage.prompt_tokens`
+is **never a trigger, only a readout**: it is the *previous* request's number, and
+it has already lied once — the header read `ctx 65%` while the request that failed
+carried ~1.28 M tokens. When the window named in the 400 disagrees with
+`contextWindowFor()`, that mismatch is **only logged** to the `[config]` line and
+is never written back into `spinney.modelTable`: the declared table is the user's
+data, and a stale window is their one-line fix, not something the harness
+corrects behind them.

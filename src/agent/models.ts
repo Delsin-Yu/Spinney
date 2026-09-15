@@ -104,6 +104,69 @@ export function contextWindowFor(model: string): number {
   return modelSpecs().find((m) => m.id === model)?.contextWindow ?? DEFAULT_CONTEXT_WINDOW;
 }
 
+/** The provider's own sentence: "maximum context length is <N> tokens. However, you requested <M>". */
+const CONTEXT_WINDOW_SENTENCE =
+  /maximum\s+context\s+length\s+is\s+([\d][\d.,_]*)\s*tokens\b[\s\S]{0,160}?you\s+requested\s+([\d][\d.,_]*)/i;
+/** The same sentence without the "requested" half (a reworded provider still names its window). */
+const CONTEXT_WINDOW_ONLY = /maximum\s+context\s+length\s+is\s+([\d][\d.,_]*)\s*tokens\b/i;
+/** The window named loosely, for a provider that reorders the sentence. */
+const LOOSE_WINDOW = /(?:context\s+length|context\s+window|maximum\s+context)[^\d]{0,32}?([\d][\d.,_]*)/i;
+/** The refused size, phrased loosely. */
+const REQUESTED_SIZE = /(?:you\s+requested|requested|you\s+sent|sent)[^\d]{0,24}([\d][\d.,_]*)/i;
+/**
+ * The wording that means "this request was refused for being too big". Deliberately
+ * a fixed list: an unrelated failure must never start a rollover (§11 of the
+ * contract has no threshold pre-emption, so the trigger has to be exactly this).
+ */
+const CONTEXT_LENGTH_HINT = /context_length_exceeded|context length|reduce the length|too many tokens|maximum context/i;
+
+/** Digits of a token count, tolerating thousands separators (`1,048,576`). */
+function tokenCount(raw: string | undefined): number | undefined {
+  if (!raw) {
+    return undefined;
+  }
+  const digits = raw.replace(/[^0-9]/g, '');
+  if (!digits) {
+    return undefined;
+  }
+  const value = Number(digits);
+  return Number.isFinite(value) ? value : undefined;
+}
+
+/**
+ * Read the window and the refused size out of a provider context-length error —
+ * the **only** authoritative runtime statement of a context window (see
+ * `docs/agents/invariants/model-capabilities.md`: no listing, header or probe
+ * carries one). It is the rollover trigger: a node is context-full exactly when
+ * its failure text parses here, and a `usage.prompt_tokens` readout never is.
+ *
+ * It is a pure *reader* of error text: it must never write `spinney.modelTable`.
+ * When the 400's window disagrees with `contextWindowFor()`, the setting stays the
+ * user's and the disagreement is only logged (`[config]`).
+ *
+ * Primary match is the sentence the provider actually emits (`maximum context
+ * length is 1,048,576 tokens. However, you requested 2,000,000`, thousands
+ * separators / casing / whitespace tolerated). The loose fallback keeps a
+ * reworded provider triggering a rollover; it returns an object with its fields
+ * `undefined` when the wording matches but no number can be read. Only text that
+ * matches nothing at all returns `undefined`.
+ */
+export function parseContextLengthError(text: string): { window?: number; requested?: number } | undefined {
+  const body = text ?? '';
+  const sentence = CONTEXT_WINDOW_SENTENCE.exec(body);
+  if (sentence) {
+    return { window: tokenCount(sentence[1]), requested: tokenCount(sentence[2]) };
+  }
+  const windowOnly = CONTEXT_WINDOW_ONLY.exec(body);
+  if (!windowOnly && !CONTEXT_LENGTH_HINT.test(body)) {
+    return undefined;
+  }
+  const window = windowOnly
+    ? tokenCount(windowOnly[1])
+    : tokenCount(LOOSE_WINDOW.exec(body)?.[1]);
+  return { window, requested: tokenCount(REQUESTED_SIZE.exec(body)?.[1]) };
+}
+
 /** The vision model ids, in catalog order. */
 export function visionModelIds(): string[] {
   return modelSpecs().filter((m) => m.vision).map((m) => m.id);

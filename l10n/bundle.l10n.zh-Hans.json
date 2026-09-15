@@ -138,5 +138,12 @@
   "A background task or sub-agent is still running on this branch ({0}). Press Stop to kill it, or wait for it to finish.": "这条分支上还有后台任务或子代理在运行（{0}）。按 Stop 终止它，或等它结束。",
   "Stop this turn": "停止这一轮",
   "Stop this node: kill its background tasks and sub-agents (nothing is sent to the model)": "停止这个节点：终止它的后台任务与子代理（不会给模型发送任何内容）",
+  "Context window {0}": "上下文窗口 {0}",
+  "Work is still running in this window.": "本窗口仍有工作正在运行。",
+  "{0} piece(s) of work are still running here (background terminals and sub-agents). Continuing in a new window stops them; what they produced stays in the transcript.": "此处仍有 {0} 项工作正在运行（后台终端和子智能体）。在新窗口中继续会终止它们；它们产生的内容会保留在转写中。",
+  "Continue and stop them": "继续并终止它们",
+  "⧉ Continue in a new window": "⧉ 在新窗口中继续",
+  "Ask the harness to continue this turn in a new, empty context window (the current one is full)": "让 harness 在一个新的空上下文窗口中继续本回合（当前窗口已满）",
+  "This node starts a new context window; the branch above it is not sent to the model any more": "此节点开启新的上下文窗口；其上方分支不再发送给模型",
   "Ready": "就绪"
 }
