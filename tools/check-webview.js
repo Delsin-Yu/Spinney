@@ -194,6 +194,15 @@ function makeElement(id) {
     parentElement: null,
     firstChild: null,
     lastChild: null,
+    // The streaming path asks the container what it appended last (the tail of the
+    // turn: which message a delta belongs to). Resolving it for real keeps every
+    // check below on the same code path the webview takes.
+    get lastElementChild() {
+      return this.children.length > 0 ? this.children[this.children.length - 1] : null;
+    },
+    get firstElementChild() {
+      return this.children.length > 0 ? this.children[0] : null;
+    },
     classList: {
       _set: new Set(),
       toggle(name, force) {
@@ -1041,6 +1050,122 @@ if (contextLabel !== 'ctx 50%') {
         }
       }
     }
+  }
+}
+
+// --- The live block is always expanded ----------------------------------------
+// `foldThinking` / `foldToolCalls` describe a block *at rest*: the block that is
+// live right now — a thinking block receiving deltas, a tool call between its first
+// delta and its end — is expanded whatever they say, and folds back the moment
+// something else takes over. A stalled turn would otherwise reason behind a closed
+// header, and a live tool card that never collapsed would grow the transcript
+// without end. Checked here because both halves fail silently: the block still
+// renders, nothing throws.
+//
+// A click on a block header is the user taking that one block over; the rule must
+// then leave it exactly where they put it (the two halves of that contract are the
+// hand-folded live block, below, and the fold-back it must *not* undo).
+//
+// One gap: `toolEnd` folds the card back through a `[data-id="…"]` lookup, which
+// this DOM stub cannot resolve (compound selectors return a shared fake element), so
+// the fold-back is covered through the turn ending instead — same rule, same
+// container (`endRun` → `closeActive('tool')`).
+{
+  const NODE = 'fold-node';
+  dispatch({ type: 'reset' });
+  dispatch({
+    type: 'tree',
+    viewId: NODE,
+    activeId: null,
+    rootId: NODE,
+    nodes: [
+      {
+        id: NODE,
+        parentId: null,
+        children: [],
+        title: 'fold smoke',
+        status: 'running',
+        createdAt: 0,
+        preview: 'fold smoke',
+        usage: null,
+        size: null,
+      },
+    ],
+  });
+  dispatch({ type: 'path', ids: [NODE], nodes: [{ id: NODE, status: 'running', items: [] }] });
+  // Both fold defaults ON: the live block is the exception this section is about.
+  dispatch({
+    type: 'config',
+    model: 'smoke-model',
+    models: ['smoke-model'],
+    visionModels: [],
+    thinkingEffort: 'medium',
+    foldToolCalls: true,
+    foldThinking: true,
+  });
+  dispatch({ type: 'state', busy: true, status: '', sessionId: 'fold-session', runningNodes: [NODE] });
+
+  const cardOf = () =>
+    Array.from(elementById('tree-canvas').children).find((child) => child.dataset && child.dataset.id === NODE);
+  const msgsOf = () => {
+    const items = cardOf() ? findByClass(cardOf(), 'node-items') : null;
+    return items ? items.children : [];
+  };
+  const lastMsgOf = (kind) =>
+    msgsOf()
+      .filter((child) => child.dataset && child.dataset.kind === kind)
+      .pop();
+  /** Is that block's body hidden? `null` when the block is not on screen at all. */
+  const foldedIn = (kind, cls) => {
+    const message = lastMsgOf(kind);
+    const body = message ? findByClass(message, cls) : null;
+    return body ? body.classList.contains('hidden') : null;
+  };
+  const expectFold = (kind, cls, folded, what) => {
+    const actual = foldedIn(kind, cls);
+    if (actual === null) {
+      problems.push(`${what} is not on screen — the card renders no .${cls}`);
+    } else if (actual !== folded) {
+      problems.push(`${what} is ${actual ? 'folded' : 'expanded'}, expected ${folded ? 'folded' : 'expanded'}`);
+    }
+  };
+  const clickHeader = (kind, cls) => {
+    const message = lastMsgOf(kind);
+    const head = message ? findByClass(message, cls) : null;
+    const handler = head && head._listeners && head._listeners.click;
+    if (typeof handler !== 'function') {
+      problems.push(`the .${cls} of a ${kind} block has no click handler — the block can no longer be folded by hand`);
+      return false;
+    }
+    handler();
+    return true;
+  };
+
+  // (a) Thinking streams in expanded, and folds back when the answer's text takes
+  // over the same message.
+  dispatch({ type: 'thinkingDelta', nodeId: NODE, text: 'reasoning' });
+  expectFold('assistant', 'thinking-body', false, 'a thinking block receiving deltas');
+  dispatch({ type: 'delta', nodeId: NODE, text: 'answer' });
+  expectFold('assistant', 'thinking-body', true, "the thinking block of a message whose answer started");
+
+  // (b) A tool call is expanded while its arguments stream and stays expanded while
+  // it runs, then folds back when the turn ends under it (an interrupted call would
+  // otherwise stay open, marked `running`, forever).
+  dispatch({ type: 'toolCallDelta', nodeId: NODE, index: 0, id: 'fold-tool', name: 'read_file', args: '{"path":"a"}' });
+  expectFold('tool', 'tool-body', false, 'a tool call streaming its arguments');
+  dispatch({ type: 'toolStart', nodeId: NODE, index: 0, id: 'fold-tool', name: 'read_file', args: '{"path":"a"}' });
+  expectFold('tool', 'tool-body', false, 'a tool call that started running');
+  dispatch({ type: 'interrupted', nodeId: NODE });
+  expectFold('tool', 'tool-body', true, 'a tool call the turn ended under');
+
+  // (c) The user's own click wins: a live block they folded by hand is left folded —
+  // the next delta must not re-open it.
+  dispatch({ type: 'thinkingDelta', nodeId: NODE, text: 'reasoning again' });
+  expectFold('assistant', 'thinking-body', false, 'a second thinking block, receiving deltas');
+  if (clickHeader('assistant', 'thinking-head')) {
+    expectFold('assistant', 'thinking-body', true, 'a thinking block the user just folded by hand');
+    dispatch({ type: 'thinkingDelta', nodeId: NODE, text: 'still streaming' });
+    expectFold('assistant', 'thinking-body', true, 'a hand-folded thinking block after another delta');
   }
 }
 

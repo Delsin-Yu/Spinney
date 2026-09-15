@@ -8,6 +8,16 @@
   to freeze the sidebar after a long session.
 - Tool cards shown in the UI (and persisted `displayItems`) cap args (~8 KiB) and
   result (~32 KiB). Agent `messages` still carry the full tool payload for the model.
+- **The live block is the only expanded one.** `foldThinking` / `foldToolCalls` are
+  the *at rest* default: the thinking block receiving deltas, and a tool call between
+  its first delta and its end, are expanded whatever the default says, and fold back
+  the moment the answer's text takes over, the call reports its result, or the turn
+  ends (`done` / `interrupted` / `error` → `endRun`). Without it a long turn either
+  reasoned behind a closed header or grew one never-collapsing tool card per call.
+  A click on a block's header hands *that* block to the user for good
+  (`_userTouched`), and `applyFoldDefault` skips the live body so a settings change
+  cannot fold it. `setActive` / `clearActive` / `closeActive` in `media/main.js`;
+  `tools/check-webview.js` asserts it ("the live block is always expanded").
 - Transcript scrolling is **per-card and event-driven**: each node's
   `.node-items` (and each thinking body) has a `createScrollController` with a
   green lock dot (`attachLock(container, host, locked)`). It starts locked only

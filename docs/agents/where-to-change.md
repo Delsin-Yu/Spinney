@@ -22,7 +22,10 @@
   (styling); the HTML shell is in `getHtml()` in `ChatViewProvider.ts`.
   `style.css` maps every colour token in `:root` to a `--vscode-*` theme variable
   (the hex values are fallbacks only) so the panel follows light/dark/HC themes —
-  keep any new colour theme-driven rather than hardcoded.
+  keep any new colour theme-driven rather than hardcoded. Folding a block
+  (thinking / tool card) goes through `setBlockOpen` + the active-block rule
+  (`setActive` / `clearActive`, `applyFoldDefault`) — see
+  `docs/agents/invariants/streaming-perf.md`.
 - **Add or reword a user-visible string** → write it as the English source inside
   one literal: `vscode.l10n.t('…')` in the host, `tr('…')` in `media/main.js`, or
   `%key%` + `package.nls.json` for `package.json`; then add the entry to every

@@ -36,6 +36,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The block that is live right now is always expanded, and it lets go on its own. A
+  thinking block receiving deltas, and a tool call between its first delta and its
+  result, are expanded whatever `spinney.foldThinking` / `spinney.foldToolCalls` say —
+  those two settings describe a block **at rest** again — and they fold back the moment
+  the answer's text takes over, the call reports its result, or the turn ends (an
+  interrupted call used to stay open, marked `running`, forever). A click on a block's
+  header is still the last word: a block you folded or opened by hand is never touched
+  by the rule again, and a settings change no longer reaches the block that is live.
 - A node that owns unfinished work now offers **Stop** instead of a greyed-out composer.
   While a background terminal or an async sub-agent batch started by that node is still
   running — or its completion notice is already queued for it — the composer's

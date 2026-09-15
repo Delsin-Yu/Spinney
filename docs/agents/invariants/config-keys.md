@@ -28,7 +28,9 @@ the **name** the prompt carries by `replyLanguageName` in
 like the prompt does; a tag CLDR cannot name, or any other name typed into
 `settings.json`, is used verbatim),
 `foldToolCalls` (default `true`),
-`foldThinking` (default `true`), `maxConcurrentSubagents` (default 15),
+`foldThinking` (default `true`; both are the *at rest* default — the block that is
+live right now is always expanded, see `docs/agents/invariants/streaming-perf.md`),
+`maxConcurrentSubagents` (default 15),
 `maxLevel2Subagents` (default 2), `saveSubAgentTranscripts` (default `true`),
 `saveSessionTranscripts` (default `true` — dump each main-agent turn; the
 one-time historical backfill is keyed by the Memento marker

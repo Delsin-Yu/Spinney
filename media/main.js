@@ -102,7 +102,9 @@
   // The node a routed streaming call is currently writing into (null while writing
   // into the view focus container). Keeps each node's live tool cards separate.
   let routingNodeId = null;
-  // User-configurable folding (set via the `config` message).
+  // User-configurable folding (set via the `config` message). These are the *at
+  // rest* defaults: the block that is live right now is always expanded (see
+  // `setActive` below).
   let foldToolCalls = true;
   let foldThinking = true;
 
@@ -266,17 +268,16 @@
    * Apply a changed fold default to the cards already on screen — a settings
    * change must not wait for the next repaint. Card bodies are the only state
    * that matters (the chevron and the `.open` marker follow it), so a later
-   * click on the header still toggles that single card as usual.
+   * click on the header still toggles that single card as usual. The one body a
+   * settings change never reaches is the live one (see `setActive`).
    */
   function applyFoldDefault(bodySelector, folded) {
     if (!messagesEl) return;
     for (const body of messagesEl.querySelectorAll(bodySelector)) {
-      body.classList.toggle('hidden', folded);
-      const parent = body.parentElement;
-      if (!parent) continue;
-      const chev = parent.querySelector('.chev');
-      if (chev) chev.classList.toggle('open', !folded);
-      if (parent.classList.contains('thinking')) parent.classList.toggle('open', !folded);
+      // The live block stays expanded whatever the default says (see `setActive`);
+      // the new default reaches it when it goes idle.
+      if (body._active) continue;
+      setBlockOpen(body, !folded);
     }
   }
   // The active node's pinned user prompt (sticky at the top of an expanded card).
@@ -417,6 +418,89 @@
     }
   }
 
+  // ---- Active blocks: the block that is live right now is always expanded ----
+  // A thinking block receiving deltas, and a tool call between its first delta and
+  // its end, are *active*: they are expanded whatever `foldThinking` /
+  // `foldToolCalls` say, and they fold back to that default the moment they stop
+  // being active — the answer's text takes over, the call reports its result, or
+  // the turn ends (`done` / `interrupted` / `error`). So at rest the fold defaults
+  // describe what is on screen, and only the live block is open.
+  //
+  // Three marks per block body carry the state:
+  //   `_active`      — the block is live right now (also what `applyFoldDefault`
+  //                    skips, so a settings change cannot fold the live block);
+  //   `_autoOpen`    — *this* rule opened it, so only this rule may close it again
+  //                    (a body that is open because the fold default is off is
+  //                    never touched);
+  //   `_userTouched` — set by a click on the block's header: from then on the user
+  //                    owns that block and the rule leaves it exactly as they left it.
+  // The list of live bodies lives on the container (`messagesEl`), which `routeTo`
+  // swaps per node, so two nodes streaming at once never see each other's blocks.
+  /**
+   * Open or close one collapsible block. The body owns the state (`hidden`); the
+   * chevron and — for a thinking block — its `.open` box marker follow it (the
+   * scroll-lock light keys off that marker, see `.thinking:not(.open)`).
+   */
+  function setBlockOpen(body, open) {
+    if (!body) return;
+    body.classList.toggle('hidden', !open);
+    const block = body.parentElement;
+    if (!block) return;
+    const chev = block.querySelector('.chev');
+    if (chev) chev.classList.toggle('open', open);
+    if (block.classList.contains('thinking')) block.classList.toggle('open', open);
+  }
+
+  /** A click on a block header hands that block to the user: the rule stops here. */
+  function markUserTouched(body) {
+    if (body) body._userTouched = true;
+  }
+
+  /** This block is the live one: expand it, and remember it may be closed again. */
+  function setActive(body) {
+    if (!body) return;
+    body._active = true;
+    if (messagesEl) {
+      const list = messagesEl._activeBodies || (messagesEl._activeBodies = []);
+      if (list.indexOf(body) < 0) list.push(body);
+    }
+    if (body._userTouched) return;
+    if (body.classList.contains('hidden')) {
+      setBlockOpen(body, true);
+      body._autoOpen = true;
+    }
+  }
+
+  /** This block is not live any more: give it back to the fold default. */
+  function clearActive(body) {
+    if (!body) return;
+    body._active = false;
+    const list = messagesEl ? messagesEl._activeBodies : null;
+    if (list) {
+      const at = list.indexOf(body);
+      if (at >= 0) list.splice(at, 1);
+    }
+    if (body._userTouched || !body._autoOpen) return;
+    setBlockOpen(body, false);
+    body._autoOpen = false;
+  }
+
+  /**
+   * Close every live block of the current container, or — with `kind` — only the
+   * thinking (`'thinking'`) or the tool (`'tool'`) ones: the answer took over, or
+   * the turn is over. Another block of the other kind stays live.
+   */
+  function closeActive(kind) {
+    const list = messagesEl ? messagesEl._activeBodies : null;
+    if (!list || list.length === 0) return;
+    for (const body of list.slice()) {
+      const isThinking = body.classList.contains('thinking-body');
+      if (kind === 'thinking' && !isThinking) continue;
+      if (kind === 'tool' && isThinking) continue;
+      clearActive(body);
+    }
+  }
+
   // ---- Message rendering into a container (defaults to the active node) ----
   // The pinned user prompt of the active node (top of an expanded card). It does
   // not scroll with the transcript and does not trigger tree panning.
@@ -481,17 +565,18 @@
     const body = el('div', 'thinking-body hidden');
     if (thinking) body.textContent = thinking;
     box.appendChild(body);
+    // The body hangs off the box (the tool cards do the same with `_bodyEl`): the
+    // streaming path reads it back on every delta, and a subtree query per token is
+    // not free.
+    box._bodyEl = body;
     body._scroll = attachLock(body, box);
     head.addEventListener('click', () => {
-      body.classList.toggle('hidden');
-      chev.classList.toggle('open');
-      box.classList.toggle('open', !body.classList.contains('hidden'));
+      markUserTouched(body);
+      setBlockOpen(body, body.classList.contains('hidden'));
       if (body._scroll && !body.classList.contains('hidden')) body._scroll.scrollToBottom();
     });
     if (!foldThinking) {
-      body.classList.remove('hidden');
-      chev.classList.add('open');
-      box.classList.add('open');
+      setBlockOpen(body, true);
     }
     return box;
   }
@@ -516,6 +601,9 @@
 
   function appendAssistant(text) {
     if (!messagesEl) return;
+    // The answer's text takes the message over, so its thinking block is no longer
+    // the live one (it folds back to the default — see `closeActive`).
+    closeActive('thinking');
     const last = messagesEl.lastElementChild;
     if (last && last.dataset.kind === 'assistant' && !last.classList.contains('error')) {
       last._text = (last._text || '') + (text || '');
@@ -565,6 +653,9 @@
 
   function finalizeStreamingAnswer() {
     if (!messagesEl) return;
+    // The message is complete: nothing in it is streaming any more, so its thinking
+    // block goes back to the fold default.
+    closeActive('thinking');
     const last = messagesEl.lastElementChild;
     if (last && last.dataset.kind === 'assistant' && !last.classList.contains('error')) {
       renderAnswer(last, true);
@@ -589,22 +680,19 @@
     if (!last || last.dataset.kind !== 'assistant' || last.classList.contains('error')) {
       last = addAssistant('', false);
     }
-    let box = last.querySelector('.thinking');
+    let box = last._thinkingBox;
     if (!box) {
       box = makeThinkingBlock('');
+      last._thinkingBox = box;
       const answer = last.querySelector('.answer');
       if (answer) last.insertBefore(box, answer);
       else last.appendChild(box);
     }
-    const body = box.querySelector('.thinking-body');
+    const body = box._bodyEl;
     thinkingTextNode(body).appendData(text);
-    // Folded-by-default means we don't force it open while streaming.
-    if (!foldThinking) {
-      body.classList.remove('hidden');
-      const chev = box.querySelector('.chev');
-      if (chev) chev.classList.add('open');
-      box.classList.add('open');
-    }
+    // The block receiving the deltas is the live one: always expanded, and it folds
+    // back on its own the moment something else takes over (see `setActive`).
+    setActive(body);
     if (body._scroll) body._scroll.scrollToBottom();
     followActive();
     return last;
@@ -719,8 +807,8 @@
     }
 
     head.addEventListener('click', () => {
-      body.classList.toggle('hidden');
-      chev.classList.toggle('open');
+      markUserTouched(body);
+      setBlockOpen(body, body.classList.contains('hidden'));
     });
 
     node.appendChild(body);
@@ -792,8 +880,8 @@
     node.appendChild(body);
 
     head.addEventListener('click', () => {
-      body.classList.toggle('hidden');
-      chev.classList.toggle('open');
+      markUserTouched(body);
+      setBlockOpen(body, body.classList.contains('hidden'));
     });
 
     node._nameEl = nameEl;
@@ -801,7 +889,6 @@
     node._bodyEl = body;
     node._argsText = argsText;
     node._argsEl = argsEl;
-    node._chevEl = chev;
 
     messagesEl.appendChild(node);
     liveBucket(undefined, true)[index] = node;
@@ -818,8 +905,8 @@
     if (id) node.dataset.id = id;
     if (argsDelta && node._argsText) node._argsText.appendData(argsDelta);
     if (argsDelta) node._argsEl.textContent = (node._argsEl.textContent || '') + argsDelta;
-    node._bodyEl.classList.remove('hidden');
-    if (node._chevEl) node._chevEl.classList.add('open');
+    // Still streaming its arguments: the call is the live block.
+    setActive(node._bodyEl);
     followActive();
     return node;
   }
@@ -848,8 +935,8 @@
     if (args && args !== '{}') {
       node._bodyEl.appendChild(el('pre', 'tool-args', describeArgs(args)));
     }
-    node._bodyEl.classList.remove('hidden');
-    if (node._chevEl) node._chevEl.classList.add('open');
+    // The arguments are settled but the call is still running, so it stays live.
+    setActive(node._bodyEl);
     followActive();
     return node;
   }
@@ -884,7 +971,9 @@
     const body = node.querySelector('.tool-body');
     if (body) {
       body.appendChild(el('pre', 'tool-result', content));
-      body.classList.remove('hidden');
+      // The call reported its result, so it is not the live block any more: it takes
+      // the fold default back. The result is in the body either way — one click away.
+      clearActive(body);
     }
     followActive();
   }
@@ -2752,7 +2841,10 @@
   function endRun(msg, extra) {
     const nodeId = msg.nodeId;
     if (nodeId) {
-      routeTo(nodeId, () => finalizeStreamingAnswer());
+      // The turn is over: nothing in that node is live any more, so the thinking
+      // block (via the finalize) and any tool call that never reported its end —
+      // the turn was interrupted mid-call — fold back to the default.
+      routeTo(nodeId, () => { finalizeStreamingAnswer(); closeActive('tool'); });
       clearLiveTools(nodeId);
       if (extra) routeTo(nodeId, extra);
       runningNodes.delete(nodeId);
@@ -2761,6 +2853,7 @@
       if (runningNodes.size === 0) setBusy(false);
     } else {
       finalizeStreamingAnswer();
+      closeActive('tool');
       clearLiveTools();
       if (extra) extra();
       setBusy(false);
