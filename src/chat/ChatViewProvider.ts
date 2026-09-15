@@ -1901,15 +1901,6 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
 
   // ---- Commands ----
 
-  /** Open the chat panel for the active session (spinney.openChat / focus). */
-  openChat(): void {
-    const session = this.getActiveSession();
-    if (!session) {
-      return;
-    }
-    this.openTab(session.id, 'open-chat');
-  }
-
   /**
    * Open a session's tab, tracing the whole switch. The op is the operation the
    * user experiences: tab creation, the HTML shell, the runtime, the persistence

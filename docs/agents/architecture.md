@@ -17,8 +17,7 @@ User (editor WebviewPanel) <--postMessage--> ChatViewProvider (src/chat)
 ```
 
 1. `extension.ts::activate` creates the sidebar `TreeView` (`spinney.sessions`)
-   and the commands (`spinney.openChat`, `openSession`, `newSession`,
-   `deleteSession`, `clear`, `focus`).
+   and the commands (`openSession`, `newSession`, `deleteSession`, `clear`).
 2. The webview (`media/main.js`) sends messages (`userMessage`, `checkout`,
    `setModel`, `setThinkingEffort`, `stop`, `clear`, `pickImage`, `setNodeSize`).
    It streams in a sandboxed iframe and loads the vendored

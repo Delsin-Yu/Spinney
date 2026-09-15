@@ -92,8 +92,6 @@ export function activate(context: vscode.ExtensionContext): void {
         void controlServer.restart();
       }
     }),
-    vscode.commands.registerCommand('spinney.openChat', () => chatProvider?.openChat()),
-    vscode.commands.registerCommand('spinney.focus', () => chatProvider?.openChat()),
     // The API key lives in SecretStorage: these two commands are the only way it
     // is read or written (`getConfig()` reports the live value). Both install the
     // key into the shared client, so no reload is needed.
