@@ -135,7 +135,8 @@
   "Remove": "移除",
   "⚠️ {0}": "⚠️ {0}",
   "Stopping…": "正在停止…",
-  "A background task or sub-agent is still running on this branch ({0}). Wait for it to finish, or kill it from its card, before sending.": "这条分支上还有后台任务或子代理在运行（{0}）。请等它结束，或在它的卡片上终止它，然后再发送。",
-  "Waiting for the background task / sub-agent on this branch to finish — sending is paused": "正在等待这条分支上的后台任务 / 子代理结束 — 暂时无法发送",
+  "A background task or sub-agent is still running on this branch ({0}). Press Stop to kill it, or wait for it to finish.": "这条分支上还有后台任务或子代理在运行（{0}）。按 Stop 终止它，或等它结束。",
+  "Stop this turn": "停止这一轮",
+  "Stop this node: kill its background tasks and sub-agents (nothing is sent to the model)": "停止这个节点：终止它的后台任务与子代理（不会给模型发送任何内容）",
   "Ready": "就绪"
 }

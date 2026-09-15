@@ -55,12 +55,11 @@
   // Send/Stop pair is a property of the view focus node, not of the session, so
   // this — and never `busy` — decides which of the two buttons is on screen.
   let runningNodes = new Set();
-  // Per-node: the nodes whose input is *locked* because they own unfinished work (a
-  // running background terminal / async sub-agent batch, or a completion notice
-  // about to be injected into them). They are deliberately not in `runningNodes`
-  // (no turn is streaming), but sending there would open a second run on the same
-  // line while the notice lands in this very node — so the Send button and the input
-  // are disabled until the host reports the node unlocked again.
+  // Per-node: the nodes that own unfinished work of their own (a running background
+  // terminal / async sub-agent batch, or a completion notice about to be injected
+  // into them). They are deliberately not in `runningNodes` (no turn is streaming),
+  // but they are *doing something*, so the composer offers Stop for them exactly as
+  // it does for a streaming node — pressing it is the host's union kill.
   let lockedNodes = new Set();
   let pendingAttachments = [];
   let currentModel = 'deepseek-chat';
@@ -1345,15 +1344,14 @@
   }
 
   // Composer banner + readonly: when the checked-out node already has children,
-  // sending creates a branch; when it is a read-only sub-agent node, or one that
-  // still owns unfinished background / sub-agent work, the composer is disabled
-  // (only the main agent may drive a sub-agent via spawn/send, and a notice is
-  // about to be injected into the node the unfinished work belongs to).
+  // sending creates a branch; when it is a read-only sub-agent node the composer is
+  // disabled (only the main agent may drive a sub-agent via spawn/send). A node that
+  // still owns unfinished work needs no banner: the bottom-right button is Stop there
+  // (`updateComposerButtons`), which says what happens without a second explanation.
   function updateBranchBanner() {
     if (!branchBanner) return;
     const node = treeNodes[treeActiveId];
     const isAgent = !!(node && isSidecarKind(node.kind));
-    const locked = focusIsLocked();
     // Sidecar cards are display-only, not conversational branches — only a *turn*
     // child makes the next message a branch.
     const hasTurnChildren = !!(
@@ -1362,18 +1360,15 @@
     if (isAgent) {
       branchBanner.textContent = tr('Sub-agent branch (read-only) — driven by the main agent through spawn_agents / send_agent_message');
       branchBanner.classList.remove('hidden');
-    } else if (locked) {
-      branchBanner.textContent = tr('Waiting for the background task / sub-agent on this branch to finish — sending is paused');
-      branchBanner.classList.remove('hidden');
     } else if (hasTurnChildren) {
       branchBanner.textContent = tr('⤷ branching from {0} — your reply starts a new branch', node.title || tr('(no title)'));
       branchBanner.classList.remove('hidden');
     } else {
       branchBanner.classList.add('hidden');
     }
-    // Read-only when the checked-out node is a sub-agent branch, or while it owes
-    // unfinished work (a strict superset of the host's own refusal).
-    const readonly = isAgent || locked;
+    // Read-only when the checked-out node is a sub-agent branch (the host additionally
+    // refuses a send into a node that still owns work — Stop is the way out there).
+    const readonly = isAgent;
     inputEl.disabled = readonly;
     sendBtn.disabled = readonly;
     attachBtn.disabled = readonly;
@@ -2419,23 +2414,31 @@
   /**
    * Whether the *view focus* node owns unfinished work of its own (a running
    * background job / async sub-agent batch, or a notice about to be injected into
-   * it). It is not streaming, so Stop would be a lie, and a send is refused
-   * host-side — the composer therefore greys out instead of pretending to accept it.
+   * it). It is not streaming, so the composer shows Stop — the same button as for a
+   * streaming node: stop what this node is doing (the host turns it into a union
+   * kill: turn + background tasks + sub-agents, and nothing continues).
    */
   function focusIsLocked() {
     return !!treeActiveId && lockedNodes.has(treeActiveId);
   }
 
   /**
-   * The composer shows Stop and hides Send iff the view focus node is running, and
-   * the reverse otherwise. Driven by the per-node running set — never by the
-   * session-level `busy` flag. Called whenever `state`, the tree, the focused path
-   * or the running set changes.
+   * The composer shows Stop and hides Send while the view focus node is *doing
+   * something* — streaming a turn, or still owning unfinished work (`lockedNodes`) —
+   * and Send otherwise. One button, one meaning: stop what this node is doing.
+   * Driven by the per-node sets, never by the session-level `busy` flag. Called
+   * whenever `state`, the tree, the focused path or either set changes.
    */
   function updateComposerButtons() {
-    if (focusIsRunning()) {
+    if (focusIsRunning() || focusIsLocked()) {
       stopBtn.classList.remove('hidden');
       sendBtn.classList.add('hidden');
+      // The same button has two scopes, so say which one applies: a node that owns
+      // background work is union-killed (and the model is told nothing), a plain
+      // streaming node only has its turn cancelled.
+      stopBtn.title = focusIsLocked()
+        ? tr('Stop this node: kill its background tasks and sub-agents (nothing is sent to the model)')
+        : tr('Stop this turn');
     } else {
       stopBtn.classList.add('hidden');
       sendBtn.classList.remove('hidden');
@@ -2702,10 +2705,9 @@
     const text = inputEl.value.trim();
     // Sending targets the view focus node, so only *that* node being live blocks it
     // (the button is hidden in that case anyway); a run elsewhere in the session is
-    // exactly the "start a new concurrent run here" case (spec §1). A node that owes
-    // unfinished work is refused as well (the host refuses it too, see
-    // `lockedNodes`) — its notice would otherwise be injected into the node this
-    // turn branches from.
+    // exactly the "start a new concurrent run here" case (spec §1). A node that still
+    // owns unfinished work shows Stop instead, so there is no Send to press — the host
+    // refuses it too in case a message arrives anyway (`lockedNodes`).
     if ((!text && pendingAttachments.length === 0) || focusIsRunning() || focusIsLocked()) return;
     setFollow(true);
     vscode.postMessage({ type: 'userMessage', text, attachments: pendingAttachments });

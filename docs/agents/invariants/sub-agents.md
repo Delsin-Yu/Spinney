@@ -29,14 +29,18 @@
   finish the sub-agent's conversation (minus the synthesized system prompt) is stored in `node.messages`
   so a follow-up can continue it, even across a restart.
 - A node whose async sub-agent batch is still running (or whose batch notice is already
-  queued for it) is **locked** against new user sends: `state.lockedNodes` reports the
-  batch's parent node, the composer disables input / Send, and the host refuses a send
-  there (`onUserMessage`, `/continue`, `/session/start`). The parent is the node the
-  notice is injected into (`beginInjectedTurn`), while a user turn branches off the node
-  it was sent from — sending while the batch is unfinished would put two agents on one
-  conversation line (notice before the question in tree order, after it in wall-clock
-  order). A depth-2 batch locks its depth-1 parent (whose own composer is hidden), not
-  the main node. See `invariants/background-terminals.md` for the same rule on jobs.
+  queued for it) reports in `state.lockedNodes`, so the composer offers **Stop** there.
+  That Stop (`SessionRuntime.stop(nodeId)`) aborts the batch **and its depth-2 children**
+  (`subAgentSubtree`), and each notice is **written back** into the owning turn node's
+  history (`queueWriteback` → `flushWritebacks`; a sidecar's notice is retargeted with
+  `turnOwnerOf`, since a sidecar's history is never sent), so it travels with the user's
+  next prompt instead of opening a turn. The stopped line is remembered
+  (`stoppedLines`) until the user continues it, so a stopped sub-agent is never resumed
+  when its own children settle. A batch the user did not stop keeps the normal delivery
+  (injected at a tool boundary, or as an injected turn on the parent). A depth-2 batch
+  belongs to its depth-1 parent — whose composer is hidden — not to the main node, but a
+  Stop on the main node still reaches it. See
+  `invariants/background-terminals.md` for the same rule on jobs.
 - **`Delivered`:** a sidecar node carries `delivered` (`tree.ts:75`) once its outcome reached its
   reader, which is what the card's `Delivered` badge shows (`main.js:896-910`). A `sync`
   `spawn_agents` / `send_agent_message` hands the summary back as the caller's tool result, so

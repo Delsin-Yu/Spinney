@@ -2500,10 +2500,14 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   }
 
   /**
-   * Stop runs (`POST /stop`): `nodeId`'s run only when given, otherwise every run
-   * of the session (`sessionId`, else the active session). Returns how many agents
-   * were cancelled — `stopped: 0` when nothing was running is still `ok`. An
-   * unknown session is refused (409). Deliberately does not touch the reload hold.
+   * Stop (`POST /stop`): `nodeId` is a **union kill** — that node's live run, its
+   * background terminals and its running sub-agents, with the completion notices
+   * written back into the node's own history instead of opening a turn (the
+   * composer's bottom-right button while a node runs or owns unfinished work).
+   * Without `nodeId`, every run of the session (else the active session) is
+   * cancelled and background jobs are left alone. Returns how many pieces of work
+   * were stopped — `stopped: 0` when nothing was running is still `ok`. An unknown
+   * session is refused (409). Deliberately does not touch the reload hold.
    */
   async controlStop(opts: { sessionId?: string; nodeId?: string }): Promise<ControlResult> {
     const session = opts.sessionId ? this.sessions.find((s) => s.id === opts.sessionId) : this.getActiveSession();
@@ -2764,8 +2768,10 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         void rt.handlePickImage();
         return;
       case 'stop':
-        // P3: `stop {nodeId}` cancels that node's run only; an omitted `nodeId`
-        // cancels every run of this session (the pre-P3 behaviour).
+        // `stop {nodeId}` is the composer's Stop: a union kill of everything that node
+        // owns (turn + background terminals + sub-agents), whose notices are written
+        // back into the node instead of continuing the conversation. An omitted
+        // `nodeId` cancels every run of this session (the pre-P3 behaviour).
         rt.stop(typeof message.nodeId === 'string' && message.nodeId ? message.nodeId : undefined);
         return;
       case 'setModel':

@@ -402,6 +402,25 @@ export class SessionRuntime {
   private readonly signals = new Map<string, SignalNotice[]>();
   /** Coalesces delivery so a burst of finishes becomes one message / one turn. */
   private signalDrainTimer: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * Notices the user's **union kill** produced (pressing Stop on a node): they must
+   * not open a turn — the conversation continues only when the user sends the next
+   * prompt or presses ▶ Continue — so they are appended to the owning node's own
+   * history (and rendered in its card) as soon as that node is quiet. That is what
+   * puts them into the *next* request's context instead of continuing the
+   * conversation on their own.
+   */
+  private readonly writebacks = new Map<string, SignalNotice[]>();
+
+  /**
+   * Turn nodes whose line was union-killed ("Stop") and has not been continued since:
+   * nothing under them may continue on its own. A notice belonging to such a line is
+   * written back (`writebacks`) instead of being delivered as a turn, and a stopped
+   * sub-agent is **never resumed** just because its own children settled. Cleared when
+   * the user sends the next prompt / ▶ Continue into that node.
+   */
+  private readonly stoppedLines = new Set<string>();
   /** Background task id -> the `kind:'bg'` card that mirrors it. */
   private readonly bgNodes = new Map<number, string>();
   /** Coalesces background UI refreshes (chatty processes fire onUpdated many times/s). */
@@ -530,23 +549,22 @@ export class SessionRuntime {
   }
 
   /**
-   * Node ids whose composer must stay **locked**: the node owns work that is still
-   * unfinished and whose completion is bound to it — a running background terminal
-   * (`BackgroundHub` keys a job on the node whose turn spawned it), a running
-   * sub-agent batch (its direct `kind:'agent'` children are in `runningSubAgents`),
-   * or a completion notice already queued for it (`signals`, the window between a
-   * job finishing and its injected turn starting).
+   * Node ids whose work is not done yet, even though no turn of theirs is streaming:
+   * a running background terminal (`BackgroundHub` keys a job on the node whose turn
+   * spawned it), a running sub-agent batch (its direct `kind:'agent'` children are in
+   * `runningSubAgents`), or a completion notice already queued for it (`signals`, the
+   * window between a job finishing and its injected turn starting).
    *
-   * Why locking, not just "Stop isn't shown": `beginTurn` starts the user's message
-   * as a *child* of the basis node, while the completion notice is injected into the
-   * basis node *itself* (`beginInjectedTurn`, `fresh:false`). Sending while a job is
-   * unfinished therefore runs two agents on one conversation line: the notice lands
-   * before the user's question in tree order but after it in wall-clock order, and
-   * the reply the user is waiting for never sees the job's result.
+   * The composer shows **Stop** for these nodes, exactly as it does for a node that is
+   * streaming: one button, "stop what this node is doing". Pressing it is a union kill
+   * (`stop`), which also refuses a send host-side (`onUserMessage`, `/continue`,
+   * `/session/start`) — the completion notice is injected into the node that owns the
+   * work while a user turn branches off the node it was sent from, so sending there
+   * would run two agents on one conversation line.
    *
-   * Only the owner itself is locked — deliberately **not** its existing descendants.
-   * A send from one of those is a different line (its own path), and locking the
-   * whole subtree would freeze a long-lived job's whole conversation below it.
+   * Only the owner is listed — deliberately **not** its existing descendants. A send
+   * from one of those is a different line (its own path), and locking the whole
+   * subtree would freeze a long-lived job's whole conversation below it.
    */
   lockedNodes(): string[] {
     const out = new Set<string>();
@@ -1267,6 +1285,11 @@ export class SessionRuntime {
       return null;
     }
     const parentId = opts?.parentId !== undefined ? opts.parentId : session.activeNodeId;
+    if (parentId) {
+      // The user is continuing this line, so a union kill's "nothing continues" no
+      // longer applies to it (the interrupt it wrote back is already in the history).
+      this.stoppedLines.delete(parentId);
+    }
     // P3: only the basis node must be free. `parentId` null (the session's first
     // turn) can never be running, so it is never refused.
     if (parentId != null && this.runs.has(parentId)) {
@@ -1333,6 +1356,9 @@ export class SessionRuntime {
       // That node already has a live run; there is no second basis to bind.
       return null;
     }
+    // ▶ Continue (or an injected turn) on a line the user once stopped is the user
+    // continuing it again: normal delivery resumes from here.
+    this.stoppedLines.delete(node.id);
     const worker = this.workerFor(node);
     const messages = this.buildPath(this.session, node.id);
     worker.agent.setMessages(messages);
@@ -1403,6 +1429,9 @@ export class SessionRuntime {
     // A finished turn is the state that must never be lost (its history is what the
     // next turn sends), so it is written now rather than coalesced.
     this.host.persistNow();
+    // A union kill that hit this node while its turn was winding down: the interrupt
+    // message can only be appended now (the turn's own slice was just stored).
+    this.flushWritebacks();
     if (node && session.nodes[node.id]) {
       this.post({
         type: 'nodeUpdate',
@@ -1432,13 +1461,13 @@ export class SessionRuntime {
     // The basis node still owns unfinished work (a background job, an async
     // sub-agent batch, or a notice about to be injected into it): a send here would
     // open a second run on the same line while that notice lands in the very node
-    // this turn branches from. The composer is locked for the same reason
-    // (`lockedNodes` in `state`), so this is the host-side half of one rule.
+    // this turn branches from. The composer shows Stop for those nodes (`lockedNodes`
+    // in `state`), so this is the host-side half of one rule.
     if (basis && this.lockedWorkCount(basis) > 0) {
       this.postNotice(
         'warning',
         vscode.l10n.t(
-          'A background task or sub-agent is still running on this branch ({0}). Wait for it to finish, or kill it from its card, before sending.',
+          'A background task or sub-agent is still running on this branch ({0}). Press Stop to kill it, or wait for it to finish.',
           this.lockedWorkCount(basis),
         ),
       );
@@ -1627,31 +1656,193 @@ export class SessionRuntime {
   }
 
   /**
-   * Stop runs: `nodeId`'s agent only when given, otherwise every live run's agent
-   * of this session. Returns how many agents were cancelled. Also aborts an
-   * in-flight image upload (there is one per session).
+   * Stop a node — the composer's bottom-right button while that node runs or while
+   * it still owns unfinished work (`lockedNodes`).
+   *
+   * `nodeId` is a **union kill**: the node's live turn, every background terminal it
+   * spawned and every sub-agent it is still running are all stopped, and **nothing
+   * continues**: the completion notices are written back into the node's own history
+   * (`writebacks`) instead of being injected as a turn, so they reach the model only
+   * with the user's next prompt / ▶ Continue. Killing a card's ✕ stays the
+   * fine-grained path: one job, and the model *is* told about it.
+   *
+   * Without `nodeId` the session-wide meaning is kept (cancel every live run); it
+   * deliberately does not touch background jobs, which outlive a turn by design.
    */
   stop(nodeId?: string): number {
     this.uploadController?.abort();
-    let stopped = 0;
     if (nodeId) {
-      const run = this.runs.get(nodeId);
-      const agent = run?.agent ?? this.nodeWorkers.get(nodeId)?.agent;
-      if (agent && (run || agent.running)) {
-        agent.cancel();
+      return this.stopNode(nodeId);
+    }
+    let stopped = 0;
+    const seen = new Set<Agent>();
+    for (const run of this.runs.values()) {
+      if (!seen.has(run.agent)) {
+        seen.add(run.agent);
+        run.agent.cancel();
         stopped++;
-      }
-    } else {
-      const seen = new Set<Agent>();
-      for (const run of this.runs.values()) {
-        if (!seen.has(run.agent)) {
-          seen.add(run.agent);
-          run.agent.cancel();
-          stopped++;
-        }
       }
     }
     return stopped;
+  }
+
+  /**
+   * Everything one node owns, in one go. The completion notices are *redirected*
+   * (`queueWriteback`) rather than dropped, so the interrupt message is still in the
+   * context of the next request — it just cannot start one by itself.
+   */
+  private stopNode(nodeId: string): number {
+    let killed = 0;
+    // Nothing under this line may continue on its own until the user sends again.
+    this.stoppedLines.add(nodeId);
+    // 1. The node's own turn (its agent is cancelled; `finishTurn` stores the
+    //    partial turn and the next send resumes with the usual interrupt notice).
+    const run = this.runs.get(nodeId);
+    const agent = run?.agent ?? this.nodeWorkers.get(nodeId)?.agent;
+    if (agent && (run || agent.running)) {
+      agent.cancel();
+      killed++;
+    }
+    // 2. Its background terminals, killed without the usual notice — the interrupt
+    //    message is written back below instead.
+    killed += this.killJobsOf(nodeId);
+    // 3. Its sub-agents, the **whole subtree**: a depth-1 sub-agent may be running
+    //    depth-2 children of its own, and those belong to this node just as much.
+    for (const agentNodeId of this.subAgentSubtree(nodeId)) {
+      const entry = this.runningSubAgents.get(agentNodeId);
+      if (!entry) {
+        continue;
+      }
+      entry.abort.abort();
+      entry.agent.cancel();
+      killed++;
+      // A sub-agent's own `exec_command` registers under the *sub-agent's* node, so
+      // its terminals are this node's work too.
+      killed += this.killJobsOf(agentNodeId);
+    }
+    // 4. A notice already queued for this node must not fire a turn now either.
+    for (const signal of this.takePendingSignals(nodeId)) {
+      this.queueWriteback(signal);
+    }
+    this.postBackgrounds();
+    this.postState();
+    return killed;
+  }
+
+  /** Every running sub-agent below `nodeId`, depth first (max depth 2 by design). */
+  private subAgentSubtree(nodeId: string): string[] {
+    const out: string[] = [];
+    const collect = (parentId: string, guard = 0): void => {
+      if (guard > 8) {
+        return;
+      }
+      for (const agentNodeId of [...this.runningSubAgents.keys()]) {
+        if (this.session.nodes[agentNodeId]?.parentId !== parentId) {
+          continue;
+        }
+        out.push(agentNodeId);
+        collect(agentNodeId, guard + 1);
+      }
+    };
+    collect(nodeId);
+    return out;
+  }
+
+  /** Kill one node's background terminals silently; their interrupt is written back. */
+  private killJobsOf(nodeId: string): number {
+    let killed = 0;
+    const owner: BackgroundOwner = { sessionId: this.sessionId, nodeId };
+    for (const task of this.hub.listForNode(this.sessionId, nodeId)) {
+      if (task.status !== 'running') {
+        continue;
+      }
+      const hit = this.hub.kill(this.sessionId, task.id, { notifyAgent: false });
+      if (hit) {
+        this.queueWriteback(this.buildBackgroundSignal(owner, hit));
+        killed++;
+      }
+    }
+    return killed;
+  }
+
+  /** The conversational node a card belongs to: the sub-agent / job chain's owner. */
+  private turnOwnerOf(nodeId: string): TreeNode | null {
+    let node: TreeNode | undefined = this.session.nodes[nodeId];
+    for (let guard = 0; node && isSidecar(node) && guard < 64; guard++) {
+      node = node.parentId ? this.session.nodes[node.parentId] : undefined;
+    }
+    return node ?? null;
+  }
+
+  /**
+   * True when this card belongs to a line the user union-killed and has not continued
+   * since — nothing produced under it may start a turn (it is written back instead).
+   */
+  private isStoppedLine(nodeId: string): boolean {
+    const turn = this.turnOwnerOf(nodeId);
+    return !!turn && this.stoppedLines.has(turn.id);
+  }
+
+  /**
+   * Queue a notice that must reach the *next* request instead of opening a turn. A
+   * sub-agent's own notice is retargeted to the turn node that owns its line — that is
+   * the history the next request is built from (a sidecar's history is never sent).
+   */
+  private queueWriteback(signal: SignalNotice): void {
+    const target = this.turnOwnerOf(signal.nodeId);
+    if (!target) {
+      return;
+    }
+    signal.nodeId = target.id;
+    const queue = this.writebacks.get(target.id);
+    if (queue) {
+      queue.push(signal);
+    } else {
+      this.writebacks.set(target.id, [signal]);
+    }
+    this.flushWritebacks();
+  }
+
+  /**
+   * Append queued union-kill notices to their node's history — the card block and
+   * the message the next request carries — once that node is quiet. A node whose
+   * turn is still winding down is retried by the signal drain (`scheduleSignalDrain`)
+   * so the text can never slip past a request built in between.
+   */
+  private flushWritebacks(): void {
+    if (this.dead || this.writebacks.size === 0) {
+      return;
+    }
+    let deferred = false;
+    for (const nodeId of [...this.writebacks.keys()]) {
+      const node = this.session.nodes[nodeId];
+      if (!node) {
+        this.writebacks.delete(nodeId);
+        continue;
+      }
+      if (this.runs.has(nodeId) || this.runningSubAgents.has(nodeId) || this.nodeWorkers.get(nodeId)?.agent.running) {
+        // Its turn is still finishing: `finishTurn` flushes again, and the drain
+        // retries in the meantime (the agent's own history decides what the next
+        // request sends, so writing earlier would be overwritten).
+        deferred = true;
+        continue;
+      }
+      const batch = this.writebacks.get(nodeId);
+      this.writebacks.delete(nodeId);
+      if (!batch || batch.length === 0) {
+        continue;
+      }
+      // The card shows what happened (the same block a delivered notice renders)…
+      this.renderSignalCards(nodeId, batch);
+      // …and the interrupt travels with the next request instead of starting one.
+      node.messages = [...node.messages, { role: 'user', content: combineSignalText(batch) }];
+      this.host.persist();
+      this.postTree();
+      this.postState();
+    }
+    if (deferred) {
+      this.scheduleSignalDrain(75);
+    }
   }
 
   /** Stop every run of this session (the control plane's interrupt path). */
@@ -2108,6 +2299,13 @@ export class SessionRuntime {
       return;
     }
     const cardText = `Sub-agent #${node.id.slice(-6)} ${result.ok ? 'finished' : 'failed'}: ${result.summary || '(no summary)'}${this.transcriptNote(node)}`;
+    if (this.isStoppedLine(node.id)) {
+      // Stop killed this resume: record the interrupt where the next request will
+      // pick it up instead of delivering a notice turn.
+      this.queueWriteback(this.buildSubAgentSignal(parent, [{ ok: result.ok, summary: result.summary, node }], cardText));
+      this.host.persist();
+      return;
+    }
     this.queueSubAgentSignal(parent, [{ ok: result.ok, summary: result.summary, node }], cardText);
     this.host.persist();
   }
@@ -2335,30 +2533,49 @@ export class SessionRuntime {
    *    that no longer exists).
    */
   private queueSubAgentSignal(parent: TreeNode, results: Array<{ ok: boolean; summary: string; node: TreeNode }>, cardText?: string): void {
-    const lines = results.map(
-      (r) => `Sub-agent #${r.node.id.slice(-6)} ${r.ok ? 'finished' : 'failed'}: ${r.summary || '(no summary)'}${this.transcriptNote(r.node)}`,
-    );
-    const body = cardText ?? lines.join('\n');
-    const doneText = `${results.length} sub-agent(s) finished`;
-    const text = `[Sub-agent batch] ${doneText}\n${body}`;
-    const signal: SignalNotice = {
-      nodeId: parent.id,
-      kind: 'subagent',
-      sourceNodeIds: results.map((r) => r.node.id),
-      text,
-      card: { kind: 'subagent', id: `sub-${parent.id}`, name: 'Sub-agents finished', doneText, content: body },
-    };
+    const signal = this.buildSubAgentSignal(parent, results, cardText);
     if (parent.kind === 'agent' && !this.isNodeLive(parent.id)) {
       // A finished sub-agent parent cannot receive an injected turn on its own
       // node (its history is not in the API path), so resume it with the text.
       const abort = new AbortController();
       void this.runSubAgent(
-        { node: parent, spec: { instruction: text, write: parent.agentWrite ?? false, model: undefined }, resume: true, sessionId: this.sessionId },
+        { node: parent, spec: { instruction: signal.text, write: parent.agentWrite ?? false, model: undefined }, resume: true, sessionId: this.sessionId },
         abort.signal,
       );
       return;
     }
     this.pushSignal(signal);
+  }
+
+  /** The one-notice-per-batch signal both delivery paths share (D2). */
+  private buildSubAgentSignal(
+    parent: TreeNode,
+    results: Array<{ ok: boolean; summary: string; node: TreeNode }>,
+    cardText?: string,
+  ): SignalNotice {
+    const lines = results.map(
+      (r) => `Sub-agent #${r.node.id.slice(-6)} ${r.ok ? 'finished' : 'failed'}: ${r.summary || '(no summary)'}${this.transcriptNote(r.node)}`,
+    );
+    const body = cardText ?? lines.join('\n');
+    // A batch the user stopped with Stop did not "finish": say what actually happened,
+    // because this block is what the next request's context carries.
+    const stopped = this.isStoppedLine(parent.id);
+    const doneText = stopped
+      ? `${results.length} sub-agent(s) stopped by Stop`
+      : `${results.length} sub-agent(s) finished`;
+    return {
+      nodeId: parent.id,
+      kind: 'subagent',
+      sourceNodeIds: results.map((r) => r.node.id),
+      text: `[Sub-agent batch] ${doneText}\n${body}`,
+      card: {
+        kind: 'subagent',
+        id: `sub-${parent.id}`,
+        name: stopped ? 'Sub-agents stopped' : 'Sub-agents finished',
+        doneText,
+        content: body,
+      },
+    };
   }
 
   /** True when this node has a live run (its turn would take signals mid-turn). */
@@ -2527,10 +2744,15 @@ export class SessionRuntime {
    * what the agent knew stay in step.
    */
   private onAsyncBatchDone(parent: TreeNode, results: Array<{ ok: boolean; summary: string; node: TreeNode }>): void {
-    const lines = results.map(
-      (r) => `Sub-agent #${r.node.id.slice(-6)} ${r.ok ? 'finished' : 'failed'}: ${r.summary || '(no summary)'}${this.transcriptNote(r.node)}`,
-    );
-    this.queueSubAgentSignal(parent, results, lines.join('\n'));
+    if (this.isStoppedLine(parent.id)) {
+      // The user's Stop killed this work: the batch's interrupt message is written
+      // back into the owning turn's history instead of opening a turn — and a stopped
+      // sub-agent is never resumed just because its own children settled.
+      this.queueWriteback(this.buildSubAgentSignal(parent, results));
+      this.host.persist();
+      return;
+    }
+    this.queueSubAgentSignal(parent, results);
     this.host.persist();
   }
 
@@ -2771,6 +2993,12 @@ export class SessionRuntime {
 
   /** Queue one signal under the node that owns the work and schedule delivery. */
   private pushSignal(signal: SignalNotice): void {
+    // Work that finishes on a line the user already union-killed must not open a turn
+    // either — it is written back and travels with the next request.
+    if (this.isStoppedLine(signal.nodeId)) {
+      this.queueWriteback(signal);
+      return;
+    }
     const queue = this.signals.get(signal.nodeId);
     if (queue) {
       queue.push(signal);
@@ -2836,6 +3064,9 @@ export class SessionRuntime {
     if (this.heldBackoff(() => this.scheduleSignalDrain(500))) {
       return;
     }
+    // Union-kill notices are handled by their own flush (they never open a turn, but
+    // they must land before the next request is built).
+    this.flushWritebacks();
     let retry = false;
     for (const nodeId of [...this.signals.keys()]) {
       const node = this.session.nodes[nodeId];

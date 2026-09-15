@@ -36,19 +36,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- A node that owns unfinished work is now locked against new sends. While a
-  background terminal or an async sub-agent batch started by that node is still
-  running — or its completion notice is already queued for it — the composer
-  disables the input, Send and attach buttons and shows a "waiting for the
-  background task / sub-agent on this branch" banner, and the host refuses the
-  send (`onUserMessage`, `POST /continue`, `POST /session/start`). `GET /state`
-  reports those nodes as `sessions[].lockedNodes` (and `state.lockedNodes` to the
-  webview). The notice is injected into the node that owns the work while a user
-  turn branches off the node it was sent from, so sending from there used to run
-  two agents on one conversation line: the notice landed before the user's question
-  in tree order but after it in wall-clock order, and that reply never saw the job's
-  result. Only the owner is locked — its existing descendant branches stay usable,
-  so a long-lived job (a dev server) does not freeze the conversation below it.
+- A node that owns unfinished work now offers **Stop** instead of a greyed-out composer.
+  While a background terminal or an async sub-agent batch started by that node is still
+  running — or its completion notice is already queued for it — the composer's
+  bottom-right button is Stop rather than Send (with a tooltip saying so; no banner, and
+  the input stays usable exactly as while a turn streams). Pressing it is a **union
+  kill**: that node's turn, every background terminal it spawned and every sub-agent it
+  is still running are stopped, and **nothing continues the conversation** — each
+  suppressed notice is written back into that node's own history (and shown in its card
+  as the usual notification block), so it reaches the model with the user's next prompt
+  or ▶ Continue. `POST /stop {nodeId}` and `GET /state → sessions[].lockedNodes` expose
+  the same rule to the control plane; a card's ✕ still kills one job and *does* tell the
+  model. The reason for the node-scoped lock is unchanged: the notice is injected into
+  the node that owns the work while a user turn branches off the node it was sent from,
+  so sending from there used to run two agents on one conversation line. Only the owner
+  is covered — its existing descendant branches stay usable, so a long-lived job (a dev
+  server) does not freeze the conversation below it.
 - The composer (the checked-out node's input dock) no longer scales. Its controls and
   fonts used to follow the host card's width — `--cs` was `card width / 560`, clamped to
   0.8–1.6, so dragging a card's resize handle (or a wide/narrow window hosting the

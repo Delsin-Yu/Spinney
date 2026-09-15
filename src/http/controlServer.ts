@@ -48,9 +48,11 @@ export interface ControlSessionInfo {
   runningNodes: string[];
   /**
    * Node ids that are not streaming but still own unfinished work — a running
-   * background terminal, a running sub-agent batch, or a completion notice waiting
-   * to be injected into them. A send from such a node is refused (`/continue`,
-   * `/session/start`) and the composer is locked (same rule as the webview).
+   * background terminal, a running sub-agent batch, or a completion notice waiting to
+   * be injected into them. The composer shows Stop for them, and `POST /stop {nodeId}`
+   * is a union kill there: it stops everything the node owns and writes the notices
+   * back into its history instead of continuing the conversation. A send from such a
+   * node is refused (`/continue`, `/session/start`).
    */
   lockedNodes: string[];
   /** True while this session owns at least one running background terminal. */

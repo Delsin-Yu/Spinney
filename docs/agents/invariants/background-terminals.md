@@ -85,22 +85,26 @@
 - While an external controller holds the window (`host.isHeld()`), the hook returns `[]` and the
   idle drain backs off (500 ms, `runtime.ts:2343-2349`) instead of starting a turn — the reload
   must not be refused with "agent is busy".
-- **A node that owns unfinished work is locked against new sends.** While a job of
-  node X is still running (or its completion notice is already queued for X,
-  `signals`), X is reported in `state.lockedNodes`: the composer disables
-  input / Send / attach and shows a "waiting for the background task / sub-agent"
-  banner, and the host refuses a send there (`SessionRuntime.onUserMessage`,
-  `GET /state → sessions[].lockedNodes`, `/continue`, `/session/start`). The reason
-  is the delivery rule above: a user turn starts as a *child* of the node it was
-  sent from (`beginTurn`), while the notice is injected into the owner *itself*
-  (`beginInjectedTurn`), so sending from a node that is about to be injected would
-  run two agents on one conversation line — the notice would land before the user's
-  question in tree order and after it in wall-clock order, and that turn's reply
-  would never see the job's result. Only the owner is locked: a send from one of its
-  *existing* descendants is allowed (that is a different line), so a long-lived job
-  does not freeze the whole conversation below it. A job that is joined/killed
-  through a tool is settled without a notice, so the lock ends with it; killing it
-  from its card (`killBackground`) settles it the same way.
+- **Stop is a union kill, and it never continues the conversation.**
+  The composer's bottom-right button is Stop while a node runs *or* while it still owns
+  unfinished work (`state.lockedNodes`); there is no separate banner and the input stays
+  usable, exactly as while a turn streams. Pressing it (`SessionRuntime.stop(nodeId)`,
+  `POST /stop {nodeId}`) stops that node's turn, kills every background terminal it owns
+  — *and* the terminals its running sub-agents own, since a sub-agent's `exec_command`
+  registers under the sub-agent's node (`killJobsOf`) — and aborts **the whole sub-agent
+  subtree** (`subAgentSubtree`: a depth-1 sub-agent may be running depth-2 children),
+  then suppresses the notices that would have followed. Nothing is dropped: each notice
+  is **written back** (`queueWriteback` / `flushWritebacks`) into that node's own history
+  as a `user` message and rendered in its card as the usual `.bgnotify` block, so it
+  reaches the model with the next prompt / ▶ Continue and cannot start a turn on its own.
+  A notice produced below a sidecar is retargeted to the turn node that owns the line
+  (`turnOwnerOf`), because a sidecar's history is never sent. The node is remembered in
+  `stoppedLines` until the user continues that line, so a stopped sub-agent is **never
+  resumed** by its own settling children (`onAsyncBatchDone` / `deliverResumeAsync` /
+  `pushSignal` all redirect there). A turn that is still winding down defers the write
+  (`finishTurn` flushes again, and the signal drain retries), so the text can never slip
+  past a request built in between. The fine-grained path is unchanged: a card's ✕ kills
+  that one job *and* tells the model (`notifyAgent: true`).
 - **Delete / clear / branch deletion:** a session, a cleared conversation or a branch that owns
   *running* jobs asks a modal confirmation first — `confirmKillBackgrounds` for delete/clear,
   `deleteBranchInteractive` for a branch (its count comes from

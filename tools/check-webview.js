@@ -540,30 +540,40 @@ if (contextLabel !== 'ctx 50%') {
 
 // A node that is *not* streaming but still owns unfinished work (a running
 // background terminal / async sub-agent batch, or a completion notice about to be
-// injected into it) locks its own composer: the send would open a second run on the
-// same line while that notice lands in the very node the new turn branches from.
+// injected into it) is "doing something", so the composer offers **Stop** there too —
+// one button, one meaning ("stop what this node is doing"), which the host turns into
+// a union kill. No banner: the button says it. The input stays usable exactly as it
+// does while a turn streams.
 {
   const input = elementById('input');
   const send = elementById('send-btn');
+  const stop = elementById('stop-btn');
   const attach = elementById('attach-btn');
   const banner = elementById('branch-banner');
+  const hidden = (element) => element.classList.contains('hidden');
   const locked = (ids) =>
     dispatch({ type: 'state', busy: false, status: '', sessionId: 'smoke-session', runningNodes: [], lockedNodes: ids });
   locked([NODE_ID]);
-  if (!input.disabled || !send.disabled || !attach.disabled) {
+  if (hidden(stop) || !hidden(send)) {
     problems.push(
-      'a node that still owns unfinished work leaves its composer usable (input / Send / attach must be disabled)',
+      `a node that still owns unfinished work shows ${hidden(stop) ? 'Send' : 'Stop'} (it must offer Stop — the union kill)`,
     );
   }
-  if (!banner || banner.classList.contains('hidden') || !banner.textContent) {
-    problems.push('a locked composer explains nothing (no banner text)');
+  if (!stop.title) {
+    problems.push('the Stop button of a node that owns unfinished work carries no tooltip (it kills more than a turn)');
   }
-  locked([]);
-  if (input.disabled || send.disabled || attach.disabled) {
-    problems.push('the composer stays disabled after the node reported no unfinished work');
+  if (input.disabled || attach.disabled) {
+    problems.push('a node that owes unfinished work greys out its input / attach (only the button should change)');
   }
   if (banner && !banner.classList.contains('hidden')) {
-    problems.push('the lock banner is still shown after the node was unlocked');
+    problems.push('a node that owes unfinished work shows an extra banner (Stop is the explanation)');
+  }
+  locked([]);
+  if (hidden(send) || !hidden(stop)) {
+    problems.push('the composer does not go back to Send once the node reported no unfinished work');
+  }
+  if (input.disabled || attach.disabled) {
+    problems.push('the composer stays disabled after the node reported no unfinished work');
   }
 }
 
