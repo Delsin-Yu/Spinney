@@ -38,6 +38,7 @@
   "spinney.replyLanguage.description": "智能体回复所用的语言。'auto' 跟随 VS Code 显示语言；其余选项是 VS Code 自带显示翻译的语言，按使用频率排序，每一项都标注为写入系统提示词的确切名称。也可以在 settings.json 中直接输入其他语言名称或标签。所选语言会写入系统提示词，因此在已打开的对话中更改它，下一次请求可能会错过提示词缓存并重新处理整个上下文——与更改模型或推理力度类似。",
   "spinney.foldToolCalls.description": "默认在聊天树中折叠工具调用卡片；点击标题栏即可展开。正在运行的调用始终展开。",
   "spinney.foldThinking.description": "默认在聊天树中折叠推理/思考区块；点击其标题栏即可展开。正在流式输出的区块始终展开。",
+  "spinney.promptSections.markdownDescription": "由输入框左侧按钮提供的预写指令文本，以其菜单中显示的名称为键。点击某个名称会把它的文本插入消息框：它成为你自己这一轮发言的一部分，发送前可自由编辑，点击本身不会发送任何内容。可在 [settings.json](command:workbench.action.openSettingsJson?%7B%22revealSetting%22%3A%7B%22key%22%3A%22spinney.promptSections%22%2C%22edit%22%3Atrue%7D%7D) 中编辑。\n\n```json\n\"spinney.promptSections\": {\n  \"Plan\": \"This is a planning task: …\",\n  \"Implement Parallel\": \"Start implementing the topic we discussed. …\"\n}\n```\n\n名称与扩展内置片段相同时，会替换该片段的文本；其他名称则新增一行，内置片段始终可用。名称为空或文本为空的条目会被忽略。",
   "spinney.maxConcurrentSubagents.description": "主智能体可同时运行的一级子智能体数量（一个槽位池；超出的任务会排队）。",
   "spinney.maxLevel2Subagents.description": "每个子智能体可以启动的子子智能体数量。深度硬性限制为 2（没有子子子智能体）。",
   "spinney.saveSubAgentTranscripts.description": "将每个已完成的子智能体的完整对话以 JSONL 写入磁盘（每行一条 API 消息，第 1 行为元数据 + 工具调用统计），并把其路径交回调用方。",

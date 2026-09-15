@@ -66,6 +66,13 @@
   naming prompts (single + batched), `sanitizeTitle` / `parseBatchTitles`, and the
   zero-cost `heuristicTitle` fallback. Pure prompt/data helpers — no VS Code APIs,
   so it is smoke-testable outside the Extension Host.
+- `src/chat/promptSnippets.ts` — the composer's **prompt snippets**: the two texts
+  the extension ships (`SHIPPED_PROMPT_SNIPPETS` — `Plan` / `Implement Parallel`)
+  and `resolvePromptSnippets(setting)`, which merges the user's
+  `spinney.promptSections` rows over them (same name replaces the shipped text, any
+  other name adds a row). A name *is* its menu label and its settings key. The texts
+  are user-turn text — the composer inserts one into the input box — so this file
+  never touches the system prompt.
 - `src/chat/transcript.ts` — transcript dumps (JSONL, one API message per line,
   meta + tool stats on line 1), one file per main-agent turn (`writeSessionTranscript`)
   and per sub-agent run (`writeSubAgentTranscript`); plus the read side —

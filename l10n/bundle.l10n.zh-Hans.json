@@ -53,6 +53,7 @@
   "Fit the tree to view": "适应视图大小",
   "Ask the agent… (Enter to send, Shift+Enter for newline)": "向智能体提问…（Enter 发送，Shift+Enter 换行）",
   "Attach image": "附加图片",
+  "Prompt snippets": "提示词片段",
   "Model": "模型",
   "Manage model cards…": "管理模型卡片…",
   "Thinking effort": "推理力度",

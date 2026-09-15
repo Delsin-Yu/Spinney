@@ -15,6 +15,10 @@ Spinney works with a folder open and with no folder open. With no folder, a rela
 - The agent edits the working tree, runs shell commands, and can keep a long command in a background terminal while the turn continues.
 - Sub-agents run as parallel branches and report back to the parent that spawned them.
 - Press Stop to abort the turn at an active head.
+- A prompt-snippet button beside the message box fills it with a pre-written
+  instruction — the shipped `Plan` / `Implement Parallel`, or your own rows from
+  `spinney.promptSections` — so a routine instruction is one click and still editable
+  before you send it.
 
 An agent inspects the same history with `list_nodes`, and it can hop to a separate history with `hop_session`, then take back that history's answer.
 

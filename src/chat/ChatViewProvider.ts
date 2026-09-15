@@ -68,6 +68,7 @@ import {
 } from './runtime';
 import { SessionTreeItem } from './SessionsProvider';
 import { ModelTreeController, apiKeySecretName } from './modelTree';
+import { resolvePromptSnippets } from './promptSnippets';
 import {
   removeTranscriptDir,
   removeTranscriptFile,
@@ -359,7 +360,12 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     const saveSessionTranscripts = cfg.get<boolean>('saveSessionTranscripts') ?? true;
     const subAgentTranscriptDir = (cfg.get<string>('subAgentTranscriptDir') ?? '').trim();
     const autoSessionTitles = cfg.get<boolean>('autoSessionTitles') ?? true;
-    return { defaultCardId, replyLanguage, foldToolCalls, foldThinking, maxConcurrentSubagents, maxLevel2Subagents, saveSubAgentTranscripts, saveSessionTranscripts, subAgentTranscriptDir, autoSessionTitles };
+    // The composer's snippets: the shipped rows plus the user's own, keyed by
+    // display name (`spinney.promptSections`). Resolved here rather than cached, so
+    // the list is live on the next `postConfig` — the same shape every other key
+    // follows.
+    const promptSnippets = resolvePromptSnippets(cfg.get<unknown>('promptSections'));
+    return { defaultCardId, replyLanguage, foldToolCalls, foldThinking, maxConcurrentSubagents, maxLevel2Subagents, saveSubAgentTranscripts, saveSessionTranscripts, subAgentTranscriptDir, autoSessionTitles, promptSnippets };
   }
 
   // ---- API keys (SecretStorage: one entry per provider) ----
@@ -3076,6 +3082,9 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     <div id="composer-row">
       <textarea id="input" placeholder="${vscode.l10n.t('Ask the agent… (Enter to send, Shift+Enter for newline)')}" rows="1" spellcheck="false" autocorrect="off" autocapitalize="off" autocomplete="off"></textarea>
       <div id="composer-controls">
+        <button id="snippets-btn" class="icon-btn" title="${vscode.l10n.t('Prompt snippets')}" aria-label="${vscode.l10n.t('Prompt snippets')}" aria-haspopup="true">
+          <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 11h10M4 16h13"/></svg>
+        </button>
         <button id="attach-btn" class="icon-btn" title="${vscode.l10n.t('Attach image')}" aria-label="${vscode.l10n.t('Attach image')}">
           <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
         </button>

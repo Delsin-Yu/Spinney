@@ -72,6 +72,7 @@ import { ToolRegistry } from '../tools';
 import { BackgroundTask } from '../tools/background';
 import { defaultSessionTitle, isDefaultSessionTitle } from '../i18n';
 import { BackgroundHub, BackgroundOwner } from './backgroundHub';
+import { PromptSnippet } from './promptSnippets';
 import { SubAgentPool } from './SubAgentPool';
 import { sumUsage, summarizeTranscript } from './transcript';
 import { opPayload, opTag, perf, startRepaintOp, timedSync } from '../perf';
@@ -320,6 +321,14 @@ export interface HarnessConfig {
   saveSessionTranscripts: boolean;
   subAgentTranscriptDir: string;
   autoSessionTitles: boolean;
+  /**
+   * The composer's prompt snippets — `spinney.promptSections` merged over the
+   * shipped rows (`resolvePromptSnippets` in `src/chat/promptSnippets.ts`), in
+   * menu order and addressed by display name. They are **user-turn** text: the
+   * webview inserts one into the input box and it travels as the message the user
+   * sends, so nothing about them reaches the system prompt.
+   */
+  promptSnippets: PromptSnippet[];
 }
 
 /** One sub-agent run: its dispatch spec plus the tree node that owns it. */
@@ -1712,6 +1721,10 @@ export class SessionRuntime {
    * the webview keeps no copy of its own, and a card the Model Card Tree page just
    * edited shows up on the next repaint. `model` is a card **id**; `efforts` are the
    * levels *that card* offers, which is what the effort dropdown shows.
+   *
+   * `snippets` is the composer's prompt-snippet list (`{ name, text }`, shipped
+   * rows first) — the webview builds the menu from it and keeps no copy, so
+   * editing `spinney.promptSections` repaints it exactly like a catalog edit.
    */
   postConfig(): void {
     const cfg = this.host.getConfig();
@@ -1731,6 +1744,7 @@ export class SessionRuntime {
       thinkingEffort: this.thinkingEffort,
       foldToolCalls: cfg.foldToolCalls,
       foldThinking: cfg.foldThinking,
+      snippets: cfg.promptSnippets,
     });
   }
 

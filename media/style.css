@@ -154,7 +154,8 @@ body {
   gap: 8px;
 }
 
-#composer-controls #attach-btn {
+#composer-controls #attach-btn,
+#composer-controls #snippets-btn {
   display: flex;
   align-items: center;
   justify-content: center;
@@ -167,7 +168,8 @@ body {
 
 /* The icon is an inline <svg width="14" height="14">: the attributes and the CSS
    must agree, since nothing scales the island any more. */
-#composer-controls #attach-btn svg {
+#composer-controls #attach-btn svg,
+#composer-controls #snippets-btn svg {
   width: 14px;
   height: 14px;
 }
@@ -1492,11 +1494,13 @@ button.icon-btn {
 .node-del:focus-visible { opacity: 1; }
 .node-del:hover { background: var(--error-bg); border-color: var(--error-bg); color: #fff; }
 
-/* Node header menu (RMB on a card header — `openNodeMenu` in media/main.js).
-   Pinned to the viewport, not to the card: it must not scale with the canvas zoom
-   or be clipped by the card's `overflow: hidden`. Above everything the panel
-   draws (cards reach z-index 3, the autoscroll origin 1000). */
-.node-menu {
+/* Node header menu (RMB on a card header — `openNodeMenu` in media/main.js) and the
+   composer's snippet menu (`openSnippetMenu`): one floating surface, pinned to the
+   viewport, not to whatever opened it — it must not scale with the canvas zoom or be
+   clipped by the card's `overflow: hidden`. Above everything the panel draws (cards
+   reach z-index 3, the autoscroll origin 1000). */
+.node-menu,
+.snippet-menu {
   position: fixed;
   z-index: 2000;
   min-width: 150px;
@@ -1509,7 +1513,8 @@ button.icon-btn {
   -webkit-user-select: none;
 }
 
-.node-menu-item {
+.node-menu-item,
+.snippet-menu-item {
   display: block;
   width: 100%;
   padding: 5px 8px;
@@ -1524,7 +1529,9 @@ button.icon-btn {
 }
 
 .node-menu-item:hover,
-.node-menu-item:focus-visible {
+.node-menu-item:focus-visible,
+.snippet-menu-item:hover,
+.snippet-menu-item:focus-visible {
   background: var(--user-bg);
   color: var(--user-fg);
 }

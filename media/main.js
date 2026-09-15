@@ -37,6 +37,7 @@
   const statusText = document.getElementById('status-text');
   const attachmentsEl = document.getElementById('attachments');
   const attachBtn = document.getElementById('attach-btn');
+  const snippetsBtn = document.getElementById('snippets-btn');
   const contextLabel = document.getElementById('context-label');
   const modelSelect = document.getElementById('model-select');
   const modelsBtn = document.getElementById('models-btn');
@@ -1526,6 +1527,7 @@
     inputEl.disabled = readonly;
     sendBtn.disabled = readonly;
     attachBtn.disabled = readonly;
+    snippetsBtn.disabled = readonly;
   }
 
   // An agent (sub-agent) branch is expanded when it is the checked-out node, when
@@ -2457,16 +2459,23 @@
   // Anything that is not a press inside the menu closes it — including a second
   // right-click, which then reopens it on the header under the cursor. Capture
   // phase, so a pan that starts while the menu is up cannot leave it hanging over
-  // cards that have moved away from it.
+  // cards that have moved away from it. The composer's snippet menu is the same
+  // surface with the same rule, so both are closed here.
   document.addEventListener('pointerdown', (e) => {
     if (nodeMenuEl && !(nodeMenuEl.contains && nodeMenuEl.contains(e.target))) closeNodeMenu();
+    // The snippet button is the one place a press must *not* close its own menu:
+    // the `click` that follows decides (open ↔ close), so closing here would make
+    // every second click a reopen.
+    if (snippetMenuEl && e.target !== snippetsBtn && !(snippetMenuEl.contains && snippetMenuEl.contains(e.target))) {
+      closeSnippetMenu();
+    }
   }, true);
   // Zooming / panning moves the cards out from under a viewport-anchored menu, and
   // so does losing the window.
-  window.addEventListener('wheel', closeNodeMenu, { passive: true });
-  window.addEventListener('blur', closeNodeMenu);
+  window.addEventListener('wheel', () => { closeNodeMenu(); closeSnippetMenu(); }, { passive: true });
+  window.addEventListener('blur', () => { closeNodeMenu(); closeSnippetMenu(); });
   window.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') closeNodeMenu();
+    if (e.key === 'Escape') { closeNodeMenu(); closeSnippetMenu(); }
   });
 
   // Zoom around a screen-space cursor position.
@@ -2620,6 +2629,10 @@
   // There is no catalog copy here, and no hardcoded model name anywhere.
   let CARDS = [];
   let EFFORTS = [];
+  // Also from `config`: the composer's prompt snippets (`{ name, text }`, the
+  // shipped rows first). The host resolves them from `spinney.promptSections`, so
+  // this is a copy of nothing the webview owns — editing the setting repaints it.
+  let SNIPPETS = [];
 
   /** The card object the dropdown is currently on (undefined before the first config). */
   function currentCard() {
@@ -2957,6 +2970,84 @@
     inputEl.style.height = Math.min(inputEl.scrollHeight, INPUT_MAX_H) + 'px';
   }
 
+  // ---- Composer prompt snippets ----
+  // A snippet is **the user's own turn**: the menu places its text in the input box,
+  // and the user may edit it before sending. Nothing is sent by the menu itself, so
+  // a snippet can never turn into a turn the user did not ask for. The list is the
+  // host's (`SNIPPETS`, from `config`); the names are data, not translated strings —
+  // a name is what the user called it in `spinney.promptSections`.
+  let snippetMenuEl = null;
+
+  function closeSnippetMenu() {
+    if (snippetMenuEl) {
+      snippetMenuEl.remove();
+      snippetMenuEl = null;
+    }
+  }
+
+  /** Insert a snippet's text at the caret, keeping whatever is already typed. */
+  function insertSnippet(text) {
+    if (!text || inputEl.disabled) {
+      return;
+    }
+    const value = inputEl.value;
+    const start = typeof inputEl.selectionStart === 'number' ? inputEl.selectionStart : value.length;
+    const end = typeof inputEl.selectionEnd === 'number' ? inputEl.selectionEnd : start;
+    const before = value.slice(0, start);
+    const after = value.slice(end);
+    // A snippet is a block of its own: never glue it onto the end of a sentence
+    // (or the start of one) without a line break.
+    const lead = before && !before.endsWith('\n') ? '\n' : '';
+    const tail = after && !after.startsWith('\n') ? '\n' : '';
+    const inserted = lead + text + tail;
+    inputEl.value = before + inserted + after;
+    const caret = before.length + inserted.length;
+    if (inputEl.setSelectionRange) {
+      inputEl.setSelectionRange(caret, caret);
+    }
+    autoGrow();
+    if (inputEl.focus) {
+      inputEl.focus();
+    }
+  }
+
+  /** Show the snippet menu above its button (the composer sits at the tab's bottom). */
+  function openSnippetMenu() {
+    closeSnippetMenu();
+    if (SNIPPETS.length === 0) {
+      return;
+    }
+    const menu = el('div', 'snippet-menu');
+    for (const snippet of SNIPPETS) {
+      if (!snippet || typeof snippet.text !== 'string') continue;
+      const item = el('button', 'snippet-menu-item', String(snippet.name || ''));
+      // The name says what it does; the tooltip is the text that will land in the
+      // box, so a long snippet can be told apart from a similarly named one.
+      item.title = snippet.text;
+      item.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        closeSnippetMenu();
+        insertSnippet(snippet.text);
+      });
+      menu.appendChild(item);
+    }
+    document.body.appendChild(menu);
+    // Measured only now that it is in the DOM, then clamped: the button sits at the
+    // bottom edge, so the menu opens upwards and stays fully visible.
+    const rect = snippetsBtn.getBoundingClientRect ? snippetsBtn.getBoundingClientRect() : { left: 0, top: 0 };
+    const w = menu.offsetWidth || 160;
+    const h = menu.offsetHeight || 26;
+    menu.style.left = clamp(rect.left, 0, Math.max(0, window.innerWidth - w)) + 'px';
+    menu.style.top = clamp(rect.top - h - 4, 0, Math.max(0, window.innerHeight - h)) + 'px';
+    snippetMenuEl = menu;
+  }
+
+  /** The button is hidden until a `config` names at least one snippet. */
+  function updateSnippetsButton() {
+    if (!snippetsBtn) return;
+    snippetsBtn.classList.toggle('hidden', SNIPPETS.length === 0);
+  }
+
   /**
    * Remember which session this webview shows. VS Code persists the state set
    * here across window reloads and hands it to the host's webview panel
@@ -3061,6 +3152,8 @@
         // answer (the host never sends one — it always has a fallback card).
         CARDS = Array.isArray(msg.cards) ? msg.cards : [];
         EFFORTS = Array.isArray(msg.efforts) ? msg.efforts : [];
+        SNIPPETS = Array.isArray(msg.snippets) ? msg.snippets : [];
+        updateSnippetsButton();
         renderModelSelect(msg.model);
         renderEffortSelect(msg.thinkingEffort);
         foldToolCalls = msg.foldToolCalls !== false;
@@ -3279,6 +3372,12 @@
     // asks for it — the host creates or focuses it.
     vscode.postMessage({ type: 'openModelTree' });
   });
+  snippetsBtn.addEventListener('click', () => {
+    // Toggle: a second click on the button closes the menu it opened (a press
+    // anywhere else closes it through the capture-phase listener above).
+    if (snippetMenuEl) closeSnippetMenu();
+    else openSnippetMenu();
+  });
   effortSelect.addEventListener('change', () => {
     if (busy) {
       renderEffortSelect(currentEffort);
@@ -3320,4 +3419,7 @@
   setStatus(tr('Ready'));
   updateImageVisibility();
   updateFollowButton();
+  // No `config` yet means no snippet list: the button stays out of the way until
+  // one arrives (it always does, and it always carries at least the shipped rows).
+  updateSnippetsButton();
 })();

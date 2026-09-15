@@ -326,6 +326,15 @@
             "default": true,
             "description": "%spinney.foldToolCalls.description%",
             "scope": "window"
+          },
+          "spinney.promptSections": {
+            "type": "object",
+            "default": {},
+            "additionalProperties": {
+              "type": "string"
+            },
+            "markdownDescription": "%spinney.promptSections.markdownDescription%",
+            "scope": "window"
           }
         }
       },

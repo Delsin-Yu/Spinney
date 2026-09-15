@@ -621,6 +621,92 @@ if (contextLabel !== 'ctx 50%') {
   }
 }
 
+// The composer's snippet button: the menu is built from the host's list (the
+// webview owns no copy), choosing a name fills the input box, and the click itself
+// never sends — a snippet is the *user's* turn, editable before it goes out.
+{
+  const button = elementById('snippets-btn');
+  const input = elementById('input');
+  const base = TURN_MESSAGES.find((m) => m.type === 'config');
+  const hidden = () => button.classList.contains('hidden');
+  const menus = () => document.body.children.filter((child) => child.classList.contains('snippet-menu'));
+  const click = button._listeners && button._listeners.click;
+
+  // A host that predates the feature sends no `snippets`: the button stays out of
+  // the way rather than opening an empty menu.
+  dispatch(base);
+  if (!hidden()) {
+    problems.push('the snippet button shows up for a config that carries no snippets');
+  }
+  if (typeof click !== 'function') {
+    problems.push('the snippet button has no click handler');
+  }
+
+  const snippets = [
+    { name: 'Plan', text: 'This is a planning task.' },
+    { name: 'Implement Parallel', text: 'Start implementing; parallelize.' },
+  ];
+  dispatch({ ...base, snippets });
+  if (hidden()) {
+    problems.push('the snippet button stays hidden although the config carries snippets');
+  }
+
+  if (typeof click === 'function') {
+    posted.length = 0;
+    input.value = '';
+    click();
+    const menu = menus()[0];
+    if (!menu) {
+      problems.push('the snippet button opened no menu');
+    } else {
+      const names = menu.children.map((item) => item.textContent);
+      if (names.join(',') !== 'Plan,Implement Parallel') {
+        problems.push(`the snippet menu lists ${JSON.stringify(names)} after a config carrying two snippets`);
+      }
+      notes.push(`prompt snippets: ${names.join(', ') || '(empty)'}`);
+      const item = menu.children[0];
+      const itemClick = item && item._listeners && item._listeners.click;
+      if (typeof itemClick !== 'function') {
+        problems.push('a snippet menu item has no click handler');
+      } else {
+        itemClick({ stopPropagation() {} });
+        if (!String(input.value).includes('This is a planning task.')) {
+          problems.push(`choosing a snippet did not put its text in the input (${JSON.stringify(input.value)})`);
+        }
+        if (posted.some((message) => message && message.type === 'userMessage')) {
+          problems.push('choosing a snippet sent a message (it must only fill the input box)');
+        }
+        if (menus().length !== 0) {
+          problems.push('the snippet menu stays open after a snippet was chosen');
+        }
+      }
+    }
+
+    // The button toggles: while its menu is up a second click closes it.
+    input.value = '';
+    click();
+    const open = menus().length === 1;
+    click();
+    if (!open || menus().length !== 0) {
+      problems.push('the snippet button does not toggle its own menu');
+    }
+
+    // An insertion joins existing text on a line of its own instead of gluing the
+    // two sentences together.
+    input.value = 'hello';
+    click();
+    const first = menus()[0] && menus()[0].children[1];
+    const secondClick = first && first._listeners && first._listeners.click;
+    if (typeof secondClick === 'function') {
+      secondClick({ stopPropagation() {} });
+    }
+    if (String(input.value) !== 'hello\nStart implementing; parallelize.') {
+      problems.push(`a snippet inserted into a non-empty input produced ${JSON.stringify(input.value)}`);
+    }
+    input.value = '';
+  }
+}
+
 // The composer's Send/Stop pair follows the *view focus* node, not the session:
 // you cannot send into a node that is streaming, but a run on another branch must
 // leave this composer fully usable (spec §1 — "sending a new prompt when another

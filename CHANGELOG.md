@@ -121,6 +121,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `media/modeltree.js` into a stub DOM and replays the page protocol — the `ready`
   handshake, a snapshot drawn as a tree, a failed save that keeps the draft, and an
   add-card → save round trip. It runs in `vscode:prepublish` alongside the others.
+- Prompt snippets in the composer: a button beside the input box opens a menu of
+  pre-written instruction texts, and choosing one inserts its text into the message —
+  it becomes part of your own turn, editable before you send it, and the click itself
+  sends nothing. The extension ships two (`Plan`, `Implement Parallel`); your own are
+  `spinney.promptSections`, an object keyed by the name shown in the menu. A row whose
+  name matches a shipped snippet replaces its text, any other name adds a row, and the
+  shipped ones always stay available. Editing the setting repaints the menu in an open
+  chat tab, with no reload.
 
 ### Changed
 

@@ -40,6 +40,16 @@
   page and the host both understand (`providers` / `modelCards`) belongs there too,
   not only in the page's save path. Extend the table in
   `docs/agents/invariants/config-keys.md` with the new key.
+- **Add or reword a composer prompt snippet** → the shipped texts and the merge over
+  `spinney.promptSections` are `src/chat/promptSnippets.ts` (the text is
+  user-turn text and, like every string that reaches the model, carries no
+  workspace fact — `invariants/system-prompt.md`, hard rule 1); the setting is
+  contributed in `package.json` and read in `ChatViewProvider.getConfig()`, it
+  rides the `config` message (`SessionRuntime.postConfig`), and the button, menu and
+  insertion are `media/main.js` (`openSnippetMenu` / `insertSnippet`) with
+  `.snippet-menu` in `media/style.css`. The webview keeps no copy of the list, so a
+  settings edit repaints the menu on the next push. The replay check is the
+  "snippet button" block in `tools/check-webview.js`.
 - **Change the UI** → `media/main.js` (behavior) and/or `media/style.css`
   (styling); the HTML shell is in `getHtml()` in `ChatViewProvider.ts`.
   `style.css` maps every colour token in `:root` to a `--vscode-*` theme variable
