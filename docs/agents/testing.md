@@ -107,7 +107,9 @@ exactly the bug class. The method that does, with no real API key and no tokens:
    (no prompt) hands the UI back afterwards.
 
 Rules learned the hard way: back up `.vscode/settings.json` byte-for-byte and
-restore it in a `finally` (a failed run must never leave a mock base URL behind);
+restore it in a `finally` (a failed run must never leave a mock base URL behind — the
+file is `.gitignore`d, being per-developer state, so at least a botched run cannot be
+committed);
 space two edits more than a second apart (VS Code debounces external writes, and
 a coalesced event looks like a missing feature); pass an explicit `timeout` on
 the command that edits the file, or you end up measuring the tool's own default

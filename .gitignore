@@ -27,6 +27,11 @@ l10n/bundle.l10n.zh-tw.json
 coverage/
 *.lcov
 
+# Local VS Code settings (per-developer: model/effort picks, base URL, scratch keys)
+# — launch.json and tasks.json stay tracked, those describe the project; this file
+# describes one machine.
+.vscode/settings.json
+
 # Logs
 *.log
 npm-debug.log*
