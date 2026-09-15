@@ -12,7 +12,12 @@
   `{ os, shell, root, rootKind: 'workspace' | 'scratch' }`; in no-repo mode it
   renders a second line stating that relative paths and the default `cwd` are
   based on the harness root, to use absolute paths for real files and not to
-  assume a repository layout), `{{agentsMd}}` (the session's snapshot). The
+  assume a repository layout), `{{language}}` (the `## Language` line, from
+  `languageLine(language)` — the value is the language **name** resolved from
+  `spinney.replyLanguage` by `replyLanguageName` (`auto` → the VS Code display
+  language, a tag → its CLDR name), with `DEFAULT_REPLY_LANGUAGE` ('English') as
+  the floor when nothing resolves) and
+  `{{agentsMd}}` (the session's snapshot). The
   sub-agent template adds `{{depth}}`, `{{permissions}}`
   and `{{fanOut}}`; it stays lean — identity + environment + three behaviour lines
   — and never repeats the main template.
@@ -53,9 +58,20 @@
   `vscode:prepublish`) fails the build when a `src/**/*.ts` file other than the
   catalog names a model, or when `package.json` / `README.md` / `docs/**` names one
   the catalog does not have.
+- **The reply language is user-facing only.** `spinney.replyLanguage` (a dropdown
+  of `auto` + the language tags VS Code ships display translations for — `en`,
+  `zh-Hans`, `zh-Hant` first, then the rest by use, each labelled with the name the
+  prompt will carry) fills the
+  main template's `{{language}}` line with a language name; the sub-agent template
+  keeps `Answer in English`, because a sub-agent reports to the agent that
+  dispatched it and never to the user. Changing the setting is a prompt change like
+  any other: `SessionRuntime.applyReplyLanguage` rewrites every node worker's
+  `messages[0]` and posts the same cache-miss warning the model/effort switches
+  post. `Spinney: Show System Prompt` renders the session's current value.
 - Session semantics are unchanged: the prompt is synthesized per activation and
-  never stored in a node (`docs/agents/invariants/chat-tree.md`); on a model or
-  effort switch only `messages[0]` is rewritten (`refreshSystemIdentity`).
+  never stored in a node (`docs/agents/invariants/chat-tree.md`); on a model,
+  effort or reply-language change only `messages[0]` is rewritten
+  (`refreshSystemIdentity`).
 - To read the current prompt, run **`Spinney: Show System Prompt`**: it
   renders for the active model + effort and the session's `AGENTS.md` snapshot and
   opens the result in an editor tab.

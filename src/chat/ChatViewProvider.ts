@@ -3,6 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { Agent } from '../agent/agent';
+import { replyLanguageName } from '../agent/languages';
 import { DeepSeekClient } from '../agent/deepseek';
 import { ChatMessage, ThinkingEffort } from '../agent/types';
 import {
@@ -323,6 +324,11 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     // A blank base URL means "use the default" rather than a relative URL.
     const baseUrl = (cfg.get<string>('baseUrl') ?? '').trim() || 'https://api.deepseek.com';
     const thinkingEffort = (cfg.get<string>('thinkingEffort') ?? 'medium') as ThinkingEffort;
+    // The reply-language setting is a dropdown of VS Code language tags plus
+    // `auto`; the prompt wants a language *name*, so `auto` is resolved here
+    // against the display language of this window (`replyLanguageName` also maps
+    // a tag to its CLDR name and falls back to English for a blank locale).
+    const replyLanguage = replyLanguageName(cfg.get<string>('replyLanguage') ?? '', vscode.env.language);
     const foldToolCalls = cfg.get<boolean>('foldToolCalls') ?? true;
     const foldThinking = cfg.get<boolean>('foldThinking') ?? true;
     const maxConcurrentSubagents = cfg.get<number>('maxConcurrentSubagents') ?? 15;
@@ -331,7 +337,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     const saveSessionTranscripts = cfg.get<boolean>('saveSessionTranscripts') ?? true;
     const subAgentTranscriptDir = (cfg.get<string>('subAgentTranscriptDir') ?? '').trim();
     const autoSessionTitles = cfg.get<boolean>('autoSessionTitles') ?? true;
-    return { apiKey, model, baseUrl, thinkingEffort, foldToolCalls, foldThinking, maxConcurrentSubagents, maxLevel2Subagents, saveSubAgentTranscripts, saveSessionTranscripts, subAgentTranscriptDir, autoSessionTitles };
+    return { apiKey, model, baseUrl, thinkingEffort, replyLanguage, foldToolCalls, foldThinking, maxConcurrentSubagents, maxLevel2Subagents, saveSubAgentTranscripts, saveSessionTranscripts, subAgentTranscriptDir, autoSessionTitles };
   }
 
   // ---- API key (SecretStorage) ----
@@ -506,6 +512,11 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    *   setting" rule, read per session — a pick anchored to the *previous* setting
    *   value is retired, see `loadRuntimeConfig`). Like the dropdowns, the value is
    *   skipped while that session is running.
+   * - **`replyLanguage`** is written into the system prompt, so it is pushed to
+   *   every runtime (`SessionRuntime.applyReplyLanguage`) when its key changed
+   *   — again skipped for a session that is mid-turn. Without a per-session pick
+   *   to arbitrate, the setting is the only source: the runtime replaces the value
+   *   and warns the session about the prompt-cache miss the change implies.
    *
    * Every other `spinney.*` key is already read lazily at its point of use
    * — `autoSessionTitles`, `maxLevel2Subagents`, `saveSessionTranscripts`,
@@ -520,6 +531,10 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     this.client.configure({ baseUrl: cfg.baseUrl });
     const modelChanged = !event || event.affectsConfiguration('spinney.model');
     const effortChanged = !event || event.affectsConfiguration('spinney.thinkingEffort');
+    // The reply language is written into the system prompt, so a change to it is
+    // pushed to every live session exactly like a model/effort change — including
+    // the cache-miss warning the runtime posts.
+    const languageChanged = !event || event.affectsConfiguration('spinney.replyLanguage');
     if (modelChanged || effortChanged) {
       // A settings edit also moves the default for sessions created from now on
       // (and retires a persisted record made against an older setting value).
@@ -549,12 +564,21 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
           rt.applyDefaultEffort(this.defaultThinkingEffort);
         }
       }
+      if (languageChanged) {
+        if (rt.busy) {
+          skippedBusy = true;
+        } else {
+          // No per-session pick here: the setting is the only source, so it simply
+          // replaces the old value (and warns about the prompt-cache miss).
+          rt.applyReplyLanguage(cfg.replyLanguage);
+        }
+      }
       // Repaint the dropdowns and the fold defaults (the webview re-applies the
       // latter to the cards already on screen).
       rt.postConfig();
     }
     if (skippedBusy) {
-      this.output.appendLine('[config] model/thinkingEffort change skipped: a turn is running');
+      this.output.appendLine('[config] model/thinkingEffort/replyLanguage change skipped: a turn is running');
     }
     if (!event || event.affectsConfiguration('spinney.baseUrl')) {
       // The endpoint changed: the credit line it answers comes from that host.
@@ -622,7 +646,9 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   /** The system prompt the active (last-focused) session would send next. */
   systemPrompt(): string {
     const rt = this.runtimes.get(this.activeSessionId);
-    return rt ? rt.systemPromptText() : Agent.systemPrompt(this.defaultModel, this.defaultThinkingEffort);
+    return rt
+      ? rt.systemPromptText()
+      : Agent.systemPrompt(this.defaultModel, this.defaultThinkingEffort, this.getConfig().replyLanguage);
   }
 
   /**
@@ -1906,9 +1932,9 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   /**
    * Open the fully-rendered system prompt in an editor tab
    * (spinney.showSystemPrompt). The content is rendered from the *current*
-   * session state — the active model, the reasoning effort and the AGENTS.md
-   * snapshot taken when the session started — so it is exactly what the model
-   * would receive on the next turn.
+   * session state — the active model, the reasoning effort, the reply language and
+   * the AGENTS.md snapshot taken when the session started — so it is exactly what
+   * the model would receive on the next turn.
    */
   async showSystemPrompt(): Promise<void> {
     const content = this.systemPrompt();

@@ -5,6 +5,14 @@ call does not pass its own `timeout`; a non-positive/absent value falls back to
 600), `contextWindow` (0 = use the catalog's window; a `modelTable` row
 beats it), `thinkingEffort`
 (`none|low|medium|high`, default `medium` — `none` omits `reasoning_effort`),
+`replyLanguage` (`auto` — the default, i.e. follow the VS Code display language —
+or one of the language tags VS Code ships display translations for; resolved into
+the **name** the prompt carries by `replyLanguageName` in
+`src/agent/languages.ts` — the tags live only in the setting's `enum`, ordered
+`auto`, `en`, `zh-Hans`, `zh-Hant` and then the rest by use, and the setting's
+`enumDescriptions` are exactly the names the prompt receives, so the dropdown reads
+like the prompt does; a tag CLDR cannot name, or any other name typed into
+`settings.json`, is used verbatim),
 `foldToolCalls` (default `true`),
 `foldThinking` (default `true`), `maxConcurrentSubagents` (default 15),
 `maxLevel2Subagents` (default 2), `saveSubAgentTranscripts` (default `true`),
@@ -64,6 +72,7 @@ no handling.
 | `modelTable` | immediately | pushed: `applyModelTable()` (re-parse + install) → `postConfig()` (dropdown + image affordances) → `getContextWindow`/`postContext` for the row's own model |
 | `maxConcurrentSubagents` | immediately (raising wakes queued tasks; lowering drains) | pushed: `SubAgentPool.setMaxConcurrent` |
 | `model`, `thinkingEffort` | immediately when *that key* changed, and only for sessions **without a pick of their own** (a per-tab dropdown pick wins) | pushed through `SessionRuntime.applyDefaultModel` / `applyDefaultEffort` (driven by `onConfigurationChanged`); a running session is skipped, like the dropdowns |
+| `replyLanguage` | immediately when *that key* changed (a running session is skipped) | pushed: `ChatViewProvider.getConfig()` resolves the setting to a language **name** (`auto` → `vscode.env.language`, a tag → its CLDR name, via `replyLanguageName`), and `SessionRuntime.applyReplyLanguage` pushes that name to every node worker's `Agent.setReplyLanguage`, which rewrites `messages[0]`; a session with history gets the cache-miss notice. **No per-session pick**: the language is a property of the reader, so the setting is the only source (`SessionRuntime.replyLanguage` is seeded from it at construction). Re-picking `auto` when the display language is already in force resolves to the same name and is a no-op |
 | `foldToolCalls`, `foldThinking` | immediately, incl. cards already on screen | pushed: `postConfig()` → the webview re-applies the default to existing cards |
 | `httpApi.enabled`, `httpApi.port` | immediately | pushed: `ControlServer.restart()` (rebind the listener; disabling just leaves `start()` a no-op) |
 | `commandTimeout`, `maxInlineToolOutput`, `maxLevel2Subagents`, `saveSessionTranscripts`, `saveSubAgentTranscripts`, `subAgentTranscriptDir`, `autoSessionTitles` | immediately | pulled at the point of use (they already were — no listener needed) |

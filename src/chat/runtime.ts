@@ -33,6 +33,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { Agent } from '../agent/agent';
+import { DEFAULT_REPLY_LANGUAGE } from '../agent/prompt';
 import { DeepSeekBalance, DeepSeekClient } from '../agent/deepseek';
 import { AgentEvent, ChatMessage, ContentPart, ThinkingEffort, Usage } from '../agent/types';
 import {
@@ -159,6 +160,13 @@ export interface HarnessConfig {
   model: string;
   baseUrl: string;
   thinkingEffort: ThinkingEffort;
+  /**
+   * Reply language **name** (not the setting's raw value) injected into the main
+   * agent's system prompt — `ChatViewProvider.getConfig()` resolves
+   * `spinney.replyLanguage` (`auto` → the VS Code display language) through
+   * `replyLanguageName`.
+   */
+  replyLanguage: string;
   foldToolCalls: boolean;
   foldThinking: boolean;
   maxConcurrentSubagents: number;
@@ -413,6 +421,15 @@ export class SessionRuntime {
    */
   model: string;
   thinkingEffort: ThinkingEffort;
+  /**
+   * The language the main agent replies in, as the **name** the prompt carries
+   * ("Japanese"), not the setting's raw value. It has **no** per-session pick — it
+   * comes straight from `spinney.replyLanguage` (resolved by
+   * `ChatViewProvider.getConfig()`, seeded at construction, pushed by
+   * {@link applyReplyLanguage} when the setting changes), because the language is a
+   * property of the reader, not of one conversation.
+   */
+  replyLanguage: string = DEFAULT_REPLY_LANGUAGE;
   contextWindow: number;
 
   /** Set by `dispose()`: a deleted session's runtime must stop delivering. */
@@ -431,6 +448,9 @@ export class SessionRuntime {
     this.client = client;
     this.model = model;
     this.thinkingEffort = thinkingEffort;
+    // The reply language is not a per-session pick, so it is read straight from
+    // the setting; a later edit arrives through `applyReplyLanguage`.
+    this.replyLanguage = host.getConfig().replyLanguage;
     this.contextWindow = host.getContextWindow(model);
     this.hub = hub;
 
@@ -473,6 +493,7 @@ export class SessionRuntime {
       const agent = new Agent(this.client, tools, (event) => this.handleAgentEventFor(node, event));
       agent.setModel(this.model);
       agent.setThinkingEffort(this.thinkingEffort);
+      agent.setReplyLanguage(this.replyLanguage);
       // This agent can spawn sub-agents: hand it this runtime's orchestrator,
       // bound to the same node.
       agent.setSpawnHandler((args, signal) => this.handleSpawnAgents(node, args, signal));
@@ -564,7 +585,7 @@ export class SessionRuntime {
 
   /** The system prompt this session would send on its next request. */
   systemPromptText(): string {
-    return Agent.systemPrompt(this.model, this.thinkingEffort);
+    return Agent.systemPrompt(this.model, this.thinkingEffort, this.replyLanguage);
   }
 
   /** Tear down: kill background jobs, abort sub-agents, cancel timers. */
@@ -738,6 +759,40 @@ export class SessionRuntime {
       );
     }
     this.host.output.appendLine(`[config] thinkingEffort=${effort}${explicit ? ' (session pick)' : ' (settings)'}`);
+  }
+
+  /**
+   * Adopt a changed `spinney.replyLanguage` setting. `language` is the resolved
+   * **name** (`ChatViewProvider.getConfig().replyLanguage`), so the `auto` →
+   * display-language step has already happened: re-picking `auto` on a window that
+   * already follows its own language is a no-op, and no notice is posted for it.
+   * Unlike the model and the thinking effort there is no per-session pick to
+   * arbitrate: this session always follows the setting, so the value is replaced
+   * outright and pushed to every node worker. A session that already has history
+   * gets the same cache-miss warning the other two produce — the system prompt it
+   * was built against is no longer the one the next request will send.
+   */
+  applyReplyLanguage(language: string): void {
+    if (this.busy) {
+      return; // same rule as the model/effort pick: never rewrite a prompt mid-turn
+    }
+    const next = (language || '').trim() || DEFAULT_REPLY_LANGUAGE;
+    if (next === this.replyLanguage) {
+      return;
+    }
+    this.replyLanguage = next;
+    for (const worker of this.nodeWorkers.values()) {
+      worker.agent.setReplyLanguage(next);
+    }
+    if (this.hasHistory()) {
+      this.postNotice(
+        'warning',
+        'Reply language changed to "' +
+          next +
+          '". The system prompt changed with it, so the next request may miss the prompt cache and reprocess the full context.',
+      );
+    }
+    this.host.output.appendLine(`[config] replyLanguage=${next}`);
   }
 
   /** Push a settings change onto the live sub-agent pool. */

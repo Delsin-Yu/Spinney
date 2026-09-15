@@ -78,6 +78,13 @@
 - `src/agent/profile.ts` — `describeAgent(profile, registryTools, facts?)`: the
   prompt **and** the tools array for one (role, model, effort, capabilities)
   profile — the public entry point for "what does the model actually receive".
+- `src/agent/languages.ts` — `replyLanguageName(value, vscodeLocale)`: the
+  reply-language setting (`auto` or a VS Code language tag) → the language **name**
+  the prompt carries, named through `Intl.DisplayNames` so the tag list lives only
+  in the setting's `enum`. That `enum` is ordered by use (`auto`, `en`, `zh-Hans`,
+  `zh-Hant`, then the rest) and its `enumDescriptions` are these same names, so the
+  dropdown reads like the prompt does; `zh-cn`/`zh-tw` stay aliased because
+  `vscode.env.language` reports the region tags.
 - `src/agent/models.ts` — the model catalog (id / context window / accepts images)
   and its accessors (`DEFAULT_MODEL`, `isVisionModel`, `contextWindowFor`,
   `visionModelsLabel`). The **only** place a model id may appear;

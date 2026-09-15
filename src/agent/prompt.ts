@@ -12,6 +12,7 @@ import { ThinkingEffort } from './types';
  *
  *   {{identity}}    who the agent is (harness name + model + reasoning effort)
  *   {{environment}} where it runs (OS / shell / workspace)
+ *   {{language}}    the reply language (`spinney.replyLanguage`)
  *   {{agentsMd}}    the workspace AGENTS.md snapshot taken at session start
  *
  * The sub-agent template shares `{{identity}}` / `{{environment}}` but is
@@ -26,6 +27,15 @@ import { ThinkingEffort } from './types';
 /** Heading of the trailing AGENTS.md section (used by the template and the empty-snapshot case). */
 const AGENTS_MD_HEADING = '## Workspace AGENTS.md (project instructions)';
 
+/**
+ * The reply language used when nothing else resolves. It is the floor under
+ * `replyLanguageName` (`src/agent/languages.ts`), which turns
+ * `spinney.replyLanguage` into the language name the prompt carries: a blank
+ * value, or `auto` with no VS Code display language, must never send an empty
+ * `## Language` line to the model.
+ */
+export const DEFAULT_REPLY_LANGUAGE = 'English';
+
 /** The main agent's system prompt. */
 export const SYSTEM_PROMPT_TEMPLATE = [
   '{{identity}}',
@@ -33,7 +43,7 @@ export const SYSTEM_PROMPT_TEMPLATE = [
   '{{environment}}',
   '',
   '## Language',
-  '- Default to English; keep answering in English even if the user writes another language, unless the user explicitly asks for one.',
+  '{{language}}',
   '- Leave code, file paths, command output and identifiers verbatim; never translate them.',
   '',
   '## Ask when it matters',
@@ -63,7 +73,11 @@ export const SYSTEM_PROMPT_TEMPLATE = [
   '{{agentsMd}}',
 ].join('\n');
 
-/** A sub-agent's (lean) system prompt. */
+/**
+ * A sub-agent's (lean) system prompt. It reports in English on purpose: a
+ * sub-agent never talks to the user, only to the agent that dispatched it, so
+ * `spinney.replyLanguage` (a user-facing choice) does not apply here.
+ */
 export const SUB_AGENT_SYSTEM_PROMPT_TEMPLATE = [
   '{{identity}}',
   '',
@@ -85,6 +99,16 @@ export function identityLines(model: string, effort: ThinkingEffort): string[] {
     lines.push('Your reasoning effort is currently set to "' + effort + '".');
   }
   return lines;
+}
+
+/**
+ * The `## Language` line, filled from `spinney.replyLanguage`. A blank value
+ * falls back to {@link DEFAULT_REPLY_LANGUAGE} instead of sending an empty
+ * instruction to the model.
+ */
+export function languageLine(language: string): string {
+  const lang = (language || '').trim() || DEFAULT_REPLY_LANGUAGE;
+  return `- Default to ${lang}; keep answering in ${lang} even if the user writes another language, unless the user explicitly asks for one.`;
 }
 
 /**
@@ -191,18 +215,21 @@ function stripAgentsMdSection(text: string): string {
 }
 
 /**
- * The main agent's system prompt for a model + reasoning effort. `facts`
- * defaults to the live environment so the normal path needs no arguments.
+ * The main agent's system prompt for a model + reasoning effort + reply
+ * language. `facts` defaults to the live environment so the normal path needs no
+ * arguments.
  */
 export function systemPrompt(
   model = '',
   effort: ThinkingEffort = 'none',
+  language: string = DEFAULT_REPLY_LANGUAGE,
   facts: EnvironmentFacts = currentEnvironmentFacts(),
 ): string {
   const agentsMd = (agentsMdSnapshot ?? '').trim();
   const text = renderPromptTemplate(SYSTEM_PROMPT_TEMPLATE, {
     identity: identityLines(model, effort).join('\n'),
     environment: environmentSection(facts),
+    language: languageLine(language),
     agentsMd,
   });
   return agentsMd ? text : stripAgentsMdSection(text);

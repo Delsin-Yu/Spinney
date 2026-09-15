@@ -161,13 +161,21 @@ export class Agent {
   }
 
   /** Fresh conversation history consisting of just the system prompt. */
-  static initialMessages(model = '', effort: ThinkingEffort = 'none'): ChatMessage[] {
-    return [{ role: 'system', content: prompt.systemPrompt(model, effort) }];
+  static initialMessages(
+    model = '',
+    effort: ThinkingEffort = 'none',
+    language: string = prompt.DEFAULT_REPLY_LANGUAGE,
+  ): ChatMessage[] {
+    return [{ role: 'system', content: prompt.systemPrompt(model, effort, language) }];
   }
 
   /** The current system prompt (used to refresh persisted sessions). */
-  static systemPrompt(model = '', effort: ThinkingEffort = 'none'): string {
-    return prompt.systemPrompt(model, effort);
+  static systemPrompt(
+    model = '',
+    effort: ThinkingEffort = 'none',
+    language: string = prompt.DEFAULT_REPLY_LANGUAGE,
+  ): string {
+    return prompt.systemPrompt(model, effort, language);
   }
 
   /**
@@ -247,6 +255,8 @@ export class Agent {
   private pendingImageFiles: Array<{ file_id: string; path: string }> = [];
   private model = '';
   private thinkingEffort: ThinkingEffort = 'none';
+  /** Reply language injected as the prompt's `## Language` line. */
+  private replyLanguage: string = prompt.DEFAULT_REPLY_LANGUAGE;
   /** Provider hook that runs sub-agents for the `spawn_agents` tool. */
   private spawnHandler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null = null;
   /** Provider hook that resumes a finished sub-agent for the `send_agent_message` tool. */
@@ -301,6 +311,12 @@ export class Agent {
   /** Set the reasoning-effort mode for subsequent completions. */
   setThinkingEffort(effort: ThinkingEffort): void {
     this.thinkingEffort = effort;
+    this.refreshSystemIdentity();
+  }
+
+  /** Set the language the agent replies in (the prompt's `## Language` line). */
+  setReplyLanguage(language: string): void {
+    this.replyLanguage = language || prompt.DEFAULT_REPLY_LANGUAGE;
     this.refreshSystemIdentity();
   }
 
@@ -363,20 +379,21 @@ export class Agent {
   }
 
   /**
-   * Rewrite the leading system prompt to the current identity (model + effort).
-   * The instructions are identical every time, so only the identity/environment
-   * lines are updated; the rest of the conversation history is preserved.
-   * Switching is applied in place because it invalidates the prompt cache anyway
-   * and the first message is the most authoritative identity signal.
+   * Rewrite the leading system prompt to the current identity (model + effort +
+   * reply language). The instructions are identical every time, so only the
+   * identity/environment/language lines are updated; the rest of the conversation
+   * history is preserved. Switching is applied in place because it invalidates the
+   * prompt cache anyway and the first message is the most authoritative identity
+   * signal.
    */
   private refreshSystemIdentity(): void {
     if (this.messages[0]?.role === 'system') {
-      this.messages[0].content = prompt.systemPrompt(this.model, this.thinkingEffort);
+      this.messages[0].content = prompt.systemPrompt(this.model, this.thinkingEffort, this.replyLanguage);
     }
   }
 
   reset(): void {
-    this.messages = Agent.initialMessages(this.model, this.thinkingEffort);
+    this.messages = Agent.initialMessages(this.model, this.thinkingEffort, this.replyLanguage);
     this.pendingImageFiles = [];
   }
 

@@ -15,7 +15,8 @@
   reload**: read it at its point of use (the preferred shape), or, if some live
   owner caches it, push it from `ChatViewProvider.onConfigurationChanged()`
   (wired in `extension.ts` from `onDidChangeConfiguration`), which pushes it to the
-  live owners (`SessionRuntime.applyDefaultModel` / `applyDefaultEffort`); a value read only once at activation is a bug. Extend the table in
+  live owners (`SessionRuntime.applyDefaultModel` / `applyDefaultEffort` /
+  `applyReplyLanguage`); a value read only once at activation is a bug. Extend the table in
   `docs/agents/invariants/config-keys.md` with the new key.
 - **Change the UI** → `media/main.js` (behavior) and/or `media/style.css`
   (styling); the HTML shell is in `getHtml()` in `ChatViewProvider.ts`.

@@ -1,4 +1,4 @@
-import { EnvironmentFacts, subAgentSystemPrompt, systemPrompt } from './prompt';
+import { DEFAULT_REPLY_LANGUAGE, EnvironmentFacts, subAgentSystemPrompt, systemPrompt } from './prompt';
 import { ToolCapabilities, interceptedDefinitions } from './tools';
 import { ThinkingEffort, ToolDefinition } from './types';
 
@@ -16,6 +16,13 @@ export interface AgentProfile {
   role: 'main' | 'subagent';
   model: string;
   effort: ThinkingEffort;
+  /**
+   * Reply language **name** for the main agent, already resolved from
+   * `spinney.replyLanguage` (see `replyLanguageName` in `src/agent/languages.ts`);
+   * ignored for a sub-agent, whose reports stay English (see
+   * `SUB_AGENT_SYSTEM_PROMPT_TEMPLATE`).
+   */
+  language?: string;
   /** Sub-agent depth (sub-agents only; default 1). */
   depth?: number;
   /** Sub-agent may write files / run commands (sub-agents only; default false). */
@@ -33,7 +40,7 @@ export function describeAgent(
   const system =
     profile.role === 'subagent'
       ? subAgentSystemPrompt(profile.model, profile.effort, profile.depth ?? 1, profile.write ?? false, facts)
-      : systemPrompt(profile.model, profile.effort, facts);
+      : systemPrompt(profile.model, profile.effort, profile.language ?? DEFAULT_REPLY_LANGUAGE, facts);
   return {
     systemPrompt: system,
     tools: [...registryTools, ...interceptedDefinitions(profile.capabilities)],
