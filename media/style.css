@@ -127,17 +127,15 @@ body {
    pane pans/zooms with the tree and is visibly attached to the node it sends
    into. It has no other home: with an empty session the placeholder card
    (`.composer-node`) hosts it, and with a focused sub-agent branch (or no active
-   node at all) the pane is hidden. `--cs` scales the whole pane (controls and
-   fonts). It follows the host card's width, so dragging the card's resize handle
-   scales the pane with the card. */
+   node at all) the pane is hidden. Every size below is fixed px: the pane does
+   NOT scale with the host card's width, its resize handle, or the panel. */
 #composer {
-  --cs: 1;
   flex: 0 0 auto;
   display: flex;
   flex-direction: column;
-  gap: calc(6px * var(--cs));
+  gap: 6px;
   width: 100%;
-  padding: calc(8px * var(--cs)) calc(10px * var(--cs));
+  padding: 8px 10px;
   border-top: 1px solid var(--border);
   background: var(--bg2);
   /* The canvas disables selection for panning; the input needs it back. */
@@ -147,31 +145,31 @@ body {
 
 /* Leave the card's bottom-right resize handle clear. */
 #composer #meter-row-readout {
-  padding-right: calc(16px * var(--cs));
+  padding-right: 16px;
 }
 
 #composer-controls {
   display: flex;
   align-items: center;
-  gap: calc(8px * var(--cs));
+  gap: 8px;
 }
 
 #composer-controls #attach-btn {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: calc(22px * var(--cs));
-  height: calc(22px * var(--cs));
-  font-size: calc(12px * var(--cs));
+  width: 22px;
+  height: 22px;
+  font-size: 12px;
   padding: 0;
   flex: 0 0 auto;
 }
 
-/* The icon is an inline <svg width="14" height="14">: override both attributes
-   so it scales with the island too. */
+/* The icon is an inline <svg width="14" height="14">: the attributes and the CSS
+   must agree, since nothing scales the island any more. */
 #composer-controls #attach-btn svg {
-  width: calc(14px * var(--cs));
-  height: calc(14px * var(--cs));
+  width: 14px;
+  height: 14px;
 }
 
 .icon-btn svg {
@@ -183,10 +181,10 @@ body {
   background: var(--bg3);
   color: var(--text);
   border: 1px solid var(--border);
-  border-radius: calc(6px * var(--cs));
-  padding: calc(2px * var(--cs)) calc(6px * var(--cs));
+  border-radius: 6px;
+  padding: 2px 6px;
   font-family: inherit;
-  font-size: calc(11px * var(--cs));
+  font-size: 11px;
 }
 
 #composer-controls select:focus {
@@ -214,12 +212,12 @@ body {
 #meter-row-readout {
   display: flex;
   align-items: center;
-  gap: calc(4px * var(--cs));
+  gap: 4px;
   /* Leave the bottom-right corner free for the resize handle. */
-  padding-right: calc(14px * var(--cs));
+  padding-right: 14px;
   min-width: 0;
   font-family: "Consolas", "Courier New", monospace;
-  font-size: calc(10px * var(--cs));
+  font-size: 10px;
   line-height: 1;
   color: var(--text-dim);
   user-select: none;
@@ -230,10 +228,10 @@ body {
   flex: 0 0 auto;
 }
 
-/* The status light is a `.dot` (9px); inside the island it scales with it. */
+/* The status light is a `.dot` (9px); pin it so it matches the readout's text. */
 #composer .dot {
-  width: calc(9px * var(--cs));
-  height: calc(9px * var(--cs));
+  width: 9px;
+  height: 9px;
 }
 
 /* Live status ("Thinking…", "Interrupted", …). Owns the left; the metrics are
@@ -251,7 +249,7 @@ body {
   margin-left: auto;
   display: flex;
   align-items: center;
-  gap: calc(6px * var(--cs));
+  gap: 6px;
   min-width: 0;
 }
 
@@ -264,7 +262,7 @@ body {
   text-align: center;
   white-space: nowrap;
   font-family: "Consolas", "Courier New", monospace;
-  font-size: calc(10px * var(--cs));
+  font-size: 10px;
   color: var(--text-dim);
 }
 
@@ -751,7 +749,7 @@ button.icon-btn {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: calc(4px * var(--cs));
+  gap: 4px;
 }
 
 #tps-meter.active {
@@ -768,7 +766,7 @@ button.icon-btn {
 }
 
 #tps-value {
-  min-width: calc(24px * var(--cs));
+  min-width: 24px;
   text-align: right;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
@@ -781,7 +779,7 @@ button.icon-btn {
 #composer-row {
   display: flex;
   flex-direction: column;
-  gap: calc(6px * var(--cs));
+  gap: 6px;
 }
 
 #composer:focus-within {
@@ -791,20 +789,20 @@ button.icon-btn {
 #attachments {
   display: flex;
   flex-wrap: wrap;
-  gap: calc(6px * var(--cs));
+  gap: 6px;
 }
 
 .attach-hint {
-  font-size: calc(12px * var(--cs));
+  font-size: 12px;
   color: var(--warn);
-  padding: calc(4px * var(--cs)) 0;
+  padding: 4px 0;
 }
 
 .pending-att {
   position: relative;
-  width: calc(52px * var(--cs));
-  height: calc(52px * var(--cs));
-  border-radius: calc(6px * var(--cs));
+  width: 52px;
+  height: 52px;
+  border-radius: 6px;
   overflow: hidden;
   border: 1px solid var(--border);
   background: var(--bg3);
@@ -820,12 +818,12 @@ button.icon-btn {
   position: absolute;
   top: 0;
   right: 0;
-  width: calc(18px * var(--cs));
-  height: calc(18px * var(--cs));
+  width: 18px;
+  height: 18px;
   padding: 0;
-  line-height: calc(14px * var(--cs));
-  font-size: calc(12px * var(--cs));
-  border-radius: 0 0 0 calc(6px * var(--cs));
+  line-height: 14px;
+  font-size: 12px;
+  border-radius: 0 0 0 6px;
   background: rgba(0, 0, 0, 0.65);
   color: #fff;
   border: none;
@@ -834,9 +832,9 @@ button.icon-btn {
 
 #input {
   resize: none;
-  /* At least three text lines tall; autoGrow() expands it up to 160px (× --cs)
+  /* At least three text lines tall; autoGrow() expands it up to 160px
      while typing. */
-  min-height: calc(56px * var(--cs));
+  min-height: 56px;
   background: transparent;
   color: var(--text);
   border: none;
@@ -844,7 +842,7 @@ button.icon-btn {
   -webkit-appearance: none;
   appearance: none;
   font-family: inherit;
-  font-size: calc(12px * var(--cs));
+  font-size: 12px;
   line-height: 1.4;
 }
 
@@ -859,14 +857,14 @@ button.icon-btn {
 #actions {
   display: flex;
   align-items: center;
-  gap: calc(6px * var(--cs));
+  gap: 6px;
   margin-left: auto;
 }
 
 #actions button {
-  min-width: calc(44px * var(--cs));
-  padding: calc(4px * var(--cs)) calc(10px * var(--cs));
-  font-size: calc(11px * var(--cs));
+  min-width: 44px;
+  padding: 4px 10px;
+  font-size: 11px;
 }
 
 .msg-imgs {
@@ -1326,12 +1324,12 @@ button.icon-btn {
    next reply creates a new branch rather than continuing a leaf. */
 #branch-banner {
   flex: 0 0 auto;
-  font-size: calc(11px * var(--cs));
+  font-size: 11px;
   color: var(--accent);
   background: var(--bg2);
   border: 1px solid var(--border);
-  border-radius: calc(8px * var(--cs));
-  padding: calc(4px * var(--cs)) calc(8px * var(--cs));
+  border-radius: 8px;
+  padding: 4px 8px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

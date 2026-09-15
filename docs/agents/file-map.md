@@ -180,7 +180,8 @@
   placeholder card hosts it, and with a focused sidecar card (a sub-agent window or
   a background job card — `isSidecarKind`, `main.js:111`) or no active
   node the pane is **hidden entirely** (`setComposerVisible(false)`); there is
-  no floating/docked fallback. `--cs` follows the host card's width.
+  no floating/docked fallback. The pane keeps one fixed size: nothing about the
+  host card's width (or its resize handle) scales it.
 - `media/tree.js` — the Chat Tree layout algorithm (`window.treeLayout`), a pure
   function with no DOM; `main.js` positions cards with it. The tidy-tree geometry
   is delegated to the vendored, pinned engine (below); this file only maps our two
@@ -202,8 +203,8 @@
   `docs/agents/invariants/vendored-deps.md`.
 - `media/style.css` — chat UI styling (incl. tree node cards / toolbar, the
   `kind:'bg'` job card and the `.bgnotify` / `Delivered` badges). Every
-  size inside `#composer` is `calc(<design px> * var(--cs))` so the input dock's
-  controls and fonts scale with its host card.
+  size inside `#composer` is a fixed px value: the input dock's controls and
+  fonts never scale with its host card.
 - `media/vendor/markdown-it/` — **vendored, pinned** Markdown renderer
   (`@14.3.1`, MIT): `markdown-it.min.js` (the file the webview loads), `LICENSE`,
   `PROVENANCE.md` (hashes + the third-party code inlined in the bundle). Not an npm

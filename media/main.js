@@ -2011,8 +2011,6 @@
     card.style.width = target.w + 'px';
     card.style.maxHeight = target.h + 'px';
     if (treeNodes[id]) treeNodes[id].size = { w: target.w, h: target.h };
-    // The pane scales with its host card's width.
-    if (composerHost === card) syncComposerScale();
     // Collision resolution runs once, on mouse-up.
     relayout();
     if (card._itemScroll) card._itemScroll.scrollToBottom();
@@ -2690,9 +2688,12 @@
     autoGrow();
   }
 
+  // The input never scales with anything, so its height cap is a constant.
+  const INPUT_MAX_H = 160;
+
   function autoGrow() {
     inputEl.style.height = 'auto';
-    inputEl.style.height = Math.min(inputEl.scrollHeight, Math.round(160 * composerScale)) + 'px';
+    inputEl.style.height = Math.min(inputEl.scrollHeight, INPUT_MAX_H) + 'px';
   }
 
   /**
@@ -2944,27 +2945,10 @@
   // attached to the node it sends into. It is NEVER docked anywhere else — when
   // there is no host card (empty session uses the placeholder card, a focused
   // sub-agent branch is read-only) the pane is hidden / kept out of the DOM.
-  // `--cs` scales every control and font in the pane and follows the host card's
-  // width, so dragging the card's resize handle scales the pane with the card.
-  const COMPOSER_BASE_W = 560;          // .node.expanded's default width
-  const MIN_COMPOSER_SCALE = 0.8;
-  const MAX_COMPOSER_SCALE = 1.6;
-
-  let composerScale = 1;
-  // `undefined` until the first mount, so the initial call always applies.
+  // The pane keeps one fixed size: neither the host card's width nor the panel's
+  // size scales its controls or fonts.
+  // `undefined` until the first mount, so the first mountComposer always relocates.
   let composerHost;                     // the card the pane is currently mounted in
-
-  function composerScaleFor(width) {
-    return Math.max(MIN_COMPOSER_SCALE, Math.min(MAX_COMPOSER_SCALE, width / COMPOSER_BASE_W));
-  }
-
-  /** Re-derive `--cs` from the host card's width (or the panel when there is none). */
-  function syncComposerScale() {
-    const width = composerHost ? composerHost.offsetWidth : window.innerWidth;
-    composerScale = composerScaleFor(width);
-    composerEl.style.setProperty('--cs', String(composerScale));
-    autoGrow();
-  }
 
   /**
    * Inline the pane at the bottom of `card`, or take it out of the DOM entirely
@@ -2972,7 +2956,7 @@
    */
   function mountComposer(card) {
     if (composerHost === card) {
-      syncComposerScale();
+      autoGrow();
       return;
     }
     // Relocating a focused subtree drops focus; put it back on the input.
@@ -2983,7 +2967,7 @@
     } else {
       composerEl.remove();
     }
-    syncComposerScale();
+    autoGrow();
     if (hadFocus && card) inputEl.focus();
   }
 
@@ -2996,10 +2980,6 @@
     composerEl.classList.toggle('hidden', !visible);
     if (!visible && composerEl.contains(document.activeElement)) inputEl.blur();
   }
-
-  // The panel is the reference width when the pane has no host card, so
-  // re-derive the scale when the panel is resized.
-  window.addEventListener('resize', syncComposerScale);
 
   // ---- Input handlers ----
   sendBtn.addEventListener('click', send);

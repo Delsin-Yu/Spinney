@@ -36,6 +36,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The composer (the checked-out node's input dock) no longer scales. Its controls and
+  fonts used to follow the host card's width — `--cs` was `card width / 560`, clamped to
+  0.8–1.6, so dragging a card's resize handle (or a wide/narrow window hosting the
+  placeholder card) resized the input, buttons and metrics along with it. Every size in
+  the pane is now a fixed px value, and the pane ignores the card and panel size
+  entirely.
+
 - The settings are grouped in the Settings UI: `contributes.configuration` is now one
   section per topic — **Model & API**, **Chat & Display**, **Tools & Execution**,
   **Sub-agents**, **Sessions & Transcripts**, **Control Plane** — in a logical order
