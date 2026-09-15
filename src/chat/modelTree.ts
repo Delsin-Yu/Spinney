@@ -14,6 +14,7 @@
  */
 
 import * as vscode from 'vscode';
+import { isBalanceDialect } from '../agent/balance';
 import { CardView, ModelPanel, ModelPanelOptions, ModelTreeSave, ModelTreeSnapshot, ProviderView } from './ModelPanel';
 import {
   BUILTIN_CARD_DEFAULTS,
@@ -128,6 +129,7 @@ export class ModelTreeController {
         name: provider.name,
         baseUrl: provider.baseUrl,
         concurrency: provider.concurrency,
+        balance: provider.balance,
         hasKey: await this.opts.hasKey(provider.id),
         isBuiltin: provider.id === DEFAULT_PROVIDER_ID,
       })),
@@ -190,6 +192,7 @@ export class ModelTreeController {
         name: provider.name.trim(),
         baseUrl: provider.baseUrl.trim(),
         concurrency: Math.floor(provider.concurrency) || 0,
+        balance: provider.balance,
       };
     }
     const cards: Record<string, unknown> = {};
@@ -283,6 +286,9 @@ function validatePayload(payload: ModelTreeSave | undefined): string[] {
     }
     if (!isCount(provider.concurrency)) {
       errors.push(vscode.l10n.t('Provider "{0}": concurrency must be 0 or a positive integer.', label));
+    }
+    if (!isBalanceDialect(provider.balance)) {
+      errors.push(vscode.l10n.t('Provider "{0}": the wallet line is not a dialect this build knows.', label));
     }
   }
 

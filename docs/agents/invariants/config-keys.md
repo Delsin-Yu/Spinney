@@ -15,9 +15,11 @@ property out of the manifest has to flatten the sections first
 The keys are:
 `model` (the **default model card id**; the dropdown is built at runtime from
 `spinney.modelCards`, so the setting carries no enum), `providers` (object of
-provider id → `{ name, baseUrl, concurrency }`), `modelCards` (object of card id →
-`{ name, providerId, oaiModel, contextWindow, concurrency, vision: { enabled,
-transport }, efforts, defaultEffort }`), `commandTimeout`
+provider id → `{ name, baseUrl, balance, concurrency }`; `balance` is the wallet
+dialect — `none` / `deepseek` / `openrouter` / `moonshot` — and a row that leaves it
+out is declared by host, see `invariants/model-cards.md`), `modelCards` (object of
+card id → `{ name, providerId, oaiModel, contextWindow, concurrency, vision: {
+enabled, transport }, efforts, defaultEffort }`), `commandTimeout`
 (seconds, default 600 = 10 minutes — the default for `exec_command` when the tool
 call does not pass its own `timeout`; a non-positive/absent value falls back to
 600), `replyLanguage` (`auto` — the default, i.e. follow the VS Code display language —
@@ -91,7 +93,7 @@ no handling.
 
 | Key | Applied | Mechanism |
 | --- | --- | --- |
-| `providers`, `modelCards` | immediately | pushed: `applyModelCards()` (re-parse + install the catalog) → `ClientRegistry.applyCatalog()` (re-point every provider client at its `baseUrl`, install the two concurrency limits) → every runtime's `postConfig()` (both dropdowns + image affordances) and `applyDefaultModel` for sessions with no pick; a `providers` change also fires `refreshBalance()` for every session |
+| `providers`, `modelCards` | immediately | pushed: `applyModelCards()` (re-parse + install the catalog) → `ClientRegistry.applyCatalog()` (re-point every provider client at its `baseUrl`, install the two concurrency limits) → every runtime's `postConfig()` (both dropdowns + image affordances) and `applyDefaultModel` for sessions with no pick; a `providers` change also fires `refreshBalance()` for every session, so editing a row's `balance` dialect takes effect with it |
 | `model` | immediately when *that key* changed, and only for sessions **without a pick of their own** (a per-tab dropdown pick wins) | pushed through `SessionRuntime.applyDefaultModel` (driven by `onConfigurationChanged`); a running session is skipped, like the dropdowns |
 | `maxConcurrentSubagents` | immediately (raising wakes queued tasks; lowering drains) | pushed: `SubAgentPool.setMaxConcurrent` |
 | `replyLanguage` | immediately when *that key* changed (a running session is skipped) | pushed: `ChatViewProvider.getConfig()` resolves the setting to a language **name** (`auto` → `vscode.env.language`, a tag → its CLDR name, via `replyLanguageName`), and `SessionRuntime.applyReplyLanguage` pushes that name to every node worker's `Agent.setReplyLanguage`, which rewrites `messages[0]`; a session with history gets the cache-miss notice. **No per-session pick**: the language is a property of the reader, so the setting is the only source (`SessionRuntime.replyLanguage` is seeded from it at construction). Re-picking `auto` when the display language is already in force resolves to the same name and is a no-op |

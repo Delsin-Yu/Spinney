@@ -4,7 +4,7 @@
 branches off exactly one **provider node**. Nothing in the harness is configured by
 a bare model id any more: a card is what the user picks in the chat, what a session
 stores, what a transcript records, and what a request is built from. The settings are
-`spinney.providers` (an object of provider id → `{ name, baseUrl, concurrency }`),
+`spinney.providers` (an object of provider id → `{ name, baseUrl, balance, concurrency }`),
 `spinney.modelCards` (an object of card id → card fields), and `spinney.model` (the
 **card id** of the default card). The Model Card Tree page (`Spinney: Open Model Cards`)
 is the editor of those three keys.
@@ -16,8 +16,9 @@ A **provider node** is one OpenAI-compatible endpoint:
 | Field | Meaning |
 | --- | --- |
 | id | The settings key. `default` is the built-in provider and is always present; the page generates a fresh id for anything else. |
-| name | What the user sees — the dropdown's `optgroup` label, the balance/nudge text. A row that leaves it out is named after its URL's host (`providerNameFromUrl`: the host, except for the one endpoint this harness ships knowledge about — `api.deepseek.com` → `DeepSeek`). |
-| baseUrl | The API root, e.g. `https://api.deepseek.com`. Every chat request is `POST <baseUrl>/chat/completions`, an image upload is `POST <baseUrl>/files`, and the wallet line is `GET <baseUrl>/user/balance`. |
+| name | What the user sees — the dropdown's `optgroup` label, the `wallet <name>: …` line, the nudge text. A row that leaves it out is named after its URL's host (`providerNameFromUrl`: the host, except for the one endpoint this harness ships knowledge about — `api.deepseek.com` → `DeepSeek`). |
+| baseUrl | The API root, e.g. `https://api.deepseek.com`. Every chat request is `POST <baseUrl>/chat/completions` and an image upload is `POST <baseUrl>/files`; the only other request a provider gets is the wallet readout, whose endpoint the `balance` dialect picks. |
+| balance | Which wallet readout this provider has: `none`, or one of the three vendor dialects. A row that leaves it out is declared by host and never probed — see below. |
 | concurrency | Maximum requests in flight against that endpoint; `0` = unlimited. |
 
 The API key is **not** in settings. SecretStorage holds one entry per provider —
@@ -96,6 +97,54 @@ does not have it needs the inline form, and the user is the one who knows which
 endpoint they pointed at. The declaration stays a declaration — it is never probed
 (see `model-capabilities.md`).
 
+### The wallet readout is a per-provider declaration, with a dialect
+
+Every wallet readout in the harness goes through `src/agent/balance.ts`; nothing else
+reads one. It is a **declaration on the provider row** (`ProviderSpec.balance`, the
+settings row `spinney.providers.<id>.balance`) — `BalanceDialect = 'none' |
+'deepseek' | 'openrouter' | 'moonshot'`, the four values `BALANCE_DIALECTS` holds and
+`isBalanceDialect()` accepts — and every dialect is normalized into the same readout,
+`Balance { isAvailable, balances }` of `BalanceEntry { currency, total, granted?,
+toppedUp?, used? }`. The path is relative to that provider's `baseUrl`:
+
+| Dialect | Request | Response → the readout |
+| --- | --- | --- |
+| `none` | — | the empty readout (`emptyBalance()`), and **no request at all** |
+| `deepseek` | `GET /user/balance` | `{ is_available, balance_infos: [{ currency, total_balance, granted_balance, topped_up_balance }] }`; that split becomes `total` / `granted` / `toppedUp` |
+| `openrouter` | `GET /credits` | `{ data: { total_credits, total_usage } }` → currency `USD`, `total = total_credits - total_usage`, `used = total_usage` |
+| `moonshot` | `GET /users/me/balance` | `{ data: { available_balance, voucher_balance, cash_balance } }` → currency `CNY`, `total` / `granted` / `toppedUp` |
+
+`fetchBalance({ dialect, baseUrl, apiKey, providerName, signal? })` is the one
+function that reads a wallet. Like the vision dialect it is **never probed** (see
+`model-capabilities.md`): a row that leaves the field out is declared by host —
+`api.deepseek.com` → `deepseek`, anything else → `none`, so the built-in provider
+behaves exactly as an existing DeepSeek profile always did and a fresh row starts
+with no readout at all. And like the image upload it is **never retried**
+(`api-retries.md`): the number is cosmetic, so one attempt, and a failure is one line
+in the output channel.
+
+The number never travels alone. `ClientRegistry.balance(spec)` takes the whole
+**`ProviderSpec`** (it needs the dialect and the name), and
+`SessionRuntime.refreshBalance()` posts `{ type: 'balance', providerId, providerName,
+balance }` — **including when the readout is empty** (a `none` dialect, or a failed
+fetch). That is what keeps a tab honest across a checkout: a tab that checks out a
+node on another provider can never keep showing the previous provider's number — the
+checkout re-reads it (`handleCheckout` → `refreshBalanceOnCheckout()`, which skips the
+request when the provider did not change, because clicking around one provider's own
+branch must not spend a request per click). The
+
+Note the asymmetry between the two writers: the **settings parser** answers an omitted
+field by host, because that is a row a user wrote by hand, while a **page save** must
+carry one — `validatePayload` refuses a payload whose provider names a dialect this
+build does not know, or none at all. The page's draft always holds one
+(`normalizeBalance` in `media/modeltree.js`), so the refusal is what "the host is the
+authority, and a bad payload writes nothing" means here.
+page's provider form gives the dialect its own `balance` select (None / DeepSeek /
+OpenRouter / Moonshot) with its own ↺ reset, and the chat's tooltip reads
+`wallet <provider name>: <amounts>`, naming the provider the number came from; the
+per-entry detail shows `granted x + topped up y` only when the dialect reports that
+split, and `spent z` when it reports spend.
+
 ### `spinney.model` is a card id
 
 `spinney.model` holds a **card id** and carries no enum. The chat's dropdown is built
@@ -136,8 +185,9 @@ the chat tree's visual language and the same vendored layout engine — with:
   four built-in levels with `medium` as the default, images off, no cap) and is still
   invalid in the one place nothing may invent: its **wire model name**. So validation
   refuses it until it is named, and every other field is already usable,
-- a **reset button on every resettable property** (base URL, concurrency, context
-  window, vision on/off, image transport, the level list, the default level). What it
+- a **reset button on every resettable property** (base URL, the wallet dialect,
+  concurrency, context window, vision on/off, image transport, the level list, the
+  default level). What it
   restores is **the row's own factory state**, and the page is told it rather than
   knowing it: the snapshot carries `defaults.builtin` / `defaults.fresh`
   (`FRESH_*` / `BUILTIN_*` in `src/agent/models.ts`, chosen per row by
@@ -223,13 +273,15 @@ apart), and the thinking-level dropdown is built from the **active card's** `eff
 | `parseCatalog()` (`parseProviderRow` / `parseCardRow` / `parseVision`) — object shape, per-field defaults, error rows | `src/agent/models.ts` |
 | `setCatalog()` + accessors: `providerSpecs` / `providerById` / `cards` / `cardById` / `resolveCard` / `defaultCard` / `contextWindowFor` / `isVisionCard` / `visionCardsLabel` / `cardDisplayName` / `effortsFor` / `normalizeEffort` / `newId` / `providerNameFromUrl` | `src/agent/models.ts` |
 | `applyModelCards()` / `onModelCardsSaved()` / `refreshKeys()` / `resolveModel()` — read the settings, install the catalog, push to live owners | `ChatViewProvider` (`src/chat/ChatViewProvider.ts`) |
-| `ClientRegistry` — one client per provider, per-provider keys, the two gates, the routing (`body.model` from the card) | `src/agent/clients.ts` |
+| `BalanceDialect` / `BALANCE_DIALECTS` / `isBalanceDialect()` / `BalanceEntry` / `Balance` / `emptyBalance()` / `fetchBalance()` — the four dialects, and the one place that reads a wallet (`none` sends no request at all) | `src/agent/balance.ts` |
+| `ApiClient` — the SSE transport, its retries and the image upload; it no longer knows about a wallet | `src/agent/apiClient.ts` |
+| `ClientRegistry` — one client per provider, per-provider keys, the two gates, the routing (`body.model` from the card) and the wallet (`balance(spec)`) | `src/agent/clients.ts` |
 | `RequestGate` — the FIFO, abort-aware slot gate | `src/agent/requestGate.ts` |
 | The page shell + its serializer lifecycle (`MODEL_VIEW_TYPE`, `ModelPanel.create` / `revive`, the `ready` hold) | `src/chat/ModelPanel.ts` |
 | The page controller: the message protocol, `validatePayload` (host authority), `apiKeySecretName` | `src/chat/modelTree.ts` |
 | The page itself (tree, the selected card's form, draft/save/revert, key fields, request preview) | `media/modeltree.js` · `media/modeltree.css` |
 | The command (`spinney.openModelCards`) and the gear the webview asks for (`openModelTree`) | `src/extension.ts` · `media/main.js` |
-| The chat's dropdowns (`postConfig`) | `src/chat/runtime.ts` |
+| The chat's dropdowns (`postConfig`) and the wallet readout (`refreshBalance()` → the `balance` message) | `src/chat/runtime.ts` |
 | Settings (`model`, `providers`, `modelCards`) | `package.json` |
 | Guards (`npm run check:models` / `check:modeltree`): `spinney.model.default` == the fallback, the two catalog settings exist, no `enum` on `spinney.model`, no model id in `src/**/*.ts` (the catalog module excepted) or `media/*.js` (the vendored bundles excepted), README/docs name only ids the catalog has; the page protocol replay | `tools/check-models.js` · `tools/check-modeltree.js` |
 

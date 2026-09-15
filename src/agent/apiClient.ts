@@ -139,21 +139,6 @@ export interface CompletionRequest {
   onRetry?: RetryReporter;
 }
 
-/** A single currency balance entry from DeepSeek's `/user/balance` endpoint. */
-export interface BalanceEntry {
-  currency: string;
-  totalBalance: number;
-  grantedBalance: number;
-  toppedUpBalance: number;
-}
-
-/** Wallet balance from DeepSeek's `/user/balance` endpoint (account-level). */
-export interface Balance {
-  isAvailable: boolean;
-  /** One entry per currency DeepSeek reports (e.g. CNY and USD). */
-  balances: BalanceEntry[];
-}
-
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -198,59 +183,6 @@ export class ApiClient {
     if (typeof patch.model === 'string' && patch.model.trim()) {
       this.options.model = patch.model;
     }
-  }
-
-  /**
-   * Fetch the account's wallet balance from DeepSeek's `/user/balance` endpoint.
-   * Used to show the remaining credit in the UI. Throws `ApiError` on
-   * missing key, network failure, or malformed response so the caller can
-   * degrade gracefully (i.e. hide the balance) instead of crashing the view.
-   */
-  async getBalance(): Promise<Balance> {
-    if (!this.options.apiKey) {
-      throw new ApiError(
-        'No API key configured for this provider. Run the spinney.setApiKey command (or set the DEEPSEEK_API_KEY environment variable for the built-in provider).',
-      );
-    }
-    const url = `${this.options.baseUrl.replace(/\/$/, '')}/user/balance`;
-    let response: Response;
-    try {
-      response = await fetch(url, {
-        method: 'GET',
-        headers: {
-          Authorization: `Bearer ${this.options.apiKey}`,
-        },
-      });
-    } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      throw new ApiError(`Network error fetching balance: ${message}`);
-    }
-    if (!response.ok) {
-      const text = await response.text().catch(() => '');
-      throw new ApiError(`Balance error ${response.status}: ${text || response.statusText}`, response.status);
-    }
-    const data = (await response.json()) as {
-      is_available?: boolean;
-      balance_infos?: Array<{
-        currency?: string;
-        total_balance?: string;
-        granted_balance?: string;
-        topped_up_balance?: string;
-      }>;
-    };
-    const infos = data.balance_infos ?? [];
-    if (infos.length === 0) {
-      throw new ApiError('The balance response is missing balance_infos.');
-    }
-    return {
-      isAvailable: !!data.is_available,
-      balances: infos.map((info) => ({
-        currency: info.currency ?? 'CNY',
-        totalBalance: Number(info.total_balance ?? 0),
-        grantedBalance: Number(info.granted_balance ?? 0),
-        toppedUpBalance: Number(info.topped_up_balance ?? 0),
-      })),
-    };
   }
 
   /**

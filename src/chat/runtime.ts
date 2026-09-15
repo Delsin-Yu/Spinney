@@ -34,11 +34,12 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { Agent } from '../agent/agent';
 import { DEFAULT_REPLY_LANGUAGE } from '../agent/prompt';
-import { Balance } from '../agent/apiClient';
+import { Balance, emptyBalance } from '../agent/balance';
 import { ClientRegistry } from '../agent/clients';
 import { AgentEvent, ChatMessage, ContentPart, ThinkingEffort, Usage } from '../agent/types';
 import {
   ModelCard,
+  ProviderSpec,
   cardById,
   cardDisplayName,
   cards,
@@ -514,6 +515,15 @@ function dataUrlBytes(dataUrl: string): Buffer {
   return Buffer.from(base64, 'base64');
 }
 
+/**
+ * What a wallet readout is a readout **of**: the provider's identity, the dialect it
+ * was read in, and the endpoint it came from. Two readouts with the same key answer
+ * for the same wallet, which is what lets a checkout skip a read it already has.
+ */
+function balanceKeyOf(provider: ProviderSpec): string {
+  return `${provider.id}|${provider.balance}|${provider.baseUrl}`;
+}
+
 export class SessionRuntime {
   readonly sessionId: string;
   readonly session: AgentSession;
@@ -659,6 +669,13 @@ export class SessionRuntime {
    * indicator (the live value is the {@link contextWindow} getter).
    */
   private lastContextWindow: number;
+
+  /**
+   * The provider the wallet readout on screen belongs to (id, dialect and endpoint),
+   * so a checkout can tell "another provider's wallet" from "the same one again" —
+   * see {@link refreshBalanceOnCheckout}. Empty until the first readout is posted.
+   */
+  private lastBalanceKey = '';
 
   /** Set by `dispose()`: a deleted session's runtime must stop delivering. */
   private disposed = false;
@@ -1516,6 +1533,9 @@ export class SessionRuntime {
     this.postConfig();
     this.postContext();
     this.postSessionStats();
+    // The wallet is the other thing a checkout moves: it answers for the provider the
+    // tab is on now (`refreshBalanceOnCheckout` skips it when that did not change).
+    void this.refreshBalanceOnCheckout();
   }
 
   /** Persist a user-resized card's bounds onto a node (drag-resize finished). */
@@ -1768,21 +1788,45 @@ export class SessionRuntime {
   }
 
   /**
-   * Fetch the balance of the provider **the card in view routes to** and push it to
-   * this session's tab. Best-effort: on failure (no key / network / off-API scope) we
-   * log to the output channel and leave whatever balance the UI already shows. Two
-   * sessions on different providers therefore show different numbers, which is
-   * exactly right — a wallet is a property of the endpoint, not of the harness — and
-   * a checkout to a node of another provider follows it, like the rest of the config
-   * does. Refreshed at the start and after each turn.
+   * Fetch the wallet of the provider **the card in view routes to** and push it to
+   * this session's tab, with the provider's own identity beside it. Two sessions on
+   * different providers therefore show different numbers, which is exactly right — a
+   * wallet is a property of the endpoint, not of the harness — and a checkout to a
+   * node of another provider follows it (`refreshBalanceOnCheckout`). Refreshed at the
+   * start and after each turn, always.
+   *
+   * Best-effort, but **never stale**: whatever happens below, the tab is told which
+   * provider the readout belongs to and is handed an empty one when there is nothing
+   * to show (a failed refresh, or a provider whose `balance` dialect is `none`). That
+   * is what keeps a `bal –` honest instead of leaving the previous provider's number
+   * on screen. A failure costs one line in the output channel.
    */
   async refreshBalance(): Promise<void> {
+    const provider = providerById(this.card.providerId);
+    let balance: Balance;
     try {
-      const balance: Balance = await this.clients.balance(this.card.providerId);
-      this.post({ type: 'balance', balance });
+      balance = await this.clients.balance(provider);
     } catch (err) {
-      this.host.output.appendLine(`[balance] ${err instanceof Error ? err.message : String(err)}`);
+      this.host.output.appendLine(
+        `[balance] ${provider.name}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      balance = emptyBalance();
     }
+    this.lastBalanceKey = balanceKeyOf(provider);
+    this.post({ type: 'balance', providerId: provider.id, providerName: provider.name, balance });
+  }
+
+  /**
+   * The checkout's half of the rule above: the wallet answers for the provider the tab
+   * is on now, so clicking into another provider's branch re-reads it — and clicking
+   * around one provider's own branch does not, because the readout already belongs to
+   * that provider and a checkout is a gesture, not a spend.
+   */
+  async refreshBalanceOnCheckout(): Promise<void> {
+    if (balanceKeyOf(providerById(this.card.providerId)) === this.lastBalanceKey) {
+      return;
+    }
+    await this.refreshBalance();
   }
 
   /** Full repaint of this session's tab (used on activation / panel rerender). */

@@ -306,6 +306,21 @@
   }
 
   /**
+   * The dialect a provider's wallet (balance) line is read in — the page works in
+   * the four names `src/agent/balance.ts` knows: `none` (the endpoint has no
+   * wallet line this page can read), `deepseek`, `openrouter` and `moonshot`,
+   * which each answer with their own response shape.
+   *
+   * A **missing** value reads as `none`, so a snapshot the host did not fill in
+   * fully still draws a usable select instead of throwing; anything else that is
+   * not one of the three real dialects is that same default.
+   */
+  function normalizeBalance(value) {
+    const raw = String(value == null ? '' : value).trim().toLowerCase();
+    return raw === 'deepseek' || raw === 'openrouter' || raw === 'moonshot' ? raw : 'none';
+  }
+
+  /**
    * The reset targets of a snapshot (`ModelTreeDefaults`), as the page reads them:
    * every field coerced to the type the draft uses, so a host that sends a string
    * where a number belongs cannot put one into a form. Nothing here throws, and
@@ -324,6 +339,7 @@
     return {
       baseUrl: text(fields.baseUrl),
       concurrency: isCount(fields.concurrency) ? fields.concurrency : 0,
+      balance: normalizeBalance(fields.balance),
     };
   }
 
@@ -387,6 +403,7 @@
           name: text(provider.name),
           baseUrl: text(provider.baseUrl),
           concurrency: toInt(provider.concurrency),
+          balance: normalizeBalance(provider.balance),
           hasKey: !!provider.hasKey,
           isBuiltin: !!provider.isBuiltin,
         })),
@@ -542,6 +559,7 @@
         name: provider.name,
         baseUrl: provider.baseUrl,
         concurrency: provider.concurrency,
+        balance: normalizeBalance(provider.balance),
       })),
       cards: draft.cards.map((card) => ({
         id: card.id,
@@ -968,7 +986,7 @@
     return input;
   }
 
-  function selectField(parent, field, labelText, options, value, onChange) {
+  function selectField(parent, field, labelText, options, value, onChange, reset) {
     const row = fieldRow(field, labelText);
     const select = el('select', 'mt-input');
     for (const option of options) {
@@ -980,7 +998,9 @@
     }
     select.value = value;
     select.addEventListener('change', () => onChange(select.value));
-    row.appendChild(select);
+    appendControl(row, select, reset, (next) => {
+      select.value = next == null ? '' : String(next);
+    });
     parent.appendChild(row);
     return select;
   }
@@ -1038,6 +1058,26 @@
       target: () => providerDefaults(provider).concurrency,
       assign: (value) => {
         provider.concurrency = value;
+      },
+    });
+    // How this endpoint's wallet (balance) line is read. A `<select>` of fixed
+    // options at a fixed height: changing it is not a shape change, so it goes
+    // through `edit()` like the vision transport, never `render()`.
+    selectField(form, 'balance', tr('Wallet line'), [
+      // `none` first: it is the default for a new provider, and it is the honest
+      // answer for an endpoint whose wallet line this build cannot read.
+      { value: 'none', text: tr('No wallet line') },
+      { value: 'deepseek', text: tr('DeepSeek') },
+      { value: 'openrouter', text: tr('OpenRouter') },
+      { value: 'moonshot', text: tr('Moonshot') },
+    ], normalizeBalance(provider.balance), (value) => {
+      provider.balance = normalizeBalance(value);
+      edit();
+    }, {
+      current: () => normalizeBalance(provider.balance),
+      target: () => normalizeBalance(providerDefaults(provider).balance),
+      assign: (value) => {
+        provider.balance = normalizeBalance(value);
       },
     });
     buildKeyFields(form, provider);
@@ -1459,6 +1499,7 @@
       name: tr('New provider'),
       baseUrl: '',
       concurrency: 0,
+      balance: normalizeBalance(defaults.fresh.provider.balance),
       hasKey: false,
       isBuiltin: false,
     };

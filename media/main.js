@@ -2833,6 +2833,13 @@
 
   let statsCacheData = null;
   let statsBalanceData = null;
+  /**
+   * The display name of the provider whose wallet the readout shows (`''` when the
+   * host named none). Kept beside `statsBalanceData` so the tooltip can say which
+   * provider the number belongs to — and cleared with it, so a wallet is never
+   * named after another provider.
+   */
+  let statsBalanceWho = '';
 
   function currencySymbol(currency) {
     switch (currency) {
@@ -2841,6 +2848,25 @@
       case 'EUR': return '€';
       default: return currency + ' ';
     }
+  }
+
+  /**
+   * One wallet entry as the tooltip shows it: the money, plus the split the
+   * provider reports. DeepSeek reports the granted / topped-up pair (both fields or
+   * neither), the spend-reporting dialects report `used` instead, and a dialect
+   * that reports neither is just its total.
+   */
+  function balanceEntryText(entry) {
+    const sym = currencySymbol(entry.currency);
+    const money = sym + entry.total.toFixed(2);
+    if (typeof entry.granted === 'number' && typeof entry.toppedUp === 'number') {
+      return tr('{0} (granted {1} + topped up {2})',
+        money, sym + entry.granted.toFixed(2), sym + entry.toppedUp.toFixed(2));
+    }
+    if (typeof entry.used === 'number') {
+      return tr('{0} (spent {1})', money, sym + entry.used.toFixed(2));
+    }
+    return money;
   }
 
   function renderStatsTitle() {
@@ -2857,14 +2883,12 @@
       }
     }
     if (statsBalanceData && statsBalanceData.balances && statsBalanceData.balances.length) {
-      const wallet = statsBalanceData.balances.map((b) => {
-        const sym = currencySymbol(b.currency);
-        return tr('{0} (granted {1} + topped up {2})',
-          sym + b.totalBalance.toFixed(2),
-          sym + b.grantedBalance.toFixed(2),
-          sym + b.toppedUpBalance.toFixed(2));
-      });
-      parts.push(tr('wallet {0}', wallet.join(' · ')));
+      const entries = statsBalanceData.balances.map(balanceEntryText);
+      parts.push(
+        statsBalanceWho
+          ? tr('wallet {0}: {1}', statsBalanceWho, entries.join(' · '))
+          : tr('wallet {0}', entries.join(' · ')),
+      );
     }
     elStats.title = parts.length ? tr('Session: {0}', parts.join(' · ')) : '';
   }
@@ -2875,21 +2899,31 @@
     renderStatsTitle();
   }
 
-  function setBalance(balance) {
-    if (!balance || !balance.balances || balance.balances.length === 0) {
+  /**
+   * The wallet readout, from the host's whole `balance` message: the provider that
+   * answered (`providerName`, falling back to its id) and its entries. An empty
+   * `balances` means "there is no number to show" — a provider whose wallet dialect
+   * is `none`, or a refresh that failed — so the readout and the tooltip are
+   * dropped instead of keeping the previous provider's number.
+   */
+  function setBalance(msg) {
+    const balances = (msg && msg.balance && msg.balance.balances) || [];
+    if (balances.length === 0) {
       statBalanceEl.textContent = 'bal –';
       statsBalanceData = null;
+      statsBalanceWho = '';
       renderStatsTitle();
       return;
     }
-    const active = balance.balances.filter((b) => b.totalBalance > 0);
+    const active = balances.filter((b) => b.total > 0);
     if (active.length === 0) {
       statBalanceEl.textContent = 'bal 0';
     } else {
-      const parts = active.map((b) => currencySymbol(b.currency) + b.totalBalance.toFixed(2));
+      const parts = active.map((b) => currencySymbol(b.currency) + b.total.toFixed(2));
       statBalanceEl.textContent = 'bal ' + parts.join(' ');
     }
-    statsBalanceData = balance;
+    statsBalanceData = msg.balance;
+    statsBalanceWho = msg.providerName || msg.providerId || '';
     renderStatsTitle();
   }
 
@@ -3285,7 +3319,7 @@
         setSessionStats(msg.stats);
         break;
       case 'balance':
-        setBalance(msg.balance);
+        setBalance(msg);
         break;
       case 'status':
         setStatus(msg.text);

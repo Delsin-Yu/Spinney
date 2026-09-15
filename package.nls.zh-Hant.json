@@ -47,5 +47,6 @@
   "spinney.autoSessionTitles.description": "自動為工作階段命名：在第一個回合之後，以及對話增長後（最多每 2 分鐘一次）。標題由模型產生，要求失敗時改用第一則訊息。手動重新命名工作階段會鎖定其標題。在此功能之前建立的工作階段會在啟用時命名一次。",
   "spinney.maxInlineToolOutput.description": "search_files / list_dir / search_transcripts 結果以內嵌方式傳回的大小上限（位元組）。更大的結果會寫入暫存檔，只傳回其路徑和簡短預覽。設為 0 則一律內嵌。",
   "spinney.httpApi.enabled.description": "在 127.0.0.1 上開放本機 HTTP 控制平面（需 bearer token 驗證），讓 tools/hyper-vscode 之類的外部控制器可以讀取狀態、等待代理進入閒置、巡覽至某個節點並從該節點繼續。預設關閉；/continue 允許呼叫端讓代理執行一則指令，因此請將它視為本機信任邊界。",
-  "spinney.httpApi.port.description": "HTTP 控制平面使用的連接埠。0 表示自動選擇可用連接埠；所選連接埠和 token 會寫入 <globalStorage>/http/<instanceId>.json，供 supervisor 探索。"
+  "spinney.httpApi.port.description": "HTTP 控制平面使用的連接埠。0 表示自動選擇可用連接埠；所選連接埠和 token 會寫入 <globalStorage>/http/<instanceId>.json，供 supervisor 探索。",
+  "spinney.providers.balance.description": "該端點的剩餘額度如何讀取。`none` 不讀取餘額，`deepseek` 讀取 `GET /user/balance`，`openrouter` 讀取 `GET /credits`（剩餘 = 總額度減去已用量），`moonshot` 讀取 `GET /users/me/balance`。此讀取不會重試。省略此欄位的列會使用其主機對應的方言（`api.deepseek.com` → `deepseek`，其他 → `none`）。"
 }

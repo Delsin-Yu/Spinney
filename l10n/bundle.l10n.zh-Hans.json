@@ -248,5 +248,12 @@
   "DeepSeek": "DeepSeek",
   "OpenAI": "OpenAI",
   "New Model": "新模型",
-  "The images in this history were uploaded to a DeepSeek Files API, and this model cannot read an uploaded file id, so those image blocks are hidden too (the image data is kept and will be restored when you switch back to a card that serves DeepSeek uploads).": "这段历史中的图片是通过 DeepSeek Files API 上传的，而当前模型无法读取上传得到的文件 id，因此这些图片块也会被隐藏（图片数据仍然保留，等你切回支持 DeepSeek 上传的卡片时会恢复）。"
+  "The images in this history were uploaded to a DeepSeek Files API, and this model cannot read an uploaded file id, so those image blocks are hidden too (the image data is kept and will be restored when you switch back to a card that serves DeepSeek uploads).": "这段历史中的图片是通过 DeepSeek Files API 上传的，而当前模型无法读取上传得到的文件 id，因此这些图片块也会被隐藏（图片数据仍然保留，等你切回支持 DeepSeek 上传的卡片时会恢复）。",
+  "Wallet line": "余额读取方式",
+  "No wallet line": "不读取余额",
+  "OpenRouter": "OpenRouter",
+  "Moonshot": "Moonshot",
+  "Provider \"{0}\": the wallet line is not a dialect this build knows.": "服务商“{0}”：余额读取方式不是本版本已知的方言。",
+  "wallet {0}: {1}": "余额 {0}：{1}",
+  "{0} (spent {1})": "{0}（已花费 {1}）"
 }

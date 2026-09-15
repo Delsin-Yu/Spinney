@@ -21,7 +21,8 @@
  * a batch auto-naming run occupy every slot would starve the conversation.
  */
 
-import { ApiClient, Balance, CompletionRequest } from './apiClient';
+import { ApiClient, CompletionRequest } from './apiClient';
+import { Balance, fetchBalance } from './balance';
 import { ModelCard, ProviderSpec, cards, providerById, providerSpecs } from './models';
 import { RequestGate, GateStats } from './requestGate';
 import { StreamChunk, UploadedFile, Usage } from './types';
@@ -126,10 +127,18 @@ export class ClientRegistry {
     }
   }
 
-  /** The wallet readout of a provider (ungated, account-level). */
-  async balance(providerId: string): Promise<Balance> {
-    const client = await this.clientFor(providerId);
-    return client.getBalance();
+  /**
+   * The wallet readout of a provider, in that provider's own dialect (`balance.ts`),
+   * with that provider's key. Ungated and unretried: it is bookkeeping, and it must
+   * never take a conversation's slot (see the class comment).
+   */
+  async balance(provider: ProviderSpec): Promise<Balance> {
+    return fetchBalance({
+      dialect: provider.balance,
+      baseUrl: provider.baseUrl,
+      apiKey: await this.keyFor(provider.id),
+      providerName: provider.name,
+    });
   }
 
   /** The provider's client, with its key and `baseUrl` installed. */

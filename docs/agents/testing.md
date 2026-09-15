@@ -181,8 +181,10 @@ exactly the bug class. The method that does, with no real API key and no tokens:
    stream (`data: {…}` … `data: [DONE]`) for `stream: true` / plain JSON for
    `stream: false`.
 2. Edit `.vscode/settings.json` the way a user does in the Settings UI — point a
-   provider's `baseUrl` (`spinney.providers`) at the mock, with a `spinney.modelCards`
-   card on it and `spinney.model` set to that
+   provider's `baseUrl` (`spinney.providers`) at the mock and declare its wallet
+   dialect (`"balance": "deepseek"`: a row that leaves the field out is declared by
+   host, and a loopback host is `none`, so the wallet request below would never be
+   sent), with a `spinney.modelCards` card on it and `spinney.model` set to that
    card's id — and set a marker key with **`Spinney: Set API
    Key`** (the key lives in SecretStorage now, not in `settings.json`) —
    then assert what the running host sent: `GET /user/balance` with the new base

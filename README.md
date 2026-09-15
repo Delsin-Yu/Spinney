@@ -77,8 +77,13 @@ draws your providers as a tree with their model cards branching off them, and it
 the editor of the model configuration:
 
 - `spinney.providers` — one entry per OpenAI-compatible endpoint: a name, a base URL
-  (`https://api.deepseek.com` for the built-in provider), and a concurrency cap
-  (`0` = unlimited requests in flight).
+  (`https://api.deepseek.com` for the built-in provider), a concurrency cap
+  (`0` = unlimited requests in flight), and how the endpoint reports its wallet balance
+  — `none` (no wallet line, the default for a new row and the honest answer for a local
+  vLLM/llama.cpp endpoint), `deepseek` (`GET /user/balance`), `openrouter`
+  (`GET /credits`) or `moonshot` (`GET /users/me/balance`). Leave the field out and the
+  row is read by its host, as `deepseek` for `api.deepseek.com` and `none` for anything
+  else. A `none` provider shows no balance figure.
 - `spinney.modelCards` — one entry per selectable model: the name you see in the chat,
   the provider it branches off, the wire model name sent to the provider, its context
   window, its own concurrency cap, whether it takes images and which dialect their

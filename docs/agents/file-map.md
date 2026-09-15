@@ -138,7 +138,8 @@
   dropdown reads like the prompt does; `zh-cn`/`zh-tw` stay aliased because
   `vscode.env.language` reports the region tags.
 - `src/agent/models.ts` — the model configuration module: the `ProviderSpec` /
-  `ModelCard` shapes, the built-in fallback provider and card (`deepseek-flash`),
+  `ModelCard` shapes (a provider's `balance` dialect among the fields), the built-in
+  fallback provider and card (`deepseek-flash`),
   `parseCatalog()` (the object-shape parser with per-field defaults and error rows),
   the accessors everything derives from (`cards`, `cardById`, `resolveCard`,
   `contextWindowFor`, `isVisionCard`, `cardDisplayName`, `effortsFor`,
@@ -151,9 +152,11 @@
   provider's `baseUrl` is edited), the per-provider API key (cached until
   `ChatViewProvider.refreshKeys` invalidates it), the two `RequestGate`s, and the
   routing (`stream(card, request)` fills in `body.model` from the card's `oaiModel`,
-  so no caller can name a model the card did not declare). Chat completions and file
-  uploads take a slot; session-title requests and the wallet readout deliberately do
-  not. See `invariants/model-cards.md`.
+  so no caller can name a model the card did not declare). The wallet is
+  `balance(spec)` — the dialect and the display name come off the `ProviderSpec`, and
+  the request itself is `fetchBalance` in `src/agent/balance.ts`. Chat completions
+  and file uploads take a slot; session-title requests and the wallet readout
+  deliberately do not. See `invariants/model-cards.md`.
 - `src/agent/requestGate.ts` — `RequestGate`: the FIFO, abort-aware slot gate used
   per provider and per card (`0` = unlimited; a limit that drops below the running
   count never kills a request in flight; `acquire(signal)` rejects while queued, so
@@ -205,7 +208,18 @@
 - `src/agent/apiClient.ts` — `ApiClient` (stream SSE over `fetch`,
   `ApiError`), builds `stream: true`, `stream_options.include_usage`,
   `reasoning_effort`. The read loop flushes the `TextDecoder` and parses a final
-  `data:` line that arrived without a trailing newline.
+  `data:` line that arrived without a trailing newline. It is transport and retries
+  only: it no longer reads a wallet (that moved to `balance.ts` below), so nothing
+  in it names a vendor — the error strings are the client's own (`API error 400: …`,
+  `Stream stalled: …`, `Network error calling the API: …`).
+- `src/agent/balance.ts` — the wallet readout: `BalanceDialect` (`none` /
+  `deepseek` / `openrouter` / `moonshot`), `BALANCE_DIALECTS`, `isBalanceDialect()`,
+  the normalized `BalanceEntry` / `Balance`, `emptyBalance()`, and
+  `fetchBalance({ dialect, baseUrl, apiKey, providerName, signal? })` — the one place
+  that reads a wallet. Called once, never retried; `none` answers with the empty
+  readout and sends no request at all. Which dialect a provider uses is a field on
+  its row (`src/agent/models.ts` — declared by host when the row leaves it out). See
+  `invariants/model-cards.md`.
 - `src/agent/types.ts` — shared types (`Role`, `ThinkingEffort`, `ContentPart`,
   `ChatMessage`, `ToolCall`, `ToolDefinition`, `Usage`, `StreamChunk`,
   `AgentEvent`, `AgentTool`).

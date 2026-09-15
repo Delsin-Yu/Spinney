@@ -15,7 +15,9 @@
   `media/modeltree.css` (change `validatePayload` and its client mirror together),
   the host glue is `ChatViewProvider.applyModelCards` /
   `onModelCardsSaved` / `resolveModel` / `refreshKeys`, the routing and the two
-  concurrency gates are `src/agent/clients.ts` + `src/agent/requestGate.ts`, and the
+  concurrency gates are `src/agent/clients.ts` + `src/agent/requestGate.ts`, a
+  provider's wallet readout is `src/agent/balance.ts` (`fetchBalance` + the dialect
+  table, reached through `ClientRegistry.balance(spec)`), and the
   settings are contributed in `package.json`. A per-provider API key is
   `apiKeySecretName()` in `src/chat/modelTree.ts` plus `ChatViewProvider.storeKeyFor`
   / `clearKeyFor`. The guards are `tools/check-models.js` and

@@ -13,9 +13,10 @@
 // Code), dispatches every message type `ChatViewProvider` posts, and asserts that
 //   (a) no handler throws, and
 //   (b) the UI follows the message — the effort dropdown, the model list, the
-//       image affordances, the context readout and the composer's Send/Stop pair
-//       are checked explicitly, plus the P2 background docks (each job has to end
-//       up in the card of the node that owns it — see the bottom of this file).
+//       image affordances, the context readout, the wallet readout and the
+//       composer's Send/Stop pair are checked explicitly, plus the P2 background
+//       docks (each job has to end up in the card of the node that owns it — see the
+//       bottom of this file).
 //
 // The DOM stub resolves a plain `.class` selector against the element's own
 // subtree, so "which card holds this dock" is answerable per card.
@@ -112,7 +113,14 @@ const TURN_MESSAGES = [
   },
   { type: 'context', used: 524288, total: 1048576, model: 'smoke-model' },
   { type: 'sessionStats', stats: { totalTokens: 3, cacheHit: 0, cacheMiss: 3, cacheHitRate: 0, cacheKnown: true } },
-  { type: 'balance', balance: { isAvailable: true, balances: [] } },
+  // The wallet, in the provider's own dialect: the message names the provider the
+  // numbers belong to (the tooltip says so) and carries one entry per currency.
+  {
+    type: 'balance',
+    providerId: 'smoke-provider',
+    providerName: 'Smoke Provider',
+    balance: { isAvailable: true, balances: [{ currency: 'CNY', total: 12.34, granted: 2, toppedUp: 10.34 }] },
+  },
   { type: 'background', tasks: [] },
   // P2 shape: one flat list, every task tagged with its owning node. Each group
   // renders into the dock at the bottom of that node's own card (the detailed
@@ -586,6 +594,75 @@ notes.push(`model dropdown: ${modelLabels.join(', ') || '(empty)'}`);
 const contextLabel = elementById('context-label').textContent;
 if (contextLabel !== 'ctx 50%') {
   problems.push(`the context readout shows ${JSON.stringify(contextLabel)} for 524288/1048576 (expected "ctx 50%")`);
+}
+
+// The wallet readout, from the host's *whole* `balance` message: the provider the
+// number belongs to (the tooltip names it, in the dialect's own shape) and an empty
+// `balances` list, which is the host saying "there is no number to show" — a
+// provider whose wallet dialect is `none`, or a refresh that failed. The empty list
+// must *clear* the readout: leaving the previous provider's number up is the one
+// failure a user cannot see coming, and neither failure throws.
+{
+  const readout = () => elementById('stat-balance').textContent;
+  const tooltip = () => elementById('meter-row-readout').title;
+
+  // (a) A DeepSeek-shaped entry: the total behind the currency symbol.
+  dispatch({
+    type: 'balance',
+    providerId: 'smoke-provider',
+    providerName: 'Smoke Provider',
+    balance: { isAvailable: true, balances: [{ currency: 'CNY', total: 12.34, granted: 2, toppedUp: 10.34 }] },
+  });
+  if (readout() !== 'bal ¥12.34') {
+    problems.push(`the wallet readout shows ${JSON.stringify(readout())} for a ¥12.34 wallet (expected "bal ¥12.34")`);
+  }
+  // (b) …and the tooltip names the provider and the granted / topped-up split.
+  const wantWallet = 'wallet Smoke Provider: ¥12.34 (granted ¥2.00 + topped up ¥10.34)';
+  if (!tooltip().includes(wantWallet)) {
+    problems.push(
+      `the wallet tooltip is ${JSON.stringify(tooltip())}, expected it to carry ${JSON.stringify(wantWallet)}`,
+    );
+  }
+
+  // The other dialects: one reports spend instead of a split, and a message that
+  // names no provider at all (neither name nor id) falls back to the name-less key.
+  dispatch({
+    type: 'balance',
+    providerId: 'smoke-provider',
+    providerName: 'Smoke Provider',
+    balance: { isAvailable: true, balances: [{ currency: 'USD', total: 3.5, used: 1.25 }] },
+  });
+  if (!tooltip().includes('wallet Smoke Provider: $3.50 (spent $1.25)')) {
+    problems.push(
+      `a spend-reporting dialect's wallet tooltip is ${JSON.stringify(tooltip())} (expected the "{0} (spent {1})" form)`,
+    );
+  }
+  dispatch({
+    type: 'balance',
+    balance: { isAvailable: true, balances: [{ currency: 'CNY', total: 1, granted: 0, toppedUp: 1 }] },
+  });
+  if (!tooltip().includes('wallet ¥1.00 (granted ¥0.00 + topped up ¥1.00)')) {
+    problems.push(
+      `a balance message naming no provider produced ${JSON.stringify(tooltip())} (expected the "wallet {0}" form)`,
+    );
+  }
+
+  // (c) The empty list: back to "there is nothing to show", wallet part and all.
+  dispatch({
+    type: 'balance',
+    providerId: 'smoke-provider',
+    providerName: 'Smoke Provider',
+    balance: { isAvailable: false, balances: [] },
+  });
+  if (readout() !== 'bal –') {
+    problems.push(
+      `the wallet readout shows ${JSON.stringify(readout())} after an empty balances list (expected "bal –")`,
+    );
+  }
+  if (tooltip().includes('wallet')) {
+    problems.push(`the wallet tooltip survived an empty balances list: ${JSON.stringify(tooltip())}`);
+  }
+  notes.push('wallet readout: provider-named, cleared on an empty list');
 }
 
 // Image affordances follow the vision flag of the *card* the dropdown is on.

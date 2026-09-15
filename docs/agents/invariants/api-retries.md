@@ -29,9 +29,11 @@ retries a **transient** failure up to `MAX_ATTEMPTS = 10` total attempts
   Spinney output channel with the clipped reason. When attempts run out,
   `withAttempts` appends `(after 10 attempts)` to the `ApiError` message, so
   the error bubble in the chat says why it gave up.
-- `uploadFile` and `getBalance` are **not** retried: an image upload failure is
-  reported in the tool result / a warning notice, and a balance refresh is
-  cosmetic. Uploading a 64 MiB body ten times is not a favour.
+- `uploadFile` is **not** retried: an image upload failure is reported in the tool
+  result / a warning notice, and uploading a 64 MiB body ten times is not a favour.
+  The wallet readout keeps that rule, but it is not this client's any more: it lives
+  in `src/agent/balance.ts` (`fetchBalance`, one call per dialect — see
+  `model-cards.md`), which sits outside this policy and is never retried either.
 - The Agent's own image-rejection retry (`markRejectedImages`, see
   `vision-images.md`) still works because a 400 is not retriable here: it surfaces
   immediately and the Agent hides the offending image and re-asks.

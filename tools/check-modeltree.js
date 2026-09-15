@@ -53,8 +53,8 @@
 //       cursor class) and stops (marker gone, class gone),
 //   (l) a fresh snapshot rebuilds the tree,
 //   (m) the **reset buttons**: exactly one `↺` per resettable property (`baseUrl`,
-//       `concurrency`, `contextWindow`, the vision toggle, the transport, the level
-//       list, the default level) and none for `id` / `name` / `oaiModel` /
+//       `balance`, `concurrency`, `contextWindow`, the vision toggle, the transport,
+//       the level list, the default level) and none for `id` / `name` / `oaiModel` /
 //       `providerId`, all of them the same glyph and the same sentence, disabled while
 //       the property already holds its default and live the moment it does not, one
 //       click writing only that property into the draft (the card is not rebuilt — its
@@ -64,7 +64,14 @@
 //       `builtin`, the rest from `fresh`, proven by a second snapshot whose values are
 //       different from the real host's, plus a snapshot with no `defaults` at all that
 //       must not throw. The built-in rows' delete buttons are disabled while a card
-//       that merely *is* the default keeps an enabled one.
+//       that merely *is* the default keeps an enabled one,
+//   (n) the provider's **wallet line**: a `<select>` of exactly the four dialects
+//       `src/agent/balance.ts` knows (`none`, `deepseek`, `openrouter`, `moonshot`), in
+//       that frozen order and labelled with the vendor, showing the provider's own
+//       dialect (`deepseek` for the built-in row, `none` for a fresh one and for a
+//       dialect this build does not know), with a `↺` that restores *that row's*
+//       factory dialect and rides the same non-shape path as every other select — and,
+//       unlike a keystroke, a save carries the dialect it shows in the payload.
 //
 // The page's *strings* are checked elsewhere (tools/check-l10n.js extracts every
 // `tr()` call whose argument is one literal), and its look is not checked anywhere:
@@ -680,6 +687,9 @@ const SNAPSHOT = {
       id: 'provider-a',
       name: 'Smoke provider',
       baseUrl: 'https://provider.invalid/v1',
+      // The built-in row points at DeepSeek, so its wallet line is `deepseek` — the
+      // dialect `defaults.builtin.provider` restores, and the one the select shows.
+      balance: 'deepseek',
       concurrency: 0,
       hasKey: true,
       isBuiltin: true,
@@ -717,12 +727,12 @@ const SNAPSHOT = {
   // (`ModelTreeSnapshot.defaults` → `BUILTIN_*` / `FRESH_*` in src/agent/models.ts).
   // The values the protocol pins are the real ones — the built-in card really does
   // ship with a 2500 concurrency cap and with images on `deepseek`, a fresh card with
-  // 0 and `openai`, both providers with the DeepSeek URL — so a page that copied them
-  // instead of reading them would look right here; section 22's *second* snapshot is
-  // what rules that out.
+  // 0 and `openai`, both providers with the DeepSeek URL and the built-in one with the
+  // `deepseek` wallet line — so a page that copied them instead of reading them would
+  // look right here; section 22's *second* snapshot is what rules that out.
   defaults: {
     builtin: {
-      provider: { baseUrl: 'https://api.deepseek.com', concurrency: 0 },
+      provider: { baseUrl: 'https://api.deepseek.com', concurrency: 0, balance: 'deepseek' },
       card: {
         contextWindow: 1048576,
         concurrency: 2500,
@@ -732,7 +742,7 @@ const SNAPSHOT = {
       },
     },
     fresh: {
-      provider: { baseUrl: 'https://api.deepseek.com', concurrency: 0 },
+      provider: { baseUrl: 'https://api.deepseek.com', concurrency: 0, balance: 'none' },
       card: {
         contextWindow: 1048576,
         concurrency: 0,
@@ -902,7 +912,7 @@ function assertDraw() {
   if (form.length !== 1) {
     problems.push(`the selected provider card holds ${form.length} form(s), expected exactly one (the card *is* the form)`);
   }
-  for (const field of ['name', 'baseUrl', 'concurrency', 'apiKey', 'id']) {
+  for (const field of ['name', 'baseUrl', 'balance', 'concurrency', 'apiKey', 'id']) {
     if (providerCard && !findField(providerCard, field)) {
       problems.push(`the selected provider card has no "${field}" field`);
     }
@@ -1661,12 +1671,12 @@ if (!saveBtn().disabled) {
 }
 // --- 22. one ↺ per resettable property, restoring the snapshot's default --------
 //
-// Every **resettable** property — a provider's `baseUrl` and `concurrency`, a card's
-// `contextWindow`, `concurrency`, `vision.enabled`, `vision.transport`, `efforts` and
-// `defaultEffort` — carries exactly one reset button, and the fields that have no
-// factory value carry none (`id`, `name` and a card's `providerId` are not resettable;
-// `oaiModel` stays hand-authored). Each button restores the value **its own row was
-// created with**: the built-in provider and the vendored card to
+// Every **resettable** property — a provider's `baseUrl`, `concurrency` and `balance`,
+// a card's `contextWindow`, `concurrency`, `vision.enabled`, `vision.transport`,
+// `efforts` and `defaultEffort` — carries exactly one reset button, and the fields that
+// have no factory value carry none (`id`, `name` and a card's `providerId` are not
+// resettable; `oaiModel` stays hand-authored). Each button restores the value **its own
+// row was created with**: the built-in provider and the vendored card to
 // `snapshot.defaults.builtin.*`, every other row to `snapshot.defaults.fresh.*` —
 // read out of the snapshot, never a literal in the page (the second snapshot at the
 // end of this section is what rules a literal out, because the fixture's own values
@@ -1708,14 +1718,14 @@ if (!saveBtn().disabled) {
     }
   }
 
-  // --- the provider: two resettable properties, and nothing else --------------
+  // --- the provider: three resettable properties, and nothing else ------------
   dispatch({ type: 'modelTree', snapshot: SNAPSHOT });
   seam.selectProvider('provider-a');
   const providerCard = cardById('provider-a');
-  if (resetsOf(providerCard).length !== 2) {
-    problems.push(`the provider form renders ${resetsOf(providerCard).length} reset button(s), expected exactly 2 (base URL and concurrency)`);
+  if (resetsOf(providerCard).length !== 3) {
+    problems.push(`the provider form renders ${resetsOf(providerCard).length} reset button(s), expected exactly 3 (base URL, concurrency and the wallet line)`);
   }
-  for (const field of ['baseUrl', 'concurrency']) {
+  for (const field of ['baseUrl', 'concurrency', 'balance']) {
     const count = resetsOf(findField(providerCard, field)).length;
     if (count !== 1) {
       problems.push(`the provider's "${field}" field renders ${count} reset button(s), expected exactly one`);
@@ -2021,7 +2031,7 @@ if (!saveBtn().disabled) {
   // not reading `snapshot.defaults` at all.
   const ALTERNATE = {
     builtin: {
-      provider: { baseUrl: 'https://builtin.invalid/v1', concurrency: 42 },
+      provider: { baseUrl: 'https://builtin.invalid/v1', concurrency: 42, balance: 'moonshot' },
       card: {
         contextWindow: 111,
         concurrency: 222,
@@ -2031,7 +2041,7 @@ if (!saveBtn().disabled) {
       },
     },
     fresh: {
-      provider: { baseUrl: 'https://fresh.invalid/v1', concurrency: 7 },
+      provider: { baseUrl: 'https://fresh.invalid/v1', concurrency: 7, balance: 'openrouter' },
       card: {
         contextWindow: 333,
         concurrency: 444,
@@ -2071,6 +2081,41 @@ if (!saveBtn().disabled) {
         );
       }
     }
+    // A provider created under *this* snapshot is seeded from its fresh wallet line,
+    // and its ↺ is already disabled because of that — the value came out of
+    // `snapshot.defaults`, exactly like the base URL above.
+    const freshWalletField = findField(cardById(freshProvider.id), 'balance');
+    const freshWalletSelect = freshWalletField ? firstSelect(freshWalletField) : null;
+    const freshWalletReset = resetsOf(freshWalletField)[0];
+    if (!freshWalletSelect || freshWalletSelect.value !== ALTERNATE.fresh.provider.balance) {
+      problems.push(
+        `a new provider's wallet line shows ${JSON.stringify(freshWalletSelect && freshWalletSelect.value)}, expected the snapshot's ` +
+          `fresh ${JSON.stringify(ALTERNATE.fresh.provider.balance)}`,
+      );
+    }
+    if (!freshWalletReset || !freshWalletReset.disabled) {
+      problems.push('a new provider already carries the snapshot\'s fresh wallet line, so its reset must be disabled');
+    }
+  }
+
+  // The built-in provider's wallet line is read from the snapshot too: it holds the
+  // fixture's `deepseek`, this snapshot says `moonshot`, so the ↺ is live and lands on
+  // the snapshot's value, never on the page's own copy of `BUILTIN_PROVIDER_DEFAULTS`.
+  seam.selectProvider('provider-a');
+  const altWalletReset = resetsOf(findField(cardById('provider-a'), 'balance'))[0];
+  if (!altWalletReset || altWalletReset.disabled) {
+    problems.push(
+      `the snapshot's built-in wallet line (${JSON.stringify(ALTERNATE.builtin.provider.balance)}) differs from the draft's, so its reset must be enabled`,
+    );
+  } else {
+    fire(altWalletReset, 'click');
+    const provider = draftProvider('provider-a');
+    if (!provider || provider.balance !== ALTERNATE.builtin.provider.balance) {
+      problems.push(
+        `the built-in provider's wallet-line reset restored ${JSON.stringify(provider && provider.balance)}, expected the snapshot's ` +
+          `${JSON.stringify(ALTERNATE.builtin.provider.balance)} — the target is taken from snapshot.defaults.builtin`,
+      );
+    }
   }
 
   seam.selectCard('card-a');
@@ -2106,6 +2151,194 @@ if (!saveBtn().disabled) {
   dispatch({ type: 'modelTree', snapshot: SNAPSHOT });
   if (seam.state().dirty) {
     problems.push('re-applying a snapshot at the end of the reset section left the draft dirty');
+  }
+}
+
+// --- 23. the provider's wallet line: four dialects, one ↺, one round trip ------
+//
+// A provider *declares* how its wallet is read (`ProviderSpec.balance`) — the same
+// shape of decision as a card's image transport, never a probe. The form offers
+// exactly the four names `src/agent/balance.ts` knows, in that frozen order and
+// labelled with the vendor whose response shape it is; `none` leads because it is
+// what a new row carries. The current value is the provider's own dialect, the ↺
+// restores *that row's* factory dialect — `deepseek` for the built-in row, `none` for
+// a user row — and is disabled while the value already is that dialect. Changing the
+// select is **not** a shape change: it goes through `edit()`, like the vision
+// transport, so nothing on screen moves (the counterpart is the level-list ↺ in
+// section 22, the one reset that can add or remove rows and therefore re-renders and
+// is re-measured).
+
+{
+  // The four labels are one string per dialect: `none` says what it is rather than
+  // naming a vendor, and the other three are the vendor's own name.
+  const DIALECT_OPTIONS = 'none=No wallet line,deepseek=DeepSeek,openrouter=OpenRouter,moonshot=Moonshot';
+  const draftProvider = (id) => seam.state().providers.find((entry) => entry.id === id);
+
+  // --- the four dialects, in the frozen order, showing the row's own ----------
+  dispatch({ type: 'modelTree', snapshot: SNAPSHOT });
+  seam.selectProvider('provider-a');
+  const providerCard = cardById('provider-a');
+  const balanceField = providerCard ? findField(providerCard, 'balance') : null;
+  const formSelect = balanceField ? firstSelect(balanceField) : null;
+  if (!formSelect) {
+    problems.push('the selected provider card has no wallet-line <select>');
+  } else {
+    const options = formSelect.children.map((option) => option.value + '=' + option.textContent);
+    if (options.join(',') !== DIALECT_OPTIONS) {
+      problems.push(`the wallet-line <select> offers ${JSON.stringify(options)}, expected ${JSON.stringify(DIALECT_OPTIONS)}`);
+    }
+    // … and it shows the provider's own dialect: this row points at DeepSeek's
+    // endpoint, so its wallet line is `deepseek`.
+    if (formSelect.value !== 'deepseek') {
+      problems.push(`the built-in provider's wallet line shows ${JSON.stringify(formSelect.value)}, expected its own "deepseek"`);
+    }
+    notes.push(`${formSelect.children.length} wallet dialect(s) in the provider form`);
+  }
+
+  // A provider that declares another dialect shows it: this is the row's data, not a
+  // page-side default.
+  const declared = JSON.parse(JSON.stringify(SNAPSHOT));
+  declared.providers.push({
+    id: 'provider-b',
+    name: 'Wallet provider',
+    baseUrl: 'https://api.moonshot.cn/v1',
+    balance: 'moonshot',
+    concurrency: 0,
+    hasKey: false,
+    isBuiltin: false,
+  });
+  dispatch({ type: 'modelTree', snapshot: declared });
+  seam.selectProvider('provider-b');
+  const declaredSelect = firstSelect(findField(cardById('provider-b'), 'balance'));
+  if (!declaredSelect || declaredSelect.value !== 'moonshot') {
+    problems.push(
+      `a provider declaring the moonshot wallet line shows ${JSON.stringify(declaredSelect && declaredSelect.value)}, expected "moonshot"`,
+    );
+  }
+
+  // A dialect this build does **not** know — a hand-edited settings row — reads as
+  // "no wallet line": the select can never show a fifth option, and the page can never
+  // post a name the host would refuse (it refuses an unknown dialect outright, see
+  // tools/modeltree-acceptance.js).
+  const bogus = JSON.parse(JSON.stringify(SNAPSHOT));
+  bogus.providers[0].balance = 'plaid';
+  dispatch({ type: 'modelTree', snapshot: bogus });
+  seam.selectProvider('provider-a');
+  const bogusSelect = firstSelect(findField(cardById('provider-a'), 'balance'));
+  if (!bogusSelect || bogusSelect.value !== 'none') {
+    problems.push(
+      `a provider declaring the unknown wallet line "plaid" shows ` +
+        `${JSON.stringify(bogusSelect && bogusSelect.value)}, expected the fallback "none"`,
+    );
+  }
+
+  // --- the built-in row: its ↺ restores `deepseek` ----------------------------
+  dispatch({ type: 'modelTree', snapshot: SNAPSHOT });
+  seam.selectProvider('provider-a');
+  const builtinCard = cardById('provider-a');
+  const builtinField = builtinCard ? findField(builtinCard, 'balance') : null;
+  const builtinSelect = builtinField ? firstSelect(builtinField) : null;
+  const builtinReset = resetsOf(builtinField)[0];
+  if (!builtinSelect || !builtinReset) {
+    problems.push('the built-in provider renders no wallet-line reset button');
+  } else {
+    if (!builtinReset.disabled) {
+      problems.push('the built-in provider already carries its own "deepseek", so its wallet-line reset must be disabled');
+    }
+    builtinSelect.value = 'openrouter';
+    fire(builtinSelect, 'change', { target: builtinSelect });
+    if (draftProvider('provider-a').balance !== 'openrouter') {
+      problems.push(`choosing OpenRouter left the draft at ${JSON.stringify(draftProvider('provider-a').balance)}`);
+    }
+    if (builtinReset.disabled !== false) {
+      problems.push("changing a provider's wallet line left its reset disabled");
+    }
+    // The select is a fixed-height field: `edit()`, never `render()`.
+    if (cardById('provider-a') !== builtinCard) {
+      problems.push('changing the wallet line rebuilt the card — a fixed-height select must go through edit(), not render()');
+    }
+    fire(builtinReset, 'click');
+    const restored = draftProvider('provider-a').balance;
+    if (restored !== SNAPSHOT.defaults.builtin.provider.balance || builtinSelect.value !== SNAPSHOT.defaults.builtin.provider.balance) {
+      problems.push(
+        `the built-in provider's wallet-line reset restored ${JSON.stringify(restored)} (box: ${JSON.stringify(builtinSelect.value)}), ` +
+          `expected the built-in ${JSON.stringify(SNAPSHOT.defaults.builtin.provider.balance)}`,
+      );
+    }
+    if (builtinReset.disabled !== true) {
+      problems.push('after its click a wallet-line reset stayed enabled although the property now holds its default');
+    }
+  }
+
+  // --- a user row: it starts on `none`, and its ↺ goes back to `none` ---------
+  dispatch({ type: 'modelTree', snapshot: SNAPSHOT });
+  const freshProvider = seam.addProvider();
+  if (!freshProvider) {
+    problems.push('addProvider() returned nothing while checking the wallet line');
+  } else {
+    const freshField = findField(cardById(freshProvider.id), 'balance');
+    const freshSelect = freshField ? firstSelect(freshField) : null;
+    const freshReset = resetsOf(freshField)[0];
+    if (!freshSelect || freshSelect.value !== 'none') {
+      problems.push(`a fresh provider's wallet line shows ${JSON.stringify(freshSelect && freshSelect.value)}, expected the fresh "none"`);
+    }
+    if (!freshReset || !freshReset.disabled) {
+      problems.push('a fresh provider already carries the fresh wallet line (none), so its reset must be disabled');
+    }
+    if (freshSelect && freshReset) {
+      const layoutBefore = JSON.stringify(seam.layout());
+      const canvasBefore = JSON.stringify(seam.canvasSize());
+      freshSelect.value = 'openrouter';
+      fire(freshSelect, 'change', { target: freshSelect });
+      if (draftProvider(freshProvider.id).balance !== 'openrouter') {
+        problems.push(`choosing OpenRouter on a user row left the draft at ${JSON.stringify(draftProvider(freshProvider.id).balance)}`);
+      }
+      if (freshReset.disabled !== false) {
+        problems.push("changing a user provider's wallet line left its reset disabled");
+      }
+      // Not a shape change: no re-layout, no rebuild (the level-list ↺ is the one
+      // reset that moves the tree, section 22).
+      if (JSON.stringify(seam.layout()) !== layoutBefore || JSON.stringify(seam.canvasSize()) !== canvasBefore) {
+        problems.push('changing the wallet line re-laid the tree out — the select is not a shape change');
+      }
+      fire(freshReset, 'click');
+      const restored = draftProvider(freshProvider.id).balance;
+      if (restored !== 'none' || freshSelect.value !== 'none') {
+        problems.push(
+          `a user provider's wallet-line reset restored ${JSON.stringify(restored)} (box: ${JSON.stringify(freshSelect.value)}), ` +
+            'expected the fresh "none"',
+        );
+      }
+    }
+  }
+  assertDraw();
+
+  // --- the round trip: pick OpenRouter, save, and the payload carries it ------
+  dispatch({ type: 'modelTree', snapshot: SNAPSHOT });
+  seam.selectProvider('provider-a');
+  const roundTripSelect = firstSelect(findField(cardById('provider-a'), 'balance'));
+  if (!roundTripSelect) {
+    problems.push('the provider form lost its wallet-line <select> before the round trip');
+  } else {
+    roundTripSelect.value = 'openrouter';
+    fire(roundTripSelect, 'change', { target: roundTripSelect });
+    posted.length = 0;
+    const refused = seam.save();
+    if (refused.length > 0) {
+      problems.push(`save() refused a complete draft after a wallet-line edit: ${JSON.stringify(refused)}`);
+    }
+    const sent = posted.find((message) => message && message.type === 'save');
+    const sentProvider = sent && sent.payload && sent.payload.providers.find((entry) => entry.id === 'provider-a');
+    if (!sentProvider || sentProvider.balance !== 'openrouter') {
+      problems.push(
+        `the save payload carries ${JSON.stringify(sentProvider && sentProvider.balance)} as the provider's wallet line, expected "openrouter"`,
+      );
+    }
+  }
+  // Leave the page clean for the autoscroll section.
+  dispatch({ type: 'modelTree', snapshot: SNAPSHOT });
+  if (seam.state().dirty) {
+    problems.push('re-applying a snapshot at the end of the wallet-line section left the draft dirty');
   }
 }
 

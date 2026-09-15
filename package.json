@@ -191,6 +191,17 @@
                   "minimum": 0,
                   "default": 0,
                   "description": "%spinney.providers.concurrency.description%"
+                },
+                "balance": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "deepseek",
+                    "openrouter",
+                    "moonshot"
+                  ],
+                  "default": "none",
+                  "description": "%spinney.providers.balance.description%"
                 }
               }
             },

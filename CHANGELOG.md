@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- The wallet readout is a **provider** property now instead of an assumption. A provider
+  row carries `balance`, which is one of `none` (no wallet line at all — the default for
+  a new row, and the right answer for a local vLLM/llama.cpp endpoint), `deepseek`
+  (`GET /user/balance`), `openrouter` (`GET /credits`) or `moonshot`
+  (`GET /users/me/balance`), and the Model Cards page's provider form has a select for
+  it. A row that omits the field is read with the dialect this harness knows for that
+  host — `api.deepseek.com` → `deepseek`, anything else → `none` — because it is
+  declared, never probed: no request is spent finding out, and no endpoint is read as if
+  it spoke DeepSeek's dialect. The built-in provider still reads DeepSeek's wallet.
+
+### Changed
+
+- The wallet number belongs to the provider that reported it, and no longer outlives it:
+  a `none` provider shows no figure at all, and a refresh that fails now clears the
+  number instead of leaving the previous provider's on screen. The readout is still
+  never retried, and its tooltip names the provider the number belongs to.
+- The API client, its error and its options are no longer named after DeepSeek:
+  `src/agent/deepseek.ts` → `src/agent/apiClient.ts`, `DeepSeekClient` → `ApiClient`,
+  `DeepSeekError` → `ApiError`, `DeepSeekOptions` → `ClientOptions`. Nothing in it was
+  ever DeepSeek-specific — there is one instance per provider and every endpoint it
+  talks to is OpenAI-compatible — and its error text no longer claims otherwise.
+  Everything that really is DeepSeek keeps the name: the vendored `deepseek-flash`
+  card, the built-in provider's base URL, `DEEPSEEK_API_KEY`, and the `deepseek` image
+  transport.
+
 ## [0.0.2] - 2026-09-16
 
 The first public release. No earlier build was ever shipped, so this entry covers

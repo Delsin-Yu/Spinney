@@ -4,8 +4,9 @@
  *
  * The model of the world (see `docs/agents/invariants/model-cards.md`):
  *
- *   provider node  → `{ id, name, baseUrl, concurrency }` — an OpenAI-compatible
- *                    endpoint plus how many requests may be in flight against it.
+ *   provider node  → `{ id, name, baseUrl, balance, concurrency }` — an
+ *                    OpenAI-compatible endpoint, the dialect its wallet line is read
+ *                    in, and how many requests may be in flight against it.
  *   model card     → `{ id, name, providerId, oaiModel, contextWindow, vision,
  *                    efforts, defaultEffort, concurrency }` — branches off exactly
  *                    one provider and carries everything a request to it needs:
@@ -35,6 +36,7 @@
  */
 
 import { randomUUID } from 'crypto';
+import { BalanceDialect, BALANCE_DIALECTS, isBalanceDialect } from './balance';
 
 /**
  * How a card's images reach the provider. Two mechanisms, named after the vendor
@@ -70,6 +72,13 @@ export interface ProviderSpec {
   name: string;
   /** Where the API root sits, e.g. `https://api.deepseek.com` (no trailing slash needed). */
   baseUrl: string;
+  /**
+   * How this endpoint's wallet line is read (`balance.ts`) — a **declaration**, like a
+   * card's image transport, never a probe. `none` says the endpoint has no wallet at
+   * all, which is the honest answer for a local server and for any vendor this build
+   * has no parser for.
+   */
+  balance: BalanceDialect;
   /** Maximum requests in flight against this provider; `0` = unlimited. */
   concurrency: number;
 }
@@ -146,6 +155,7 @@ export const VENDORED_PROVIDER: ProviderSpec = {
   id: DEFAULT_PROVIDER_ID,
   name: 'DeepSeek',
   baseUrl: 'https://api.deepseek.com',
+  balance: 'deepseek',
   concurrency: 0,
 };
 
@@ -172,6 +182,7 @@ export const VENDORED_CARD: ModelCard = {
 /** What the provider form's reset buttons restore. */
 export interface ProviderDefaults {
   baseUrl: string;
+  balance: BalanceDialect;
   concurrency: number;
 }
 
@@ -192,6 +203,9 @@ export interface CardDefaults {
  */
 export const FRESH_PROVIDER_DEFAULTS: ProviderDefaults = {
   baseUrl: VENDORED_PROVIDER.baseUrl,
+  // A brand-new row declares no wallet line: this build ships a parser for exactly one
+  // endpoint's dialect, and a row the user just typed is not it until they say so.
+  balance: 'none',
   concurrency: 0,
 };
 
@@ -206,6 +220,7 @@ export const FRESH_CARD_DEFAULTS: CardDefaults = {
 /** The **built-in** rows' factory state — the vendored provider and card themselves. */
 export const BUILTIN_PROVIDER_DEFAULTS: ProviderDefaults = {
   baseUrl: VENDORED_PROVIDER.baseUrl,
+  balance: VENDORED_PROVIDER.balance,
   concurrency: VENDORED_PROVIDER.concurrency,
 };
 
@@ -406,26 +421,49 @@ export function newId(): string {
 }
 
 /**
- * A provider name for a URL. Normally its host — a derived name must not invent copy
- * — but the one endpoint this harness ships knowledge about gets its own product name
- * (`api.deepseek.com` → `DeepSeek`), because that is what the built-in provider is
- * called everywhere else. The name stays editable either way.
+ * A provider name and wallet dialect for a URL. The name is normally its host — a
+ * derived name must not invent copy — but the one endpoint this harness ships
+ * knowledge about gets its own product name (`api.deepseek.com` → `DeepSeek`),
+ * because that is what the built-in provider is called everywhere else. The name
+ * stays editable either way.
+ *
+ * The dialect is the same knowledge, used where it matters: a provider row that
+ * leaves `balance` out is answered by its host. That is a **declaration by host**,
+ * not a probe — this table is the whole of what the build knows, and every other
+ * endpoint (a local vLLM, a gateway, a vendor nobody wrote a parser for) is
+ * honestly `none` until the user says otherwise.
  */
-const KNOWN_PROVIDER_HOSTS: ReadonlyArray<{ suffix: string; name: string }> = [
-  { suffix: 'deepseek.com', name: 'DeepSeek' },
+const KNOWN_PROVIDER_HOSTS: ReadonlyArray<{ suffix: string; name: string; balance: BalanceDialect }> = [
+  { suffix: 'deepseek.com', name: 'DeepSeek', balance: 'deepseek' },
 ];
+
+/** The known-host entry for a URL, when this build ships knowledge about that host. */
+function knownProviderHost(url: string): (typeof KNOWN_PROVIDER_HOSTS)[number] | undefined {
+  const raw = (url ?? '').trim();
+  if (!raw) {
+    return undefined;
+  }
+  const match = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]+)/i.exec(raw);
+  const host = match ? match[1] : raw;
+  return KNOWN_PROVIDER_HOSTS.find((entry) => host === entry.suffix || host.endsWith('.' + entry.suffix));
+}
 
 export function providerNameFromUrl(url: string): string {
   const raw = (url ?? '').trim();
   if (!raw) {
     return VENDORED_PROVIDER.name;
   }
+  const known = knownProviderHost(raw);
+  if (known) {
+    return known.name;
+  }
   const match = /^[a-z][a-z0-9+.-]*:\/\/([^/?#]+)/i.exec(raw);
-  const host = match ? match[1] : raw;
-  const known = KNOWN_PROVIDER_HOSTS.find(
-    (entry) => host === entry.suffix || host.endsWith('.' + entry.suffix),
-  );
-  return known ? known.name : host;
+  return match ? match[1] : raw;
+}
+
+/** The wallet dialect a provider row takes when it leaves `balance` out (see above). */
+export function providerBalanceFromUrl(url: string): BalanceDialect {
+  return knownProviderHost(url)?.balance ?? 'none';
 }
 
 export interface CatalogParseResult {
@@ -436,6 +474,7 @@ export interface CatalogParseResult {
 }
 
 const PROVIDER_URL_KEYS = new Set(['baseurl', 'url', 'endpoint']);
+const PROVIDER_BALANCE_KEYS = new Set(['balance', 'wallet']);
 const CARD_PROVIDER_KEYS = new Set(['providerid', 'provider']);
 const CARD_WIRE_KEYS = new Set(['oaimodel', 'model', 'wiremodel']);
 const WINDOW_KEYS = new Set(['contextwindow', 'max_tokens', 'context', 'window']);
@@ -465,12 +504,13 @@ function nonNegativeInt(raw: unknown): number | undefined {
 /** A provider row's own key/field errors, collected for the output channel. */
 function parseProviderRow(id: string, rawFields: unknown, errors: string[]): ProviderSpec | undefined {
   if (rawFields !== undefined && rawFields !== null && (typeof rawFields !== 'object' || Array.isArray(rawFields))) {
-    errors.push(`providers["${id}"]: expected { name, baseUrl, concurrency }, got ${JSON.stringify(rawFields)}`);
+    errors.push(`providers["${id}"]: expected { name, baseUrl, balance, concurrency }, got ${JSON.stringify(rawFields)}`);
     return undefined;
   }
   const fields = (rawFields ?? {}) as Record<string, unknown>;
   let name = '';
   let baseUrl = '';
+  let balance: BalanceDialect | undefined;
   let concurrency = 0;
   for (const [rawKey, rawValue] of Object.entries(fields)) {
     const key = rawKey.trim().toLowerCase();
@@ -486,6 +526,14 @@ function parseProviderRow(id: string, rawFields: unknown, errors: string[]): Pro
         errors.push(`providers["${id}"]: ${rawKey} must be a non-empty URL`);
         return undefined;
       }
+    } else if (PROVIDER_BALANCE_KEYS.has(key)) {
+      if (!isBalanceDialect(rawValue)) {
+        errors.push(
+          `providers["${id}"]: ${rawKey} must be one of ${BALANCE_DIALECTS.join(', ')}, got ${JSON.stringify(rawValue)}`,
+        );
+        return undefined;
+      }
+      balance = rawValue;
     } else if (CONCURRENCY_KEYS.has(key)) {
       const value = nonNegativeInt(rawValue);
       if (value === undefined) {
@@ -494,7 +542,7 @@ function parseProviderRow(id: string, rawFields: unknown, errors: string[]): Pro
       }
       concurrency = value;
     } else {
-      errors.push(`providers["${id}"]: unknown field "${rawKey}" (expected name, baseUrl, concurrency)`);
+      errors.push(`providers["${id}"]: unknown field "${rawKey}" (expected name, baseUrl, balance, concurrency)`);
       return undefined;
     }
   }
@@ -502,7 +550,9 @@ function parseProviderRow(id: string, rawFields: unknown, errors: string[]): Pro
     errors.push(`providers["${id}"]: baseUrl is required`);
     return undefined;
   }
-  return { id, name: name || providerNameFromUrl(baseUrl), baseUrl, concurrency };
+  // An omitted `balance` is answered by the host: this build ships a parser for one
+  // endpoint, and a row pointing at it must keep its wallet line without being told.
+  return { id, name: name || providerNameFromUrl(baseUrl), baseUrl, balance: balance ?? providerBalanceFromUrl(baseUrl), concurrency };
 }
 
 /**

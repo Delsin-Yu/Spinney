@@ -248,5 +248,12 @@
   "DeepSeek": "DeepSeek",
   "OpenAI": "OpenAI",
   "New Model": "新模型",
-  "The images in this history were uploaded to a DeepSeek Files API, and this model cannot read an uploaded file id, so those image blocks are hidden too (the image data is kept and will be restored when you switch back to a card that serves DeepSeek uploads).": "這段歷史中的圖片是透過 DeepSeek Files API 上傳的，而目前模型無法讀取上傳取得的檔案 id，因此這些圖片區塊也會被隱藏（圖片資料仍保留，等你切回支援 DeepSeek 上傳的卡片時會恢復）。"
+  "The images in this history were uploaded to a DeepSeek Files API, and this model cannot read an uploaded file id, so those image blocks are hidden too (the image data is kept and will be restored when you switch back to a card that serves DeepSeek uploads).": "這段歷史中的圖片是透過 DeepSeek Files API 上傳的，而目前模型無法讀取上傳取得的檔案 id，因此這些圖片區塊也會被隱藏（圖片資料仍保留，等你切回支援 DeepSeek 上傳的卡片時會恢復）。",
+  "Wallet line": "餘額讀取方式",
+  "No wallet line": "不讀取餘額",
+  "OpenRouter": "OpenRouter",
+  "Moonshot": "Moonshot",
+  "Provider \"{0}\": the wallet line is not a dialect this build knows.": "服務商「{0}」：餘額讀取方式不是本版本已知的方言。",
+  "wallet {0}: {1}": "餘額 {0}：{1}",
+  "{0} (spent {1})": "{0}（已花費 {1}）"
 }

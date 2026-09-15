@@ -47,5 +47,6 @@
   "spinney.autoSessionTitles.description": "自动为会话命名：在第一个回合之后，以及对话增长后（最多每 2 分钟一次）。标题由模型生成，请求失败时回退到第一条消息。手动重命名会话会锁定其标题。在此功能之前创建的会话会在激活时命名一次。",
   "spinney.maxInlineToolOutput.description": "search_files / list_dir / search_transcripts 结果以内联方式返回的最大大小（字节）。更大的结果会写入临时文件，只返回其路径和简短预览。设为 0 则始终内联。",
   "spinney.httpApi.enabled.description": "在 127.0.0.1 上开放本地 HTTP 控制面（需 bearer token 鉴权），让 tools/hyper-vscode 之类的外部控制器可以读取状态、等待智能体进入空闲、导航到某个节点并从该节点继续。默认关闭；/continue 允许调用方让智能体执行一条指令，因此请把它视为本地信任边界。",
-  "spinney.httpApi.port.description": "HTTP 控制面使用的端口。0 表示自动选择空闲端口；所选端口和 token 会写入 <globalStorage>/http/<instanceId>.json，供 supervisor 发现。"
+  "spinney.httpApi.port.description": "HTTP 控制面使用的端口。0 表示自动选择空闲端口；所选端口和 token 会写入 <globalStorage>/http/<instanceId>.json，供 supervisor 发现。",
+  "spinney.providers.balance.description": "该端点的剩余额度如何读取。`none` 不读取余额，`deepseek` 读取 `GET /user/balance`，`openrouter` 读取 `GET /credits`（剩余 = 总额度减去已用量），`moonshot` 读取 `GET /users/me/balance`。该读取不会重试。省略此字段的行会使用其主机对应的方言（`api.deepseek.com` → `deepseek`，其他 → `none`）。"
 }

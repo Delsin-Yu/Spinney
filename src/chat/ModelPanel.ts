@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { BalanceDialect } from '../agent/balance';
 import { CardDefaults, ProviderDefaults } from '../agent/models';
 import { displayLocale, webviewL10n } from '../i18n';
 
@@ -24,6 +25,8 @@ export interface ProviderView {
   name: string;
   baseUrl: string;
   concurrency: number;
+  /** How this endpoint's wallet line is read (see `src/agent/balance.ts`). */
+  balance: BalanceDialect;
   hasKey: boolean;
   isBuiltin: boolean;
 }
