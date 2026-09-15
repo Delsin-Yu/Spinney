@@ -1,6 +1,6 @@
 ## Interrupt / abort / rollback
 - `Agent.cancel()` aborts an `AbortController`; `exec_command` and the SSE stream
-  both watch the signal. `deepseek.ts` re-checks the signal before every read and
+  both watch the signal. `apiClient.ts` re-checks the signal before every read and
   after every buffered SSE line.
 - On interruption the partial output/reasoning streamed so far is preserved as a
   single "checkpoint" assistant message (no `tool_calls` — those are always

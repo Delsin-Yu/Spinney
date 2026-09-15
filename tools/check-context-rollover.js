@@ -223,7 +223,7 @@ ok('the parsed window never leaks into the model table', M.contextWindowFor('dee
 ok('  … and nothing was installed as an override', M.modelIds().length === M.MODEL_CATALOG.length, M.modelIds().join(','));
 
 console.log('-- an ordinary failure is never a context-length error --');
-ok('a stalled stream is not', P('DeepSeek stream stalled') === undefined);
+ok('a stalled stream is not', P('Stream stalled: no data for 60000ms mid-answer.') === undefined);
 ok('a 401 body is not', P('{"error":{"message":"Authentication Fails, Your api key is invalid","type":"authentication_error","code":"invalid_api_key"}}') === undefined);
 ok('the max_tokens 400 is not', P('Invalid max_tokens value, the valid range of max_tokens is [1, 393216]') === undefined);
 ok('empty text is not', P('') === undefined);

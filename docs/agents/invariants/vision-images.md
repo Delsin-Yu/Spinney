@@ -62,7 +62,7 @@
   prevents repeating the same 400.
 - Uploads are abortable: the attach path (`onUserMessage`) and `read_image`
   (`tryReadImage`) both pass an `AbortSignal` to `uploadFile`, so pressing Stop
-  mid-upload rejects with `DeepSeekError('Upload aborted.')` and is treated as an
+  mid-upload rejects with `ApiError('Upload aborted.')` and is treated as an
   interruption rather than a failed upload.
 - The webview hides image thumbnails (history and the composer preview) when the
   active model is not image-capable (`updateImageVisibility` in `media/main.js`

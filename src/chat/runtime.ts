@@ -34,7 +34,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { Agent } from '../agent/agent';
 import { DEFAULT_REPLY_LANGUAGE } from '../agent/prompt';
-import { DeepSeekBalance } from '../agent/deepseek';
+import { Balance } from '../agent/apiClient';
 import { ClientRegistry } from '../agent/clients';
 import { AgentEvent, ChatMessage, ContentPart, ThinkingEffort, Usage } from '../agent/types';
 import {
@@ -1778,7 +1778,7 @@ export class SessionRuntime {
    */
   async refreshBalance(): Promise<void> {
     try {
-      const balance: DeepSeekBalance = await this.clients.balance(this.card.providerId);
+      const balance: Balance = await this.clients.balance(this.card.providerId);
       this.post({ type: 'balance', balance });
     } catch (err) {
       this.host.output.appendLine(`[balance] ${err instanceof Error ? err.message : String(err)}`);

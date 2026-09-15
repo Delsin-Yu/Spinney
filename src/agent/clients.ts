@@ -2,11 +2,11 @@
  * `ClientRegistry` — the one place that turns a **model card** into an actual
  * request.
  *
- * Before model cards there was a single shared `DeepSeekClient` and one base URL /
+ * Before model cards there was a single shared client and one base URL /
  * API key pair for the whole window, handed to every session and every agent. Now a
  * card names its provider, so this registry owns:
  *
- *   - one `DeepSeekClient` per provider (created lazily, re-pointed when the
+ *   - one `ApiClient` per provider (created lazily, re-pointed when the
  *     provider's `baseUrl` is edited),
  *   - the API key per provider (read through {@link ClientRegistryHost.apiKeyFor},
  *     i.e. SecretStorage), cached until it changes,
@@ -21,7 +21,7 @@
  * a batch auto-naming run occupy every slot would starve the conversation.
  */
 
-import { CompletionRequest, DeepSeekBalance, DeepSeekClient } from './deepseek';
+import { ApiClient, Balance, CompletionRequest } from './apiClient';
 import { ModelCard, ProviderSpec, cards, providerById, providerSpecs } from './models';
 import { RequestGate, GateStats } from './requestGate';
 import { StreamChunk, UploadedFile, Usage } from './types';
@@ -41,7 +41,7 @@ export interface QueueInfo {
 }
 
 export class ClientRegistry {
-  private readonly clients = new Map<string, DeepSeekClient>();
+  private readonly clients = new Map<string, ApiClient>();
   private readonly keys = new Map<string, string>();
   private readonly providerGates = new Map<string, RequestGate>();
   private readonly cardGates = new Map<string, RequestGate>();
@@ -127,18 +127,18 @@ export class ClientRegistry {
   }
 
   /** The wallet readout of a provider (ungated, account-level). */
-  async balance(providerId: string): Promise<DeepSeekBalance> {
+  async balance(providerId: string): Promise<Balance> {
     const client = await this.clientFor(providerId);
     return client.getBalance();
   }
 
   /** The provider's client, with its key and `baseUrl` installed. */
-  async clientFor(providerId: string): Promise<DeepSeekClient> {
+  async clientFor(providerId: string): Promise<ApiClient> {
     const provider: ProviderSpec = providerById(providerId);
     const key = await this.keyFor(provider.id);
     let client = this.clients.get(provider.id);
     if (!client) {
-      client = new DeepSeekClient({ apiKey: key, baseUrl: provider.baseUrl, model: '' });
+      client = new ApiClient({ apiKey: key, baseUrl: provider.baseUrl, model: '' });
       this.clients.set(provider.id, client);
     } else {
       client.configure({ apiKey: key, baseUrl: provider.baseUrl });

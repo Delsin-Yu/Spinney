@@ -147,7 +147,7 @@
   rollover. See `invariants/model-cards.md`. It is the **only** place a model id may
   appear; `tools/check-models.js` enforces that on every package.
 - `src/agent/clients.ts` — `ClientRegistry`, the one place that turns a card into a
-  request: one `DeepSeekClient` per provider (created lazily, re-pointed when the
+  request: one `ApiClient` per provider (created lazily, re-pointed when the
   provider's `baseUrl` is edited), the per-provider API key (cached until
   `ChatViewProvider.refreshKeys` invalidates it), the two `RequestGate`s, and the
   routing (`stream(card, request)` fills in `body.model` from the card's `oaiModel`,
@@ -202,8 +202,8 @@
   filters them.
   Each declares its `requires` capability tag, so the advertised tools and the
   prompt's capability wording cannot drift apart.
-- `src/agent/deepseek.ts` — `DeepSeekClient` (stream SSE over `fetch`,
-  `DeepSeekError`), builds `stream: true`, `stream_options.include_usage`,
+- `src/agent/apiClient.ts` — `ApiClient` (stream SSE over `fetch`,
+  `ApiError`), builds `stream: true`, `stream_options.include_usage`,
   `reasoning_effort`. The read loop flushes the `TextDecoder` and parses a final
   `data:` line that arrived without a trailing newline.
 - `src/agent/types.ts` — shared types (`Role`, `ThinkingEffort`, `ContentPart`,

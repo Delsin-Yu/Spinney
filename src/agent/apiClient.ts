@@ -110,11 +110,11 @@ function clipReason(reason: string, max = 160): string {
 }
 
 /** Name the attempt count on an error — but only when retries actually happened. */
-function withAttempts(error: DeepSeekError, attempt: number): DeepSeekError {
-  return attempt > 1 ? new DeepSeekError(`${error.message} (after ${attempt} attempts)`, error.status) : error;
+function withAttempts(error: ApiError, attempt: number): ApiError {
+  return attempt > 1 ? new ApiError(`${error.message} (after ${attempt} attempts)`, error.status) : error;
 }
 
-export interface DeepSeekOptions {
+export interface ClientOptions {
   apiKey: string;
   baseUrl: string;
   model: string;
@@ -140,7 +140,7 @@ export interface CompletionRequest {
 }
 
 /** A single currency balance entry from DeepSeek's `/user/balance` endpoint. */
-export interface DeepSeekBalanceEntry {
+export interface BalanceEntry {
   currency: string;
   totalBalance: number;
   grantedBalance: number;
@@ -148,28 +148,29 @@ export interface DeepSeekBalanceEntry {
 }
 
 /** Wallet balance from DeepSeek's `/user/balance` endpoint (account-level). */
-export interface DeepSeekBalance {
+export interface Balance {
   isAvailable: boolean;
   /** One entry per currency DeepSeek reports (e.g. CNY and USD). */
-  balances: DeepSeekBalanceEntry[];
+  balances: BalanceEntry[];
 }
 
-export class DeepSeekError extends Error {
+export class ApiError extends Error {
   constructor(
     message: string,
     public readonly status?: number,
   ) {
     super(message);
-    this.name = 'DeepSeekError';
+    this.name = 'ApiError';
   }
 }
 
 /**
- * Minimal, dependency-free client for the OpenAI-compatible DeepSeek chat
- * completions endpoint. Uses the global `fetch` available in the VS Code
+ * Minimal, dependency-free client for an OpenAI-compatible chat completions
+ * endpoint. One instance per provider (`ClientRegistry`); the endpoint and the
+ * key are installed with `configure`, so nothing here is vendor-specific. Uses the global `fetch` available in the VS Code
  * Node.js runtime (Node 18+).
  */
-export class DeepSeekClient {
+export class ApiClient {
   /**
    * When the last attempt started, on this shared client. Only used to tell a
    * request that follows a long silence (the socket may be half-open) from one in
@@ -177,7 +178,7 @@ export class DeepSeekClient {
    */
   private lastAttemptAt = 0;
 
-  constructor(private readonly options: DeepSeekOptions) {}
+  constructor(private readonly options: ClientOptions) {}
 
   /**
    * Update the connection settings **in place**. The same client instance is
@@ -187,7 +188,7 @@ export class DeepSeekClient {
    * mid-turn (each request reads the options when it is built). Fields absent
    * from the patch are kept.
    */
-  configure(patch: Partial<DeepSeekOptions>): void {
+  configure(patch: Partial<ClientOptions>): void {
     if (typeof patch.apiKey === 'string') {
       this.options.apiKey = patch.apiKey;
     }
@@ -201,14 +202,14 @@ export class DeepSeekClient {
 
   /**
    * Fetch the account's wallet balance from DeepSeek's `/user/balance` endpoint.
-   * Used to show the remaining credit in the UI. Throws `DeepSeekError` on
+   * Used to show the remaining credit in the UI. Throws `ApiError` on
    * missing key, network failure, or malformed response so the caller can
    * degrade gracefully (i.e. hide the balance) instead of crashing the view.
    */
-  async getBalance(): Promise<DeepSeekBalance> {
+  async getBalance(): Promise<Balance> {
     if (!this.options.apiKey) {
-      throw new DeepSeekError(
-        'No DeepSeek API key configured. Run the spinney.setApiKey command (or set the DEEPSEEK_API_KEY environment variable).',
+      throw new ApiError(
+        'No API key configured for this provider. Run the spinney.setApiKey command (or set the DEEPSEEK_API_KEY environment variable for the built-in provider).',
       );
     }
     const url = `${this.options.baseUrl.replace(/\/$/, '')}/user/balance`;
@@ -222,11 +223,11 @@ export class DeepSeekClient {
       });
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      throw new DeepSeekError(`Network error fetching balance: ${message}`);
+      throw new ApiError(`Network error fetching balance: ${message}`);
     }
     if (!response.ok) {
       const text = await response.text().catch(() => '');
-      throw new DeepSeekError(`DeepSeek balance error ${response.status}: ${text || response.statusText}`, response.status);
+      throw new ApiError(`Balance error ${response.status}: ${text || response.statusText}`, response.status);
     }
     const data = (await response.json()) as {
       is_available?: boolean;
@@ -239,7 +240,7 @@ export class DeepSeekClient {
     };
     const infos = data.balance_infos ?? [];
     if (infos.length === 0) {
-      throw new DeepSeekError('DeepSeek balance response is missing balance_infos.');
+      throw new ApiError('The balance response is missing balance_infos.');
     }
     return {
       isAvailable: !!data.is_available,
@@ -261,22 +262,22 @@ export class DeepSeekClient {
    *
    * The image is detected by magic bytes, not by filename/MIME, so we send the
    * raw bytes and let DeepSeek read the format from content. Throws
-   * `DeepSeekError` on an unsupported format, an invalid response, or a network
+   * `ApiError` on an unsupported format, an invalid response, or a network
    * failure so the caller can surface a clean message to the agent.
    */
   async uploadFile(bytes: Uint8Array, filename = 'image', signal?: AbortSignal): Promise<UploadedFile> {
     if (!this.options.apiKey) {
-      throw new DeepSeekError(
-        'No DeepSeek API key configured. Run the spinney.setApiKey command (or set the DEEPSEEK_API_KEY environment variable).',
+      throw new ApiError(
+        'No API key configured for this provider. Run the spinney.setApiKey command (or set the DEEPSEEK_API_KEY environment variable for the built-in provider).',
       );
     }
     const mime = detectImageMime(bytes);
     if (!mime) {
-      throw new DeepSeekError('Unsupported image format. Supported formats: JPEG, PNG, GIF, WebP.');
+      throw new ApiError('Unsupported image format. Supported formats: JPEG, PNG, GIF, WebP.');
     }
     const integrity = imageIntegrityError(bytes);
     if (integrity) {
-      throw new DeepSeekError(`Invalid image: ${integrity}.`);
+      throw new ApiError(`Invalid image: ${integrity}.`);
     }
 
     const url = `${this.options.baseUrl.replace(/\/$/, '')}/files`;
@@ -295,18 +296,18 @@ export class DeepSeekClient {
       });
     } catch (err) {
       if (signal?.aborted) {
-        throw new DeepSeekError('Upload aborted.');
+        throw new ApiError('Upload aborted.');
       }
       const message = err instanceof Error ? err.message : String(err);
-      throw new DeepSeekError(`Network error uploading image: ${message}`);
+      throw new ApiError(`Network error uploading image: ${message}`);
     }
     if (!response.ok) {
       const text = await response.text().catch(() => '');
-      throw new DeepSeekError(`DeepSeek files error ${response.status}: ${text || response.statusText}`, response.status);
+      throw new ApiError(`Files API error ${response.status}: ${text || response.statusText}`, response.status);
     }
     const data = (await response.json()) as { id?: string; filename?: string; bytes?: number };
     if (!data.id) {
-      throw new DeepSeekError('DeepSeek files response is missing the file id.');
+      throw new ApiError('The files response is missing the file id.');
     }
     return {
       id: data.id,
@@ -322,8 +323,8 @@ export class DeepSeekClient {
   async *stream(request: CompletionRequest): AsyncGenerator<StreamChunk> {
     const { messages, tools, signal } = request;
     if (!this.options.apiKey) {
-      throw new DeepSeekError(
-        'No DeepSeek API key configured. Run the spinney.setApiKey command (or set the DEEPSEEK_API_KEY environment variable).',
+      throw new ApiError(
+        'No API key configured for this provider. Run the spinney.setApiKey command (or set the DEEPSEEK_API_KEY environment variable for the built-in provider).',
       );
     }
 
@@ -359,7 +360,7 @@ export class DeepSeekClient {
       const opened = await this.postWithRetry(url, payload, { signal, onRetry: request.onRetry }, attempt);
       attempt = opened.attempt;
       let yielded = false;
-      let readError: DeepSeekError | undefined;
+      let readError: ApiError | undefined;
       try {
         for await (const chunk of this.readStream(opened.response, signal, opened.watch, attempt)) {
           yielded = true;
@@ -367,14 +368,14 @@ export class DeepSeekClient {
         }
       } catch (err) {
         if (signal?.aborted) {
-          throw new DeepSeekError('Request aborted.');
+          throw new ApiError('Request aborted.');
         }
         // A watchdog abort reads as a body error here; name the real reason so the
         // UI's ↻ Retry says "no data for Ns" instead of a bogus network failure.
         readError = opened.watch.stalled
-          ? new DeepSeekError(`DeepSeek stream stalled: ${opened.watch.stalled}.`)
-          : new DeepSeekError(
-              `Network error reading DeepSeek stream: ${err instanceof Error ? err.message : String(err)}`,
+          ? new ApiError(`Stream stalled: ${opened.watch.stalled}.`)
+          : new ApiError(
+              `Network error reading the response stream: ${err instanceof Error ? err.message : String(err)}`,
             );
         if (opened.watch.stalled) {
           // A post-yield stall is fatal (no retry line will follow), so record it.
@@ -411,7 +412,7 @@ export class DeepSeekClient {
     attempt: number,
   ): AsyncGenerator<StreamChunk> {
     if (!response.body) {
-      throw new DeepSeekError('DeepSeek returned no response body.');
+      throw new ApiError('The API returned no response body.');
     }
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
@@ -424,7 +425,7 @@ export class DeepSeekClient {
       // if the underlying body stream does not reject on abort. This guarantees
       // we stop the moment Stop is pressed and discard any buffered future data.
       if (signal?.aborted) {
-        throw new DeepSeekError('Request aborted.');
+        throw new ApiError('Request aborted.');
       }
       // Nothing has been yielded before the first chunk, so that wait is still
       // retriable; once tokens are flowing a silence is fatal instead (see the
@@ -458,7 +459,7 @@ export class DeepSeekClient {
         // Re-check after every buffered line so already-buffered events do not
         // keep streaming out after the request has been aborted.
         if (signal?.aborted) {
-          throw new DeepSeekError('Request aborted.');
+          throw new ApiError('Request aborted.');
         }
         const line = buffer.slice(0, newlineIndex).trim();
         buffer = buffer.slice(newlineIndex + 1);
@@ -500,7 +501,7 @@ export class DeepSeekClient {
    * HTTP 408/429/5xx) up to `MAX_ATTEMPTS` total attempts. Returns the successful
    * response together with the attempt that produced it, so a caller that keeps
    * retrying (the streaming reader) can carry the count forward instead of
-   * restarting it. Throws the `DeepSeekError` of the last failure — annotated
+   * restarting it. Throws the `ApiError` of the last failure — annotated
    * with the attempt count when retries actually happened.
    */
   private async postWithRetry(
@@ -509,7 +510,7 @@ export class DeepSeekClient {
     opts: { signal?: AbortSignal; onRetry?: RetryReporter },
     attemptStart = 1,
   ): Promise<{ response: Response; attempt: number; watch: AttemptWatch }> {
-    let last: DeepSeekError | undefined;
+    let last: ApiError | undefined;
     for (let attempt = attemptStart; attempt <= MAX_ATTEMPTS; attempt++) {
       // A request that follows a long silence is the one most likely to be handed
       // a pooled keep-alive socket the provider already dropped, so it gets the
@@ -549,12 +550,12 @@ export class DeepSeekClient {
         clearTimeout(firstByteTimer);
         watch.detach();
         if (opts.signal?.aborted) {
-          throw new DeepSeekError('Request aborted.');
+          throw new ApiError('Request aborted.');
         }
         const message = err instanceof Error ? err.message : String(err);
         last = watch.stalled
-          ? new DeepSeekError(`DeepSeek ${watch.stalled} (attempt ${attempt}).`)
-          : new DeepSeekError(`Network error calling DeepSeek: ${message}`);
+          ? new ApiError(`${watch.stalled} (attempt ${attempt}).`)
+          : new ApiError(`Network error calling the API: ${message}`);
         perf(() => `request-timeout ${watch.stalled ? 'headers' : 'network'} ${Date.now() - fetchStart}ms attempt=${attempt}`);
         if (!(await this.retryLater(attempt, last.message, opts.onRetry, opts.signal))) {
           throw withAttempts(last, attempt);
@@ -575,8 +576,8 @@ export class DeepSeekClient {
       watch.detach();
       if (!response.ok) {
         const text = await response.text().catch(() => '');
-        last = new DeepSeekError(
-          `DeepSeek API error ${response.status}: ${text || response.statusText}`,
+        last = new ApiError(
+          `API error ${response.status}: ${text || response.statusText}`,
           response.status,
         );
         if (
@@ -588,12 +589,12 @@ export class DeepSeekClient {
         continue;
       }
       // 200 without a body: nothing to read, so the attempt produced no answer.
-      last = new DeepSeekError('DeepSeek returned no response body.');
+      last = new ApiError('The API returned no response body.');
       if (!(await this.retryLater(attempt, last.message, opts.onRetry, opts.signal))) {
         throw withAttempts(last, attempt);
       }
     }
-    throw last ?? new DeepSeekError(`DeepSeek request failed after ${MAX_ATTEMPTS} attempts.`);
+    throw last ?? new ApiError(`The request failed after ${MAX_ATTEMPTS} attempts.`);
   }
 
   /**
@@ -638,12 +639,12 @@ export class DeepSeekClient {
    * Non-streaming completion (`stream: false`), for small side tasks that want a
    * single short answer and no SSE plumbing — e.g. generating a session title.
    * Returns the assistant text ('' when the API answered with nothing) and the
-   * usage when the API reported it. Throws `DeepSeekError` like `stream`.
+   * usage when the API reported it. Throws `ApiError` like `stream`.
    */
   async complete(request: CompletionRequest): Promise<{ text: string; usage?: Usage }> {
     if (!this.options.apiKey) {
-      throw new DeepSeekError(
-        'No DeepSeek API key configured. Run the spinney.setApiKey command (or set the DEEPSEEK_API_KEY environment variable).',
+      throw new ApiError(
+        'No API key configured for this provider. Run the spinney.setApiKey command (or set the DEEPSEEK_API_KEY environment variable for the built-in provider).',
       );
     }
     const url = `${this.options.baseUrl.replace(/\/$/, '')}/chat/completions`;

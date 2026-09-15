@@ -3,9 +3,9 @@
 Two halves of one story — "a model call failed, what now?" — and neither may be
 implemented anywhere else.
 
-## 1. Transparent retries (`src/agent/deepseek.ts`)
+## 1. Transparent retries (`src/agent/apiClient.ts`)
 
-`DeepSeekClient.stream` and `.complete` both POST through `postWithRetry`, which
+`ApiClient.stream` and `.complete` both POST through `postWithRetry`, which
 retries a **transient** failure up to `MAX_ATTEMPTS = 10` total attempts
 (the initial try + 9 retries) with `retryDelay` backoff: 1s, 2s, 4s, … capped at
 `RETRY_MAX_DELAY_MS = 30s` (worst case ≈ 2.5 minutes).
@@ -27,7 +27,7 @@ retries a **transient** failure up to `MAX_ATTEMPTS = 10` total attempts
   (the Agent turns it into a `status` event, `retryStatus` in `agent.ts`:
   "Model call failed (2/10); retrying in 2s…") and logged via `perf()` to the
   Spinney output channel with the clipped reason. When attempts run out,
-  `withAttempts` appends `(after 10 attempts)` to the `DeepSeekError` message, so
+  `withAttempts` appends `(after 10 attempts)` to the `ApiError` message, so
   the error bubble in the chat says why it gave up.
 - `uploadFile` and `getBalance` are **not** retried: an image upload failure is
   reported in the tool result / a warning notice, and a balance refresh is
@@ -45,7 +45,7 @@ was the user pressing Stop. That was the "the first answer takes forever, and St
 handed a pooled keep-alive socket the provider already dropped, `fetch` never
 resolves, the turn shows `Thinking…` with the tok/s meter pinned at 0, and the
 `[perf]` channel stays empty (nothing is logged before the response headers
-arrive). Three timers in `deepseek.ts` now bound it:
+arrive). Three timers in `apiClient.ts` now bound it:
 
 - `FIRST_BYTE_TIMEOUT_MS` (20 s) — no response headers. `FIRST_BYTE_TIMEOUT_AFTER_IDLE_MS`
   (12 s) is used instead when the previous attempt started ≥ `IDLE_GAP_MS` (60 s)

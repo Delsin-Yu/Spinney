@@ -22,7 +22,7 @@ SessionRuntime (src/chat/runtime.ts) — all per-session state, one instance per
 Agent (src/agent/agent.ts) — one worker per **node** (`workerFor`), each with its own
    |   ToolRegistry — streaming loop
    v
-ClientRegistry (src/agent/clients.ts) → DeepSeekClient (src/agent/deepseek.ts)
+ClientRegistry (src/agent/clients.ts) → ApiClient (src/agent/apiClient.ts)
    |   one client per provider (baseUrl + its key), the two RequestGates
    |   tools (function calls)
    v

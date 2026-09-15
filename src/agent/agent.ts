@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { DeepSeekError, RetryInfo } from './deepseek';
+import { ApiError, RetryInfo } from './apiClient';
 import { ClientRegistry, QueueInfo } from './clients';
 import { ToolRegistry, resolvePath } from '../tools';
 import {
@@ -1167,7 +1167,7 @@ export class Agent {
    * image was recorded, i.e. when a retry can make progress.
    */
   private markRejectedImages(err: unknown): boolean {
-    if (!(err instanceof DeepSeekError) || err.status !== 400) {
+    if (!(err instanceof ApiError) || err.status !== 400) {
       return false;
     }
     if (!/unsupported image/i.test(err.message)) {

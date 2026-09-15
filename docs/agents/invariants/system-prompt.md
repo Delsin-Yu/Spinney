@@ -38,7 +38,7 @@
   **both** the prompt and the tools array for one (role, model, effort,
   capabilities) profile — the public answer to "what does the model receive?".
 - **No tool list in the prompt.** Every tool's schema is sent in the API request's
-  `tools` field (`Agent.getTools()` → `src/agent/deepseek.ts` `body.tools`), so
+  `tools` field (`Agent.getTools()` → `src/agent/apiClient.ts` `body.tools`), so
   repeating signatures in the prompt would only be a second copy to drift. There is
   deliberately no "tool index" placeholder — do not add one.
 - **Capabilities are one judgement, used twice.** Each intercepted tool declares a

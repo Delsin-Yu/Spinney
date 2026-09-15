@@ -79,7 +79,7 @@ const T = require(path.join(ROOT, 'out', 'chat', 'tree.js'));
 const M = require(path.join(ROOT, 'out', 'agent', 'models.js'));
 const { ClientRegistry } = require(path.join(ROOT, 'out', 'agent', 'clients.js'));
 const { BackgroundHub } = require(path.join(ROOT, 'out', 'chat', 'backgroundHub.js'));
-const { DeepSeekClient } = require(path.join(ROOT, 'out', 'agent', 'deepseek.js'));
+const { ApiClient } = require(path.join(ROOT, 'out', 'agent', 'apiClient.js'));
 
 // --- the catalog: three cards, two dialects -----------------------------------
 const DS = 'deepseek-flash'; // the vendored card's id: `deepseek` transport
@@ -114,7 +114,7 @@ M.setCatalog(
 
 // --- an offline client that records every request ------------------------------
 const requests = [];
-DeepSeekClient.prototype.stream = async function* (request) {
+ApiClient.prototype.stream = async function* (request) {
   requests.push({ model: request.model, messages: JSON.parse(JSON.stringify(request.messages ?? [])), thinkingEffort: request.thinkingEffort });
   yield { choices: [{ delta: { content: 'ok' } }] };
 };

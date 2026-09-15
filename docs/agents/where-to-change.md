@@ -115,5 +115,5 @@
   (`applySessionTitle` / `renameSession` / the auto-title drain + backfill). The
   sidebar commands are `spinney.renameSession` / `spinney.autoRenameSession`;
   the agent-facing tool is `rename_session`.
-- **Change the API client** → `src/agent/deepseek.ts`.
+- **Change the API client** → `src/agent/apiClient.ts`.
 

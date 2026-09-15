@@ -62,9 +62,9 @@ const T = require(path.join(ROOT, 'out', 'chat', 'tree.js'));
 const M = require(path.join(ROOT, 'out', 'agent', 'models.js'));
 const { ClientRegistry } = require(path.join(ROOT, 'out', 'agent', 'clients.js'));
 const { BackgroundHub } = require(path.join(ROOT, 'out', 'chat', 'backgroundHub.js'));
-const { DeepSeekClient } = require(path.join(ROOT, 'out', 'agent', 'deepseek.js'));
+const { ApiClient } = require(path.join(ROOT, 'out', 'agent', 'apiClient.js'));
 
-DeepSeekClient.prototype.stream = async function* () {
+ApiClient.prototype.stream = async function* () {
   throw new Error('offline (acceptance run)');
 };
 

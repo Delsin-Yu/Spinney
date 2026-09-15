@@ -554,7 +554,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    * takes effect in this window instead of only after a reload.
    *
    * - **base URL** and the **API key** of a provider are read into that
-   *   provider's `DeepSeekClient` through `ClientRegistry`: the first by
+   *   provider's `ApiClient` through `ClientRegistry`: the first by
    *   `applyCatalog()`, the second by `refreshKeys` (a key is not a setting — it
    *   lives in SecretStorage, installed by `spinney.setApiKey`, so a settings
    *   event only invalidates the cache). Every runtime's agent and every

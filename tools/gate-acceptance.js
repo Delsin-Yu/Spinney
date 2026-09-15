@@ -25,7 +25,7 @@ const ok = (label, cond, detail) => {
 const { RequestGate } = require(path.join(ROOT, 'out', 'agent', 'requestGate.js'));
 const M = require(path.join(ROOT, 'out', 'agent', 'models.js'));
 const { ClientRegistry } = require(path.join(ROOT, 'out', 'agent', 'clients.js'));
-const { DeepSeekClient } = require(path.join(ROOT, 'out', 'agent', 'deepseek.js'));
+const { ApiClient } = require(path.join(ROOT, 'out', 'agent', 'apiClient.js'));
 
 const tick = (ms = 0) => new Promise((r) => setTimeout(r, ms));
 
@@ -180,7 +180,7 @@ process.on('exit', (code) => {
     let live = 0;
     let maxLive = 0;
     let sentModel = '';
-    DeepSeekClient.prototype.stream = async function* (request) {
+    ApiClient.prototype.stream = async function* (request) {
       live++;
       maxLive = Math.max(maxLive, live);
       sentModel = request.model;
@@ -189,7 +189,7 @@ process.on('exit', (code) => {
       await tick(30);
       live--;
     };
-    DeepSeekClient.prototype.complete = async function () {
+    ApiClient.prototype.complete = async function () {
       return { text: 'title' };
     };
 
