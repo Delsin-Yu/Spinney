@@ -9,6 +9,7 @@ node_modules/**
 .gitignore
 .gitattributes
 AGENTS.md
+SECURITY.md
 tsconfig.json
 **/*.map
 **/*.ts
