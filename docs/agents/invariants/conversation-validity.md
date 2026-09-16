@@ -20,13 +20,14 @@
   messages. It is **not** applied by `loadSessions` (`ChatViewProvider.loadSessions` only
   hands the stored tree to `pruneSession`, which heals the nodes). The sanitized copy is
   produced where a request is assembled: `SessionRuntime.buildPath`
-  (`src/chat/runtime.ts:1475`) prepends the fresh system prompt and sanitizes the path
+  (`src/chat/runtime.ts:1484`) prepends the fresh system prompt and sanitizes the path
   messages, and a sub-agent resume does the same for its stored conversation
-  (`src/chat/runtime.ts:3455`). The sanitized copy is derived, never written back into the
+  (`src/chat/runtime.ts:3499`). The sanitized copy is derived, never written back into the
   nodes (`src/chat/tree.ts:17`).
 - No system message is ever stored: `pruneSession` (`src/chat/tree.ts:531`) deletes a stored
   one (`src/chat/tree.ts:542`), and a fresh prompt is synthesized per run by
-  `SessionRuntime.buildPath` / `SessionRuntime.systemPromptFor` (`src/chat/runtime.ts:1050`).
+  `SessionRuntime.buildPath` / `SessionRuntime.systemPromptFor`
+  (`src/chat/runtime.ts:1484`, `src/chat/runtime.ts:1067`).
   So there is no stored identity to refresh on load — the leading system message is built at
   request time, which is what `docs/agents/invariants/chat-tree.md` means by "the system
   prompt is never stored in a node".

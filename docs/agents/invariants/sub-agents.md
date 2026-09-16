@@ -8,7 +8,7 @@
   `spinney.maxConcurrentSubagents` (default **15**, sized into `SubAgentPool` in `src/chat/runtime.ts`),
   the surplus tasks queueing for a free slot, and each parent may start at most
   `spinney.maxLevel2Subagents` (default **2**) depth-2 children, past which the spawn returns
-  `Error: this sub-agent may start at most N sub-sub-agents (M already started).` (`src/chat/runtime.ts:3258-3265`).
+  `Error: this sub-agent may start at most N sub-sub-agents (M already started).` (`src/chat/runtime.ts:3301-3309`).
   A read-only depth-1 sub-agent gets `spawn_readonly_agents` instead of
   `spawn_agents` (`canSpawn = depth < 2 && write`, `canSpawnReadOnly = depth < 2 && !write`): its agent
   specs have no `write` field, `Agent.executeToolCall` rewrites every spec to `write:false` (so a
@@ -21,12 +21,12 @@
   volunteer to decompose. `mode:'sync'` blocks and returns `{ results }`;
   `mode:'async'` returns
   `{ spawned, async:true, ids, transcriptDir }` immediately and the whole batch settles into **one** completion
-  signal for the parent node (`onAsyncBatchDone` `runtime.ts:3703` → `queueSubAgentSignal`
-  `runtime.ts:3492`). A signal is delivered either at the parent turn's **next tool boundary** (injected into the running
+  signal for the parent node (`onAsyncBatchDone` `runtime.ts:3747` → `queueSubAgentSignal`
+  `runtime.ts:3536`). A signal is delivered either at the parent turn's **next tool boundary** (injected into the running
   turn, so the model reacts on its next hop) or, when the parent is idle, as an injected turn on
   that same node — never as a new node.
 - **A sub-agent's tool surface is a subset — and it excludes the background tools.** `subAgentTools`
-  (`src/chat/runtime.ts:3042-3052`) builds from `workerFor(node).tools`, so a sub-agent sees exactly
+  (`src/chat/runtime.ts:3086-3097`) builds from `workerFor(node).tools`, so a sub-agent sees exactly
   `read_file` / `list_dir` / `search_files` / `search_transcripts` (plus `write_file` /
   `replace_in_file` / `exec_command` when it is writable) and nothing else. `check_background_terminal` /
   `kill_background` / `join_background` are **not** in that list: a sub-agent that backgrounds a job
@@ -38,9 +38,9 @@
 - `send_agent_message({ id, message, write?, model?, mode })` resumes a **finished** sub-agent (the
   `id` from a prior `spawn_agents`) with a follow-up `message`. `sync` blocks and returns the resumed
   result; `async` returns immediately and delivers the result as a notice. `model` is not a wire-name
-  whitelist: it goes through `parseModelOverride` → `resolveCard` (`src/chat/runtime.ts:3133-3141`), so any
+  whitelist: it goes through `parseModelOverride` → `resolveCard` (`src/chat/runtime.ts:3177-3186`), so any
   spelling a card resolves by — its card id, its display name or its wire name — is accepted and anything
-  unknown answers `Error: unknown model "…".` (`src/chat/runtime.ts:3279-3282`). A still-running target
+  unknown answers `Error: unknown model "…".` (`src/chat/runtime.ts:3183`). A still-running target
   returns `still running`.
 - A sub-agent is a `kind:'agent'` node — a **display-only sidecar**: its own conversation is a separate
   history and `pathMessages` (in `tree.ts`) skips it, so it never leaks into the parent's API path. On
@@ -60,11 +60,11 @@
   Stop on the main node still reaches it. See
   `invariants/background-terminals.md` for the same rule on jobs.
 - **`Delivered`:** a sidecar node carries `delivered` (`tree.ts:110`) once its outcome reached its
-  reader, which is what the card's `Delivered` badge shows (`media/main.js:1206-1219`, `applyDeliveredBadge`).
+  reader, which is what the card's `Delivered` badge shows (`media/main.js:1211-1224`, `applyDeliveredBadge`).
   A `sync` `spawn_agents` / `send_agent_message` hands the summary back as the caller's tool result, so
-  `finish` sets it directly (`runtime.ts:3340-3344` for a spawn batch, `runtime.ts:3189-3193` for a
+  `finish` sets it directly (`runtime.ts:3384-3388` for a spawn batch, `runtime.ts:3233-3237` for a
   resume); an async batch sets it when its notice is actually delivered (`settleSignals`,
-  `runtime.ts:4172-4186`, followed by a `postTree()`). A sub-agent that was still running when the host
+  `runtime.ts:4216-4231`, followed by a `postTree()`). A sub-agent that was still running when the host
   went away is normalized to `killed` on load (`tree.ts:555-558`) and stays as a record card.
 - **Transcript dumps (`node.agentTranscript`):** because the caller can only ever see the sub-agent's
   summary, `runSubAgent`'s `finish` also writes the whole conversation to disk as **JSONL**
@@ -77,14 +77,14 @@
   grep it. A resume **overwrites** the same `<nodeId>.jsonl` with the extended conversation. Folder,
   config and the shared search surface are described in "Transcripts" above.
 - Async results for a **sub-agent parent** (a depth-1 sub-agent that spawned depth-2 children in async
-  mode) take the same path as the main agent's (D3): `queueSubAgentSignal` (`runtime.ts:3492-3505`)
+  mode) take the same path as the main agent's (D3): `queueSubAgentSignal` (`runtime.ts:3536`)
   queues the signal under the parent node when the parent is live — the parent's own
-  `Agent.setSignalHandler` hook (`runtime.ts:3429`) then injects it at its next tool boundary, so a
+  `Agent.setSignalHandler` hook (`runtime.ts:3473`) then injects it at its next tool boundary, so a
   depth-1 sub-agent learns about its depth-2 children **mid-turn**, exactly like the main agent — and
   resumes the parent with the notice when it already finished (its history is not in the API path, so
-  it cannot receive an injected turn; the idle drain does the same, `runtime.ts:4050-4062`). Either way
+  it cannot receive an injected turn; the idle drain does the same, `runtime.ts:4094-4106`). Either way
   the notice lands inside the parent node's own card as a `.bgnotify` block (`renderSignalCards`,
-  `runtime.ts:4147-4168`) — a child's completion never opens a node under it.
+  `runtime.ts:4191`) — a child's completion never opens a node under it.
 - A sub-agent branch is checked-out as **read-only** and the composer pane is **hidden** while such a node
   is focused (`setComposerVisible(false)` in `setActiveLeaf`); only the parent drives it via
   `spawn_agents` / `send_agent_message`. `onKillAgent` aborts a running sub-agent from its card's ✕.

@@ -7,66 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- The **user manual**, shipped inside the package and opened by **`Spinney: Show User Manual`**:
-  a reference for the person using the extension — the chat tree and its gestures, sessions and
-  tabs, models and providers, sub-agents and background terminals, images, retries, the context
-  rollover, a full settings reference, a full command reference, privacy, and troubleshooting. It
-  follows the VS Code display language (one page per shipped catalog: English, `zh-Hans`,
-  `zh-Hant`, with English as the source and the fallback) and opens as an untitled markdown tab,
-  the way `Spinney: Show System Prompt` does. Every page is written in ASD-STE100 Simplified
-  Technical English, and the language pages quote the UI through the shipped catalogs, so they
-  read the way the window does.
-- A packaging guard, `npm run check:docs` (`tools/check-docs.js`): a language that ships a catalog
-  but no page, a heading structure that diverged across the translated pages, a command title or
-  a `spinney.*` key missing from a reference table, and a `.vscodeignore` pattern that would keep
-  the pages out of the `.vsix` all fail the package instead of the reader.
-- The wallet readout is a **provider** property now instead of an assumption. A provider
-  row carries `balance`, which is one of `none` (no wallet line at all — the default for
-  a new row, and the right answer for a local vLLM/llama.cpp endpoint), `deepseek`
-  (`GET /user/balance`), `openrouter` (`GET /credits`) or `moonshot`
-  (`GET /users/me/balance`), and the Model Cards page's provider form has a select for
-  it. A row that omits the field is read with the dialect this harness knows for that
-  host — `api.deepseek.com` → `deepseek`, anything else → `none` — because it is
-  declared, never probed: no request is spent finding out, and no endpoint is read as if
-  it spoke DeepSeek's dialect. The built-in provider still reads DeepSeek's wallet.
-- The Model Cards page says when it holds unsaved edits. The editor tab's title carries
-  `* Model Cards` while the draft differs from the stored configuration, and a **docked**
-  status strip at the very top of the view says the same thing in the display language
-  (*No unsaved changes.* while it matches, *You have unsaved changes.* while it does not).
-  The strip is never hidden and is one line tall in both states, so the tree below it does
-  not move when the first edit lands. Both follow the one flag Save / Revert read, so a
-  save, a revert or a fresh snapshot clears them. Closing the tab cannot be vetoed
-  (`WebviewPanel` only reports `onDidDispose`), so the mark is on screen while the work is
-  unsaved rather than raised on the way out.
-
-### Changed
-
-- `README.md` is a summary again. The tool tables, the model-card field lists, and the
-  privacy / uninstall detail moved into the manual, which is the one home for user-facing
-  reference text; the README keeps the pitch, the install, the first-run steps and the links.
-  A detail that lived in two places is the detail that drifts.
-- `tools/check-models.js` scans `manual/**` alongside `README.md` and `docs/**`, so the manual
-  can only name model ids the catalog has.
-- The wallet number belongs to the provider that reported it, and no longer outlives it:
-  a `none` provider shows no figure at all, and a refresh that fails now clears the
-  number instead of leaving the previous provider's on screen. The readout is still
-  never retried, and its tooltip names the provider the number belongs to.
-- The API client, its error and its options are no longer named after DeepSeek:
-  `src/agent/deepseek.ts` → `src/agent/apiClient.ts`, `DeepSeekClient` → `ApiClient`,
-  `DeepSeekError` → `ApiError`, `DeepSeekOptions` → `ClientOptions`. Nothing in it was
-  ever DeepSeek-specific — there is one instance per provider and every endpoint it
-  talks to is OpenAI-compatible — and its error text no longer claims otherwise.
-  Everything that really is DeepSeek keeps the name: the vendored `deepseek-flash`
-  card, the built-in provider's base URL, `DEEPSEEK_API_KEY`, and the `deepseek` image
-  transport.
-- The Model Cards page's banner is localized. An unusable `settings.json` row is reported
-  as structured data (a code plus its arguments) and turned into a sentence by the page's
-  host, so the banner reads in the display language like the rest of the page. The
-  Spinney **output channel** keeps the English wording it has always printed —
-  diagnostics are deliberately not translated.
-
 ## [0.0.2] - 2026-09-16
 
 The first public release. No earlier build was ever shipped, so this entry covers
@@ -203,6 +143,45 @@ everything the extension contains — the baseline the project had reached at th
   name matches a shipped snippet replaces its text, any other name adds a row, and the
   shipped ones always stay available. Editing the setting repaints the menu in an open
   chat tab, with no reload.
+- The **user manual**, shipped inside the package and opened by **`Spinney: Show User Manual`**:
+  a reference for the person using the extension — the chat tree and its gestures, sessions and
+  tabs, models and providers, sub-agents and background terminals, images, retries, the context
+  rollover, a full settings reference, a full command reference, privacy, and troubleshooting. It
+  follows the VS Code display language (one page per shipped catalog: English, `zh-Hans`,
+  `zh-Hant`, with English as the source and the fallback) and opens as an untitled markdown tab,
+  the way `Spinney: Show System Prompt` does. Every page is written in ASD-STE100 Simplified
+  Technical English, and the language pages quote the UI through the shipped catalogs, so they
+  read the way the window does.
+- A packaging guard, `npm run check:docs` (`tools/check-docs.js`): a language that ships a catalog
+  but no page, a heading structure that diverged across the translated pages, a command title or
+  a `spinney.*` key missing from a reference table, and a `.vscodeignore` pattern that would keep
+  the pages out of the `.vsix` all fail the package instead of the reader.
+- The wallet readout is a **provider** property now instead of an assumption. A provider
+  row carries `balance`, which is one of `none` (no wallet line at all — the default for
+  a new row, and the right answer for a local vLLM/llama.cpp endpoint), `deepseek`
+  (`GET /user/balance`), `openrouter` (`GET /credits`) or `moonshot`
+  (`GET /users/me/balance`), and the Model Cards page's provider form has a select for
+  it. A row that omits the field is read with the dialect this harness knows for that
+  host — `api.deepseek.com` → `deepseek`, anything else → `none` — because it is
+  declared, never probed: no request is spent finding out, and no endpoint is read as if
+  it spoke DeepSeek's dialect. The built-in provider still reads DeepSeek's wallet.
+- The Model Cards page says when it holds unsaved edits. The editor tab's title carries
+  `* Model Cards` while the draft differs from the stored configuration, and a **docked**
+  status strip at the very top of the view says the same thing in the display language
+  (*No unsaved changes.* while it matches, *You have unsaved changes.* while it does not).
+  The strip is never hidden and is one line tall in both states, so the tree below it does
+  not move when the first edit lands. Both follow the one flag Save / Revert read, so a
+  save, a revert or a fresh snapshot clears them. Closing the tab cannot be vetoed
+  (`WebviewPanel` only reports `onDidDispose`), so the mark is on screen while the work is
+  unsaved rather than raised on the way out.
+- An **approval gate** in the system prompt (`## Approval before work`): the agent
+  discusses a request — what changes, where, the trade-offs — and waits for a go-ahead
+  before *state-changing* work, while reading and searching during the discussion stay
+  free. A clear request is not an approval, and neither is silence or a correction; the
+  approval covers the topic rather than every step (so it does not re-ask per file, but it
+  does re-confirm before going past what was agreed), and an explicit "just do it" starts
+  that topic directly. The gate is main-agent text — a sub-agent has no user to ask, so
+  the sub-agent prompt is untouched.
 
 ### Changed
 
@@ -285,6 +264,29 @@ everything the extension contains — the baseline the project had reached at th
   to its cell — so a sub-agent that spawned sub-agents ends flush with its own sub-grid
   instead of stopping early beside it, and a deep branch costs only its own column
   instead of leaving a dead gap under the cards of a shallower one.
+- `README.md` is a summary again. The tool tables, the model-card field lists, and the
+  privacy / uninstall detail moved into the manual, which is the one home for user-facing
+  reference text; the README keeps the pitch, the install, the first-run steps and the links.
+  A detail that lived in two places is the detail that drifts.
+- `tools/check-models.js` scans `manual/**` alongside `README.md` and `docs/**`, so the manual
+  can only name model ids the catalog has.
+- The wallet number belongs to the provider that reported it, and no longer outlives it:
+  a `none` provider shows no figure at all, and a refresh that fails now clears the
+  number instead of leaving the previous provider's on screen. The readout is still
+  never retried, and its tooltip names the provider the number belongs to.
+- The API client, its error and its options are no longer named after DeepSeek:
+  `src/agent/deepseek.ts` → `src/agent/apiClient.ts`, `DeepSeekClient` → `ApiClient`,
+  `DeepSeekError` → `ApiError`, `DeepSeekOptions` → `ClientOptions`. Nothing in it was
+  ever DeepSeek-specific — there is one instance per provider and every endpoint it
+  talks to is OpenAI-compatible — and its error text no longer claims otherwise.
+  Everything that really is DeepSeek keeps the name: the vendored `deepseek-flash`
+  card, the built-in provider's base URL, `DEEPSEEK_API_KEY`, and the `deepseek` image
+  transport.
+- The Model Cards page's banner is localized. An unusable `settings.json` row is reported
+  as structured data (a code plus its arguments) and turned into a sentence by the page's
+  host, so the banner reads in the display language like the rest of the page. The
+  Spinney **output channel** keeps the English wording it has always printed —
+  diagnostics are deliberately not translated.
 
 ### Removed
 
@@ -293,6 +295,13 @@ everything the extension contains — the baseline the project had reached at th
 - The fixed four-level effort enum (`none|low|medium|high`) as a harness-wide
   concept.
 - `spinney.model.enum`: the dropdown is built from `spinney.modelCards`.
+- `spinney.maxTurns`: the tool loop runs until the model answers in plain text, with no
+  cap on tool-call rounds per user message (the "Stopped after N tool rounds (loop
+  limit)" rollback went with it).
+- `spinney.openChat` and `spinney.focus`, and the sessions view's title-bar action that
+  opened the chat tree: the sessions view is a session list rather than a unified tree,
+  so a chat tab is opened by clicking a session in the list (`spinney.openSession`)
+  only.
 
 ### Fixed
 
@@ -311,3 +320,6 @@ everything the extension contains — the baseline the project had reached at th
   channel also gained `request-headers pending/slow`, `request-first-chunk`,
   `request-timeout` and `request-stall` lines, so a request that has not produced
   its first byte is now visible *while* it waits.
+
+[Unreleased]: https://github.com/Delsin-Yu/Spinney/compare/v0.0.2...HEAD
+[0.0.2]: https://github.com/Delsin-Yu/Spinney/releases/tag/v0.0.2

@@ -104,10 +104,13 @@ it. The ground truth for "too big" stays the API's 400, whose message names both
 the window and the size it refused.
 
 That 400 text now has a **second consumer**: `parseContextLengthError()` in the
-same catalog module reads the window and the refused size back out of it, and that
-is what triggers a context rollover (`context-rollover.md`) — the provider's
-refusal, never a local threshold, because a threshold would have to fire before
-the window is full and would therefore have to summarise. `usage.prompt_tokens`
+same catalog module recognizes the refusal, and that is what triggers a context
+rollover (`context-rollover.md`) — the provider's refusal, never a local
+threshold, because a threshold would have to fire before the window is full and
+would therefore have to summarise. The parser does return the window and the
+refused size it matched, but no caller reads them: its one consumer
+(`contextFull`, `chat/runtime.ts`) only asks whether the failure *is* that
+refusal, which is why the fields are never compared or written back. `usage.prompt_tokens`
 is **never a trigger, only a readout**: it is the *previous* request's number, and
 it has already lied once — the header read `ctx 65%` while the request that failed
 carried ~1.28 M tokens. When the window named in the 400 disagrees with

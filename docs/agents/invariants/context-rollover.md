@@ -222,7 +222,7 @@ Rules for building it:
 - **The pointer degrades.** If `spinney.saveSessionTranscripts` is off, or the
   file is missing (`rolloverTranscriptOnDisk(prevId)` →
   `fs.existsSync(path.join(host.transcriptDir(sessionId), prevId + '.jsonl'))`, the path
-  builder being `rolloverTranscriptPath`; `src/chat/runtime.ts` ~:2474-2494),
+  builder being `rolloverTranscriptPath`; `src/chat/runtime.ts` ~:2519-2529),
   the pointer lines are replaced by: *"The previous window's transcript is not
   available on disk; rely on the carried-over text and ask the user when a detail
   is missing."*

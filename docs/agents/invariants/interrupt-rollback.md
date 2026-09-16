@@ -27,8 +27,8 @@
   new message is a steering correction (continue) or a fresh request (restart) —
   it does **not** force a restart.
 - `Agent.sanitizeMessages` is applied where a history is assembled, **not** on session
-  restore: `SessionRuntime.buildPath` (`src/chat/runtime.ts` ~:1475) and a sub-agent
-  resume in `runSubAgent` (~:3455). It treats an assistant
+  restore: `SessionRuntime.buildPath` (`src/chat/runtime.ts` ~:1484) and a sub-agent
+  resume in `runSubAgent` (~:3499). It treats an assistant
   message without `tool_calls` as valid, so a preserved checkpoint message
   followed by a `user` message is safe on resume.
 - A turn that ended in `interrupted` (or `error`) also offers the ▶ Continue

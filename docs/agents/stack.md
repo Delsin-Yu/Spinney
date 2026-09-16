@@ -8,6 +8,6 @@
   `http`/`axios` dep.
 - **Runtime deps:** **none.** `node_modules` is only devDependencies
   (`typescript`, `@types/node`, `@types/vscode`, `@vscode/vsce`).
-- **Packaging:** `@vscode/vsce` produces a `.vsix`; `spinney-0.0.1.vsix` is a
+- **Packaging:** `@vscode/vsce` produces a `.vsix`; `spinney-0.0.2.vsix` is a
   **local build artifact** (gitignored via `*.vsix`, never tracked).
 

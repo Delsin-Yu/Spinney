@@ -287,7 +287,7 @@
   active node's input dock: `setActiveLeaf` moves `#composer` into the
   checked-out card's bottom. It has no other home — with an empty session the
   placeholder card hosts it, and with a focused sidecar card (a sub-agent window or
-  a background job card — `isSidecarKind`, `media/main.js:303`) or no active
+  a background job card — `isSidecarKind`, `media/main.js:307-309`) or no active
   node the pane is **hidden entirely** (`setComposerVisible(false)`); there is
   no floating/docked fallback. The pane keeps one fixed size: nothing about the
   host card's width (or its resize handle) scales it.

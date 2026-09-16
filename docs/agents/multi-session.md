@@ -262,7 +262,7 @@ Rules that keep a reboot verifiable (the self-driving loop):
 - `POST /wait-for-finish {holdMs}` arms a hold (`ChatViewProvider.isHeld()`), and **every** turn
   start is refused while it is armed — `beginTurn` and `beginInjectedTurn` both gate on it, and
   the completion-signal hook `takeSignalsFor()` returns nothing while it is held
-  (`src/chat/runtime.ts` ~:3987-3999, hold check ~:3995) — injected
+  (`src/chat/runtime.ts` ~:4031, hold check ~:4039) — injected
   background/sub-agent notice turns included. `/reload-window` itself refuses while a
   turn runs, so the hold is what closes the race: once idle, nothing new can start.
 - Restore the **focus before** the reboot: `wait-for-finish`'s `{sessionId, nodeId}` is what the
