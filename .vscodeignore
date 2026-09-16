@@ -14,4 +14,8 @@ tsconfig.json
 **/*.ts
 build-deploy.ps1
 docs/**
+# Repository art for the README (screenshots). It never ships: the Marketplace reads
+# the README from the repository, and vsce rewrites a relative image path to its raw
+# URL, so the file is fetched, not packaged.
+assets/**
 *.vsix
