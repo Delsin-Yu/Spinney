@@ -8,9 +8,9 @@ host behaviour: `node tools/harness-test.mjs <suite...|all>` (suites `health`, `
 `multi-session.md` §5.1). Manual F5 checks still cover what the harness cannot see — the F5
 flow exercises read/write/exec against a scratch file (keep it in `.spinney/`, which is
 gitignored, so a leftover is harmless). Before a release, confirm `npm run compile` is clean and
-`build-deploy.ps1` succeeds. CI (`.github/workflows/ci.yml`) runs only a subset of the guards
-below — `compile` + `check:models` + `check:webview` + `check:signals` — so green CI is not the
-same as a green release gate.
+`build-deploy.ps1` succeeds. CI (`.github/workflows/ci.yml`) runs the release gate itself —
+`npm run vscode:prepublish` — on a push to `main`, on a `v*` tag, on a pull request and on
+demand, so a red workflow and a red gate are the same thing instead of two lists that drift.
 
 Eight build-time guards are the exception, all run by `vscode:prepublish` so a
 regression fails *packaging* instead of the user's session:
