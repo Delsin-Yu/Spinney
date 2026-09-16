@@ -4,6 +4,7 @@ import { MODEL_VIEW_TYPE } from './chat/ModelPanel';
 import { ChatViewProvider } from './chat/ChatViewProvider';
 import { SessionsProvider } from './chat/SessionsProvider';
 import { ControlServer } from './http/controlServer';
+import { showManual } from './manual';
 import { setHarnessStorageDir } from './tools';
 
 let chatProvider: ChatViewProvider | undefined;
@@ -186,6 +187,11 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('spinney.clear', () => chatProvider?.clear()),
     vscode.commands.registerCommand('spinney.showSystemPrompt', () => {
       void chatProvider?.showSystemPrompt();
+    }),
+    // The user manual is not chat state: it is a page shipped in the `.vsix`
+    // (`manual/`), rendered in an untitled tab for the window's display language.
+    vscode.commands.registerCommand('spinney.showManual', () => {
+      void showManual(context.extensionUri);
     }),
   );
 }

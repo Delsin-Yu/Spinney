@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The **user manual**, shipped inside the package and opened by **`Spinney: Show User Manual`**:
+  a reference for the person using the extension — the chat tree and its gestures, sessions and
+  tabs, models and providers, sub-agents and background terminals, images, retries, the context
+  rollover, a full settings reference, a full command reference, privacy, and troubleshooting. It
+  follows the VS Code display language (one page per shipped catalog: English, `zh-Hans`,
+  `zh-Hant`, with English as the source and the fallback) and opens as an untitled markdown tab,
+  the way `Spinney: Show System Prompt` does. Every page is written in ASD-STE100 Simplified
+  Technical English, and the language pages quote the UI through the shipped catalogs, so they
+  read the way the window does.
+- A packaging guard, `npm run check:docs` (`tools/check-docs.js`): a language that ships a catalog
+  but no page, a heading structure that diverged across the translated pages, a command title or
+  a `spinney.*` key missing from a reference table, and a `.vscodeignore` pattern that would keep
+  the pages out of the `.vsix` all fail the package instead of the reader.
 - The wallet readout is a **provider** property now instead of an assumption. A provider
   row carries `balance`, which is one of `none` (no wallet line at all — the default for
   a new row, and the right answer for a local vLLM/llama.cpp endpoint), `deepseek`
@@ -30,6 +43,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `README.md` is a summary again. The tool tables, the model-card field lists, and the
+  privacy / uninstall detail moved into the manual, which is the one home for user-facing
+  reference text; the README keeps the pitch, the install, the first-run steps and the links.
+  A detail that lived in two places is the detail that drifts.
+- `tools/check-models.js` scans `manual/**` alongside `README.md` and `docs/**`, so the manual
+  can only name model ids the catalog has.
 - The wallet number belongs to the provider that reported it, and no longer outlives it:
   a `none` provider shows no figure at all, and a refresh that fails now clears the
   number instead of leaving the previous provider's on screen. The readout is still

@@ -10,6 +10,7 @@
   "Spinney: API key saved.": "Spinney：API 密钥已保存。",
   "Spinney: stored API key cleared — still using the DEEPSEEK_API_KEY environment variable.": "Spinney：已清除保存的 API 密钥 — 仍在使用 DEEPSEEK_API_KEY 环境变量。",
   "Spinney: API key cleared.": "Spinney：API 密钥已清除。",
+  "The Spinney user manual is missing from this installation.": "当前安装缺少 Spinney 用户手册。",
   "Set API Key": "设置 API 密钥",
   "Spinney: no API key is configured for this provider yet.": "Spinney：尚未为此服务商配置 API 密钥。",
   "Session title — renaming locks it, so automatic naming will not overwrite it.": "会话标题 — 手动重命名会锁定标题，自动命名将不再覆盖它。",

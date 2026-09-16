@@ -12,7 +12,7 @@ gitignored, so a leftover is harmless). Before a release, confirm `npm run compi
 below — `compile` + `check:models` + `check:webview` + `check:signals` — so green CI is not the
 same as a green release gate.
 
-Seven build-time guards are the exception, all run by `vscode:prepublish` so a
+Eight build-time guards are the exception, all run by `vscode:prepublish` so a
 regression fails *packaging* instead of the user's session:
 
 - `npm run check:models` (`tools/check-models.js`) — the model configuration:
@@ -109,6 +109,19 @@ regression fails *packaging* instead of the user's session:
   way this layout could creep every frame. Drift in any of the four `media/tree.js`
   invariants just named — the per-column stacks, the even fill, the `stretch` map, the
   corridors — fails packaging here instead of shipping.
+- `npm run check:docs` (`tools/check-docs.js`) — the **shipped user manual**
+  (`manual/**`, one page per catalog language, English first) against the manifest: a
+  language that ships a catalog but no page (the set comes from
+  `l10n/bundle.l10n.<tag>.json`, minus the reported-tag aliases `sync:l10n` writes, and
+  the tag pair is read from `out/languageTags.js`, so this one runs after `compile`),
+  a heading level sequence that diverged across the translated pages, a command title
+  or a `spinney.*` setting key missing from a page (the titles are the localized
+  `package.nls*.json` values, which is what the palette shows), and a `.vscodeignore`
+  pattern that would keep a page out of the `.vsix` — the ignore file is evaluated the
+  way `vsce` reads it (last match wins, `!` re-includes, a slash-free pattern matches
+  the base name). `node tools/check-docs.js <dir>` points it at another manual folder,
+  which is how to prove it still catches what it is for. See
+  `docs/agents/user-manual.md`.
 
 `tools/rollover-acceptance.js` is the first of the four acceptance runs that need
 neither a window nor a provider — dev-only, **not** in `vscode:prepublish`. The

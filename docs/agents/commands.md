@@ -14,6 +14,7 @@ npm run check:signals                        # guard: the completion-signal pers
 npm run check:l10n                           # guard: the UI catalogs drifting from the code
 npm run check:rollover                       # guard: the context-rollover contract
 npm run check:grid                           # guard: the Chat Tree sidecar lattice (media/tree.js)
+npm run check:docs                           # guard: the shipped user manual (manual/**) vs the manifest
 npm run package                              # compile + guards + package (.vsix)  — POSIX
 powershell -File build-deploy.ps1            # compile + package + install         — Windows
 powershell -File build-deploy.ps1 -NoInstall # compile + package only              — Windows
@@ -21,9 +22,9 @@ powershell -File build-deploy.ps1 -NoInstall # compile + package only           
 
 `npm run package` and `build-deploy.ps1` are the two side-by-side closing paths.
 `npm run package` is the POSIX entry point: it packages the `.vsix`, runs the
-`vscode:prepublish` gate (compile + `sync:l10n` + the **seven** guards — `check:models`,
+`vscode:prepublish` gate (compile + `sync:l10n` + the **eight** guards — `check:models`,
 `check:webview`, `check:modeltree`, `check:signals`, `check:l10n`, `check:rollover`,
-`check:grid`) on the way, and takes the generated l10n aliases off disk again once it
+`check:grid`, `check:docs`) on the way, and takes the generated l10n aliases off disk again once it
 is done.
 `build-deploy.ps1` is the Windows path, and it also installs the newest `.vsix`
 with `code --install-extension --force`. Use one of them for quick iteration,

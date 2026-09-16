@@ -93,6 +93,17 @@
   (`/health`, `/state`, `/wait-for-finish`, `/navigate`, `/continue`, `/stop`,
   `/session/start`, `/reload-window`); token + discovery file, loopback only. See
   "External control plane & the `hvsc` supervisor".
+- `src/manual.ts` — the shipped **user manual**: `manualFileNames()` /
+  `canonicalLocale()` (which page a display language picks, through
+  `languageTags.ts`) and `showManual()` (`spinney.showManual` reads the page with
+  `workspace.fs` and opens it as an untitled markdown tab, absent pages falling back
+  to English). Its pages are `manual/**` — shipped, and written in ASD-STE100. See
+  `docs/agents/user-manual.md`.
+- `manual/manual.md` · `manual/manual.<canonical tag>.md` — the pages themselves: one
+  per catalog language, English as the source. They are the one user-facing document
+  inside the `.vsix`; `.vscodeignore` does not exclude them, and
+  `tools/check-docs.js` fails packaging when a page, a command title, a `spinney.*`
+  key or the shared heading structure drifts.
 - `docs/agents/multi-session.md` — the frozen multi-session / multi-branch contract
   (P1–P4): view-focus vs turn-basis, the host⇄webview protocol, the tools-side
   `BackgroundHub` API, and the acceptance evidence.
@@ -182,9 +193,11 @@
   four names are gitignored. See `docs/agents/invariants/i18n.md`.
 - `tools/check-models.js` · `tools/check-webview.js` · `tools/check-signal-persist.js`
   · `tools/check-l10n.js` · `tools/check-context-rollover.js` ·
-  `tools/check-modeltree.js` · `tools/check-tree-grid.js` — the packaging guards
+  `tools/check-modeltree.js` · `tools/check-tree-grid.js` · `tools/check-docs.js` —
+  the packaging guards
   (`npm run check:models` / `check:webview` / `check:signals` / `check:l10n` /
-  `check:rollover` / `check:modeltree` / `check:grid`, run by `vscode:prepublish`):
+  `check:rollover` / `check:modeltree` / `check:grid` / `check:docs`, run by
+  `vscode:prepublish`):
   model-config drift (the default is the fallback card, `providers` / `modelCards`
   exist as object schemas, no `enum` on `model`, no model id in the code or the
   webviews), "does the chat webview still survive every message the provider
@@ -198,7 +211,10 @@
   column its own stack ending flush and evenly filled, a `stretch` map covering every
   sidecar card, card-free corridors, over ~18 topologies plus the real session
   `mu2zn79jlv7b23`; and `relayout()` in `media/main.js` clearing the stretch before
-  measuring and applying the new one after). See `testing.md`.
+  measuring and applying the new one after), and the shipped user manual against the
+  manifest (`manual/**`: a page per catalog language, one shared heading structure, a
+  spot for every command title and every `spinney.*` key, and no `.vscodeignore`
+  pattern that would keep a page out of the `.vsix`). See `testing.md`.
 - `src/agent/tools/` — one file per intercepted tool (`readImage`, `spawnAgents`,
   `spawnReadonlyAgents`, `sendAgentMessage`, `sendReadonlyAgentMessage`,
   `hopSession`, `listNodes`, `renameSession`) plus `index.ts`, the barrel that

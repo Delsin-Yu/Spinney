@@ -115,6 +115,10 @@
         "title": "%command.spinney.showSystemPrompt.title%"
       },
       {
+        "command": "spinney.showManual",
+        "title": "%command.spinney.showManual.title%"
+      },
+      {
         "command": "spinney.setApiKey",
         "title": "%command.spinney.setApiKey.title%"
       },
@@ -444,7 +448,8 @@
     "check:rollover": "node tools/check-context-rollover.js",
     "check:l10n": "node tools/check-l10n.js",
     "check:grid": "node tools/check-tree-grid.js",
-    "vscode:prepublish": "npm run compile && npm run sync:l10n && npm run check:models && npm run check:webview && npm run check:modeltree && npm run check:signals && npm run check:l10n && npm run check:rollover && npm run check:grid"
+    "check:docs": "node tools/check-docs.js",
+    "vscode:prepublish": "npm run compile && npm run sync:l10n && npm run check:models && npm run check:webview && npm run check:modeltree && npm run check:signals && npm run check:l10n && npm run check:rollover && npm run check:grid && npm run check:docs"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

@@ -10,6 +10,7 @@
   "command.spinney.openModelCards.title": "Spinney: 開啟模型卡片",
   "command.spinney.clear.title": "Spinney: 清除對話",
   "command.spinney.showSystemPrompt.title": "Spinney: 顯示系統提示",
+  "command.spinney.showManual.title": "Spinney: 顯示使用者手冊",
   "command.spinney.setApiKey.title": "Spinney: 設定 API 金鑰",
   "command.spinney.clearApiKey.title": "Spinney: 清除 API 金鑰",
   "view.sessions.name": "工作階段",

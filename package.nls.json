@@ -10,6 +10,7 @@
   "command.spinney.openModelCards.title": "Spinney: Open Model Cards",
   "command.spinney.clear.title": "Spinney: Clear Conversation",
   "command.spinney.showSystemPrompt.title": "Spinney: Show System Prompt",
+  "command.spinney.showManual.title": "Spinney: Show User Manual",
   "command.spinney.setApiKey.title": "Spinney: Set API Key",
   "command.spinney.clearApiKey.title": "Spinney: Clear API Key",
   "view.sessions.name": "Sessions",

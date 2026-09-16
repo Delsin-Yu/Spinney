@@ -13,14 +13,14 @@ A change to anything under `src/`, `media/`, or `package.json` is not finished u
 3. Ask the user to run `Ctrl+Shift+P` → "Developer: Reload Window". The extension host keeps running the old code until then, so do not claim a change is live before the reload, and do not leave this step for the user to guess.
 
 - Automated alternative: when the `hvsc` supervisor is running (a live pid in `tools/hyper-vscode/.state/daemon.json`), drive the reload with `node tools/hyper-vscode/hvsc.mjs reboot <instanceId> --continue "<message>"`; when the current window did not start under hvsc (no instanceId), use `reboot --current`, which adopts the current window (reload only, never kill). Never add `--wait` inside a turn; it deadlocks.
-- A docs-only change (`README.md` / `AGENTS.md`) does not need `build-deploy`, unless the packaged `.vsix` should be refreshed too.
+- A docs-only change (`README.md` / `AGENTS.md`) does not need `build-deploy`, unless the packaged `.vsix` should be refreshed too. A change under `manual/**` **does**: the user manual is an artifact of the package, so it needs the compile, the package and the reload like code.
 - A reload restarts the extension host; sessions live in `spinney.state`, so the conversation survives it.
 
 ## Versioning
 
 - The version follows SemVer. We are at `0.x`, which is pre-1.0: a breaking change bumps the minor version only.
 - Tag every release as `vX.Y.Z`.
-- `vscode:prepublish` (compile plus the seven guards) is the release gate: a release does not ship when that script fails.
+- `vscode:prepublish` (compile plus the eight guards) is the release gate: a release does not ship when that script fails.
 - `CHANGELOG.md` uses the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
 ## Hard invariants (read before you touch code)
@@ -42,6 +42,7 @@ A change to anything under `src/`, `media/`, or `package.json` is not finished u
 - `npm run check:models` fails packaging when a model id is hard-coded in `src/**`: always read model names from `src/agent/models.ts`.
 - Every user-visible string is localized, and each one is written as the English source inside a single `vscode.l10n.t('…')` (host) or `tr('…')` (webview) literal — never concatenated, never a template literal, because `npm run check:l10n` extracts the keys from exactly that shape and fails packaging when a shipped catalog misses one. The webview cannot call `vscode.l10n`; the host injects the catalog as `window.__spinneyL10n`. See `docs/agents/invariants/i18n.md`.
 - `npm run check:webview` loads `media/main.js` into an in-memory DOM before packaging and replays every provider message type; a "reference to a deleted identifier" inside a webview callback is silent in the real UI (it freezes on stale values), and this guard exists to catch it.
+- `manual/**` is the **user manual** that ships in the `.vsix` and `Spinney: Show User Manual` opens: one page per catalog language (English is the source), written in ASD-STE100. A user-visible change updates every page, and `npm run check:docs` fails packaging when a page is missing, the heading structure diverges, a command title or a `spinney.*` key drops out of the reference tables, or `.vscodeignore` would keep the folder out of the package. See `docs/agents/user-manual.md`.
 
 ## Directory (the body lives in `docs/agents/`)
 
@@ -54,5 +55,6 @@ A change to anything under `src/`, `media/`, or `package.json` is not finished u
 - Control plane / desktop: `control-plane` (includes hop_session / list_nodes)
 - Other invariants: `invariants/line-endings` · `invariants/config-keys` · `invariants/streaming-perf` · `invariants/vendored-deps`
 - UI text / i18n: `invariants/i18n` (one catalog per language, the two lookup paths, the `check:l10n` guard, what is deliberately left English)
+- The shipped user manual: `user-manual` (the `manual/**` pages, the `Spinney: Show User Manual` command, the page-per-language rule, the STE writing rule, the `check:docs` guard)
 - No-workspace mode (no folder open): `no-repo-mode` (root, session storage, behavior differences)
 - Acceptance and artifacts: `testing` · `scratch-space`

@@ -10,6 +10,7 @@
   "command.spinney.openModelCards.title": "Spinney: 打开模型卡片",
   "command.spinney.clear.title": "Spinney: 清除对话",
   "command.spinney.showSystemPrompt.title": "Spinney: 显示系统提示词",
+  "command.spinney.showManual.title": "Spinney: 显示用户手册",
   "command.spinney.setApiKey.title": "Spinney: 设置 API 密钥",
   "command.spinney.clearApiKey.title": "Spinney: 清除 API 密钥",
   "view.sessions.name": "会话",

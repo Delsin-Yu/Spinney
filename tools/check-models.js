@@ -117,7 +117,7 @@ if (Array.isArray(modelProp?.enum)) {
 scan('package.json', JSON.stringify(configProps['spinney.model'], null, 1), { allowAny: true });
 scan('README.md', fs.readFileSync(path.join(root, 'README.md'), 'utf8'), { allowAny: true });
 
-for (const dir of ['docs']) {
+for (const dir of ['docs', 'manual']) {
   const walk = (d) => {
     for (const entry of fs.readdirSync(d, { withFileTypes: true })) {
       const full = path.join(d, entry.name);
