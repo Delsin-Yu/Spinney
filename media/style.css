@@ -4,6 +4,9 @@
  * panel matches the editor in light, dark and high-contrast themes alike.
  */
 :root {
+  /* The card's own cap, in one place: `media/main.js` reads `--node-max-h` back when it
+     has to decide how much room the two zones may take (`cardHeightCap`). */
+  --node-max-h:   1200px;
   --bg:           var(--vscode-sideBar-background, #1e1e1e);
   --bg2:          var(--vscode-sideBarSectionHeader-background, #252526);
   --bg3:          var(--vscode-input-background, #2d2d30);
@@ -949,8 +952,9 @@ button.icon-btn {
 
 /* Node content is selectable/copiable (the head + background stay non-selectable so
    panning and checkout clicks don't fight text selection). */
-.node-items,
-.node-prompt,
+.node-work,
+.node-answer,
+.node-ask,
 .node-excerpt,
 .node-summary,
 .tool-args,
@@ -1003,18 +1007,25 @@ button.icon-btn {
   position: absolute;
   width: 320px;
   /* A long transcript no longer grows the card forever; the items scroll.
-     600px = the old 480px transcript height + ~120px for the composer dock that
-     now lives at the bottom of the active card. */
-  max-height: 600px;
+     1200px = twice the old cap (the transcript height plus the composer dock that
+     now lives at the bottom of the active card): a card stacks three zones (ask,
+     work log, answer) and splits its body 1:2 between the last two, so the old
+     height would have halved each of them. The same doubled cap is repeated on
+     `.node.expanded` below — one reading height for the card, not a second
+     opinion. */
+  max-height: var(--node-max-h);
   background: var(--assistant-bg);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   /* `visible`, not `hidden`: the resize handle is deliberately placed *outside*
      the card's bottom-right corner (see `.node-resize`), and a clip here would
-     cut it off. Nothing inside needs the clip — every scroller (.node-items,
-     .node-prompt, .thinking-body) scrolls on its own — but the two children that
-     paint their own background must carry the card's rounding instead:
-     `.node-head` at the top, `#composer` at the bottom. */
+     cut it off. Nothing inside needs the clip — every scroller (.node-work,
+     .node-answer, .node-ask, .thinking-body) scrolls on its own — but the
+     children that paint their own background must carry the card's rounding
+     instead: `.node-head` at the top, `#composer` at the bottom. Zone 3's band is
+     the third painter and carries none of its own: only a card that hosts no
+     composer (i.e. a non-active one) ends on that band, and there its square
+     corners sit inside this rule's rounded border. */
   overflow: visible;
   display: flex;
   flex-direction: column;
@@ -1028,7 +1039,7 @@ button.icon-btn {
 .node.expanded {
   /* An expanded node opens as a wider window (content scrolls inside). */
   width: 560px;
-  max-height: 600px;
+  max-height: var(--node-max-h);
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
   z-index: 2;
 }
@@ -1086,17 +1097,78 @@ button.icon-btn {
 .node-status[data-status="done"] { color: var(--success); background: #1d3a2a; }
 
 .node-body {
-  padding: 10px;
+  /* Deliberately *un*padded: zone 3's surface and its hairline have to reach the
+     card's edges (that is the whole point of the band), and a padding here would
+     hold them 10px inside it. The inset it used to give every child now lives on
+     the zones themselves — `.node-work-wrap`, `.node-answer-wrap` and
+     `.node-excerpt` each carry 10px — so the only thing that changed is that a
+     zone can now paint all the way out. */
+  padding: 0;
   display: flex;
   flex-direction: column;
   min-height: 0;
 }
 
-.node-items {
+/* Zone 2 (the work log) hangs off a wrapper that is the scroll-lock light's
+   positioning context: the dot is absolute, so it lands in the strip below the
+   work log (the log's own `margin-bottom`), not at the bottom of the whole body.
+   It also owns zone 2's 10px inset now that `.node-body` is bare, and hosts the
+   fold head *above* the scroller, so the head stays put while the log scrolls
+   under it. */
+.node-work-wrap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1 1 auto;
+  padding: 10px;
+}
+
+/* The fold control for the log: a strip, not content — small dim type over a
+   hairline, so it reads as a control *on* the log instead of as its first item.
+   It is a sibling above `.node-work`, never inside it: a head in the scroller
+   would scroll away from the click that needs it. `flex: 0 0 auto` because a
+   squeezed log must not be able to squeeze its own handle off the card. */
+.node-work-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  margin-bottom: 6px;
+  padding-bottom: 3px;
+  border-bottom: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--text-dim);
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Hover brightens the label and the chevron together (the chevron deliberately
+   inherits the head's colour) and lifts the hairline to the accent: the whole
+   strip is the click target, so the whole strip answers the pointer. */
+.node-work-head:hover {
+  color: var(--text);
+  border-bottom-color: var(--accent-dim);
+}
+
+/* The chevron uses the shared idiom (`.thinking-head .chev` / `.tool-head .chev`);
+   the rotation rule has to be restated because the existing ones are scoped to
+   those heads. */
+.node-work-head .chev {
+  font-size: 10px;
+  transition: transform 0.15s ease;
+}
+
+.node-work-head .chev.open {
+  transform: rotate(90deg);
+}
+
+.node-work {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  /* Fill the card's body and scroll inside; the card's own max-height bounds it,
+  /* Fill its wrapper and scroll inside; the card's own max-height bounds it,
      so a scaled card reveals more transcript. */
   flex: 1 1 auto;
   min-height: 0;
@@ -1105,18 +1177,131 @@ button.icon-btn {
   margin-bottom: 20px;
 }
 
-.node-items .msg {
+/* Folded: the scroller is gone (the head above is what unfolds it again) and so is
+   its scroll-lock light — while the log is folded nothing inside it scrolls, so a
+   "follow" light would be a light over nothing. */
+.node.work-folded .node-work,
+.node.work-folded .scroll-lock-dot {
+  display: none;
+}
+
+/* Zone 3 holds the same bubbles zone 2 does, so both scrollers need the widening:
+   without `.node-answer` here the promoted answer falls back to the base
+   `.msg.assistant` (`max-width: 92%`, `align-self: flex-start`) and renders as an
+   inset bubble inside a full-width zone, which is what zone 3 must never look
+   like. */
+.node-work .msg,
+.node-answer .msg {
   max-width: 100%;
 }
 
-.node-items .msg.user,
-.node-items .msg.assistant,
-.node-items .msg.tool,
-.node-items .msg.bgnotify {
+.node-work .msg.user,
+.node-work .msg.assistant,
+.node-work .msg.tool,
+.node-work .msg.bgnotify,
+.node-answer .msg.user,
+.node-answer .msg.assistant,
+.node-answer .msg.tool,
+.node-answer .msg.bgnotify {
   align-self: stretch;
 }
 
+/* How the two zones share the card — a priority, not a ratio, and it is settled in
+   JS (`settleAnswerSplit`), because "the height the answer needs" cannot be read in
+   CSS. A hard 1:2 lock used to live here: it divided the card even when neither zone
+   wanted its half, so a short answer sat above a block of blank space while the log
+   scrolled inside a third of the card. */
+.node.answer-fit .node-work-wrap {
+  /* Both fit: the log takes exactly its content and the card hugs the two of them. */
+  flex: 0 0 auto;
+}
+
+.node.answer-fit .node-answer-wrap {
+  /* Its own content, plus whatever the tree layout stretched the card by: the slack
+     belongs under the answer (inside its surface), never as a gap between the zones. */
+  flex: 1 1 auto;
+}
+
+.node.answer-scarce .node-work-wrap {
+  /* Scarce: the log takes whatever the answer's share leaves — its own content may be
+     longer, in which case it scrolls. */
+  flex: 1 1 0;
+  min-height: 0;
+}
+
+.node.answer-scarce .node-answer-wrap {
+  /* Its height is the inline one `settleAnswerSplit` measured and wrote; `auto` here
+     would let a long answer push the log back to nothing. */
+  flex: 0 0 auto;
+}
+/* Folded log: the answer is the only zone left to fill the body, so it takes what
+   it needs (`auto`) rather than a share of a card it no longer shares. */
+.node.has-answer.work-folded .node-answer-wrap { flex: 1 1 auto; }
+/* No free space for the folded strip to share: a card the tree layout stretched (or
+   the user dragged taller) has a definite height, and with `1 1 auto` on both
+   wrappers the free space was split 1:1 between a one-line fold strip and the answer.
+   The strip is a handle, not content, so it hugs its own height; the answer keeps the
+   `1 1 auto` above. */
+.node.has-answer.work-folded .node-work-wrap { flex: 0 0 auto; }
+
+/* One read with the split suspended, for `settleAnswerSplit` (media/main.js): both
+   zones hug their content, so `offsetHeight` *is* the natural height it decides from.
+   Last in the group, so it wins for as long as the flag is on. */
+.node.split-measure .node-work-wrap,
+.node.split-measure .node-answer-wrap {
+  flex: 0 0 auto;
+}
+
+/* Zone 3: the turn's final answer, promoted out of the log (see main.js). It is a
+   full-bleed band — no padding on `.node-body` to stop its surface at the card's
+   edges — and it carries the `--bg2` surface zone 1 (`.node-ask`) uses, so the card
+   reads ask / log / answer = bg2 / card surface / bg2. The hairline on top is the
+   separation: the two zones are stacked, not nested, and this is the line that says
+   so. It has no dot strip: the scroll-lock light belongs to the transcript in zone
+   2, not to the answer. */
+.node-answer-wrap {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1 1 auto;
+  padding: 10px;
+  border-top: 1px solid var(--border);
+  background: var(--bg2);
+  /* The band is the last painted element on a card with no composer, and `.node`
+     does not clip its children, so its square corners poked past the card's arc.
+     Same formula the composer uses; the override below squares them again when
+     `#composer` follows it. */
+  border-radius: 0 0 calc(var(--radius) - 1px) calc(var(--radius) - 1px);
+}
+
+/* A composer-hosting card ends in `#composer` — `mountComposer` appends it as the
+   card's last child (main.js) — so the band's bottom corners are not the card's
+   bottom corners any more. */
+.node:has(#composer) .node-answer-wrap {
+  border-radius: 0;
+}
+
+.node-answer {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* The band *is* the block, so the promoted bubble is flattened onto it: keeping the
+   assistant bubble's `--assistant-bg` and border would stack a box on a box and
+   re-introduce the inset bubble zone 3 exists to remove. Its own rounding and
+   padding stay (it is still a `.msg.assistant`, with the `border-bottom-left-radius`
+   tail that marks the end of the turn's text). */
+.node-answer .msg.assistant {
+  background: none;
+  border: none;
+}
+
 .node-excerpt {
+  /* A direct child of `.node-body`, which no longer pads: the collapsed one-line
+     preview takes the 10px inset the body used to give it. */
+  padding: 10px;
   color: var(--text-dim);
   font-size: 12px;
   line-height: 1.45;
@@ -1129,7 +1314,7 @@ button.icon-btn {
 }
 
 .node-excerpt.hidden,
-.node-items.hidden {
+.node-work.hidden {
   display: none;
 }
 
@@ -1148,18 +1333,21 @@ button.icon-btn {
   text-overflow: ellipsis;
 }
 
-#tree-canvas.hide-images .node-items .msg.user .msg-imgs {
+#tree-canvas.hide-images .node-work .msg.user .msg-imgs {
   display: none;
 }
 
-/* Pinned prompt + per-card scroll lock for the tree. */
+/* The body is a bare flex column: both zones inside it (`.node-work-wrap`,
+   `.node-answer-wrap`) scroll on their own and the work wrapper is the scroll-lock
+   light's context, so the body itself is deliberately *not* positioned. */
 .node-body {
-  position: relative;
   flex: 1 1 auto;
   min-height: 0;
 }
 
-.node-prompt {
+/* Zone 1: the user's ask, pinned above the body. It is Markdown now, i.e. an
+   `.answer` inside a `--user-bg` bubble. */
+.node-ask {
   flex: 0 0 auto;
   padding: 8px 10px;
   border-bottom: 1px solid var(--border);
@@ -1170,11 +1358,11 @@ button.icon-btn {
   overflow-y: auto;
 }
 
-.node-prompt.hidden {
+.node-ask.hidden {
   display: none;
 }
 
-.node-prompt .msg.user.prompt {
+.node-ask .msg.user.prompt {
   max-width: 100%;
   align-self: stretch;
   background: var(--user-bg);
@@ -1182,6 +1370,73 @@ button.icon-btn {
   border-radius: var(--radius);
   padding: 6px 9px;
   font-size: 12px;
+}
+
+/* Markdown needs `white-space: normal` (`.msg` sets `pre-wrap` for plain text and
+   would otherwise keep the renderer's source line breaks); same wrapper rule the
+   assistant bubbles get. */
+.node-ask .msg.user.prompt .answer {
+  white-space: normal;
+  overflow-wrap: break-word;
+  word-wrap: break-word;
+}
+
+/* Markdown palette for that bubble. The global `.answer` palette is built for the
+   card's panel background — `--bg3` code boxes, `--border` rules, `--text-dim`
+   asides — which reads as holes punched into the blue `--user-bg`. These rules
+   rebuild it from `--user-fg`, the colour the theme pairs with `--user-bg`, so the
+   bubble keeps its own contrast in light, dark and high-contrast themes alike:
+   insets are a translucent lift of the bubble's text colour, borders are the same
+   mix at a stronger percentage, and code text stays on `--user-fg` instead of the
+   panel's `--text`. */
+.node-ask .msg.user.prompt .answer code,
+.node-ask .msg.user.prompt .answer pre,
+.node-ask .msg.user.prompt .answer th {
+  background: color-mix(in srgb, var(--user-fg) 14%, transparent);
+}
+
+.node-ask .msg.user.prompt .answer code,
+.node-ask .msg.user.prompt .answer pre,
+.node-ask .msg.user.prompt .answer th,
+.node-ask .msg.user.prompt .answer td {
+  border-color: color-mix(in srgb, var(--user-fg) 34%, transparent);
+}
+
+.node-ask .msg.user.prompt .answer pre code {
+  color: var(--user-fg);
+}
+
+.node-ask .msg.user.prompt .answer blockquote {
+  background: color-mix(in srgb, var(--user-fg) 10%, transparent);
+  border-left-color: color-mix(in srgb, var(--user-fg) 55%, transparent);
+  color: color-mix(in srgb, var(--user-fg) 85%, transparent);
+}
+
+.node-ask .msg.user.prompt .answer hr {
+  border-top-color: color-mix(in srgb, var(--user-fg) 34%, transparent);
+}
+
+/* The three rules of the shared `.answer` typography that name a panel token rather
+   than inheriting: headings (`--text`), an `h1`'s underline (`--border`) and `del`
+   (`--text-dim`). Inside the ask bubble they would be panel-coloured on the theme's
+   button colour, which is unreadable in a light theme. Same translucent-lift trick as
+   above, so the bubble keeps its own contrast in every theme. Links need no rule —
+   `.msg.user a` (more specific than `.answer a`) already puts them on `--user-fg`. */
+.node-ask .msg.user.prompt .answer h1,
+.node-ask .msg.user.prompt .answer h2,
+.node-ask .msg.user.prompt .answer h3,
+.node-ask .msg.user.prompt .answer h4,
+.node-ask .msg.user.prompt .answer h5,
+.node-ask .msg.user.prompt .answer h6 {
+  color: var(--user-fg);
+}
+
+.node-ask .msg.user.prompt .answer h1 {
+  border-bottom-color: color-mix(in srgb, var(--user-fg) 34%, transparent);
+}
+
+.node-ask .msg.user.prompt .answer del {
+  color: color-mix(in srgb, var(--user-fg) 75%, transparent);
 }
 
 /* A message the *harness* wrote inside the transcript (the ▶ Continue turn, which
@@ -1292,6 +1547,18 @@ button.icon-btn {
   box-shadow: 0 0 7px var(--success);
 }
 
+/* The node transcript's dot hangs off `.node-work-wrap`, which now pads, and it is
+   positioned against that wrapper's *padding box* — which, since `.node-body` lost
+   its own 10px, reaches the card's edge. The offsets therefore have to carry the
+   10px again to leave the light exactly where it was: 10px in from the log's right
+   edge, in the strip the log's `margin-bottom` reserves below it. Scoped to this
+   host on purpose — a thinking block's dot hangs off its unpadded `.thinking` box
+   and must not move. */
+.node-work-wrap > .scroll-lock-dot {
+  right: 20px;
+  bottom: 18px;
+}
+
 /* The light only makes sense while its scroll area is visible. */
 .thinking:not(.open) .scroll-lock-dot,
 .node:not(.expanded) .scroll-lock-dot {
@@ -1311,7 +1578,8 @@ button.icon-btn {
   height: 0 !important;
 }
 
-.node-items,
+.node-work,
+.node-answer,
 .thinking-body {
   scrollbar-gutter: stable;
 }

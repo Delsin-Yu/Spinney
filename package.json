@@ -356,6 +356,12 @@
             "description": "%spinney.foldToolCalls.description%",
             "scope": "window"
           },
+          "spinney.foldWork": {
+            "type": "boolean",
+            "default": true,
+            "description": "%spinney.foldWork.description%",
+            "scope": "window"
+          },
           "spinney.promptSections": {
             "type": "object",
             "default": {},

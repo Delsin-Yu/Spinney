@@ -1,7 +1,7 @@
 ## Config keys (`spinney.*`)
 The settings are contributed in **groups**: `contributes.configuration` is an array of
 `{ title, properties }` sections — Model & API (`model`, `providers`, `modelCards`) · Chat & Display
-(`replyLanguage`, `foldThinking`, `foldToolCalls`, `promptSections`) · Tools & Execution
+(`replyLanguage`, `foldThinking`, `foldToolCalls`, `foldWork`, `promptSections`) · Tools & Execution
 (`commandTimeout`, `maxInlineToolOutput`) · Sub-agents (`maxConcurrentSubagents`,
 `maxLevel2Subagents`) · Sessions & Transcripts (`autoSessionTitles`,
 `saveSessionTranscripts`, `saveSubAgentTranscripts`, `subAgentTranscriptDir`) ·
@@ -33,6 +33,11 @@ like the prompt does; a tag CLDR cannot name, or any other name typed into
 `foldToolCalls` (default `true`),
 `foldThinking` (default `true`; both are the *at rest* default — the block that is
 live right now is always expanded, see `docs/agents/invariants/streaming-perf.md`),
+`foldWork` (default `true`, **window** scope — the work log of a *finished* turn folds
+itself: it folds exactly while zone 3, the answer, is showing, and unfolds while a
+turn runs or when there is no answer. A click on the log's own header hands that card
+to the user for good, and it applies immediately, like the two above — see
+`docs/agents/invariants/streaming-perf.md`),
 `promptSections` (object of display name → text, default `{}`: the composer's own
 prompt snippets. The two the extension ships — `Plan` and `Implement Parallel` —
 live in `src/chat/promptSnippets.ts`, **not** in this default, so a shipped text can
@@ -97,7 +102,7 @@ no handling.
 | `model` | immediately when *that key* changed, and only for sessions **without a pick of their own** (a per-tab dropdown pick wins) | pushed through `SessionRuntime.applyDefaultModel` (driven by `onConfigurationChanged`); a running session is skipped, like the dropdowns |
 | `maxConcurrentSubagents` | immediately (raising wakes queued tasks; lowering drains) | pushed: `SubAgentPool.setMaxConcurrent` |
 | `replyLanguage` | immediately when *that key* changed (a running session is skipped) | pushed: `ChatViewProvider.getConfig()` resolves the setting to a language **name** (`auto` → `vscode.env.language`, a tag → its CLDR name, via `replyLanguageName`), and `SessionRuntime.applyReplyLanguage` pushes that name to every node worker's `Agent.setReplyLanguage`, which rewrites `messages[0]`; a session with history gets the cache-miss notice. **No per-session pick**: the language is a property of the reader, so the setting is the only source (`SessionRuntime.replyLanguage` is seeded from it at construction). Re-picking `auto` when the display language is already in force resolves to the same name and is a no-op |
-| `foldToolCalls`, `foldThinking` | immediately, incl. cards already on screen | pushed: `postConfig()` → the webview re-applies the default to existing cards |
+| `foldToolCalls`, `foldThinking`, `foldWork` | immediately, incl. cards already on screen | pushed: `postConfig()` → the webview re-applies the default to existing cards (`foldWork` re-runs the card's automatic work-log fold after the push, which is how a finished card folds or unfolds without a repaint) |
 | `promptSections` | immediately, incl. a chat tab already open | pushed: `postConfig()` → the webview rebuilds the snippet menu from `snippets` (it keeps no copy of the list, and the shipped rows are merged in again on every push, so a renamed or emptied row shows up at once) |
 | `httpApi.enabled`, `httpApi.port` | immediately | pushed: `ControlServer.restart()` (rebind the listener; disabling just leaves `start()` a no-op) |
 | `commandTimeout`, `maxInlineToolOutput`, `maxLevel2Subagents`, `saveSessionTranscripts`, `saveSubAgentTranscripts`, `subAgentTranscriptDir`, `autoSessionTitles` | immediately | pulled at the point of use (they already were — no listener needed) |

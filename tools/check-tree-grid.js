@@ -797,7 +797,7 @@ function webviewWiring() {
   const hSet = /style\s*\.\s*height\s*=\s*([^;]+)/.exec(applyBlock);
   const mhSet = /style\s*\.\s*maxHeight\s*=\s*([^;]+)/.exec(applyBlock);
   if (!hSet) return { ok: false, detail: 'the `result.stretch` application never sets `style.height` — look at ' + where };
-  if (!mhSet) return { ok: false, detail: 'the `result.stretch` application never sets `style.maxHeight`: `.node` caps every card at 600px, so an inline `height` alone leaves the card clipped and its column short again (' + where + ')' };
+  if (!mhSet) return { ok: false, detail: 'the `result.stretch` application never sets `style.maxHeight`: `.node` caps every card at 1200px, so an inline `height` alone leaves the card clipped and its column short again (' + where + ')' };
   const rhs = (m) => m[1].replace(/\s+/g, ' ').trim();
   if (rhs(hSet) !== rhs(mhSet)) {
     return { ok: false, detail: '`style.height` and `style.maxHeight` are set from different values ("' + rhs(hSet) + '" vs "' + rhs(mhSet) + '") — the inline cap has to be lifted to exactly the same height (' + where + ')' };

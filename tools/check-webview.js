@@ -15,11 +15,14 @@
 //   (b) the UI follows the message — the effort dropdown, the model list, the
 //       image affordances, the context readout, the wallet readout and the
 //       composer's Send/Stop pair are checked explicitly, plus the P2 background
-//       docks (each job has to end up in the card of the node that owns it — see the
-//       bottom of this file).
+//       docks (each job has to end up in the card of the node that owns it) and the
+//       three zones of a turn card, whose third zone is a *move* of the work log's
+//       tail and never a copy (see the bottom of this file).
 //
 // The DOM stub resolves a plain `.class` selector against the element's own
-// subtree, so "which card holds this dock" is answerable per card.
+// subtree, so "which card holds this dock" is answerable per card — and it gives a
+// node exactly one parent (an append moves it), so "which zone holds the answer" is
+// answerable too.
 //
 // It is deliberately *not* a rendering test: there is no CSS, no layout and no
 // theme, so it cannot tell you the panel looks wrong. It answers one question —
@@ -110,6 +113,10 @@ const TURN_MESSAGES = [
     thinkingEffort: 'medium',
     foldToolCalls: true,
     foldThinking: true,
+    // Zone 2's own fold default (`autoWorkFold`): the work log folds itself once the
+    // answer is showing. Pinned explicitly so every `{ ...config }` fixture below says
+    // what it means — see the work-log fold block at the bottom of this file.
+    foldWork: true,
   },
   { type: 'context', used: 524288, total: 1048576, model: 'smoke-model' },
   { type: 'sessionStats', stats: { totalTokens: 3, cacheHit: 0, cacheMiss: 3, cacheHitRate: 0, cacheKnown: true } },
@@ -204,6 +211,23 @@ function findByClass(root, name) {
   return null;
 }
 
+/**
+ * Take `child` out of whatever parent currently holds it: the stub's DOM, like a
+ * browser's, gives a node exactly one parent, so `appendChild` / `insertBefore`
+ * move an attached node instead of copying it. Text nodes (see
+ * `document.createTextNode`) carry no `children` of their own — only the link back
+ * — so this is safe for them too.
+ */
+function detachNode(child) {
+  if (!child || typeof child !== 'object') return;
+  const parent = child.parentElement;
+  if (parent && Array.isArray(parent.children)) {
+    const at = parent.children.indexOf(child);
+    if (at >= 0) parent.children.splice(at, 1);
+  }
+  child.parentElement = null;
+}
+
 function makeElement(id) {
   const element = {
     id,
@@ -246,18 +270,32 @@ function makeElement(id) {
       contains: (name) => element.classList._set.has(name),
     },
     style: { setProperty() {}, removeProperty() {}, getPropertyValue: () => '' },
+    // A node has exactly ONE parent, as in a browser: appending or inserting a
+    // node that is already attached detaches it from its old parent first. This is
+    // load-bearing for the answer zone — `promoteAnswer` / `demoteAnswer` *move* a
+    // run between `.node-work` and `.node-answer`, so a stub that copied (the old
+    // behaviour) left every promoted answer in zone 2 as well and observed nothing.
     appendChild(child) {
+      detachNode(child);
       this.children.push(child);
       if (child && typeof child === 'object') child.parentElement = this;
       return child;
     },
     prepend(child) {
+      detachNode(child);
       this.children.unshift(child);
       if (child && typeof child === 'object') child.parentElement = this;
       return child;
     },
-    insertBefore(child) {
-      this.children.push(child);
+    // `insertBefore(node, ref)`: before `ref`, or appended when `ref` is null /
+    // not a child of this element (the browser's own fallback). The card head
+    // badges (SUB, Delivered, CTX, kill) are inserted before `.node-status`, so
+    // the position has to be real.
+    insertBefore(child, ref) {
+      detachNode(child);
+      const at = ref ? this.children.indexOf(ref) : -1;
+      if (at < 0) this.children.push(child);
+      else this.children.splice(at, 0, child);
       if (child && typeof child === 'object') child.parentElement = this;
       return child;
     },
@@ -271,12 +309,7 @@ function makeElement(id) {
     // and drops the ones whose job left the snapshot, and the check below has to
     // see that happen.
     remove() {
-      const parent = this.parentElement;
-      if (parent && Array.isArray(parent.children)) {
-        const at = parent.children.indexOf(this);
-        if (at >= 0) parent.children.splice(at, 1);
-      }
-      this.parentElement = null;
+      detachNode(this);
     },
     replaceChildren() {},
     setAttribute() {},
@@ -288,7 +321,7 @@ function makeElement(id) {
     },
     removeEventListener() {},
     // A plain `.class` selector resolves against *this* element's own subtree, so
-    // two node cards can no longer share one stub for `.node-bg` / `.node-items`
+    // two node cards can no longer share one stub for `.node-bg` / `.node-work`
     // (the dock lives in a specific card — see the P2 checks below). Anything
     // compound (`[data-id="x"]`, `a > b`) and every miss keeps the old behaviour:
     // a stable shared stub, so the script sees the forgiving DOM it always saw.
@@ -310,7 +343,9 @@ function makeElement(id) {
     attachShadow: () => makeElement(`${id}-shadow`),
     animate: () => ({ cancel() {}, finished: Promise.resolve() }),
     insertAdjacentElement(_position, node) {
+      detachNode(node);
       this.children.push(node);
+      if (node && typeof node === 'object') node.parentElement = this;
       return node;
     },
     insertAdjacentHTML() {},
@@ -348,7 +383,13 @@ function makeElement(id) {
     set(value) {
       innerHtml = String(value == null ? '' : value);
       if (innerHtml === '') {
+        // Clearing really detaches in a browser: a removed child's `parentNode`
+        // is null, and the stub's `remove()` reads that back.
+        const removed = element.children.slice();
         element.children.length = 0;
+        for (const child of removed) {
+          if (child && typeof child === 'object') child.parentElement = null;
+        }
       }
     },
     configurable: true,
@@ -1007,7 +1048,7 @@ if (contextLabel !== 'ctx 50%') {
   });
   dispatch({ type: 'delta', nodeId: B, text: 'after the notice' });
   {
-    const items = findByClass(cardOf(B), 'node-items');
+    const items = findByClass(cardOf(B), 'node-work');
     const kinds = (items ? items.children : []).map((child) => (child.dataset && child.dataset.kind) || '?');
     if (kinds.join(',') !== 'assistant,background,assistant') {
       problems.push(
@@ -1077,23 +1118,34 @@ if (contextLabel !== 'ctx 50%') {
         `{ type: 'loadAgentItems', id: '${SUB}' }`,
     );
   }
-  const subItems = sub ? findByClass(sub, 'node-items') : null;
-  if (!subItems) {
-    problems.push('an agent card has no `.node-items` container');
+  const subItems = sub ? findByClass(sub, 'node-work') : null;
+  const subAnswer = sub ? findByClass(sub, 'node-answer') : null;
+  if (!subItems || !subAnswer) {
+    problems.push('an agent card has no `.node-work` / `.node-answer` container');
   } else {
-    const before = subItems.children.length;
+    const rendered = () => subItems.children.length + subAnswer.children.length;
+    const before = rendered();
     if (before !== 0) {
       problems.push(`a sub-agent card rendered ${before} item(s) before its transcript arrived (the tree carries only itemCount)`);
     }
     dispatch({ type: 'agentItems', id: SUB, items: [{ kind: 'assistant', text: '子代理答案' }] });
-    const after = subItems.children.length;
+    const after = rendered();
     if (after !== 1) {
       problems.push(`an agentItems answer produced ${after} item(s) in the card, expected 1`);
     }
-    dispatch({ type: 'agentItems', id: SUB, items: [{ kind: 'assistant', text: '子代理答案' }] });
-    if (subItems.children.length !== after) {
+    // That one item is a lone assistant item — the tail of the log and therefore
+    // the sub-agent's final answer, which is *moved* into zone 3 (not copied, not
+    // left behind in the log).
+    if (subItems.children.length !== 0 || subAnswer.children.length !== 1) {
       problems.push(
-        `a second agentItems answer re-rendered the transcript (${after} → ${subItems.children.length} items) — ` +
+        `an agentItems answer left ${subItems.children.length} item(s) in .node-work and ` +
+          `${subAnswer.children.length} in .node-answer, expected 0 / 1 (a lone assistant item is the answer)`,
+      );
+    }
+    dispatch({ type: 'agentItems', id: SUB, items: [{ kind: 'assistant', text: '子代理答案' }] });
+    if (rendered() !== after) {
+      problems.push(
+        `a second agentItems answer re-rendered the transcript (${after} → ${rendered()} items) — ` +
           'the card must render once',
       );
     }
@@ -1113,9 +1165,15 @@ if (contextLabel !== 'ctx 50%') {
   });
   dispatch({ type: 'path', ids: [SUB], nodes: [{ id: SUB, status: 'done', items: [{ kind: 'assistant', text: '内联' }] }] });
   const checkedOut = cardsOf().get(SUB);
-  const inlineItems = checkedOut ? findByClass(checkedOut, 'node-items') : null;
-  if (!inlineItems || inlineItems.children.length === 0) {
-    problems.push('a `path` carrying items no longer renders them (a checked-out sidecar must render immediately)');
+  const inlineWork = checkedOut ? findByClass(checkedOut, 'node-work') : null;
+  const inlineAnswer = checkedOut ? findByClass(checkedOut, 'node-answer') : null;
+  // The item is a lone assistant item, so it is zone 3 by the same rule: what the
+  // `path` items must render immediately is the answer.
+  if (!inlineWork || !inlineAnswer || inlineAnswer.children.length !== 1 || inlineWork.children.length !== 0) {
+    problems.push(
+      'a `path` carrying items no longer renders them (a checked-out sidecar must render immediately, and its lone ' +
+        'assistant item is the .node-answer)',
+    );
   }
 }
 
@@ -1175,11 +1233,18 @@ if (contextLabel !== 'ctx 50%') {
     );
   }
 
-  // A finished node with more than 60 items renders a window whose items are the
-  // newest ones (`_needsBottomScroll` opens a finished card at its newest content).
+  // A finished node with more than 60 *work* items renders a window whose items are
+  // the newest ones (`_needsBottomScroll` opens a finished card at its newest
+  // content). The window is the work list only: the trailing answer run is lifted
+  // out into zone 3 and is never paginated, so the fixture needs work items that are
+  // NOT answers — 61 tool calls, then the answer.
   const LONG = 'burst-long';
+  const LONG_WORK = 61;
   const items = [];
-  for (let i = 0; i < 61; i++) items.push({ kind: 'assistant', text: `item-${i}` });
+  for (let i = 0; i < LONG_WORK; i++) {
+    items.push({ kind: 'tool', name: 'read_file', args: '{"path":"long-' + i + '"}', id: 'long-tool-' + i });
+  }
+  items.push({ kind: 'assistant', text: 'the final answer' });
   dispatch({ type: 'reset' });
   dispatch({
     type: 'tree',
@@ -1190,9 +1255,10 @@ if (contextLabel !== 'ctx 50%') {
   });
   dispatch({ type: 'path', ids: [LONG], nodes: [{ id: LONG, status: 'done', items }] });
   const longCard = cardOf(LONG);
-  const longItems = longCard ? findByClass(longCard, 'node-items') : null;
+  const longItems = longCard ? findByClass(longCard, 'node-work') : null;
+  const longAnswer = longCard ? findByClass(longCard, 'node-answer') : null;
   if (!longItems) {
-    problems.push('the long-transcript fixture produced no `.node-items` container');
+    problems.push('the long-transcript fixture produced no `.node-work` container');
   } else {
     const rendered = longItems.children.length;
     // 24 rendered items + at most two spacers (above/below).
@@ -1205,15 +1271,15 @@ if (contextLabel !== 'ctx 50%') {
     // The numbers are read off the spacers rather than the item text: the sandbox
     // DOM does not aggregate `textContent`, and "how many items are above/below the
     // window" is exactly what says *which* slice was rendered. A finished card opens
-    // at its newest content, so 61 items must render the last 24 with 37 above and
-    // nothing below.
+    // at its newest content, so 61 work items must render the last 24 with 37 above
+    // and nothing below.
     const spacers = Array.prototype.slice
       .call(longItems.children)
       .filter((child) => (child.className || '').indexOf('node-items-spacer') >= 0);
     const above = spacers.find((child) => (child.className || '').indexOf('above') >= 0);
     const below = spacers.find((child) => (child.className || '').indexOf('below') >= 0);
     const aboveCount = above && above.dataset ? Number(above.dataset.items) : null;
-    if (aboveCount !== 61 - 24) {
+    if (aboveCount !== LONG_WORK - 24) {
       problems.push(
         `a windowed 61-item card reports ${aboveCount} item(s) above the window, expected 37 ` +
           '(the window must be the newest page, because a finished card opens at its newest content)',
@@ -1221,6 +1287,83 @@ if (contextLabel !== 'ctx 50%') {
     }
     if (below) {
       problems.push('a windowed card shows a spacer below its newest page — there is nothing newer to stand in for');
+    }
+
+    // --- (j) the answer is promoted out of the window, and the dots --------------
+    // A windowed fixture is also the one card whose lock-dot set is unambiguous (no
+    // thinking block in it: those carry a dot of their own, on their own box).
+    const dotsIn = (element) => {
+      let n = 0;
+      for (const child of (element && element.children) || []) {
+        if (child.classList && child.classList.contains('scroll-lock-dot')) n++;
+        n += dotsIn(child);
+      }
+      return n;
+    };
+    const answerKids = longAnswer ? longAnswer.children : [];
+    if (answerKids.length !== 1 || (answerKids[0].dataset || {}).kind !== 'assistant') {
+      problems.push(
+        `the windowed fixture's final answer is ${answerKids.length} element(s) in .node-answer, expected the one ` +
+          'assistant item (the tail of the log is zone 3, not a windowed page)',
+      );
+    }
+    const assistantsInWork = longItems.children.filter((child) => (child.dataset || {}).kind === 'assistant');
+    if (assistantsInWork.length !== 0) {
+      problems.push(
+        `the window covers ${assistantsInWork.length} answer element(s) — the answer run is never windowed ` +
+          '(and it is moved out, not left behind)',
+      );
+    }
+    if (dotsIn(longCard) !== 1) {
+      problems.push(`a card showing an answer carries ${dotsIn(longCard)} green .scroll-lock-dot(s), expected exactly 1`);
+    }
+    if (dotsIn(findByClass(longCard, 'node-work-wrap')) !== 1) {
+      problems.push('the green .scroll-lock-dot is not in .node-work-wrap (the log is the scroller that follows a turn)');
+    }
+    if (dotsIn(longAnswer) !== 0) {
+      problems.push('zone 3 carries a green .scroll-lock-dot — it opens at the top and is read, not followed');
+    }
+
+    // --- (k) scrolling the window must not give the answer back -------------------
+    // `paintItemsWindow` is the one repaint of zone 2 that does not go through
+    // `renderNodeItems`, and it rebuilds every element it paints — the answer, moved
+    // out of the log, has to survive it. A repaint is not an append. The window's own
+    // scroll handler is rAF-throttled, so this check runs one task later (the same
+    // reason the perf probes at the bottom of this file are deferred).
+    const scroll = longItems._listeners && longItems._listeners.scroll;
+    if (typeof scroll !== 'function') {
+      problems.push('a windowed log has no scroll handler — the window could never extend');
+    } else {
+      longItems.scrollTop = 0; // at the top edge, so the window extends upward
+      scroll();
+      setTimeout(() => {
+        const answer = findByClass(longCard, 'node-answer');
+        const work = findByClass(longCard, 'node-work');
+        // The repaint really happened: the window grew upward by one page, so the
+        // spacer above it now stands in for 37 - 24 items.
+        const topSpacer = work
+          ? work.children.find((child) => (child.className || '').indexOf('node-items-spacer') >= 0)
+          : null;
+        const topCount = topSpacer && topSpacer.dataset ? Number(topSpacer.dataset.items) : null;
+        if (topCount !== LONG_WORK - 24 - 24) {
+          problems.push(
+            `scrolling a windowed log left ${topCount} item(s) above the window, expected ${LONG_WORK - 24 - 24} ` +
+              '(the window did not extend, so this check cannot see the repaint at all)',
+          );
+        }
+        if (!answer || answer.children.length !== 1) {
+          problems.push(
+            'scrolling a windowed log demoted the promoted answer (zone 3 holds ' +
+              `${answer ? answer.children.length : 'no'} element(s) after the repaint — a repaint is not an append)`,
+          );
+        }
+        if (work && work.children.some((child) => (child.dataset || {}).kind === 'assistant')) {
+          problems.push('scrolling a windowed log put the answer back into .node-work');
+        }
+        if (longCard && !longCard.classList.contains('has-answer')) {
+          problems.push('scrolling a windowed log dropped the card\'s `has-answer`');
+        }
+      }, 30);
     }
   }
 }
@@ -1343,8 +1486,8 @@ if (contextLabel !== 'ctx 50%') {
   } else if (!findByClass(harnessBlock, 'harness-badge')) {
     problems.push('a harness continue message carries no HARNESS badge');
   }
-  if (findByClass(cards.get(A), 'node-prompt') && findByClass(findByClass(cards.get(A), 'node-prompt'), 'harness-note')) {
-    problems.push('a harness continue message overwrote the node\'s pinned user prompt');
+  if (findByClass(cards.get(A), 'node-ask') && findByClass(findByClass(cards.get(A), 'node-ask'), 'harness-note')) {
+    problems.push('a harness continue message overwrote the node\'s pinned user prompt (zone 1, .node-ask)');
   }
   if (findByClass(cards.get(B), 'harness-note')) {
     problems.push('a harness continue message for another node leaked into a different card');
@@ -1622,7 +1765,9 @@ if (contextLabel !== 'ctx 50%') {
     ],
   });
   dispatch({ type: 'path', ids: [NODE], nodes: [{ id: NODE, status: 'running', items: [] }] });
-  // Both fold defaults ON: the live block is the exception this section is about.
+  // All three fold defaults ON: the live block is the exception this section is about
+  // (and the work log's own fold is only armed, never auto-folded here — this card
+  // stays streaming for the rest of the section).
   dispatch({
     type: 'config',
     model: 'smoke-model',
@@ -1631,13 +1776,16 @@ if (contextLabel !== 'ctx 50%') {
     thinkingEffort: 'medium',
     foldToolCalls: true,
     foldThinking: true,
+    foldWork: true,
   });
   dispatch({ type: 'state', busy: true, status: '', sessionId: 'fold-session', runningNodes: [NODE] });
 
   const cardOf = () =>
     Array.from(elementById('tree-canvas').children).find((child) => child.dataset && child.dataset.id === NODE);
   const msgsOf = () => {
-    const items = cardOf() ? findByClass(cardOf(), 'node-items') : null;
+    // Zone 2, the work log: this fixture's card is streaming (`runningNodes` holds
+    // it for the whole section), so nothing is ever promoted out of it here.
+    const items = cardOf() ? findByClass(cardOf(), 'node-work') : null;
     return items ? items.children : [];
   };
   const lastMsgOf = (kind) =>
@@ -1695,6 +1843,733 @@ if (contextLabel !== 'ctx 50%') {
     expectFold('assistant', 'thinking-body', true, 'a thinking block the user just folded by hand');
     dispatch({ type: 'thinkingDelta', nodeId: NODE, text: 'still streaming' });
     expectFold('assistant', 'thinking-body', true, 'a hand-folded thinking block after another delta');
+  }
+}
+
+// --- The three zones of a turn card: the answer is MOVED, never copied ---------
+// A turn card is read as three zones (see `createNodeCard` / `renderNodeItems`):
+//   .node-ask    — the pinned user ask (zone 1, Markdown, never overwritten);
+//   .node-work   — the work log (zone 2): reasoning, tool cards, notices, HARNESS
+//                  blocks and the text the turn went *through*. It is the one
+//                  scroller that follows a live turn, so it is the one that owns the
+//                  green `.scroll-lock-dot` (on `.node-work-wrap`, its wrapper);
+//   .node-answer — the model's final answer (zone 3): a *pretty print* of the tail of
+//                  zone 2, not a second copy of it. `promoteAnswer` moves the
+//                  trailing answer run out of the log, `demoteAnswer` moves it back
+//                  to the end of the log, and every append into the log is preceded
+//                  by a demote (the choke points are `routeTo` — both branches — and
+//                  the nodeId-less `case 'notice'`).
+// Everything below rests on "a node has exactly one parent", which is why the DOM
+// stub at the top of this file had to be taught to move a node out of its old parent:
+// a copying stub shows no promotion, no demotion and no "which zone holds it".
+//
+// The cases are the contract, one rule each: (a) a finished pure-text turn, (b)
+// streaming never promotes, (c) `done` promotes and the two choke points demote, (d)
+// an error never promotes, (e) an interruption does, (f) a thinking-only item is not
+// an answer, (g) an in-place continue demotes, (h) a live sub-agent card does not
+// promote until `agentDone`, (i) a job card never has a zone 3. Cases (j) the single
+// lock dot and (k) "scrolling the window is not an append" live with the windowed
+// fixture above, the one finished card whose lock dots are unambiguous.
+{
+  const node = (id, parentId, children, extra) =>
+    Object.assign(
+      { id, parentId, children, title: id, status: 'done', createdAt: 0, preview: id, usage: null, size: null },
+      extra || {},
+    );
+  const cardOf = (id) => {
+    for (const child of elementById('tree-canvas').children) {
+      if (child.dataset && child.dataset.id === id) return child;
+    }
+    return null;
+  };
+  const zoneOf = (card, cls) => (card ? findByClass(card, cls) : null);
+  const kindsIn = (element) =>
+    (element ? element.children : []).map((child) => (child && child.dataset && child.dataset.kind) || '?');
+  const isHidden = (card, cls) => {
+    const element = zoneOf(card, cls);
+    return element ? element.classList.contains('hidden') : null;
+  };
+  /** A fresh card on the view path: one root node, rendered from its stored items. */
+  const mount = (id, status, items) => {
+    dispatch({ type: 'reset' });
+    dispatch({ type: 'tree', viewId: id, activeId: null, rootId: id, nodes: [node(id, null, [], { status })] });
+    dispatch({ type: 'path', ids: [id], nodes: [{ id, status, items }] });
+    return cardOf(id);
+  };
+  const live = (id) =>
+    dispatch({ type: 'state', busy: true, status: '', sessionId: 'zone-session', runningNodes: [id] });
+  const idle = () =>
+    dispatch({ type: 'state', busy: false, status: '', sessionId: 'zone-session', runningNodes: [] });
+
+  /**
+   * Zone 3 holds the answer and the log does not: a promotion is a move, so the
+   * promoted element must have left `.node-work`, which keeps only what preceded it
+   * (`logKinds`, for a card whose log already held something — a second turn).
+   */
+  const expectPromoted = (card, what, logKinds) => {
+    const work = zoneOf(card, 'node-work');
+    const answer = zoneOf(card, 'node-answer');
+    if (!card || !work || !answer) {
+      problems.push(`${what}: the card has no .node-work / .node-answer to look at`);
+      return;
+    }
+    const promoted = answer.children[0];
+    if (answer.children.length !== 1 || ((promoted && promoted.dataset) || {}).kind !== 'assistant') {
+      problems.push(
+        `${what}: zone 3 holds ${answer.children.length} element(s), expected the one promoted assistant item`,
+      );
+    }
+    if (promoted && work.children.indexOf(promoted) >= 0) {
+      problems.push(`${what}: the promoted answer is still a child of .node-work — a promotion is a move, not a copy`);
+    }
+    const kinds = kindsIn(work);
+    const want = logKinds || [];
+    if (kinds.join(',') !== want.join(',')) {
+      problems.push(`${what}: .node-work holds ${JSON.stringify(kinds)}, expected ${JSON.stringify(want)}`);
+    }
+    if (!card.classList.contains('has-answer')) {
+      problems.push(`${what}: the card does not carry \`has-answer\` while its answer is shown`);
+    }
+    if (isHidden(card, 'node-answer-wrap')) {
+      problems.push(`${what}: .node-answer-wrap is hidden although zone 3 holds the answer`);
+    }
+  };
+
+  /** Nothing was lifted out: zone 3 is empty, hidden, and the card claims no answer. */
+  const expectNotPromoted = (card, what) => {
+    const answer = zoneOf(card, 'node-answer');
+    if (!card || !answer) {
+      problems.push(`${what}: the card has no .node-answer to look at`);
+      return;
+    }
+    if (answer.children.length !== 0) {
+      problems.push(`${what}: ${answer.children.length} item(s) were promoted into .node-answer`);
+    }
+    if (card.classList.contains('has-answer')) {
+      problems.push(`${what}: the card claims \`has-answer\` although nothing was promoted`);
+    }
+    if (!isHidden(card, 'node-answer-wrap')) {
+      problems.push(`${what}: .node-answer-wrap is visible although zone 3 is empty`);
+    }
+  };
+
+  // (a) A finished pure-text turn: the ask is zone 1, the whole tail is zone 3, and
+  // the log that has nothing left in it hides (no empty box under the answer).
+  {
+    const card = mount('zone-text', 'done', [
+      { kind: 'user', text: 'the ask' },
+      { kind: 'assistant', text: 'the answer' },
+    ]);
+    expectPromoted(card, 'a finished pure-text turn');
+    const ask = zoneOf(card, 'node-ask');
+    const prompt = ask && ask.children.length ? ask.children[0] : null;
+    if (!prompt || !hasClass(prompt, 'user') || !hasClass(prompt, 'prompt')) {
+      problems.push('zone 1 (.node-ask) does not hold the pinned user prompt (.msg.user.prompt)');
+    } else {
+      const body = findByClass(prompt, 'answer');
+      if (!body || !String(body.innerHTML || '').trim()) {
+        problems.push('the pinned user prompt is not Markdown-rendered into its own `div.answer`');
+      }
+      if (findByClass(prompt, 'msg-text')) {
+        problems.push('the pinned user prompt still renders a `span.msg-text` — zone 1 is Markdown now');
+      }
+    }
+    if (!isHidden(card, 'node-work-wrap')) {
+      problems.push('a pure-text turn leaves its empty .node-work-wrap on screen (zone 2 hides when it has no log)');
+    }
+    // A repaint of the same card must not give the answer back either: `expandedCard`
+    // re-syncs a card whose zone 3 already holds something, and the promotion is still
+    // the truth while nothing was appended after it (`_answerAnchor`).
+    dispatch({
+      type: 'tree',
+      viewId: 'zone-text',
+      activeId: null,
+      rootId: 'zone-text',
+      nodes: [node('zone-text', null, [], { status: 'done' })],
+    });
+    expectPromoted(card, 'a repaint of a card that already shows its answer', []);
+  }
+
+  // (b) A turn that is still streaming never promotes: its tail is still growing, and
+  // the element the next delta continues is exactly that tail. Neither a `state` that
+  // names the running node nor a bare `delta` lifts the answer out.
+  // (c) `done` promotes it — and the two choke points that append into the log give it
+  // back *before* they write, so what they write lands after the answer.
+  {
+    const id = 'zone-live';
+    const card = mount(id, 'running', [{ kind: 'user', text: 'the ask' }]);
+    live(id);
+    dispatch({ type: 'delta', nodeId: id, text: 'partial answer' });
+    expectNotPromoted(card, `a turn that is streaming (\`state{runningNodes:['${id}']}\`)`);
+    const streamingKinds = kindsIn(zoneOf(card, 'node-work'));
+    if (streamingKinds.join(',') !== 'assistant') {
+      problems.push(
+        `a streaming turn's log holds ${JSON.stringify(streamingKinds)}, expected its one (unpromoted) assistant item`,
+      );
+    }
+    if (isHidden(card, 'node-work-wrap')) {
+      problems.push('a streaming turn hides its .node-work-wrap');
+    }
+    idle();
+    dispatch({ type: 'delta', nodeId: id, text: ' still streaming' });
+    expectNotPromoted(card, 'a delta that arrives while nothing told the webview the run had ended');
+
+    dispatch({ type: 'done', nodeId: id });
+    expectPromoted(card, 'a `done` for a finished turn');
+
+    // The choke point every routed append goes through (`routeTo`): a delivered
+    // background notice is written into the log, so the answer comes out first.
+    dispatch({
+      type: 'backgroundNotice',
+      nodeId: id,
+      item: { kind: 'subagent', id: 'zone-notice', name: 'sub', doneText: 'done', content: 'x' },
+    });
+    expectNotPromoted(card, 'a background notice delivered after the answer was promoted');
+    {
+      const work = zoneOf(card, 'node-work');
+      const kinds = kindsIn(work);
+      if (kinds.join(',') !== 'assistant,background') {
+        problems.push(
+          `a notification after a promoted answer produced ${JSON.stringify(kinds)} in .node-work, expected the ` +
+            'answer back first and the notification after it',
+        );
+      }
+      const last = work && work.children.length ? work.children[work.children.length - 1] : null;
+      if (!last || last.dataset.kind !== 'background') {
+        problems.push('the notification did not land after the demoted answer in .node-work');
+      }
+    }
+
+    // The other choke point: a `notice` carries no nodeId, so it demotes the
+    // view-focus card itself (`case 'notice'`) before appending.
+    dispatch({ type: 'delta', nodeId: id, text: 'second answer' });
+    dispatch({ type: 'done', nodeId: id });
+    expectPromoted(card, 'the second turn of the same card', ['assistant', 'background']);
+    dispatch({ type: 'notice', kind: 'warning', text: 'heads up' });
+    expectNotPromoted(card, 'a nodeId-less `notice` written into the view-focus card');
+    {
+      const kinds = kindsIn(zoneOf(card, 'node-work'));
+      if (kinds.join(',') !== 'assistant,background,assistant,notice') {
+        problems.push(
+          `two turns, a notification and a warning produced ${JSON.stringify(kinds)} in .node-work, expected the ` +
+            'demoted runs in order with the warning last',
+        );
+      }
+    }
+  }
+
+  // (d) A failed turn never promotes: its tail is the `⚠️` error bubble, and an error
+  // bubble is not an answer (`isAnswerEl`). That marker is what tells a failure apart
+  // from an answer, so it stays in the log.
+  {
+    const id = 'zone-error';
+    const card = mount(id, 'running', [{ kind: 'user', text: 'the ask' }]);
+    live(id);
+    dispatch({ type: 'delta', nodeId: id, text: 'before the error' });
+    dispatch({ type: 'error', nodeId: id, message: 'boom' });
+    expectNotPromoted(card, 'a turn that ended with an error');
+    const work = zoneOf(card, 'node-work');
+    const kinds = kindsIn(work);
+    if (kinds.join(',') !== 'assistant,assistant') {
+      problems.push(
+        `an error turn produced ${JSON.stringify(kinds)} in .node-work, expected the partial answer and the error item`,
+      );
+    }
+    const last = work && work.children.length ? work.children[work.children.length - 1] : null;
+    if (!last || !hasClass(last, 'error')) {
+      problems.push('the `⚠️` item of an error turn is not the tail of .node-work (it must not be promoted)');
+    }
+  }
+
+  // (e) An interrupted run *does* promote: the user stopped it, but what streamed is
+  // the turn's answer — nothing more will arrive, and it is finished.
+  {
+    const id = 'zone-stop';
+    const card = mount(id, 'running', [{ kind: 'user', text: 'the ask' }]);
+    live(id);
+    dispatch({ type: 'delta', nodeId: id, text: 'partial text' });
+    dispatch({ type: 'interrupted', nodeId: id });
+    expectPromoted(card, 'an interrupted run');
+    const promoted = zoneOf(card, 'node-answer').children[0];
+    if (promoted && promoted._text !== 'partial text') {
+      problems.push(`an interrupted run promoted ${JSON.stringify(promoted._text)}, expected the text it streamed`);
+    }
+  }
+
+  // (f) A thinking-only assistant item has no text, so it is not an answer
+  // (`isAnswerEl` reads `_text`, not the subtree): thinking block and all, it stays
+  // in the log.
+  {
+    const id = 'zone-think';
+    const card = mount(id, 'running', []);
+    live(id);
+    dispatch({ type: 'thinkingDelta', nodeId: id, text: 'reasoning' });
+    dispatch({ type: 'done', nodeId: id });
+    expectNotPromoted(card, 'a thinking-only assistant item (its text is empty)');
+    if (!findByClass(zoneOf(card, 'node-work'), 'thinking-body')) {
+      problems.push('the thinking-only item left .node-work — it is not an answer and must stay in the log');
+    }
+  }
+
+  // (g) An in-place continue (`harnessNote`) is an append into the log of a *finished*
+  // card — the card the view stays on — so the promoted answer has to come back for it.
+  {
+    const id = 'zone-harness';
+    const card = mount(id, 'running', [{ kind: 'user', text: 'the ask' }]);
+    live(id);
+    dispatch({ type: 'delta', nodeId: id, text: 'answer one' });
+    dispatch({ type: 'interrupted', nodeId: id });
+    expectPromoted(card, 'the turn an in-place continue resumes');
+    dispatch({ type: 'harnessNote', nodeId: id, text: 'Continue from where you stopped.' });
+    expectNotPromoted(card, 'an in-place `harnessNote` on a card showing its answer');
+    const work = zoneOf(card, 'node-work');
+    const kinds = kindsIn(work);
+    if (kinds.join(',') !== 'assistant,harness') {
+      problems.push(
+        `an in-place continue produced ${JSON.stringify(kinds)} in .node-work, expected the demoted answer and the ` +
+          'HARNESS block after it',
+      );
+    }
+    const last = work && work.children.length ? work.children[work.children.length - 1] : null;
+    if (!last || last.dataset.kind !== 'harness') {
+      problems.push('the HARNESS block did not land after the demoted answer in .node-work');
+    }
+  }
+
+  // (h) A sub-agent card streams while *its own* run is live — `_agentLive`, set by
+  // `agentStart` and cleared by `agentDone` — so it promotes on `agentDone` and not
+  // before, whatever the tree's status says.
+  {
+    const R = 'zone-agent-root';
+    const SUB = 'zone-agent-sub';
+    dispatch({ type: 'reset' });
+    dispatch({
+      type: 'tree',
+      viewId: R,
+      activeId: null,
+      rootId: R,
+      nodes: [node(R, null, [SUB]), node(SUB, R, [], { kind: 'agent', status: 'running' })],
+    });
+    dispatch({ type: 'path', ids: [R], nodes: [{ id: R, status: 'done', items: [] }] });
+    const card = cardOf(SUB);
+    if (!card) {
+      problems.push('no card was rendered for the sub-agent of the zone fixture');
+    }
+    dispatch({ type: 'agentStart', id: SUB, name: 'zone agent', instruction: 'x', model: 'm' });
+    dispatch({ type: 'delta', nodeId: SUB, text: 'sub answer' });
+    expectNotPromoted(card, 'a sub-agent card whose run is live (`agentStart`, before `agentDone`)');
+    dispatch({ type: 'agentDone', id: SUB, status: 'done', summary: 'done' });
+    expectPromoted(card, 'a sub-agent card after `agentDone`');
+  }
+
+  // (i) A `kind:'bg'` job card has no conversation at all (`isCardStreaming` is
+  // unconditional for it): its log *is* its body, and its zone 3 stays empty for good.
+  {
+    const R = 'zone-bg-root';
+    const JOB = 'zone-bg-job';
+    dispatch({ type: 'reset' });
+    dispatch({
+      type: 'tree',
+      viewId: R,
+      activeId: null,
+      rootId: R,
+      nodes: [
+        node(R, null, [JOB]),
+        node(JOB, R, [], { kind: 'bg', status: 'done', bgTaskId: 5, bgCommand: 'sleep 1', bgExitCode: 0 }),
+      ],
+    });
+    dispatch({ type: 'path', ids: [R], nodes: [{ id: R, status: 'done', items: [] }] });
+    dispatch({
+      type: 'backgrounds',
+      tasks: [
+        {
+          id: 5,
+          nodeId: R,
+          cardNodeId: JOB,
+          command: 'sleep 1',
+          status: 'running',
+          exitCode: null,
+          killed: false,
+          elapsed: 1,
+          truncated: false,
+          outputTail: 'x',
+          pendingDelivery: false,
+        },
+      ],
+    });
+    const card = cardOf(JOB);
+    expectNotPromoted(card, 'a `kind:bg` job card');
+    // Even the two messages that would promote any other card cannot promote this one.
+    dispatch({ type: 'delta', nodeId: JOB, text: 'not a conversation' });
+    dispatch({ type: 'done', nodeId: JOB });
+    expectNotPromoted(card, 'a `kind:bg` job card after a delta and a `done`');
+    const work = zoneOf(card, 'node-work');
+    if (!work || work.children.length === 0) {
+      problems.push('the job card no longer renders its body into .node-work');
+    }
+  }
+}
+
+// --- Zone 2's fold: the work log of a card that shows its answer ---------------
+// The third round of the card. Zone 2 has a one-line header now (`.node-work-head`,
+// inside `.node-work-wrap` and *before* `.node-work`) and the log folds itself to it
+// as soon as zone 3 is showing, so the card reads ask → answer and the log is one
+// click away. The rule is `autoWorkFold`: folded exactly while the card carries
+// `has-answer`, unfolded otherwise; a card whose header the user clicked is theirs
+// for good (`_workTouched`); and the setting that arms it (`spinney.foldWork`, `true`
+// by default) rides the `config` message as `foldWork`, a *changed* value being
+// re-run over every card already on screen.
+//
+// None of it throws when it breaks: the log still renders, the answer is still
+// promoted, the card just lies about what it is showing — which is why it is pinned
+// here. The cases are one rule each: (a) a promoted answer folds the log and a
+// streaming turn does not, (b) a routed append unfolds again and the *next*
+// promotion folds again, (c) a header click owns the card (`_workTouched` wins),
+// (d) `foldWork: false` keeps the log open without touching the promotion, (e) the
+// header's label, (f) a job card's header is hidden, (g) one header per card, in its
+// wrapper, before the log.
+{
+  const node = (id, parentId, children, extra) =>
+    Object.assign(
+      { id, parentId, children, title: id, status: 'done', createdAt: 0, preview: id, usage: null, size: null },
+      extra || {},
+    );
+  const cardOf = (id) => {
+    for (const child of elementById('tree-canvas').children) {
+      if (child.dataset && child.dataset.id === id) return child;
+    }
+    return null;
+  };
+  /** A fresh card on the view path, rendered from its stored items (as in the zone block). */
+  const mount = (id, status, items) => {
+    dispatch({ type: 'reset' });
+    dispatch({ type: 'tree', viewId: id, activeId: null, rootId: id, nodes: [node(id, null, [], { status })] });
+    dispatch({ type: 'path', ids: [id], nodes: [{ id, status, items }] });
+    return cardOf(id);
+  };
+  const live = (id) =>
+    dispatch({ type: 'state', busy: true, status: '', sessionId: 'wf-session', runningNodes: [id] });
+  const baseConfig = TURN_MESSAGES.find((message) => message.type === 'config');
+
+  const headOf = (card) => findByClass(card, 'node-work-head');
+  const labelOf = (card) => {
+    const label = findByClass(headOf(card), 'node-work-label');
+    return label ? String(label.textContent) : null;
+  };
+  const chevOpenOf = (card) => {
+    const chev = findByClass(headOf(card), 'chev');
+    return chev ? chev.classList.contains('open') : null;
+  };
+  /** Every descendant of `element` carrying `name` (the stub's `querySelectorAll` sees none). */
+  const countClass = (element, name) => {
+    let n = 0;
+    for (const child of (element && element.children) || []) {
+      if (child.classList && child.classList.contains(name)) n++;
+      n += countClass(child, name);
+    }
+    return n;
+  };
+  /**
+   * The card's fold state as one statement: the class the CSS keys off, the flag that
+   * mirrors it, and the chevron (whose `open` is the same sense it has on a block
+   * header). Three views of one state, so a card that lost its class but kept its
+   * flag — or a chevron that stopped following the fold — is a failure, not a pass.
+   */
+  const expectFold = (card, folded, what) => {
+    if (!card) {
+      problems.push(`${what}: there is no card to look at`);
+      return;
+    }
+    const hasFoldClass = card.classList.contains('work-folded');
+    if (hasFoldClass !== folded) {
+      problems.push(
+        `${what}: the card is ${hasFoldClass ? 'folded' : 'unfolded'}, expected ${folded ? 'folded' : 'unfolded'}`,
+      );
+    }
+    if (!!card._workFolded !== folded) {
+      problems.push(`${what}: card._workFolded is ${JSON.stringify(card._workFolded)}, expected ${folded}`);
+    }
+    const open = chevOpenOf(card);
+    if (open !== !folded) {
+      problems.push(
+        `${what}: the work-log chevron is ${open === null ? 'not on screen at all' : open ? 'open' : 'closed'}, ` +
+          `expected ${folded ? 'closed' : 'open'}`,
+      );
+    }
+  };
+  /** What zone 3 and the card class claim — the promotion the fold is decided from. */
+  const promotionOf = (card) => {
+    const answer = findByClass(card, 'node-answer');
+    const work = findByClass(card, 'node-work');
+    return {
+      promoted: answer ? answer.children.length : -1,
+      hasAnswer: !!card && card.classList.contains('has-answer'),
+      kinds: work ? work.children.map((child) => (child && child.dataset && child.dataset.kind) || '?') : [],
+      work,
+    };
+  };
+  /**
+   * The promotion itself, without which the fold assertions above say nothing: a card
+   * that stopped promoting would "stay unfolded" and look like a pass.
+   */
+  const expectPromoted = (card, what) => {
+    const state = promotionOf(card);
+    if (!state.hasAnswer || state.promoted !== 1) {
+      problems.push(
+        `${what}: the answer is ${state.promoted} element(s) in .node-answer and the card ` +
+          `${state.hasAnswer ? 'carries' : 'does not carry'} \`has-answer\` — a promotion has to happen before this ` +
+          'block can say anything about the fold',
+      );
+    }
+  };
+  /** (g) One header per card, inside the wrapper, before the log it folds. */
+  const checkHeadStructure = (card, what) => {
+    if (!card) {
+      problems.push(`${what}: there is no card to look at`);
+      return;
+    }
+    const heads = countClass(card, 'node-work-head');
+    if (heads !== 1) {
+      problems.push(`${what}: the card renders ${heads} .node-work-head element(s), expected exactly 1`);
+    }
+    const head = headOf(card);
+    const wrap = findByClass(card, 'node-work-wrap');
+    const work = findByClass(card, 'node-work');
+    if (!head || !wrap || !work) {
+      problems.push(`${what}: the card is missing its .node-work-head / .node-work-wrap / .node-work`);
+      return;
+    }
+    if (head.parentElement !== wrap) {
+      problems.push(`${what}: the header is not a child of .node-work-wrap — hiding the wrapper (an empty log) would leave it on screen`);
+    }
+    if (wrap.children.indexOf(head) >= wrap.children.indexOf(work)) {
+      problems.push(`${what}: the header does not sit before .node-work inside .node-work-wrap`);
+    }
+  };
+
+  // (a) A finished pure-text turn: the answer is promoted into zone 3 and the log it
+  // left behind folds itself in the same step — the two are one card state, decided
+  // together (`promoteAnswer` → `autoWorkFold`). A repaint decides it again from the
+  // card's stored items, so the class has to follow that path too.
+  {
+    const card = mount('wf-done', 'done', [
+      { kind: 'user', text: 'the ask' },
+      { kind: 'assistant', text: 'the answer' },
+    ]);
+    expectPromoted(card, 'a repaint of a finished pure-text turn');
+    expectFold(card, true, 'a repaint of a finished pure-text turn');
+    checkHeadStructure(card, 'a repaint of a finished pure-text turn');
+
+    // …while a turn that is still streaming keeps its log open: that log is the live
+    // part of the card, and the next delta continues its tail.
+    const id = 'wf-live';
+    const streaming = mount(id, 'running', [{ kind: 'user', text: 'the ask' }]);
+    live(id);
+    dispatch({ type: 'delta', nodeId: id, text: 'streaming so far' });
+    expectFold(streaming, false, 'a turn that is still streaming');
+    checkHeadStructure(streaming, 'a turn that is still streaming');
+    // `done` is what promotes it, and the same step folds the log.
+    dispatch({ type: 'done', nodeId: id });
+    expectPromoted(streaming, 'the turn `done` just finished');
+    expectFold(streaming, true, 'the turn `done` just finished');
+
+    // (b) A *routed append* on that card: the promotion comes out of zone 3 first
+    // (see the zone block) and the fold follows it — a notice delivered into a log
+    // that stayed folded would be invisible, which is the whole reason the demote
+    // re-runs the rule.
+    dispatch({
+      type: 'backgroundNotice',
+      nodeId: id,
+      item: { kind: 'subagent', id: 'wf-notice', name: 'sub', doneText: 'done', content: 'x' },
+    });
+    expectFold(streaming, false, 'a card a background notice was just appended to');
+    {
+      const state = promotionOf(streaming);
+      if (state.hasAnswer || state.promoted !== 0) {
+        problems.push(
+          `a notice appended to a folded card left the promotion standing (${state.promoted} element(s) in ` +
+            `.node-answer, has-answer ${state.hasAnswer}) — the append has to land *after* the answer in the log`,
+        );
+      }
+      if (state.kinds.join(',') !== 'assistant,background') {
+        problems.push(
+          `a notice appended to a folded card produced ${JSON.stringify(state.kinds)} in .node-work, expected the ` +
+            'demoted answer with the notice after it',
+        );
+      }
+      const notice = state.work && state.work.children[state.work.children.length - 1];
+      if (!notice || !hasClass(notice, 'bgnotify')) {
+        problems.push('the notice did not land at the end of .node-work');
+      }
+    }
+    // The promotion machinery is intact: the next finished run promotes *and* folds
+    // the card again — the notice was a step of the log, not the end of the card.
+    dispatch({ type: 'delta', nodeId: id, text: 'more' });
+    dispatch({ type: 'done', nodeId: id });
+    expectPromoted(streaming, 'the turn after a notice was appended to the card');
+    expectFold(streaming, true, 'the turn after a notice was appended to the card');
+  }
+
+  // (c) A click on the header hands the card to the user: the click toggles the fold
+  // and `_workTouched` stops `autoWorkFold` from deciding that card ever again. Read
+  // in the one direction where the two disagree — a card the user *unfolded* while
+  // zone 3 is showing — because that is where an ignored `_workTouched` folds it
+  // straight back, and the folded log is invisible in the card's classes otherwise.
+  {
+    const id = 'wf-click';
+    const card = mount(id, 'running', [{ kind: 'user', text: 'the ask' }]);
+    live(id);
+    dispatch({ type: 'delta', nodeId: id, text: 'the answer' });
+    dispatch({ type: 'done', nodeId: id });
+    expectFold(card, true, 'the card before the user takes its fold over');
+    const clickHead = () => {
+      const head = headOf(card);
+      const handler = head && head._listeners && head._listeners.click;
+      if (typeof handler !== 'function') {
+        problems.push('the work-log header has no click handler — the log can no longer be unfolded by hand');
+        return false;
+      }
+      handler({ stopPropagation() {} });
+      return true;
+    };
+    if (clickHead()) {
+      expectFold(card, false, 'the card whose header the user just clicked (it was folded)');
+      if (card._workTouched !== true) {
+        problems.push(
+          'a header click did not mark the card as user-owned (`_workTouched`) — the automatic rule would fold it back',
+        );
+      }
+      // A later promotion must leave a user-owned card alone, whatever the default says.
+      dispatch({ type: 'delta', nodeId: id, text: 'the second turn' });
+      dispatch({ type: 'done', nodeId: id });
+      expectPromoted(card, 'a user-unfolded card after a later promotion');
+      expectFold(card, false, 'a user-unfolded card after a later promotion (`_workTouched` wins)');
+      // …and the click still toggles the other way, so it is a toggle and not a
+      // one-way "unfold".
+      if (clickHead()) {
+        expectFold(card, true, 'a second header click on the same card');
+      }
+    }
+  }
+
+  // (d) `spinney.foldWork: false`: the fold is off — and only the fold. The message
+  // has to reach the cards already on screen (a settings change may not wait for the
+  // next repaint) in both directions, and `done` still promotes the answer: the
+  // setting says where zone 2 sits, never what zone 3 holds.
+  {
+    const id = 'wf-off';
+    const card = mount(id, 'running', [{ kind: 'user', text: 'the ask' }]);
+    live(id);
+    dispatch({ type: 'delta', nodeId: id, text: 'the answer' });
+    dispatch({ type: 'done', nodeId: id });
+    expectFold(card, true, 'a card that finished while `foldWork` still defaulted to on');
+    if (dispatch({ ...baseConfig, foldWork: false })) {
+      problems.push('a `config` carrying foldWork: false threw — the setting has no handler');
+    }
+    expectFold(card, false, 'a card showing its answer when `foldWork` was switched off');
+  }
+  {
+    const id = 'wf-off-new';
+    const card = mount(id, 'running', [{ kind: 'user', text: 'the ask' }]);
+    live(id);
+    dispatch({ type: 'delta', nodeId: id, text: 'the answer' });
+    dispatch({ type: 'done', nodeId: id });
+    expectPromoted(card, 'a finished turn while `spinney.foldWork` is off');
+    expectFold(card, false, 'a finished turn while `spinney.foldWork` is off');
+    // Back on: the same card folds again, without a repaint.
+    if (dispatch({ ...baseConfig, foldWork: true })) {
+      problems.push('a `config` carrying foldWork: true threw — the setting has no handler');
+    }
+    expectFold(card, true, 'a card showing its answer when `foldWork` was switched back on');
+  }
+
+  // (e) The header's label: the log's step count, "Work log" while there is none.
+  // The count itself is **not observable here**: `updateWorkHead` asks
+  // `work.querySelectorAll('.msg.tool')`, a *compound* selector, and the stub's
+  // `querySelectorAll` answers `[]` for every selector on purpose. So `n` reads 0
+  // whatever the log holds and the "Work log · {0} steps" form cannot be reached
+  // offline — the label's *shape* is asserted for the tool case instead (which still
+  // fails on a header that lost its label or gained something else), and the `n === 0`
+  // branch is asserted exactly.
+  {
+    const id = 'wf-label';
+    const card = mount(id, 'running', [{ kind: 'user', text: 'the ask' }]);
+    live(id);
+    dispatch({ type: 'harnessNote', nodeId: id, text: 'Continue from where you stopped.' });
+    const plain = labelOf(card);
+    if (plain !== 'Work log') {
+      problems.push(
+        `the work-log header of a log holding no tool card reads ${JSON.stringify(plain)}, expected "Work log"`,
+      );
+    }
+    dispatch({ type: 'toolCallDelta', nodeId: id, index: 0, id: 'wf-tool', name: 'read_file', args: '{"path":"a"}' });
+    dispatch({ type: 'toolStart', nodeId: id, index: 0, id: 'wf-tool', name: 'read_file', args: '{"path":"a"}' });
+    const withTool = labelOf(card);
+    if (!/^Work log( · \d+ steps)?$/.test(String(withTool))) {
+      problems.push(
+        `the work-log header of a log holding a tool card reads ${JSON.stringify(withTool)}, expected the ` +
+          '"Work log" / "Work log · N steps" form',
+      );
+    }
+    checkHeadStructure(card, 'the card of the label fixture');
+    notes.push('work-log header labelled ' + JSON.stringify(plain) + ' (tool count not observable offline)');
+  }
+
+  // (f) A job card's zone 2 is its whole body (a terminal mirror), so its header is
+  // hidden and no promotion can fold it away (`setWorkFold` / `autoWorkFold` refuse a
+  // `kind: 'bg'` card). The header still has to *exist* — hiding it is one class on a
+  // real element — and it is the one card whose wrapper must never be hidden either.
+  {
+    const R = 'wf-bg-root';
+    const JOB = 'wf-bg-job';
+    dispatch({ type: 'reset' });
+    dispatch({
+      type: 'tree',
+      viewId: R,
+      activeId: null,
+      rootId: R,
+      nodes: [
+        node(R, null, [JOB]),
+        node(JOB, R, [], { kind: 'bg', status: 'done', bgTaskId: 11, bgCommand: 'sleep 1', bgExitCode: 0 }),
+      ],
+    });
+    dispatch({ type: 'path', ids: [R], nodes: [{ id: R, status: 'done', items: [] }] });
+    dispatch({
+      type: 'backgrounds',
+      tasks: [
+        {
+          id: 11,
+          nodeId: R,
+          cardNodeId: JOB,
+          command: 'sleep 1',
+          status: 'running',
+          exitCode: null,
+          killed: false,
+          elapsed: 1,
+          truncated: false,
+          outputTail: 'x',
+          pendingDelivery: false,
+        },
+      ],
+    });
+    const job = cardOf(JOB);
+    const head = headOf(job);
+    if (!job || !head) {
+      problems.push('a `kind:bg` job card has no .node-work-head — `renderBgBody` hides an element that has to exist');
+    } else if (!head.classList.contains('hidden')) {
+      problems.push('a `kind:bg` job card shows its work-log header (it must stay hidden — the log is the card body)');
+    }
+    // The other half of that pair: hiding the *wrapper* would hide the terminal the
+    // card is entirely about.
+    const jobWrap = job ? findByClass(job, 'node-work-wrap') : null;
+    if (jobWrap && jobWrap.classList.contains('hidden')) {
+      problems.push('a `kind:bg` job card hides .node-work-wrap — its log *is* its body and has to stay visible');
+    }
+    // Even the two messages that would fold any other card leave a job card alone.
+    dispatch({ type: 'delta', nodeId: JOB, text: 'not a conversation' });
+    dispatch({ type: 'done', nodeId: JOB });
+    expectFold(job, false, 'a `kind:bg` job card after a delta and a `done`');
+    checkHeadStructure(job, 'a `kind:bg` job card');
   }
 }
 

@@ -118,6 +118,8 @@
   "⤷ branching from {0} — your reply starts a new branch": "⤷ 从 {0} 分支 — 你的回复将开启一个新分支",
   "Sub-agent": "子智能体",
   "d{0} · {1} · {2}": "深度{0} · {1} · {2}",
+  "Work log": "工作日志",
+  "Work log · {0} steps": "工作日志 · {0} 个步骤",
   "write": "可写",
   "ro": "只读",
   "Kill this sub-agent": "终止此子智能体",

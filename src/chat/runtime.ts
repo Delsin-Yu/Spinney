@@ -316,6 +316,7 @@ export interface HarnessConfig {
   replyLanguage: string;
   foldToolCalls: boolean;
   foldThinking: boolean;
+  foldWork: boolean;
   maxConcurrentSubagents: number;
   maxLevel2Subagents: number;
   saveSubAgentTranscripts: boolean;
@@ -1775,6 +1776,7 @@ export class SessionRuntime {
       thinkingEffort: this.thinkingEffort,
       foldToolCalls: cfg.foldToolCalls,
       foldThinking: cfg.foldThinking,
+      foldWork: cfg.foldWork,
       snippets: cfg.promptSnippets,
     });
   }

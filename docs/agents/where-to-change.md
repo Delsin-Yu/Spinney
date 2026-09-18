@@ -59,7 +59,14 @@
   keep any new colour theme-driven rather than hardcoded. Folding a block
   (thinking / tool card) goes through `setBlockOpen` + the active-block rule
   (`setActive` / `clearActive`, `applyFoldDefault`) — see
-  `docs/agents/invariants/streaming-perf.md`.
+  `docs/agents/invariants/streaming-perf.md`. Every card is split into three zones —
+  `.node-ask` (the pinned prompt), `.node-work` (the work log, the only scroller, with
+  the green lock dot) and `.node-answer` (a conditional pretty-print of the work log's
+  tail, driven by `syncAnswerZone` / `promoteAnswer` / `demoteAnswer`) — the same file
+  has the P1/P2 rule that decides when zone 3 exists at all. Folding the **work log**
+  (not a block inside it) is its own mechanism: `setWorkFold` / `autoWorkFold` /
+  `updateWorkHead` with `.node-work-head`, the card class `work-folded`,
+  `spinney.foldWork` and the per-card `_workTouched` mark.
 - **Add or reword a user-visible string** → write it as the English source inside
   one literal: `vscode.l10n.t('…')` in the host, `tr('…')` in `media/main.js`, or
   `%key%` + `package.nls.json` for `package.json`; then add the entry to every

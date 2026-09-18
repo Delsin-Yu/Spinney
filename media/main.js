@@ -120,6 +120,11 @@
   // `setActive` below).
   let foldToolCalls = true;
   let foldThinking = true;
+  // Zone 2's own fold default (see `autoWorkFold`): the work log of a turn *with*
+  // an answer is folded down to its one-line header. Not a block default like the
+  // two above — it is re-decided per card by the promotion/demotion hooks, and a
+  // header the user clicked owns its card from then on.
+  let foldWork = true;
 
   // ---- Performance probes (diagnostics only) -------------------------------
   // The host traces one user-visible operation at a time — a session switch, a
@@ -515,8 +520,10 @@
   }
 
   // ---- Message rendering into a container (defaults to the active node) ----
-  // The pinned user prompt of the active node (top of an expanded card). It does
-  // not scroll with the transcript and does not trigger tree panning.
+  // Zone 1 of a card: the pinned user ask (`.node-ask`, top of an expanded card).
+  // It does not scroll with the work log and does not trigger tree panning, and it
+  // is Markdown now — a fenced snippet or a list in the ask reads like it does in
+  // the answer.
   function addUserPrompt(text, attachments) {
     if (!promptEl) return;
     promptEl.innerHTML = '';
@@ -535,7 +542,12 @@
       node.appendChild(imgWrap);
     }
     if (text) {
-      node.appendChild(el('span', 'msg-text', text));
+      // Zone 1 is Markdown now: the ask is rendered exactly like an answer body
+      // (fenced code, lists, links). It is a `div.answer` so the two share one
+      // style — the pinned prompt is not a lesser kind of text than the reply.
+      const body = el('div', 'answer');
+      body.innerHTML = renderMarkdown(text);
+      node.appendChild(body);
     }
     promptEl.appendChild(node);
     return node;
@@ -1029,73 +1041,536 @@
     return node;
   }
 
-  // Render a node's stored items: the user prompt goes to the pinned prompt area,
-  // everything else into the scrollable transcript. Sets messagesEl/promptEl to the
-  // node's containers for the duration.
-  //
-  // `virtual` is the caller's "this node is finished" answer (a running node's items
-  // are appended in place as they arrive, and the streaming path reads the
-  // container's last child back to continue it, so it must never be re-rendered
-  // from a slice): a finished node with more than `VIRTUAL_ITEM_THRESHOLD` items
-  // renders the window around its newest content instead of the whole transcript.
-  function renderNodeItems(itemsEl, promptElCard, items, virtual) {
-    itemsEl.innerHTML = '';
-    promptElCard.innerHTML = '';
+  /**
+   * Render a node's stored items into its card, zone by zone: the user ask to
+   * `.node-ask` (zone 1), everything else to `.node-work` (zone 2), and — as the
+   * very last step — the trailing answer run to `.node-answer` (zone 3) through
+   * `syncAnswerZone`, the *same* promotion the live path uses. There is no second
+   * "render the answer" code path, so a repaint and a live turn cannot disagree
+   * about where the answer lives.
+   *
+   * Derives its own containers from `card` (the caller no longer passes them) and
+   * still sets messagesEl/promptEl to them for the duration: every `add*` helper
+   * writes into those two globals, and they must be the node's own containers while
+   * its items are painted (a repaint of one node is not allowed to append into
+   * another node's transcript).
+   *
+   * `virtual` is the caller's "this node is finished" answer (a running node's items
+   * are appended in place as they arrive, and the streaming path reads the
+   * container's last child back to continue it, so it must never be re-rendered
+   * from a slice): a finished node with more than `VIRTUAL_ITEM_THRESHOLD` work items
+   * renders the window around its newest content instead of the whole log. The
+   * window is the work list only — the answer run is never windowed (see below).
+   */
+  function renderNodeItems(card, items, virtual) {
+    const workEl = card.querySelector('.node-work');
+    const askEl = card.querySelector('.node-ask');
+    const answerEl = card.querySelector('.node-answer');
+    const answerWrap = card.querySelector('.node-answer-wrap');
+    if (!workEl || !askEl) return;
+    workEl.innerHTML = '';
+    if (answerEl) answerEl.innerHTML = '';
+    askEl.innerHTML = '';
     // A window belongs to the list it was painted from; a full render replaces it.
-    itemsEl._virt = null;
+    workEl._virt = null;
+    // Whatever zone 3 held is gone with the clear above, so nothing anchors a
+    // promotion any more and the "answer shown" state starts from scratch.
+    card._answerAnchor = null;
+    if (answerWrap) answerWrap.classList.add('hidden');
+    card.classList.remove('has-answer');
     const prevMsg = messagesEl;
     const prevPrompt = promptEl;
-    messagesEl = itemsEl;
-    promptEl = promptElCard;
+    messagesEl = workEl;
+    promptEl = askEl;
+    // Split the items: the first `user` item is the pinned ask (a later one is
+    // neither pinned nor rendered as an item — a continued turn re-sends nothing),
+    // and the trailing run of real answers is zone 3.
+    const work = [];
+    const answer = [];
     let promptSet = false;
-    if (virtual && items && items.length > VIRTUAL_ITEM_THRESHOLD) {
-      // Same rule as the full render below: the first `user` item is the pinned
-      // prompt, a later one is neither pinned nor rendered as an item.
-      const rest = [];
-      for (const item of items) {
-        if (item.kind === 'user') {
-          if (!promptSet) {
-            addUserPrompt(item.text, item.attachments);
-            promptSet = true;
-          }
-        } else {
-          rest.push(item);
+    for (const item of items || []) {
+      if (item.kind === 'user') {
+        if (!promptSet) {
+          addUserPrompt(item.text, item.attachments);
+          promptSet = true;
         }
+        continue;
       }
-      if (!itemsEl._virtScroll) {
-        const container = itemsEl;
-        itemsEl._virtScroll = () => onItemsWindowScroll(container);
-        itemsEl.addEventListener('scroll', itemsEl._virtScroll);
+      work.push(item);
+    }
+    // Only a *finished* card lifts its answer out: while the turn streams, the tail
+    // is still growing (the next delta belongs after it), so the run stays in the
+    // log and `endRun` promotes it once the turn is really over.
+    if (!isCardStreaming(card)) {
+      let at = work.length;
+      while (at > 0 && isAnswerItem(work[at - 1])) at--;
+      if (at < work.length) {
+        for (let i = at; i < work.length; i++) answer.push(work[i]);
+        work.length = at;
       }
-      paintItemsWindow(itemsEl, {
-        items: rest,
-        promptEl: promptElCard,
+    }
+    if (virtual && work.length > VIRTUAL_ITEM_THRESHOLD) {
+      if (!workEl._virtScroll) {
+        const container = workEl;
+        workEl._virtScroll = () => onItemsWindowScroll(container);
+        workEl.addEventListener('scroll', workEl._virtScroll);
+      }
+      paintItemsWindow(workEl, {
+        items: work,
+        promptEl: askEl,
+        // The card being repainted (`paintItemsWindow` re-anchors a promotion it
+        // invalidates by rebuilding the elements it paints — see there).
+        card,
         // A finished card opens at its newest content (`_needsBottomScroll`), so the
-        // first window is the *tail* of the transcript; scrolling up extends it.
-        start: Math.max(0, rest.length - VIRTUAL_WINDOW),
-        end: rest.length,
+        // first window is the *tail* of the log; scrolling up extends it.
+        start: Math.max(0, work.length - VIRTUAL_WINDOW),
+        end: work.length,
         px: VIRTUAL_ITEM_PX,
         painted: [],
         top: null,
         bottom: null,
         raf: null,
       });
-      messagesEl = prevMsg;
-      promptEl = prevPrompt;
-      return;
+    } else {
+      for (const item of work) renderItemInto(item);
     }
-    for (const item of items) {
-      if (item.kind === 'user') {
-        if (!promptSet) {
-          addUserPrompt(item.text, item.attachments);
-          promptSet = true;
-        }
-      } else {
-        renderItemInto(item);
-      }
-    }
+    // The answer run is rendered into zone 2 like any other item — after the window,
+    // in plain order, never windowed (a run of answers is what the model *ended*
+    // with, and it is the one part of the transcript nobody wants paginated).
+    for (const item of answer) renderItemInto(item);
     messagesEl = prevMsg;
     promptEl = prevPrompt;
+    syncAnswerZone(card);
+    // Settle the log's visibility *after* the sync: zone 3 has taken its run by now,
+    // so "the log has nothing in it" is the final answer (a pure-text turn hides the
+    // wrapper and leaves no empty box). Before the sync the run is still in the log,
+    // which is exactly why this cannot be decided up there — and a card whose log is
+    // already hidden when its items arrive (an expansion that preceded them) would
+    // otherwise stay hidden with a full log inside.
+    const workWrap = card.querySelector('.node-work-wrap');
+    if (workWrap) workWrap.classList.toggle('hidden', workEl.children.length === 0);
+    // Last, because the fold depends on everything above: a repaint can have
+    // promoted the run (`syncAnswerZone`) and can have hidden the log — both are
+    // settled by now, and a header click the user made earlier is preserved
+    // (`_workTouched`).
+    autoWorkFold(card);
+  }
+
+  // ---- The three zones of a turn card ------------------------------------------
+  // A turn card is read as three zones (see `createNodeCard`):
+  //   1. `.node-ask`    — what the user asked for (pinned, Markdown);
+  //   2. `.node-work`   — the work log: reasoning blocks, tool cards, notices,
+  //                       background notices, HARNESS blocks and the assistant text
+  //                       the turn went *through*;
+  //   3. `.node-answer` — the model's final answer.
+  // Zone 3 is not a second copy of the text: it is a *pretty print* of the trailing
+  // answer run of zone 2, moved — `appendChild` — out of the log once the turn is
+  // over, and moved back the moment anything is appended after it. So every element
+  // lives in exactly one place in the DOM at any time, and there is no "which one is
+  // the real answer" (a copy would be re-markdowned on every repaint, and a delta
+  // would have to be written twice).
+  //
+  // Two rules make that safe:
+  //  - a *streaming* turn never promotes (`isCardStreaming`): its tail is still
+  //    growing, and the element the next delta continues is that tail;
+  //  - anything appended into zone 2 demotes first, so an append lands *after* the
+  //    answer rather than inside it. The choke point is `routeTo` (see there), plus
+  //    `case 'notice'` for the one message shape that carries no nodeId.
+  //
+  // `card._answerAnchor` is the element that was zone 2's last child when the run
+  // was promoted. While it is still the last child, nothing was appended after the
+  // promotion, so the run is still the tail and the promotion is still the truth —
+  // that is the whole test `syncAnswerZone` needs. It is `null` on a fresh card
+  // (never promoted, and `undefined` reads as "no anchor" too) and after a demote.
+
+  /**
+   * Is this card's turn still streaming? Not a `meta.status` question: the tree's
+   * status is a label, while a run that is live *now* is what decides whether the
+   * tail of the log can be lifted out (it cannot — the next delta continues it).
+   */
+  function isCardStreaming(card) {
+    const id = card.dataset.id;
+    const meta = treeNodes[id];
+    // A job card has no conversation at all (its body mirrors a background
+    // terminal): it never finishes a turn and never gets a zone 3.
+    if (meta && meta.kind === 'bg') return true;
+    // A sub-agent card streams while *its own* run is live. The tree status lags
+    // (`agentDone` is what ends it), and `_agentLive` is the flag `onAgentStart` /
+    // `onAgentDone` set — the exact pair a promotion has to wait for.
+    if (meta && meta.kind === 'agent') return card._agentLive === true;
+    return runningNodes.has(id);
+  }
+
+  /**
+   * The DisplayItem half of `isAnswerEl`: a stored answer is an assistant item that
+   * is not an error bubble and carries text (a thinking-only item has neither
+   * `text` nor anything to promote).
+   */
+  function isAnswerItem(item) {
+    return !!item && item.kind === 'assistant' && !item.error && String(item.text || '').trim() !== '';
+  }
+
+  /**
+   * Is this rendered element a promotable answer? The assistant message element
+   * keeps its text on `_text` (see `addAssistant`) — reading the DOM back would be
+   * wrong for a thinking-only message, whose `_text` is empty while its subtree is
+   * not.
+   */
+  function isAnswerEl(node) {
+    return !!node && node.dataset.kind === 'assistant' && !node.classList.contains('error') && String(node._text || '').trim() !== '';
+  }
+
+  /**
+   * The maximal contiguous run of answer elements at the END of `workEl` — read off
+   * the child list by index (not `previousElementSibling`): the run is a statement
+   * about the log's children, and walking the list is also the one form the offline
+   * webview checker's DOM stub can replay.
+   */
+  function trailingAnswerEls(workEl) {
+    const run = [];
+    const kids = workEl ? workEl.children : null;
+    if (!kids) return run;
+    for (let i = kids.length - 1; i >= 0; i--) {
+      if (!isAnswerEl(kids[i])) break;
+      run.unshift(kids[i]);
+    }
+    return run;
+  }
+
+  /**
+   * Zone 3 gives its content back to the END of the log. `appendChild` per child, in
+   * order, so the run keeps its order and lands after whatever the log ends with —
+   * which is exactly what an append after the answer would have looked like had the
+   * answer never been lifted out.
+   *
+   * Idempotent, and deliberately still doing its class bookkeeping when zone 3 is
+   * already empty: the callers (every routed append) rely on the invariants it
+   * restores, not on there having been something to move.
+   */
+  function demoteAnswer(card) {
+    if (!card) return;
+    const workEl = card.querySelector('.node-work');
+    const answerEl = card.querySelector('.node-answer');
+    if (workEl && answerEl) {
+      // A snapshot of the live child list: `appendChild` moves a child out of it
+      // while we iterate.
+      for (const node of Array.prototype.slice.call(answerEl.children)) workEl.appendChild(node);
+    }
+    card._answerAnchor = null;
+    const answerWrap = card.querySelector('.node-answer-wrap');
+    if (answerWrap) answerWrap.classList.add('hidden');
+    card.classList.remove('has-answer');
+    const workWrap = card.querySelector('.node-work-wrap');
+    // An *append* is what a demote precedes, so zone 2 has to be visible when this
+    // returns — that is why this un-hides unconditionally instead of asking whether
+    // the log has children right now (it usually has none yet: this runs immediately
+    // before the very first delta of a turn is written). The empty log of a card
+    // whose *whole* content is its answer is hidden by `promoteAnswer`, not here.
+    if (workWrap) workWrap.classList.remove('hidden');
+    // The answer is gone: the log is the card again, so it unfolds (unless the user
+    // folded it by hand) — the same moment `has-answer` comes off.
+    autoWorkFold(card);
+  }
+
+  /**
+   * Lift the trailing answer run of the log out into zone 3: the model's final
+   * answer, at its own scroll position, without the reasoning and tool noise above
+   * it. Nothing outside this function decides what an answer is — it is the run
+   * `trailingAnswerEls` finds, and the run is moved, never copied.
+   */
+  function promoteAnswer(card) {
+    const workEl = card.querySelector('.node-work');
+    const answerEl = card.querySelector('.node-answer');
+    if (!workEl || !answerEl) return;
+    for (const node of trailingAnswerEls(workEl)) answerEl.appendChild(node);
+    // What the log was left with: the anchor of this promotion. `null` when the log
+    // is empty now — and `syncAnswerZone`'s guard still holds for that (an empty log
+    // has a `null` last child).
+    card._answerAnchor = workEl.lastElementChild;
+    const answerWrap = card.querySelector('.node-answer-wrap');
+    if (answerWrap) answerWrap.classList.remove('hidden');
+    card.classList.add('has-answer');
+    if (workEl.children.length === 0) {
+      const workWrap = card.querySelector('.node-work-wrap');
+      if (workWrap) workWrap.classList.add('hidden');
+    }
+    // The answer is what the card is about now: fold the log away (unless the user
+    // owns this card's fold — see `autoWorkFold`).
+    autoWorkFold(card);
+  }
+
+  /**
+   * Bring a finished card's zone 3 in line with its log, in one place: promote the
+   * trailing answer run when there is one, demote when there is not. Called at every
+   * point where the log can have gained or lost its tail (a repaint, the end of a
+   * run, the end of a sub-agent run) — never from the streaming path itself, which
+   * is why a delta cannot move the answer zone out from under itself.
+   */
+  function syncAnswerZone(card) {
+    if (!card) return;
+    if (isCardStreaming(card)) { demoteAnswer(card); return; }
+    const workEl = card.querySelector('.node-work');
+    const answerEl = card.querySelector('.node-answer');
+    if (!workEl || !answerEl) return;
+    // Nothing newer than the promotion happened: it is still the tail.
+    if (answerEl.children.length > 0 && workEl.lastElementChild === card._answerAnchor) return;
+    if (trailingAnswerEls(workEl).length > 0) promoteAnswer(card);
+    else demoteAnswer(card);
+  }
+
+  // ---- Zone 2's fold: the work log as a one-line header -------------------------
+  // Round two of the three-zone card. The log used to be a capped scroller (see
+  // `.node.has-answer .node-work` in style.css) sitting under the answer: a long
+  // turn still pushed the answer down. Now zone 2 folds *to its header* whenever
+  // zone 3 is showing — the card reads ask → answer, and the log is one click away.
+  //
+  // The state lives on the card, exactly like the block-level `_userTouched`:
+  //   `_workFolded`  — the log is folded right now (mirrored by the card class
+  //                    `work-folded`, which the CSS keys off);
+  //   `_workTouched` — a click on the header handed this card to the user, so
+  //                    `autoWorkFold` stops deciding it for good.
+  // The automatic rule is not a settings default: it is re-evaluated every time a
+  // promotion can have flipped `has-answer` (the four hooks below), because the
+  // same turn can go answer → more work → answer again.
+  /** The tree kind of the node a card renders; `turn` for the ordinary ones. */
+  function kindOf(card) {
+    const meta = card && treeNodes[card.dataset.id];
+    return (meta && meta.kind) || 'turn';
+  }
+
+  /**
+   * Refresh one card's work-log header: the chevron from the fold state, the label
+   * from the live step count. Idempotent and cheap (`_workFolded` plus one
+   * `querySelectorAll`), so every path that can change either — a fold, a tool call
+   * that just started, a whole repaint — may simply call it.
+   */
+  function updateWorkHead(card) {
+    if (!card) return;
+    const workEl = card.querySelector('.node-work');
+    const n = workEl ? workEl.querySelectorAll('.msg.tool').length : 0;
+    const head = card.querySelector('.node-work-head');
+    if (!head) return;
+    const chev = byClass(head, 'chev');
+    // `open` means the log is showing, the same sense it has on a block header.
+    if (chev) chev.classList.toggle('open', !card._workFolded);
+    const label = byClass(head, 'node-work-label');
+    if (label) label.textContent = n === 0 ? tr('Work log') : tr('Work log · {0} steps', n);
+  }
+
+  /**
+   * Fold or unfold one card's work log. A job card's zone 2 is a terminal mirror,
+   * not a conversation (it has no answer to make room for), so this never touches
+   * one — its header is display-hidden anyway (see `renderBgBody`).
+   */
+  function setWorkFold(card, folded) {
+    if (!card || kindOf(card) === 'bg') return;
+    card._workFolded = !!folded;
+    card.classList.toggle('work-folded', card._workFolded);
+    const head = card.querySelector('.node-work-head');
+    if (head) {
+      const chev = byClass(head, 'chev');
+      if (chev) chev.classList.toggle('open', !card._workFolded);
+    }
+    updateWorkHead(card);
+    // The fold is also the moment the 1:2 rule starts or stops applying, so the
+    // body's definite height is settled with it (see `settleAnswerSplit`).
+    settleAnswerSplit(card);
+  }
+
+  /**
+   * The automatic rule: the log is folded exactly while the answer is showing
+   * (`has-answer`), and unfolded when it is not — a streaming turn, or a turn whose
+   * whole content stayed in the log. Called from every point where a promotion can
+   * have flipped that class (`promoteAnswer` / `demoteAnswer` / `renderNodeItems`)
+   * and from `config` when the default itself changed. A card the user clicked on
+   * is theirs (`_workTouched`): only its header text is refreshed here.
+   */
+  function autoWorkFold(card) {
+    if (!card) return;
+    if (kindOf(card) === 'bg') return;
+    if (card._workTouched) { updateWorkHead(card); settleAnswerSplit(card); return; }
+    setWorkFold(card, foldWork && card.classList.contains('has-answer'));
+  }
+
+  // ---- How the two zones share the card -----------------------------------------
+  // The share is a **priority, not a ratio** (a hard 1:2 lock was tried and was wrong:
+  // it divided the card even when neither zone needed its half, so a short answer sat
+  // above a block of blank space while the log scrolled inside a third of the card —
+  // see the `flex-basis: 0` note in the CSS). The answer comes first; the log takes
+  // what is left and keeps a readable strip while it is open:
+  //   - both zones fit the card's room → each takes its content and the card hugs
+  //     them: nothing blank, nothing scrolling;
+  //   - they do not → the card fills its room, the answer takes all of its content if
+  //     it can (otherwise everything but the log's floor) and the log takes the rest.
+  // The measurement below is what makes that possible: with the split suspended
+  // (`SPLIT_MEASURE`) both zones report their natural height, and only then can either
+  // be given "what it needs" instead of a guessed share.
+  const SPLIT_MEASURE = 'split-measure';
+  /** The log's readable strip in the scarce case: never less, never more than half. */
+  const LOG_FLOOR_PX = 200;
+  /**
+   * The floor the two zones share when an answer is showing. A card may not be shrunk
+   * out of `header + prompt + composer + this` — the drag's own floor (`MIN_H`) is a
+   * flat 260px, which a long prompt and the input pane already eat on their own, and
+   * the zones were squeezed to zero: a log with no height cannot be unfolded again.
+   */
+  const SPLIT_FLOOR_PX = 220;
+
+  /** Everything in the card except the body: head, the pinned ask, the composer, border. */
+  function cardFixedHeight(card) {
+    const head = card.querySelector('.node-head');
+    const ask = card.querySelector('.node-ask');
+    const composer = composerEl && composerEl.parentElement === card ? composerEl : null;
+    return (
+      (head ? head.offsetHeight || 0 : 0) +
+      (ask ? ask.offsetHeight || 0 : 0) +
+      (composer ? composer.offsetHeight || 0 : 0) +
+      2 // the card's own top and bottom border
+    );
+  }
+
+  /**
+   * The height this card may reach: what the user dragged, else the stylesheet's cap.
+   * Deliberately NOT `card.style.maxHeight`: the tree layout writes its stretch target
+   * there (`height` + a matching `max-height`, only ever growing a card), so reading the
+   * inline style back would treat the *folded* card's height as a hard cap — unfolding a
+   * log then divided those few pixels and the log came back with no height at all, with
+   * the max-height pinning the card so it could not grow out of it.
+   */
+  function cardHeightCap(card) {
+    const meta = treeNodes[card.dataset.id];
+    const dragged = meta && meta.size && meta.size.h ? meta.size.h : 0;
+    if (dragged > 0) return dragged;
+    return stylesheetCap();
+  }
+
+  /** The card's own cap from the stylesheet (`--node-max-h`), for a host with styles. */
+  function stylesheetCap() {
+    const root = typeof document !== 'undefined' && document.documentElement;
+    const cs =
+      root && typeof window !== 'undefined' && window.getComputedStyle
+        ? window.getComputedStyle(root)
+        : null;
+    const value = cs && cs.getPropertyValue ? parseFloat(cs.getPropertyValue('--node-max-h')) : NaN;
+    // The stylesheet's own number, for a host that reports nothing at all.
+    return value > 0 ? value : 1200;
+  }
+
+  /**
+   * Settle how the answer and the log share this card, in one pass:
+   *   - `answer-fit` — both zones take their content and the card hugs them;
+   *   - `answer-scarce` — the card fills its room, the answer is pinned to the share
+   *     measured for it and the log scrolls in the remainder.
+   * Nothing is written when the rule does not apply (no answer, a folded log, a
+   * collapsed card) or when the host has no layout at all — the offline webview
+   * checker measures 0, and a wrong definite height would be worse than none.
+   */
+  function settleAnswerSplit(card) {
+    if (!card || kindOf(card) === 'bg') return;
+    const body = card.querySelector('.node-body');
+    const workWrap = card.querySelector('.node-work-wrap');
+    const answerWrap = card.querySelector('.node-answer-wrap');
+    if (!body || !workWrap || !answerWrap) return;
+    const wanted =
+      card.classList.contains('expanded') &&
+      card.classList.contains('has-answer') &&
+      !card.classList.contains('work-folded');
+    let bodyH = 0;
+    let answerH = '';
+    let fit = false;
+    let scarce = false;
+    let lifted = false;
+    if (wanted) {
+      // One read with the split suspended (see the CSS): what the two zones would be
+      // if nothing divided them. The answer's inline height from the *previous* pass is
+      // cleared for the read: `flex-basis: auto` takes a set height as the basis, so the
+      // measurement would read the old share instead of the content — and once a pass
+      // squeezed the answer it measured small and was given small forever after (the
+      // answer could never grow back, however far the card was scaled up). The writes at
+      // the end of this function re-apply whatever this pass decides.
+      answerWrap.style.height = '';
+      card.classList.add(SPLIT_MEASURE);
+      const work = card.querySelector('.node-work');
+      // The log reserves a strip under itself for its scroll-lock dot (a margin, so
+      // the wrapper's `offsetHeight` does not count it) — without it the log would
+      // still miss those pixels and scroll by them.
+      const strip =
+        work && typeof window.getComputedStyle === 'function'
+          ? parseFloat(window.getComputedStyle(work).marginBottom) || 0
+          : 0;
+      const logH = (workWrap.offsetHeight || 0) + strip;
+      const answerNatural = answerWrap.offsetHeight || 0;
+      card.classList.remove(SPLIT_MEASURE);
+      if (logH + answerNatural > 0) {
+        const others = cardFixedHeight(card);
+        // Two things can leave the card unable to *give* the split the room it computes:
+        // a stored size the user dragged smaller than the parts need, and an inline
+        // `max-height` the tree layout left behind — its stretch target is measured from
+        // the card as it *was*, so a card unfolded later carries a stale, smaller one.
+        // Either way the card is clipped and the zones are squeezed instead of divided
+        // (the log ended up with no height at all and could not be unfolded). So the cap
+        // is never below the usable minimum, and the card's own inline limit is lifted to
+        // it — in the card's style and in the layout's copy of the size, so a relayout
+        // restores the lift rather than the squeeze. (A relayout re-derives the stretch
+        // from the card's new height anyway, and the stretch only ever grows a card.)
+        const cap = Math.max(cardHeightCap(card), others + SPLIT_FLOOR_PX);
+        const inlineMax = parseFloat(card.style.maxHeight);
+        if (inlineMax > 0 && inlineMax < cap) {
+          card.style.maxHeight = cap + 'px';
+          lifted = true;
+        }
+        // The stretch writes `height` *and* `max-height`: raising only the cap leaves the
+        // card at the stretched height (an inline `height` is not a cap), and the body —
+        // with the log, the one zone that has no height of its own — is squeezed to
+        // nothing while the pinned answer keeps showing. Dropping a too-small inline
+        // height is safe: the next relayout re-derives the stretch from the card's own
+        // height, and a stretch only ever grows a card.
+        const inlineH = parseFloat(card.style.height);
+        if (inlineH > 0 && inlineH < cap) {
+          card.style.height = '';
+          lifted = true;
+        }
+        const meta = treeNodes[card.dataset.id];
+        if (meta && meta.size && meta.size.h < cap) {
+          meta.size.h = cap;
+          card.style.maxHeight = cap + 'px';
+          lifted = true;
+        }
+        const room = Math.max(0, cap - others);
+        if (logH + answerNatural <= room) {
+          // Everything fits: the card is exactly as tall as the two of them.
+          fit = true;
+        } else {
+          // Scarce: the answer first — all of it if the log's floor leaves room for
+          // it — and the log gets the remainder (its content may be longer: it scrolls).
+          const floor = Math.min(LOG_FLOOR_PX, room * 0.5);
+          answerH = Math.min(answerNatural, Math.max(0, room - floor));
+          bodyH = room;
+          scarce = true;
+        }
+      }
+    }
+    card.classList.toggle('answer-fit', fit);
+    card.classList.toggle('answer-scarce', scarce);
+    const setH = (el, value) => {
+      if (el.style.height === value) return false;
+      el.style.height = value;
+      return true;
+    };
+    // Both writes report whether they changed anything: a style write costs a layout,
+    // and the relayout below is only worth it when something really moved — the card's
+    // own limits being lifted counts, because the card's size just changed.
+    // `bodyH` is a number, and a unitless one is silently dropped by the CSSOM (`style
+    // .height = 762.3` is not a length) — the `px` here is not decoration: without it the
+    // body kept its content height, the log (the zone with a zero basis) lost everything
+    // and only the answer — which has a height of its own — kept showing.
+    const movedBody = setH(body, bodyH ? bodyH + 'px' : '');
+    const movedAnswer = setH(answerWrap, answerH ? answerH + 'px' : '');
+    if (movedBody || movedAnswer || lifted) {
+      // The card's size just changed and the tree places cards by measured height:
+      // hand it a relayout (debounced) instead of leaving a neighbour overlapping.
+      scheduleLayout();
+    }
   }
 
   // ---- Long transcripts: render the window the user is looking at --------------
@@ -1118,7 +1593,7 @@
 
   /**
    * A spacer standing in for `count` unrendered items above or below the window.
-   * The size is inline because `.node-items` is a flex column: a spacer has no
+   * The size is inline because `.node-work` is a flex column: a spacer has no
    * content of its own and would otherwise shrink away to nothing.
    */
   function itemsSpacer(where, count, px) {
@@ -1135,7 +1610,7 @@
    * stands in for it, so the scrollbar still describes the whole transcript.
    *
    * Anything appended to the container *after* the window — a continued turn
-   * streams into this very `.node-items` — is kept and put back at the end: a
+   * streams into this very `.node-work` — is kept and put back at the end: a
    * scroll must never throw away the answer that is arriving right now.
    */
   function paintItemsWindow(container, state) {
@@ -1176,6 +1651,14 @@
       promptEl = prevPrompt;
     }
     state.painted = Array.prototype.slice.call(container.children);
+    // A paint rebuilds every element it renders, so the card's promotion anchor —
+    // a reference to the element that was the container's last child when the run
+    // left — dangles once that element is re-created. A dangling anchor reads as
+    // "the log grew after the promotion", and the next `syncAnswerZone` would demote
+    // a finished card's answer back into the log for no reason: a repaint is not an
+    // append, so the anchor is re-recorded as the last child it now has. This is the
+    // one repaint of zone 2 that does not go through `renderNodeItems`.
+    if (state.card && state.card._answerAnchor) state.card._answerAnchor = container.lastElementChild;
     // Refine the estimate from what the window actually measures: a page of long
     // tool results is far taller than one of one-line answers, and the spacers are
     // what keeps the scrollbar honest at this size.
@@ -1307,8 +1790,18 @@
   function renderBgBody(card, meta) {
     if (!card) return;
     const task = meta && meta.bgTaskId != null ? bgTasks.get(Number(meta.bgTaskId)) : null;
-    const itemsEl = card.querySelector('.node-items');
+    const itemsEl = card.querySelector('.node-work');
     if (!itemsEl) return;
+    // A job card's body is a terminal mirror, not a conversation: there is nothing
+    // to fold, so its work-log header stays out of the way (and `setWorkFold` /
+    // `autoWorkFold` refuse a `kind:'bg'` card anyway).
+    const workHeadEl = card.querySelector('.node-work-head');
+    if (workHeadEl) workHeadEl.classList.add('hidden');
+    // A job card's zone 2 *is* its body, and a job card can never be promoted (it
+    // has no conversation — see `isCardStreaming`), so the log must stay visible
+    // even though the card starts out with nothing to show.
+    const workWrap = card.querySelector('.node-work-wrap');
+    if (workWrap) workWrap.classList.remove('hidden');
     itemsEl.innerHTML = '';
     const running = !!(task && task.status === 'running');
     card.classList.toggle('bg-running', running);
@@ -1472,15 +1965,47 @@
     // exists (it is created once, here, and never rebuilt).
     syncCtxBadge(card, meta);
 
-    // Pinned user prompt (sticky at the top of an expanded card).
-    const prompt = el('div', 'node-prompt');
-    card.appendChild(prompt);
+    // Zone 1: the pinned user ask (sticky at the top of an expanded card).
+    const ask = el('div', 'node-ask');
+    card.appendChild(ask);
 
     const body = el('div', 'node-body');
-    const items = el('div', 'node-items');
+    // Zone 2: the work log. Its wrapper (not the scroller itself) is what gets the
+    // `hidden` class, and it is the host of the green scroll-lock dot: the dot marks
+    // the strip under the *log* (the container it locks), which is where a live turn
+    // follows its own output. Zone 3 has no dot — it opens at the top and is read,
+    // not followed.
+    const workWrap = el('div', 'node-work-wrap');
+    // Zone 2's one-line header (the fold control, see `setWorkFold`): it lives in
+    // the wrapper — *before* the log — so hiding the wrapper (an empty log) hides
+    // the header with it, and so the scroll-lock dot's host is untouched. The
+    // chevron starts `open` because a fresh card's log is showing (the same sense
+    // `open` has on a block header, and what `autoWorkFold` re-decides later); the
+    // label is the live step count, written by `updateWorkHead` below.
+    const workHead = el('div', 'node-work-head');
+    workHead.appendChild(el('span', 'chev open', '▶'));
+    workHead.appendChild(el('span', 'node-work-label'));
+    workHead.addEventListener('click', (ev) => {
+      // Stop the click at the header, as every other in-card control does (the card
+      // is a checkout target) — and hand this card's fold to the user, so the
+      // automatic rule never folds it back (see `autoWorkFold`).
+      ev.stopPropagation();
+      card._workTouched = true;
+      setWorkFold(card, !card._workFolded);
+    });
+    const work = el('div', 'node-work');
+    workWrap.appendChild(workHead);
+    workWrap.appendChild(work);
+    // Zone 3: the final answer, promoted out of the log (see `syncAnswerZone`).
+    const answerWrap = el('div', 'node-answer-wrap hidden');
+    const answer = el('div', 'node-answer');
+    answerWrap.appendChild(answer);
     const excerpt = el('div', 'node-excerpt');
     excerpt.textContent = meta.preview || meta.title || '';
-    body.appendChild(items);
+    // Order matters: log, answer, collapsed preview — the preview is what a
+    // collapsed card shows *instead* of the two scrollers above it.
+    body.appendChild(workWrap);
+    body.appendChild(answerWrap);
     body.appendChild(excerpt);
     card.appendChild(body);
 
@@ -1491,7 +2016,11 @@
 
     // Internal transcript scroll + green lock dot. A live turn follows its own
     // output (locked); a finished node starts unlocked so it scrolls freely.
-    card._itemScroll = attachLock(items, body, meta.status === 'running');
+    card._itemScroll = attachLock(work, workWrap, meta.status === 'running');
+
+    // The header exists from here on and is never rebuilt, so its label is written
+    // once at creation; every later change goes through the fold hooks.
+    updateWorkHead(card);
 
     nodeEls[id] = card;
     treeCanvas.appendChild(card);
@@ -1645,8 +2174,11 @@
     const card = nodeEls[id];
     card.classList.add('expanded');
     card.classList.toggle('active', id === treeActiveId);
-    const itemsEl = card.querySelector('.node-items');
-    const promptElCard = card.querySelector('.node-prompt');
+    const askEl = card.querySelector('.node-ask');
+    const workEl = card.querySelector('.node-work');
+    const workWrap = card.querySelector('.node-work-wrap');
+    const answerWrap = card.querySelector('.node-answer-wrap');
+    const answerEl = card.querySelector('.node-answer');
     const excerptEl = card.querySelector('.node-excerpt');
     // Populate from the path items, or (agent nodes) their own transcript; a
     // freshly-streamed node is filled incrementally, so never wipe it here.
@@ -1655,7 +2187,7 @@
       // A finished card with a long transcript renders a window of it (see
       // `renderNodeItems`); a running node keeps the full render, because its
       // items are appended in place as they arrive.
-      renderNodeItems(itemsEl, promptElCard, source, meta.status !== 'running');
+      renderNodeItems(card, source, meta.status !== 'running');
       card._itemsRendered = true;
       // Thinking blocks only exist once the items are rendered, so apply the
       // finished-node default here (once, so a manual lock is not clobbered by
@@ -1677,15 +2209,38 @@
     if (pendingItems > 0 && pendingKind === 'agent' && !card._itemsRendered && !card._itemsRequested) {
       requestAgentItems(id, card);
     }
-    promptElCard.classList.remove('hidden');
-    itemsEl.classList.remove('hidden');
+    askEl.classList.remove('hidden');
+    // Zone 2 shows when it has a log to show. Un-hiding it unconditionally would
+    // bring back the empty padded box of a pure-text turn (the whole turn is the
+    // answer, so the log *is* empty) on every repaint — and hiding an empty log here
+    // is safe, because every append into zone 2 is preceded by `demoteAnswer`, which
+    // un-hides it again (a running card with nothing rendered yet is exactly that
+    // case: the first delta un-hides it).
+    workWrap.classList.toggle('hidden', workEl.children.length === 0);
+    // Zone 3 is only un-hidden when it actually holds an answer: an empty answer
+    // zone would be a blank strip under the log (and the card would claim
+    // `has-answer`, which caps the log — see the CSS).
+    if (answerEl && answerEl.children.length > 0) {
+      answerWrap.classList.remove('hidden');
+      // Belt and braces: the promotion that filled zone 3 may be stale (a repaint
+      // can leave it pointing at a log that has grown since — see `_answerAnchor`).
+      // Runs *before* the scroll positioning below, so the zone it may empty is not
+      // the one just measured.
+      syncAnswerZone(card);
+    }
+    // Not a follow target (no lock dot): zone 3 opens at the top, where an answer
+    // starts — the end of an answer is not what a reader wants to see first.
+    if (answerEl) answerEl.scrollTop = 0;
     excerptEl.classList.add('hidden');
+    // The zones are on screen now, so the state that wants the 1:2 split can be
+    // settled (a repaint re-measures; a hidden card cannot be measured at all).
+    settleAnswerSplit(card);
     if (card._itemScroll && card._itemScroll.locked) {
       // Following a live turn: pin to the newest content.
       card._itemScroll.scrollToBottom();
     } else if (card._needsBottomScroll) {
       // Unlocked (finished) card: open at the newest content, then scroll freely.
-      itemsEl.scrollTop = itemsEl.scrollHeight;
+      if (workEl) workEl.scrollTop = workEl.scrollHeight;
     }
     card._needsBottomScroll = false;
   }
@@ -1693,19 +2248,24 @@
   function collapsedCard(id, meta) {
     const card = nodeEls[id];
     card.classList.remove('expanded', 'active');
-    const itemsEl = card.querySelector('.node-items');
-    const promptElCard = card.querySelector('.node-prompt');
+    const askEl = card.querySelector('.node-ask');
+    const workWrap = card.querySelector('.node-work-wrap');
+    const answerWrap = card.querySelector('.node-answer-wrap');
     const excerptEl = card.querySelector('.node-excerpt');
     excerptEl.textContent = meta.preview || meta.title || '';
-    promptElCard.classList.add('hidden');
-    itemsEl.classList.add('hidden');
+    // All three zones go: a collapsed card is its head plus the one-line preview.
+    askEl.classList.add('hidden');
+    workWrap.classList.add('hidden');
+    if (answerWrap) answerWrap.classList.add('hidden');
     excerptEl.classList.remove('hidden');
   }
 
   function setActiveLeaf(id) {
     const card = id ? nodeEls[id] : null;
-    messagesEl = card ? card.querySelector('.node-items') : null;
-    promptEl = card ? card.querySelector('.node-prompt') : null;
+    // The routed transcript is zone 2. Zone 3 only ever holds elements moved out of
+    // it (never the ones a stream appends), so nothing writes into it directly.
+    messagesEl = card ? card.querySelector('.node-work') : null;
+    promptEl = card ? card.querySelector('.node-ask') : null;
     // The send pane lives at the bottom of the checked-out node's card, and only
     // there: a sub-agent branch is read-only (driven by the main agent through
     // spawn_agents / send_agent_message), and a session with no active node has
@@ -1880,28 +2440,39 @@
     });
   }
 
-  // Route a streaming callback to a specific node's items container: every
+  // Route a streaming callback to a specific node's work log (its zone 2): every
   // streaming message carries the `nodeId` it belongs to (spec §2.1), so the
   // target is explicit and never inferred from the view — a node that streams
   // while the view sits elsewhere still gets its deltas in its own (collapsed)
   // card. A *missing* nodeId is the legacy shape (the main agent's turn before
   // P1): the callback then writes into the current view-focus container, exactly
-  // as it always did. After writing, the target card's transcript follows to the
+  // as it always did. Either way the target card is demoted first (its answer zone
+  // gives its run back), and after writing the card's transcript follows to the
   // bottom (respects that card's scroll lock).
   function routeTo(nodeId, fn) {
     if (!nodeId) {
+      // Legacy shape: the callback writes into the view-focus card's zone 2 (that
+      // is what `messagesEl` points at), so that card's answer zone has to give its
+      // run back before the append lands — same rule as the routed branch below.
+      const focus = treeActiveId ? nodeEls[treeActiveId] : null;
+      if (focus) demoteAnswer(focus);
       fn();
       return;
     }
     const card = nodeEls[nodeId];
-    const itemsEl = card ? card.querySelector('.node-items') : null;
+    const itemsEl = card ? card.querySelector('.node-work') : null;
     if (!itemsEl) return;
+    // The one choke point every routed append goes through: a card that is showing
+    // its answer in zone 3 takes that answer back into the log *first*, so what the
+    // callback appends lands after the answer and the run is no longer the tail
+    // (which is what `syncAnswerZone` reads to decide the promotion is over).
+    demoteAnswer(card);
     const prevMsg = messagesEl;
     const prevPrompt = promptEl;
     const prevRouting = routingSubAgent;
     const prevNode = routingNodeId;
     messagesEl = itemsEl;
-    promptEl = card.querySelector('.node-prompt');
+    promptEl = card.querySelector('.node-ask');
     routingSubAgent = true;
     routingNodeId = nodeId;
     try {
@@ -1913,6 +2484,10 @@
       routingNodeId = prevNode;
     }
     if (card && card._itemScroll) card._itemScroll.scrollToBottom();
+    // The append this routed may have been a tool call: the header's step count is
+    // the one piece of the log that lives *outside* it, so it is refreshed here —
+    // right where the card's own scroll was just caught up.
+    updateWorkHead(card);
     scheduleSubAgentRelayout();
   }
 
@@ -1924,9 +2499,15 @@
     }
     const card = nodeEls[msg.id];
     if (!card) return;
+    // A live sub-agent card is a *streaming* card (see `isCardStreaming`): the log is
+    // the truth while it runs, so a previous run's answer comes out of zone 3 before
+    // this one appends anything. The flag is set before that, or the demote below
+    // would be undone by the very next `syncAnswerZone`.
+    card._agentLive = true;
     card.classList.add('agent');
     card.classList.add('expanded');
-    card.querySelector('.node-items').classList.remove('hidden');
+    card.querySelector('.node-work-wrap').classList.remove('hidden');
+    demoteAnswer(card);
     setCardScrollLock(card, true);
     const head = card.querySelector('.node-head');
     let badge = card.querySelector('.node-agent-badge');
@@ -1960,6 +2541,10 @@
   function onAgentDone(msg) {
     const card = nodeEls[msg.id];
     if (card) {
+      // Its run is over: the card stops being a streaming card here, and only now
+      // may its tail be promoted (`isCardStreaming`) — set *before* the finalize
+      // below, which routes through the demote that every routed append does.
+      card._agentLive = false;
       routeTo(msg.id, () => finalizeStreamingAnswer());
       const statusEl = card.querySelector('.node-status');
       if (statusEl) {
@@ -1987,6 +2572,11 @@
         }
         summaryEl.textContent = msg.summary.slice(0, 120);
       }
+      // Its own run is over and its finalize went in: the tail of the log is the
+      // sub-agent's answer now. The promotion happens here and not in the summary
+      // branch above — a card that already showed zone 3 keeps it (the anchor still
+      // ends the log), and one that grew since promotes again.
+      syncAnswerZone(card);
     }
     const edge = treeEdges.querySelector('[data-agent="' + msg.id + '"]');
     if (edge) {
@@ -2000,7 +2590,7 @@
    * Undo the stretch the previous layout pass applied, before anything is measured.
    *
    * A stretched card carries an inline `height` **and** a matching `max-height`
-   * (`.node` caps every card at 600px, so `height` alone would be clipped). Both
+   * (`.node` caps every card at 1200px, so `height` alone would be clipped). Both
    * have to be gone before `relayout()` reads `offsetHeight`: an inline height is
    * what the browser would report back as the card's height, so measuring it as the
    * *natural* height and then stretching that card again would add the grid's free
@@ -2073,7 +2663,7 @@
     // can only run *after* `layoutTree` (the heights are the layout's answer) and it
     // must run *after* the measurement above (only a card the layout wants taller
     // than it measured may be stretched). `height` alone is not enough: `.node` caps
-    // every card at 600px, and a clipped card would leave the grid's column short
+    // every card at 1200px, and a clipped card would leave the grid's column short
     // again — the inline `max-height` is what lifts that cap for this one card.
     const stretch = result.stretch || Object.create(null);
     for (const id in stretch) {
@@ -2381,8 +2971,7 @@
       // it, so there is nothing to render from the path.
       if (pnode.items && !card._itemsRendered) {
         renderNodeItems(
-          card.querySelector('.node-items'),
-          card.querySelector('.node-prompt'),
+          card,
           pnode.items,
           (treeNodes[id] || {}).status !== 'running',
         );
@@ -2553,6 +3142,11 @@
       // the drag height it remembers. One number for both the wireframe and the
       // commit (see `onResizeMove` / `endResize`).
       ceilH: Math.max(MAX_H, card.offsetHeight, draggedH),
+      // The floor is not a flat `MIN_H` either: a card has to keep room for the two
+      // zones under its own header, prompt and input pane, or the log is squeezed to
+      // zero and cannot be unfolded again. (A size stored before this rule is lifted
+      // back up by `settleAnswerSplit`, so a drag never keeps one.)
+      floorH: Math.max(MIN_H, cardFixedHeight(card) + SPLIT_FLOOR_PX),
       target: { w: card.offsetWidth, h: card.offsetHeight },
     };
     try { e.target.setPointerCapture(e.pointerId); } catch { /* noop */ }
@@ -2573,8 +3167,9 @@
     const dh = (e.clientY - resizing.startY) / zoom;
     const w = clamp(resizing.startW + dw, MIN_W, MAX_W);
     // `startH + dh` is clamped at `resizing.ceilH` (see `startResize`), so the
-    // wireframe can never advertise a height the commit would not store.
-    const h = clamp(resizing.startH + dh, MIN_H, resizing.ceilH);
+    // wireframe can never advertise a height the commit would not store — and at the
+    // card's own `floorH`, which keeps the two zones usable.
+    const h = clamp(resizing.startH + dh, resizing.floorH || MIN_H, resizing.ceilH);
     resizing.target = { w, h };
     // Throttle to one paint per frame; only the wireframe moves.
     if (resizeRaf != null) return;
@@ -2601,6 +3196,9 @@
     card.style.width = target.w + 'px';
     card.style.maxHeight = target.h + 'px';
     if (treeNodes[id]) treeNodes[id].size = { w: target.w, h: target.h };
+    // The drag moved the cap the split divides, so settle it *before* the relayout
+    // below measures the card (a stretched card's own height is what the ratio uses).
+    settleAnswerSplit(card);
     // Collision resolution runs once, on mouse-up.
     relayout();
     if (card._itemScroll) card._itemScroll.scrollToBottom();
@@ -2919,9 +3517,11 @@
       return;
     }
     // Requirement: wheeling on top of a node scrolls that node's content; the
-    // .node-items / .thinking-body handles it natively. The composer is excluded
-    // too — it lives inside a card now and owns its own wheel.
-    const scrollable = e.target && e.target.closest ? e.target.closest('.node-items, .thinking-body, #composer') : null;
+    // .node-work (the log) / .node-answer (the final answer) / .node-ask (the
+    // pinned ask) / .thinking-body handle it natively — all three zones have their
+    // own scrollbar. The composer is excluded too — it lives inside a card now and
+    // owns its own wheel.
+    const scrollable = e.target && e.target.closest ? e.target.closest('.node-work, .node-answer, .node-ask, .thinking-body, #composer') : null;
     if (scrollable) {
       return; // native scroll
     }
@@ -3511,7 +4111,9 @@
    *   - that node's live tool cards go (another node's stay);
    *   - the follow light is released only when the node the user is looking at is
    *     the one that finished, so a background branch finishing never yanks the
-   *     scroll of the focused node.
+   *     scroll of the focused node;
+   *   - and the node's answer is promoted into zone 3, *after* it left
+   *     `runningNodes` (see `syncAnswerZone` at the very end of the function).
    * Without a nodeId the legacy shape is replayed verbatim: the view focus
    * container, all live tool cards, and the session-level busy flag.
    */
@@ -3537,6 +4139,12 @@
     }
     updateComposerButtons();
     if (!nodeId || nodeId === treeActiveId) setActiveScrollLock(false);
+    // The very last step of a finished turn, and only now: `runningNodes` no longer
+    // has this node (a card that is still in it counts as streaming — see
+    // `isCardStreaming`), so its tail is a final answer and may be promoted into
+    // zone 3. Both branches land on a card here: the routed one on its own node, the
+    // legacy one on the view focus, which is the card the turn was written into.
+    syncAnswerZone(nodeId ? nodeEls[nodeId] : (treeActiveId ? nodeEls[treeActiveId] : null));
   }
 
   /**
@@ -3568,9 +4176,11 @@
         // below) releases it just the same.
         releaseAgentItems();
         if (!card || card._itemsRendered) break;
-        const itemsEl = card.querySelector('.node-items');
+        // The work log is the scroller this path opens at its end; the answer zone
+        // is filled — and opened at its top — by `renderNodeItems` itself.
+        const itemsEl = card.querySelector('.node-work');
         const finished = (treeNodes[msg.id] || {}).status !== 'running';
-        renderNodeItems(itemsEl, card.querySelector('.node-prompt'), msg.items || [], finished);
+        renderNodeItems(card, msg.items || [], finished);
         card._itemsRendered = true;
         // Same finished-node default as in `expandedCard` / `renderPath`: the
         // thinking blocks only exist now, and this path skips their render branch.
@@ -3595,6 +4205,7 @@
       case 'config': {
         const prevFoldToolCalls = foldToolCalls;
         const prevFoldThinking = foldThinking;
+        const prevFoldWork = foldWork;
         // The card list is authoritative and complete on every `config`: a card the
         // user deleted must disappear from the dropdown, so an empty list is a real
         // answer (the host never sends one — it always has a fallback card).
@@ -3606,6 +4217,7 @@
         renderEffortSelect(msg.thinkingEffort);
         foldToolCalls = msg.foldToolCalls !== false;
         foldThinking = msg.foldThinking !== false;
+        foldWork = msg.foldWork !== false;
         // A changed fold default must apply to the cards already on screen too,
         // not only to the ones rendered after it (clicking a header still
         // toggles that single card afterwards).
@@ -3614,6 +4226,13 @@
         }
         if (foldThinking !== prevFoldThinking) {
           applyFoldDefault('.thinking-body', foldThinking);
+        }
+        // Zone 2's fold is not a body default (it depends on the card's own
+        // `has-answer`, and a header the user clicked owns its card), so the new
+        // value is handed to the cards themselves — same reasoning: a settings
+        // change must not wait for the next repaint.
+        if (foldWork !== prevFoldWork) {
+          for (const id in nodeEls) autoWorkFold(nodeEls[id]);
         }
         updateImageVisibility();
         break;
@@ -3719,7 +4338,16 @@
         setStatus(tr('Error'));
         break;
       case 'notice':
-        addNotice(msg.kind, msg.text);
+        // A notice carries no nodeId: it belongs to the card the view focuses, whose
+        // zone 2 is what `messagesEl` points at. It is appended *into* that log, so
+        // the answer zone has to give its run back first — the same rule `routeTo`
+        // enforces for every routed append.
+        {
+          const id = treeActiveId;
+          const c = id ? nodeEls[id] : null;
+          if (c) demoteAnswer(c);
+          addNotice(msg.kind, msg.text);
+        }
         break;
       case 'reset':
         clearLiveTools();

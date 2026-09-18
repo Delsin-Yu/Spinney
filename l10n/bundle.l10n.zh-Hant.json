@@ -118,6 +118,8 @@
   "⤷ branching from {0} — your reply starts a new branch": "⤷ 從 {0} 分支 — 你的回覆會開啟新分支",
   "Sub-agent": "子代理",
   "d{0} · {1} · {2}": "深度{0} · {1} · {2}",
+  "Work log": "工作日誌",
+  "Work log · {0} steps": "工作日誌 · {0} 個步驟",
   "write": "可寫",
   "ro": "唯讀",
   "Kill this sub-agent": "終止此子代理",

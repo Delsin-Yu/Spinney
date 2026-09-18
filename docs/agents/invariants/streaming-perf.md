@@ -18,14 +18,18 @@
   (`_userTouched`), and `applyFoldDefault` skips the live body so a settings change
   cannot fold it. `setActive` / `clearActive` / `closeActive` in `media/main.js`;
   `tools/check-webview.js` asserts it ("the live block is always expanded").
-- Transcript scrolling is **per-card and event-driven**: each node's
-  `.node-items` (and each thinking body) has a `createScrollController` with a
-  green lock dot (`attachLock(container, host, locked)`). It starts locked only
+- Transcript scrolling is **per-card and event-driven**, and a card has exactly
+  one scroller: the **work zone** `.node-work`, the middle of the card's three
+  zones (see §"The three zones of a card"). It has a `createScrollController`
+  with a green lock dot (`attachLock(container, host, locked)`) and is also the
+  only zone that windows a long transcript; the answer zone has no controller of
+  its own — it opens at its top — so the two zone wrappers and the card classes
+  `has-answer` / `work-folded` are what decide the heights. The controller starts locked only
   for a **live** turn (`status === 'running'`); a finished node starts unlocked
   and is positioned at its newest content once on first render, so history is
   scrollable immediately. Both item-render paths (`expandedCard` and
-  `renderPath`) apply that default right after `renderNodeItems`, because the
-  thinking blocks — which keep their own dot — only exist at that point.
+  `renderPath`) apply that default right after `renderNodeItems`, which also ends
+  in `syncAnswerZone(card)`.
   Locked = pinned to bottom with `scroll-locked` hiding and disabling the
   scrollbar; clicking the dot toggles it and hands scrolling back to the user. It is never re-engaged from scroll position (that heuristic
   was unreliable). Instead it follows the turn lifecycle: `setBusy(true)`
@@ -33,10 +37,151 @@
   sub-agent cards lock on `agentStart` / release on `agentDone`
   (`setCardScrollLock`). `scrollToBottom()` is a no-op while the light is off.
   The dot sits in the strip the container reserves below its scrollbar
-  (`margin-bottom: 20px`), inside the card/block. The tree viewport itself is a
-  pannable canvas (pan/zoom/fit), not a scroll container.
+  (`margin-bottom: 20px`), inside the card. The tree viewport itself is a
+  pannable canvas (pan/zoom/fit), not a scroll container. The **live-block
+  folding rule above is unchanged** by the split: the block taking deltas is
+  still expanded in place, it simply sits in zone 2 with the rest of the log.
 - `[perf]` lines (request JSON size, assistant-round, tool timings, persist, stream
   flush) go to the **Spinney** output channel. Open View → Output → "Spinney".
+
+### The three zones of a card: `ask` / `work` / `answer`
+
+A turn card — and a sub-agent sidecar card — is split into three zones, and the two
+rules above (one scroller, one expanded block) are really properties of that split:
+
+- **zone 1, `.node-ask`** — the pinned user prompt, Markdown-rendered; it does not
+  change once the card exists.
+- **zone 2, `.node-work`** — the work log: reasoning blocks, tool cards, notices,
+  background and sub-agent notices, `HARNESS` blocks, intermediate assistant text and
+  usage lines. It is the scroller with the green lock dot, and the only zone that
+  windows a long transcript. Its top carries the work log's own fold header
+  (`.node-work-head`, below), and a **folded** log hides the dot with itself: nothing
+  scrolls, so there is nothing to lock.
+- **zone 3, `.node-answer`** — a **conditional** pretty-print of the *tail* of zone 2.
+  It has no lock dot and opens at its top. It is a surface of its own *around* the
+  answer (below), and the heights of the two zones are a ratio of the card, not a cap
+  on either one.
+
+**The log folds itself as soon as the answer shows.** A header — chevron + label —
+sits at the top of `.node-work-wrap`, above the log, as `.node-work-head`; the card
+class `work-folded` marks the folded state. The rule is a function of zone 3, exactly
+like the promotion itself: the log folds **exactly while zone 3 is showing**, and
+unfolds while a turn runs or when there is no answer (the two conditions below fail)
+— a card with no answer is a card whose content is *only* the log, so folding it
+would leave a header in place of the card. A **click on the header hands that card to
+the user forever** (`card._workTouched`, the same semantics as a block's
+`_userTouched`): from then on the automatic rule may only refresh the label, never the
+state. The label is `Work log · {0} steps` from the card's tool-card count, or plain
+`Work log` when it holds no tool card. `spinney.foldWork` (default `true`, window
+scope) disables the automatic fold; it rides the existing `config` message
+(`postConfig()` reads `cfg.foldWork`) and therefore applies to cards already on
+screen, like `foldThinking` / `foldToolCalls`.
+
+The helpers are `setWorkFold` (the one toggler), `autoWorkFold` (the rule above) and
+`updateWorkHead` (the label), and the hooks are the **end** of `demoteAnswer` and
+`promoteAnswer` (where the class flips), the end of `renderNodeItems` (a repaint
+re-derives the fold from the items, exactly like the zones), `routeTo` (label refresh
+only, after the append) and the `config` handler (a changed default re-applies to the
+cards on screen).
+
+**The two zones' share is a *priority*, not a ratio: the answer first, the log the
+rest.** Both wrappers are flex children of `.node-body`, and the split is settled in JS
+(`settleAnswerSplit`) rather than in CSS, because "the height this answer needs" is not
+something a stylesheet can read. A hard 1:2 lock (`flex: 1 1 0` / `2 1 0`, which is what
+came first) was wrong for exactly that reason: it divided the card even when neither zone
+wanted its half, so a short answer sat above a block of blank space while the log
+scrolled inside a third of the card. The measurement suspends the split (the card class
+`split-measure`, whose CSS puts both zones back on a content basis) and then either:
+
+- **`answer-fit`** — the two together fit the card's room (its cap below, a tree-layout
+  stretch, or a manual drag-resize): each zone takes its *content* (`flex: 0 0 auto`) and
+  the card grows only as tall as the two of them. Nothing blank, nothing scrolling.
+- **`answer-scarce`** — they do not fit: the card fills its room, the answer is pinned to
+  the share it can use (`min(answer, room − floor)`, written as an inline height on
+  `.node-answer-wrap`) and the log takes the remainder (`flex: 1 1 0`, the basis that
+  absorbs precisely what is left) with a readable floor of `LOG_FLOOR_PX` (200px, never
+  more than half the room). Either zone scrolls when its own content is longer than the
+  share it got.
+
+The card's cap is **1200px** (`media/style.css`, `.node`), doubled from 600 when the body
+stopped being one scroller, and a card may not be shrunk below
+`header + prompt + composer + SPLIT_FLOOR_PX` (220px): the drag's own floor is a flat
+`MIN_H` (260px), which a multi-line prompt and the input pane already fill, and a card
+squeezed past that point had a log with no height left — one that could not be unfolded
+again. `onResizeMove` clamps to the card's own floor, and `settleAnswerSplit` lifts a
+smaller cap (a size stored before this rule) back up, writing it both into the card's
+style and into the layout's copy of the size so a relayout restores the lift.
+`cardHeightCap` reads the user's drag size, else `--node-max-h` from the stylesheet, and
+**never `card.style.maxHeight`**: the tree layout writes its stretch target there, so
+reading it back treated the *folded* card's height as a hard cap and unfolding the log
+divided those few pixels — while the max-height, being a real cap, pinned the card so it
+could not grow out of them. The mirror of that rule is that the card must actually *be
+able* to reach the cap: an inline `max-height` smaller than it (stale, from a stretch
+measured while the card was small) is lifted to the cap by the same pass, in the card's
+style and in the layout's copy of the size, and an inline `height` smaller than it is
+dropped outright — the stretch writes *both*, and an inline `height` is not a cap, so a
+stale one pins the card at the old height and the body is squeezed instead (measured in a
+Chromium fixture: a card pinned at 470px left the log 20px while the pinned answer kept
+its 321px). Without the lift the split is computed for room the card does not have, flex
+squeezes the body, and the log — the only zone without a pinned height — takes the whole
+loss. Settling
+runs from the fold helpers (`setWorkFold` /
+`autoWorkFold`), from `expandedCard` and from the end of a drag-resize, and it hands the
+tree a debounced `scheduleLayout()` because the card's size just changed. The read clears
+the answer's inline height first: `flex-basis: auto` takes a *set* height as the basis, so
+measuring a zone the previous pass pinned would read the old share instead of the content
+— a squeezed answer then measured small and was given small again, and could never grow
+back however far the card was scaled up. A host with no
+layout at all (the offline webview checker) measures 0, and then no height is written —
+a wrong definite height would be worse than none.
+
+**Zone 3 is a surface, not a bubble.** `.node-answer-wrap` carries a hairline top
+border and its own background (`var(--bg2)`, the same surface as zone 1), and the
+answer bubble inside it is flattened — no background, no border — so the zone itself
+is the block the user reads; the answer has to keep its "stretch to the card width"
+rules through that, or a flattened bubble would shrink to its text.
+
+Zone 3 shows that tail only when **both** hold:
+
+- **P1** the card has no live stream, and
+- **P2** the tail is a **model message** — a contiguous run of assistant-text items
+  that are neither errors nor empty.
+
+Everything else is a *chronological breaker*: a tool call, a `HARNESS` block, a
+notice, a background notice, a new user turn or an error item is newer than the
+promoted message, so it pushes that message back into zone 2 and zone 3 hides. There
+is deliberately no "the answer is finished" flag: the zone is a function of the items
+that are actually there, so the same card gains zone 3 when the tail becomes a model
+message and loses it again the moment a breaker is appended — with no flag to keep in
+sync.
+
+`syncAnswerZone(card)` is that promote-or-hide decision, and it is idempotent through
+`card._answerAnchor` — the element that was zone 2's last child when the promotion
+happened, i.e. the item the promoted run starts after. A second call that finds the
+same tail already promoted moves nothing. `promoteAnswer` puts the run into zone 3
+and adds `has-answer`; `demoteAnswer` returns it to zone 2 and drops the class.
+
+**Demotion runs before any append into zone 2, never after it.** The append is
+exactly what can falsify P2 — the new item is chronologically newer, so the message
+is no longer the tail — and it has to land in a zone 2 that is again showing the
+whole log, not beside a tail still parked in zone 3. The choke point is
+`routeTo(nodeId, fn)`: every routed message is appended through it, so a new message
+kind cannot append first and demote second. One path is deliberately outside that
+routing: a `notice` message carries **no** `nodeId` and lands on the view-focus card,
+so it runs the same pre-append demote for that card.
+
+The call sites are therefore: `endRun`, **after** `runningNodes.delete` (the run is no
+longer live, so P1 can hold now); `onAgentDone` / `onAgentStart` (a sidecar's
+lifecycle is a card's lifecycle: finishing can promote, and starting hides the
+promotion again because P1 fails); `renderNodeItems` (a repaint re-derives the zones
+from the items it was handed); and `routeTo` / `notice`, the pre-append demote above.
+
+That derivation is also why the live DOM and a repaint cannot disagree:
+`syncAnswerZone` is a **pure function of `(items, card state)`**, so a repaint that
+replays the same items reaches the same verdict and builds the same card — there is no
+second copy of "the answer" to keep in sync, and no flag to migrate. The only per-card
+memory is `_answerAnchor`, rebuilt with the card, and "it is already promoted" is an
+early return rather than stored state.
 
 ### Diagnosing a stutter (the `[perf] op#` traces)
 A stutter — above all when **switching sessions** — is one user-visible operation

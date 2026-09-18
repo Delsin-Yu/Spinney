@@ -119,7 +119,7 @@
   costs only its own column, never a dead gap in a shallower one. Each sidecar card is also
   **stretched** to fill its cell: `layoutTree` returns a `stretch` map (id → pixel height) covering
   every sidecar card, and `main.js` renders that card at exactly that height (setting `height` and
-  `max-height`, since `.node` caps at 600px) — a sub-agent that spawned sub-agents therefore has its
+  `max-height`, since `.node` caps at 1200px) — a sub-agent that spawned sub-agents therefore has its
   own card running down to the bottom of its own sub-grid instead of ending early beside it; turn
   cards are never stretched, and there is deliberately no cap on the stretch. The one exception is a
   cell that carries material below the card's own extent — a turn child hanging under a sidecar, a

@@ -345,7 +345,7 @@
   first), so every column ends flush at the block's bottom line and no hole is left
   between a parent's cards. Returns, in addition to `pos`/`width`/`height`, a
   `stretch` map (id → pixel height, every sidecar card) that `main.js` applies as the
-  card's exact height (`height` + `max-height`, since `.node` caps at 600px), and a
+  card's exact height (`height` + `max-height`, since `.node` caps at 1200px), and a
   `cells` **routing table** (per agent child: `busX` / `chanX` / `corrY`, the
   card-free corridors `main.js` draws the connectors through). `agentMaxRows: 1`
   reproduces the old single-column ribbon.
