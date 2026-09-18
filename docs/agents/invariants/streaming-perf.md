@@ -99,9 +99,84 @@ Two probes catch what a single op cannot express:
 - **`[perf] lag blocked <ms> (n late ticks)`** — the host's event loop was blocked
   (`startLagWatch`, 250 ms interval, reports a lag over 120 ms). This is the half no
   `perf()` line can write while it happens: a `persist-done` line is *late* exactly
-  when the Memento write stalled the host. `[perf] sidebar-refresh <ms>` / `<n>/s`
-  reports the same for VS Code re-reading the session list (fired by
-  `notifyStateChanged`).
+  when the Memento write stalled the host. **It carries a ` | ctx: …` tail**
+  (`setLagContextProvider`, registered by `ChatViewProvider.hostContext`) saying *what*
+  was most likely occupying the loop — the persist machinery (`persist in-flight
+  <ms>` / `persist idle, last done <ms> ago (took <ms>ms)`, the `chars≈` of that
+  write, the coalesced `queued=` depth), then the **live host work** (`beginWork` in
+  `src/perf.ts`): `work=[rg:6 req:15]` for the units alive at that instant (`rg` per
+  ripgrep child, `req` per outbound API request), **`peak <label>:N`** for the highest
+  concurrency reached since the previous report — a stall is over by the time the watch
+  runs, so only the peak describes it — and the monotonic **totals** (`rg-spawn:32`: a
+  burst of short units never shows as a high concurrent count), followed by
+  **`heap=used/total MiB rss=…`**, because GC churn and real work look nothing alike.
+  `workReadout()` resets the peak/total counters on read, so one burst is one line. The
+  provider is asked **once per reported burst**, never per tick, and must stay O(1): it
+  runs right after the loop was blocked, so any real work there would extend the stall
+  it describes. `[perf] sidebar-refresh <ms>` / `<n>/s` reports the same for VS Code
+  re-reading the session list (fired by `notifyStateChanged`).
+
+  This is what attributed the 15-sub-agent storm: three runs reading
+  `work=[peak req:15 peak rg:14 rg-spawn:32] | heap=77/109MiB rss=270MiB` showed the
+  stall was **aggregate saturation** — not one blocking call, not the persist
+  (7 ms queued / 80–100 ms done throughout) and not GC — which led to the ripgrep work
+  budget (`RG_CONCURRENCY` = 6, `src/tools/searchFiles.ts`): 32 whole-tree scans fired
+  at once cost 482 ms of loop lag offline and were *slower* than 6 at a time (890 ms vs
+  741 ms), and with the gate the live storm reports **no lag line at all**.
+- **`[perf] search-files ms=… files=… matches=… capped=… via=rg|walk scope=…`** — one
+  line per `search_files` call, written by the tool itself (`src/tools/searchFiles.ts`)
+  next to the generic `tool search_files <ms>` line the runtime emits. `via` says which
+  execution path ran and `scope` how many exclusions were in effect, which is how a
+  stall gets attributed to a specific search shape. A search is **allowed to be slow
+  and still be healthy**: with `rg` the work is in a child process, so the number to
+  watch is `lag blocked`, not this one. See `docs/agents/tools.md` for the tool's
+  contract.
+- **`[perf] dev tee dropped <n> line(s)`** — the dev-only `SPINNEY_PERF_LOG` file tee
+  could not keep up (`ChatViewProvider.openPerfTee`, off unless the variable names a
+  path). The tee exists because the output channel has no read-back API, which is what
+  a harness needs to assert on these lines; the output channel stays the primary sink
+  and a failing tee never loses a line from it.
+
+### Sending the log to someone else: the diagnostics log
+
+A report from a user's machine has to be self-describing, because there is no developer
+sitting next to it — and the Spinney **output channel cannot be read back** (VS Code has no
+API for it), so a file is the only thing a report can contain. **Every build therefore keeps
+one**, in the session data folder (`<data folder>/perf-<pid>.log`), and
+`src/chat/diagnosticsLog.ts` keeps it bounded: one file per window, rotated at 2 MiB with one
+`.prev` generation, and only the newest **5** windows retained (with their generations), so a
+machine nobody looks at cannot fill up over months. `spinney.diagnostics.log` (default `true`)
+turns it off, `Spinney: Open Diagnostics Log` reveals the newest file (a user should never have
+to type a profile path), and `SPINNEY_PERF_LOG` still wins when it is set — that is how the
+simulation harness points the log anywhere.
+
+**What it may contain is a promise, not a hope:** only `perf()` / `harnessLog()` lines reach it
+— timings, counters and **paths**. A session title is written to the output channel directly
+(`outputLog`, not the perf sink) and the API-key line reports `set`/`missing` only, so neither
+the conversation nor a credential can appear. `tools/diagnostics-log-acceptance.js` pins the
+bounds *and* those two source-level rules, because both failures would be silent.
+
+The lines that make such a report diagnosable, in the order they appear:
+
+- `[env version=… diag=… vscode=… node=… <platform>-<arch> cpus=… mem=…GB appRoot=… folders=… root=… store=… key=… language=…]`
+  — which build, on which VS Code (that decides whether the bundled ripgrep is findable at
+  all), on what machine, for which workspace and store root.
+- `[config effective maxSubagents=… maxLevel2=… maxInlineToolOutput=… commandTimeout=… saveSessionTranscripts=… transcriptDir=… dataDir=… autoSessionTitles=… replyLanguage=… defaultCard=… providers=… cards=…]`
+  — the settings in force, in one line.
+- `[search rg=<path>]` (or `rg=missing (… the fix is NOT in play)`, or a spawn-failure line)
+  — **the first thing to check**: whether the child-process search path is actually the one
+  running. `via=walk` on the per-call line and `rg=missing` here mean the fix is not in play.
+- `[perf] search-files ms=… files=… matches=… capped=… via=rg|walk scope=… wait=…ms` — per
+  call; `wait=` is the time the call spent queued behind the work budget.
+- `[perf] spawn-request count=N mode=… depth=1 node=…` — the shape of the fan-out.
+- `[perf] work-done peak rg:N peak req:M …` — one line per storm, on the falling edge of the
+  work counters. **A clean run produces this and no `lag blocked` line at all**, which is
+  exactly why it exists: without it a good log would contain no evidence that the storm ran.
+- `[perf] lag blocked <ms> | ctx: … | heap=…` — the stall, when there is one, with what was
+  in flight and the heap.
+- `[store] …` and `load-sessions … source=store|memento` — where the content lives and
+  whether a migration/adoption happened.
+- `[perf] persist-queued … via=store` / `persist-done …` — the write path.
 
 Reading a switch, the shape to look for: a large `panel-create`+`panel-html` is
 webview startup, a large `runtime-create` is a session with a lot of nodes, a large
@@ -149,6 +224,38 @@ Five separate costs, fixed one by one (each fix verified against these same line
    size is `chars≈` from the same pass that builds the payload (no `JSON.stringify`,
    no second walk over 108 M chars), and the bigger picture is in
    `invariants/session-persistence.md`.
+
+### A second trace: 15 sidecar cards, one cold switch
+
+The lazy-item contract fixed the *payload*, but a cold repaint still re-expanded every
+sidecar card of a session at once, and each one asked for its transcript in the same
+burst: 15 × `loadAgentItems` in one frame answered with ~5.35 M chars, `dom=2692`, and
+`webview-handler … ms=903…999` while they landed. Two changes, both on the client:
+
+- **The requests are queued** (`media/main.js`, `AGENT_ITEMS_CONCURRENCY` = 3 in
+  flight; an `agentItems` answer releases the next slot). A repaint that needs exactly
+  **one** transcript is not a burst and still posts immediately — which is the contract
+  `tools/check-webview.js` pins for the single-sidecar fixture. Where a layout exists
+  (`IntersectionObserver`), a card that enters the viewport is promoted ahead of the
+  queue and an off-screen card is not asked for at all: panning to it is what makes it
+  ask. `reset` drops the queue with the old tree, and a node the tree drops leaves the
+  queue with its card, so an answer for it can never be rendered.
+- **A finished card with a long transcript renders a window**
+  (`VIRTUAL_ITEM_THRESHOLD` 60, `VIRTUAL_WINDOW` 24): the items near the scroll
+  position are real DOM, everything above/below them is a spacer whose `data-items`
+  count and height stand in for them, so the scrollbar still describes the whole
+  transcript; scrolling extends the window one page at a time (rAF-throttled, and the
+  scroll position is corrected by what the new page added, so the text under the cursor
+  does not jump). The first window is the **tail**, because a finished card opens at its
+  newest content. A **running** node is never windowed — its transcript is appended in
+  place as deltas arrive and the streaming path reads the container's last child back to
+  continue, so re-rendering it from a slice would break the stream. `suppressFollow`
+  keeps a history repaint from panning the tree to the active node.
+
+Both halves are pinned by `tools/check-webview.js` (the burst cap, the released slot,
+the spacer's above-count of 37 for a 61-item card, and that no spacer stands below the
+newest page), and the IntersectionObserver stub there reports "observed = on screen"
+because the sandbox has no layout.
 
 **Still on the table (measured, not fixed):** the content write is one
 118,860,732-char Memento value, so `persist-done` costs ~1.5 s *inside VS Code*

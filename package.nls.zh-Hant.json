@@ -45,9 +45,14 @@
   "spinney.saveSubAgentTranscripts.description": "將每個已完成的子代理的完整對話以 JSONL 寫入磁碟（每行一則 API 訊息，第 1 列為中繼資料 + 工具呼叫統計），並把其路徑交回呼叫端。",
   "spinney.saveSessionTranscripts.description": "將主代理每個已完成的回合以 JSONL 寫入磁碟（格式與子代理逐字稿相同），讓 search_transcripts 能回顧更早的對話。否則工作階段歷史只保存在擴充功能的儲存狀態中。",
   "spinney.subAgentTranscriptDir.description": "逐字稿檔案的輸出資料夾（主代理回合 + 子代理執行），相對於 harness 根目錄（工作區資料夾；未開啟資料夾時為 harness 暫存資料夾）；其內會建立依工作階段區分的子資料夾。留空則使用擴充功能的全域儲存。",
+  "spinney.dataDir.description": "工作階段資料（工作階段本身）的存放資料夾。留空則在擴充功能全域儲存下使用一個固定資料夾——刻意不以擴充功能 id 命名，因此重新命名或重新安裝擴充功能都不會移動你的歷史。填入你想備份（或同步）的資料夾，即可把歷史放在本機設定檔之外；本項在下次重新載入視窗後生效。",
   "spinney.autoSessionTitles.description": "自動為工作階段命名：在第一個回合之後，以及對話增長後（最多每 2 分鐘一次）。標題由模型產生，要求失敗時改用第一則訊息。手動重新命名工作階段會鎖定其標題。在此功能之前建立的工作階段會在啟用時命名一次。",
   "spinney.maxInlineToolOutput.description": "search_files / list_dir / search_transcripts 結果以內嵌方式傳回的大小上限（位元組）。更大的結果會寫入暫存檔，只傳回其路徑和簡短預覽。設為 0 則一律內嵌。",
   "spinney.httpApi.enabled.description": "在 127.0.0.1 上開放本機 HTTP 控制平面（需 bearer token 驗證），讓 tools/hyper-vscode 之類的外部控制器可以讀取狀態、等待代理進入閒置、巡覽至某個節點並從該節點繼續。預設關閉；/continue 允許呼叫端讓代理執行一則指令，因此請將它視為本機信任邊界。",
   "spinney.httpApi.port.description": "HTTP 控制平面使用的連接埠。0 表示自動選擇可用連接埠；所選連接埠和 token 會寫入 <globalStorage>/http/<instanceId>.json，供 supervisor 探索。",
-  "spinney.providers.balance.description": "該端點的剩餘額度如何讀取。`none` 不讀取餘額，`deepseek` 讀取 `GET /user/balance`，`openrouter` 讀取 `GET /credits`（剩餘 = 總額度減去已用量），`moonshot` 讀取 `GET /users/me/balance`。此讀取不會重試。省略此欄位的列會使用其主機對應的方言（`api.deepseek.com` → `deepseek`，其他 → `none`）。"
+  "spinney.providers.balance.description": "該端點的剩餘額度如何讀取。`none` 不讀取餘額，`deepseek` 讀取 `GET /user/balance`，`openrouter` 讀取 `GET /credits`（剩餘 = 總額度減去已用量），`moonshot` 讀取 `GET /users/me/balance`。此讀取不會重試。省略此欄位的列會使用其主機對應的方言（`api.deepseek.com` → `deepseek`，其他 → `none`）。",
+  "command.spinney.exportData.title": "Spinney: 匯出工作階段資料",
+  "command.spinney.importData.title": "Spinney: 匯入工作階段資料",
+  "spinney.diagnostics.log.description": "為本視窗寫診斷記錄（每個視窗一個檔案，位於工作階段資料資料夾；較舊的檔案會被刪除，單一檔案到 2 MiB 時輪替）。其中只有耗時、計數與路徑——不含你的對話，也不含金鑰。用 Spinney: Open Diagnostics Log 找到它。",
+  "command.spinney.openDiagnosticsLog.title": "Spinney: 開啟診斷記錄"
 }

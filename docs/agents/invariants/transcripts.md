@@ -26,6 +26,32 @@
   at that file; so the kill record must **carry the job's command, final state and
   output tail**, because it is the only durable copy of them (see
   `context-rollover.md`).
+- **The write is queued, and a deletion wins over it.** A dump is 700 KB–1 MB of
+  JSONL and a storm of sub-agents finishes dozens at once, so `writeTranscriptFile`
+  serializes the body synchronously (that is CPU work on data already in memory, and
+  a serialization error still throws *there*, where the caller turns it into a
+  `[transcript] …` line) and hands `mkdir` + `writeFile` to an async queue
+  (`src/chat/transcript.ts`, one drain at a time, a later body for a path replacing
+  the pending one). Two rules follow, and both are pinned in
+  `tools/transcript-queue-acceptance.js`:
+  - **A deletion cancels first.** `removeTranscripts` / `removeTranscriptFile` /
+    `removeTranscriptDir` cancel every queued write they cover *before* removing, and
+    **tombstone** one already in flight so it is deleted again when it lands —
+    otherwise a dump written a moment later resurrects what
+    `invariants/session-persistence.md` calls "the files are gone". A dump that was
+    only ever queued counts as removed, and a new write for that path clears the
+    tombstone.
+  - **A queued dump counts as present** (`hasPendingTranscriptWrite`), which is what
+    `SessionRuntime.rolloverTranscriptOnDisk` asks: queueing it is what makes it
+    present, and only a deletion cancels it. `existsSync` stays for a dump written by
+    an earlier turn.
+  `flushTranscripts()` resolves when the queue is empty and is awaited at the **same
+  hand-off points as `flushPersist()`** — `controlWaitForFinish`,
+  `controlReloadWindow` (both flushes, then the reload) and `shutdown()` — because a
+  reboot that does not await it loses the last turn's dump. Errors that are still
+  synchronous (argument validation, `JSON.stringify`) surface exactly as before; an
+  async write failure is swallowed (the module has no output channel) and never
+  breaks the turn.
 - **One-time backfill:** sessions whose turns finished *before* the dumps
   existed have no JSONL, so `search_transcripts` cannot see them (their only
   copy is the Memento). `ChatViewProvider.scheduleTranscriptBackfill` runs once
@@ -52,7 +78,13 @@
   meta as `[meta] key=value …`) and greps the rendered text, so JSON escaping
   never hides a hit; `kind` filtering reads the meta line's `kind` (missing ⇒
   `subagent`, the legacy format). Hits carry absolute paths and real line numbers
-  (1:1 with the file), so `read_file` follows up directly.
+  (1:1 with the file), so `read_file` follows up directly. It is **async** (a
+  `statSync`/`readFileSync` sweep of a whole transcript root is itself a host-thread
+  stall, and a search walks up to `MAX_TRANSCRIPT_FILES` files): the returned text is
+  byte for byte what the synchronous version built, and the `await` in
+  `src/tools/searchTranscripts.ts` sits *inside* its `try` so an invalid regex still
+  answers `Error: invalid regex: …`. `listTranscriptSessions` (the cheap index
+  branch) is still synchronous on purpose.
 - **Deleting a branch deletes its dumps** so the on-disk record never outlives the
   history that produced it: `removeTranscripts(dir, nodeIds)` removes
   `<dir>/<nodeId>.jsonl` per id (ids are validated against `^[A-Za-z0-9_-]+$`, so

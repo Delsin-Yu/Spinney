@@ -68,6 +68,21 @@
   branch removal (`branchIds` / `detachBranch`), the `isSidecar` predicate (a
   sub-agent `kind:'agent'` window vs. a background job `kind:'bg'` card — both
   display-only sidecars) and the v1→v2 state migration. Pure data layer, no VS Code UI.
+- `src/chat/fileWriteQueue.ts` — the coalescing, off-the-host-thread file writer shared by
+  the transcript dumps and the session store: a synchronous answer with an async write,
+  a later body for one path replacing the pending one, an optional `atomic` swap
+  (`.tmp` → `.bak` → rename), a deletion cancelling what is still queued and tombstoning
+  what is in flight, and `flush()` for the hand-off points.
+- `src/chat/sessionStore.ts` — the **file-backed session store** (Phase 3 of the
+  persistence work; the provider now writes through it and falls back to the Memento when
+  no root is writable): a fixed root under global storage (or `spinney.dataDir`), one
+  subfolder per workspace, a rebuildable `index.json`, atomic per-session files with one
+  `.bak` generation, deletions that move to `.trash`, a per-workspace lock with a heartbeat
+  and stale takeover, and `discover` / `adoptFrom` — the pair that actually survives a
+  rename, since `globalStorage` itself is named after the extension id. Deliberately
+  **vscode-free** — the caller passes the paths — which is what makes
+  `tools/session-store-acceptance.js` possible. See
+  `invariants/session-persistence.md`.
 - `src/chat/sessionTitles.ts` — automatic session titles: the gates
   (`shouldAutoTitle`: locked / cooldown / growth), the conversation digest, the
   naming prompts (single + batched), `sanitizeTitle` / `parseBatchTitles`, and the

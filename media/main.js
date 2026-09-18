@@ -109,6 +109,9 @@
   // Set while routing a sub-agent's streaming deltas into its own card, so the
   // main tree's camera/relayout is not driven by every sub-agent token.
   let routingSubAgent = false;
+  // Set while a long transcript's history window is being (re)painted: rendering a
+  // page of *finished* history into a card must not pan the tree to the active node.
+  let suppressFollow = false;
   // The node a routed streaming call is currently writing into (null while writing
   // into the view focus container). Keeps each node's live tool cards separate.
   let routingNodeId = null;
@@ -1029,14 +1032,58 @@
   // Render a node's stored items: the user prompt goes to the pinned prompt area,
   // everything else into the scrollable transcript. Sets messagesEl/promptEl to the
   // node's containers for the duration.
-  function renderNodeItems(itemsEl, promptElCard, items) {
+  //
+  // `virtual` is the caller's "this node is finished" answer (a running node's items
+  // are appended in place as they arrive, and the streaming path reads the
+  // container's last child back to continue it, so it must never be re-rendered
+  // from a slice): a finished node with more than `VIRTUAL_ITEM_THRESHOLD` items
+  // renders the window around its newest content instead of the whole transcript.
+  function renderNodeItems(itemsEl, promptElCard, items, virtual) {
     itemsEl.innerHTML = '';
     promptElCard.innerHTML = '';
+    // A window belongs to the list it was painted from; a full render replaces it.
+    itemsEl._virt = null;
     const prevMsg = messagesEl;
     const prevPrompt = promptEl;
     messagesEl = itemsEl;
     promptEl = promptElCard;
     let promptSet = false;
+    if (virtual && items && items.length > VIRTUAL_ITEM_THRESHOLD) {
+      // Same rule as the full render below: the first `user` item is the pinned
+      // prompt, a later one is neither pinned nor rendered as an item.
+      const rest = [];
+      for (const item of items) {
+        if (item.kind === 'user') {
+          if (!promptSet) {
+            addUserPrompt(item.text, item.attachments);
+            promptSet = true;
+          }
+        } else {
+          rest.push(item);
+        }
+      }
+      if (!itemsEl._virtScroll) {
+        const container = itemsEl;
+        itemsEl._virtScroll = () => onItemsWindowScroll(container);
+        itemsEl.addEventListener('scroll', itemsEl._virtScroll);
+      }
+      paintItemsWindow(itemsEl, {
+        items: rest,
+        promptEl: promptElCard,
+        // A finished card opens at its newest content (`_needsBottomScroll`), so the
+        // first window is the *tail* of the transcript; scrolling up extends it.
+        start: Math.max(0, rest.length - VIRTUAL_WINDOW),
+        end: rest.length,
+        px: VIRTUAL_ITEM_PX,
+        painted: [],
+        top: null,
+        bottom: null,
+        raf: null,
+      });
+      messagesEl = prevMsg;
+      promptEl = prevPrompt;
+      return;
+    }
     for (const item of items) {
       if (item.kind === 'user') {
         if (!promptSet) {
@@ -1049,6 +1096,130 @@
     }
     messagesEl = prevMsg;
     promptEl = prevPrompt;
+  }
+
+  // ---- Long transcripts: render the window the user is looking at --------------
+  // A finished node with a long transcript used to render every one of its items in
+  // one go — 150 items of markdown, tool cards and answers for a single sub-agent
+  // card, every one of them built again on a cold repaint (2692 DOM nodes
+  // measured). Past `VIRTUAL_ITEM_THRESHOLD` items a *finished* node renders only a
+  // window: the items near the scroll position are real, the items above/below it
+  // are a spacer element whose height stands in for them, and scrolling the
+  // container extends the window one page at a time (rAF-throttled).
+  //
+  // A node that is still `running` is never windowed: its transcript is filled
+  // incrementally as deltas arrive (`appendAssistant` writes into the live
+  // container and reads its last child back to continue), so re-rendering it from
+  // a slice would break the stream.
+  const VIRTUAL_ITEM_THRESHOLD = 60; // items above which a finished node windows
+  const VIRTUAL_WINDOW = 24; // items rendered at once
+  const VIRTUAL_ITEM_PX = 72; // estimated height of one unrendered item
+  const VIRTUAL_EXTEND_PX = 320; // extend when the viewport is this near an edge
+
+  /**
+   * A spacer standing in for `count` unrendered items above or below the window.
+   * The size is inline because `.node-items` is a flex column: a spacer has no
+   * content of its own and would otherwise shrink away to nothing.
+   */
+  function itemsSpacer(where, count, px) {
+    const gap = el('div', 'node-items-spacer ' + where);
+    gap.style.flex = '0 0 auto';
+    gap.style.height = count * px + 'px';
+    gap.dataset.items = String(count);
+    return gap;
+  }
+
+  /**
+   * Paint `state.start … state.end` of a long transcript into `container`: those
+   * items are real DOM, everything outside the window is a spacer whose height
+   * stands in for it, so the scrollbar still describes the whole transcript.
+   *
+   * Anything appended to the container *after* the window — a continued turn
+   * streams into this very `.node-items` — is kept and put back at the end: a
+   * scroll must never throw away the answer that is arriving right now.
+   */
+  function paintItemsWindow(container, state) {
+    // Set before the first render: a scroll during the paint must find the state.
+    container._virt = state;
+    const items = state.items;
+    const children = Array.prototype.slice.call(container.children);
+    const keep = [];
+    for (const child of children) {
+      if (state.painted.indexOf(child) < 0 && child !== state.top && child !== state.bottom) keep.push(child);
+    }
+    for (const child of keep) container.removeChild(child);
+    const above = state.start;
+    const below = items.length - state.end;
+    const prevMsg = messagesEl;
+    const prevPrompt = promptEl;
+    // A page of finished history is not the live turn: nothing here may pan the tree.
+    suppressFollow = true;
+    messagesEl = container;
+    promptEl = state.promptEl;
+    state.top = null;
+    state.bottom = null;
+    try {
+      container.innerHTML = '';
+      if (above > 0) {
+        state.top = itemsSpacer('above', above, state.px);
+        container.appendChild(state.top);
+      }
+      for (let i = state.start; i < state.end; i++) renderItemInto(items[i]);
+      if (below > 0) {
+        state.bottom = itemsSpacer('below', below, state.px);
+        container.appendChild(state.bottom);
+      }
+      for (const child of keep) container.appendChild(child);
+    } finally {
+      suppressFollow = false;
+      messagesEl = prevMsg;
+      promptEl = prevPrompt;
+    }
+    state.painted = Array.prototype.slice.call(container.children);
+    // Refine the estimate from what the window actually measures: a page of long
+    // tool results is far taller than one of one-line answers, and the spacers are
+    // what keeps the scrollbar honest at this size.
+    let height = 0;
+    let count = 0;
+    for (const child of state.painted) {
+      if (child === state.top || child === state.bottom) continue;
+      const h = child.offsetHeight || 0;
+      if (h > 0) {
+        height += h;
+        count++;
+      }
+    }
+    if (count > 0 && height / count > 4) state.px = height / count;
+    if (state.top) state.top.style.height = above * state.px + 'px';
+    if (state.bottom) state.bottom.style.height = below * state.px + 'px';
+  }
+
+  /** rAF-throttled `scroll`: at most one window extension per frame. */
+  function onItemsWindowScroll(container) {
+    const state = container._virt;
+    if (!state || state.raf != null) return;
+    state.raf = requestAnimationFrame(() => {
+      state.raf = null;
+      if (container._virt === state) extendItemsWindow(container, state);
+    });
+  }
+
+  /**
+   * Extend the window towards the end the user reached, and keep the scroll
+   * position on the text they are reading: the window above grows by what the
+   * newly rendered items add to the scroll height.
+   */
+  function extendItemsWindow(container, state) {
+    const atTop = state.start > 0 && container.scrollTop <= VIRTUAL_EXTEND_PX;
+    const atBottom =
+      state.end < state.items.length &&
+      container.scrollTop + container.clientHeight >= container.scrollHeight - VIRTUAL_EXTEND_PX;
+    if (!atTop && !atBottom) return;
+    const heightBefore = container.scrollHeight;
+    if (atTop) state.start = Math.max(0, state.start - VIRTUAL_WINDOW);
+    if (atBottom) state.end = Math.min(state.items.length, state.end + VIRTUAL_WINDOW);
+    paintItemsWindow(container, state);
+    if (atTop) container.scrollTop = Math.max(0, container.scrollTop + (container.scrollHeight - heightBefore));
   }
 
   // Render a stored DisplayItem into the current target container (messagesEl).
@@ -1327,6 +1498,149 @@
     return card;
   }
 
+  // ---- Lazy sidecar transcripts: only a few requests in flight at once --------
+  // A `kind: 'agent'` node carries no transcript in the `tree` / `path` payload
+  // (only `itemCount`), so each expanded card asks for it once — `_itemsRequested`
+  // is the one-shot contract, and this queue changes only *when* that one request
+  // is posted. A cold repaint re-expands every sidecar card of a session at once,
+  // and that used to fire every request in the same burst: one measured session
+  // (15 sub-agent cards) asked for 152 items each — ~5.35 M chars of answers and
+  // 2692 DOM nodes in one frame, with the webview's handlers stuck at 900–999 ms
+  // while they landed. So the requests are queued: at most
+  // `AGENT_ITEMS_CONCURRENCY` are in flight, and an `agentItems` answer releases
+  // the next one.
+  //
+  // Two rules keep the burst honest:
+  //  - a repaint that needs exactly one transcript is not a burst: that request
+  //    still goes out immediately (the contract the sidecar section of
+  //    `tools/check-webview.js` pins);
+  //  - where there *is* a layout (`IntersectionObserver`) only a card the user can
+  //    see is worth a multi-hundred-KB answer: a card that enters the viewport is
+  //    promoted ahead of the queue, and a card that is off-screen is never asked
+  //    for — panning/zooming to it is what makes it ask.
+  //
+  // `agentItemsInFlight` counts every posted request, immediate ones included, so
+  // every answer releases a slot. `reset` (a new session) drops the queue: those
+  // cards are gone with the old tree.
+  const AGENT_ITEMS_CONCURRENCY = 3;
+
+  let agentItemsQueue = [];
+  let agentItemsInFlight = 0;
+  /** Cards queued *and* on screen — the ones the queue promotes. */
+  const agentItemsVisible = new Set();
+  const agentItemsObserver =
+    typeof IntersectionObserver === 'function'
+      ? new IntersectionObserver(onAgentItemsVisible, { root: null, rootMargin: '200px', threshold: 0 })
+      : null;
+
+  /** Does this card still want (and may still receive) its transcript? */
+  function agentItemsWanted(id) {
+    const card = nodeEls[id];
+    return !!(card && card._itemsRequested && !card._itemsRendered);
+  }
+
+  /**
+   * How many expanded cards of *this* repaint still need a transcript — the "is
+   * this a burst?" question `requestAgentItems` asks. It counts the card asking
+   * right now (`_itemsRequested` is already set for it, `_itemsRendered` is not)
+   * and uses the same expansion predicate the repaint loops use, so it answers
+   * with the sidecar cards that are actually on screen in the tree.
+   */
+  function pendingAgentCards() {
+    let n = 0;
+    for (const id in treeNodes) {
+      const meta = treeNodes[id];
+      const count = meta && (meta.itemCount || (pathNodes[id] && pathNodes[id].itemCount));
+      if (!count || meta.kind !== 'agent') continue;
+      const card = nodeEls[id];
+      if (!card || card._itemsRendered) continue;
+      if (!activePathSet.has(id) && !agentExpanded(id)) continue;
+      n++;
+    }
+    return n;
+  }
+
+  /** Post one `loadAgentItems`; every posted request holds one in-flight slot. */
+  function postAgentItems(id, card) {
+    agentItemsInFlight++;
+    if (agentItemsObserver && card) agentItemsObserver.unobserve(card);
+    vscode.postMessage({ type: 'loadAgentItems', id });
+  }
+
+  /** Drop a queued card (its node is gone, or its transcript arrived elsewhere). */
+  function forgetAgentItems(id) {
+    const at = agentItemsQueue.indexOf(id);
+    if (at >= 0) agentItemsQueue.splice(at, 1);
+    agentItemsVisible.delete(id);
+    const card = nodeEls[id];
+    if (agentItemsObserver && card) agentItemsObserver.unobserve(card);
+  }
+
+  /** Fill the free slots, the cards in the viewport first; stop when none is. */
+  function pumpAgentItems() {
+    for (let i = 0; i < agentItemsQueue.length; i++) {
+      if (!agentItemsWanted(agentItemsQueue[i])) forgetAgentItems(agentItemsQueue[i--]);
+    }
+    while (agentItemsInFlight < AGENT_ITEMS_CONCURRENCY && agentItemsQueue.length > 0) {
+      const at = agentItemsQueue.findIndex((id) => agentItemsVisible.has(id));
+      // Nothing on screen: the queue waits for the viewport to come to it (the
+      // observer promotes the card when it does).
+      if (at < 0) return;
+      const id = agentItemsQueue.splice(at, 1)[0];
+      agentItemsVisible.delete(id);
+      postAgentItems(id, nodeEls[id]);
+    }
+  }
+
+  /** A card entered or left the viewport: promote what the user is looking at. */
+  function onAgentItemsVisible(entries) {
+    let arrived = false;
+    for (const entry of entries || []) {
+      const id = entry && entry.target && entry.target.dataset ? entry.target.dataset.id : '';
+      if (!id) continue;
+      if (entry.isIntersecting) {
+        agentItemsVisible.add(id);
+        arrived = true;
+      } else {
+        agentItemsVisible.delete(id);
+      }
+    }
+    if (arrived) pumpAgentItems();
+  }
+
+  /**
+   * Ask the host for one card's transcript — the *one* request `expandedCard`
+   * documents (see `_itemsRequested`). A lone request goes out right away; a
+   * repaint that re-expands many sidecar cards queues them behind the cap.
+   */
+  function requestAgentItems(id, card) {
+    card._itemsRequested = true;
+    if (agentItemsObserver && pendingAgentCards() > 1) {
+      agentItemsQueue.push(id);
+      agentItemsObserver.observe(card);
+      pumpAgentItems();
+      return;
+    }
+    postAgentItems(id);
+  }
+
+  /** A new session: the queued cards are gone with the old tree. */
+  function resetAgentItems() {
+    for (const id of agentItemsQueue) {
+      const card = nodeEls[id];
+      if (agentItemsObserver && card) agentItemsObserver.unobserve(card);
+    }
+    agentItemsQueue = [];
+    agentItemsVisible.clear();
+    agentItemsInFlight = 0;
+  }
+
+  /** An `agentItems` answer (or a card the tree dropped) frees its slot. */
+  function releaseAgentItems() {
+    if (agentItemsInFlight > 0) agentItemsInFlight--;
+    pumpAgentItems();
+  }
+
   function expandedCard(id, meta, pnode) {
     const card = nodeEls[id];
     card.classList.add('expanded');
@@ -1338,7 +1652,10 @@
     // freshly-streamed node is filled incrementally, so never wipe it here.
     const source = pnode ? pnode.items : meta.items;
     if (source && !card._itemsRendered) {
-      renderNodeItems(itemsEl, promptElCard, source);
+      // A finished card with a long transcript renders a window of it (see
+      // `renderNodeItems`); a running node keeps the full render, because its
+      // items are appended in place as they arrive.
+      renderNodeItems(itemsEl, promptElCard, source, meta.status !== 'running');
       card._itemsRendered = true;
       // Thinking blocks only exist once the items are rendered, so apply the
       // finished-node default here (once, so a manual lock is not clobbered by
@@ -1352,12 +1669,13 @@
     // (it was most of a big session's message): the host ships only `itemCount`,
     // and the card fetches the items on its first expansion. `_itemsRequested`
     // sticks to the card, so collapsing and reopening it — or a repaint that
-    // re-expands it — asks the host once, not once per expand.
+    // re-expands it — asks the host once, not once per expand. *When* that one
+    // request is posted is `requestAgentItems`'s call: a cold repaint that
+    // re-expands a whole sidecar grid queues them instead of firing them all.
     const pendingItems = (pnode && pnode.itemCount) || meta.itemCount || 0;
     const pendingKind = (pnode && pnode.kind) || meta.kind;
     if (pendingItems > 0 && pendingKind === 'agent' && !card._itemsRendered && !card._itemsRequested) {
-      card._itemsRequested = true;
-      vscode.postMessage({ type: 'loadAgentItems', id });
+      requestAgentItems(id, card);
     }
     promptElCard.classList.remove('hidden');
     itemsEl.classList.remove('hidden');
@@ -1993,6 +2311,9 @@
     }
     for (const id in nodeEls) {
       if (!treeNodes[id]) {
+        // The card is going, so a transcript still queued for it can never arrive:
+        // it leaves the queue (and the viewport watcher) with the card.
+        forgetAgentItems(id);
         nodeEls[id].remove();
         delete nodeEls[id];
         // The card is gone, so its stretch record has nothing to restore — and a
@@ -2059,7 +2380,12 @@
       // transcript arrives via `agentItems` after `expandedCard` below asks for
       // it, so there is nothing to render from the path.
       if (pnode.items && !card._itemsRendered) {
-        renderNodeItems(card.querySelector('.node-items'), card.querySelector('.node-prompt'), pnode.items);
+        renderNodeItems(
+          card.querySelector('.node-items'),
+          card.querySelector('.node-prompt'),
+          pnode.items,
+          (treeNodes[id] || {}).status !== 'running',
+        );
         card._itemsRendered = true;
         // Same finished-node default as in expandedCard: the thinking blocks only
         // exist now, and this path skips expandedCard's render branch.
@@ -2146,7 +2472,10 @@
   // frame, and suppressed entirely while routing a sub-agent's deltas.
   let followRaf = null;
   function followActive() {
-    if (routingSubAgent) return;
+    // Suppressed while routing a sub-agent's deltas, and while a finished card's
+    // history window is painted — scrolling a transcript the user is reading must
+    // never move the camera.
+    if (routingSubAgent || suppressFollow) return;
     if (followRaf != null) return;
     followRaf = requestAnimationFrame(() => {
       followRaf = null;
@@ -3234,13 +3563,18 @@
         // a tree rebuild has dropped — is ignored (rendering twice would duplicate
         // the whole transcript).
         const card = nodeEls[msg.id];
+        // The answer is also what frees a slot for the next queued request, so that
+        // happens *first*: an answer for a card the tree has dropped (the `break`
+        // below) releases it just the same.
+        releaseAgentItems();
         if (!card || card._itemsRendered) break;
         const itemsEl = card.querySelector('.node-items');
-        renderNodeItems(itemsEl, card.querySelector('.node-prompt'), msg.items || []);
+        const finished = (treeNodes[msg.id] || {}).status !== 'running';
+        renderNodeItems(itemsEl, card.querySelector('.node-prompt'), msg.items || [], finished);
         card._itemsRendered = true;
         // Same finished-node default as in `expandedCard` / `renderPath`: the
         // thinking blocks only exist now, and this path skips their render branch.
-        if ((treeNodes[msg.id] || {}).status !== 'running') {
+        if (finished) {
           setCardScrollLock(card, false);
           card._needsBottomScroll = true;
         }
@@ -3389,6 +3723,7 @@
         break;
       case 'reset':
         clearLiveTools();
+        resetAgentItems();
         for (const id in nodeEls) { nodeEls[id].remove(); }
         for (const id in nodeEls) delete nodeEls[id];
         pathNodes = Object.create(null);

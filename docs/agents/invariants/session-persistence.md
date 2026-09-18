@@ -131,3 +131,68 @@
   (`clipMessageForStorage`, 64 KiB per message content): the in-memory history
   keeps the full payload, but one huge tool result cannot make every persist write
   tens of MiB into the memento.
+
+### Phase 3: the file-backed store (module landed; the provider still uses the Memento)
+
+`src/chat/sessionStore.ts` is the replacement for the one big row, and it is **not wired
+into `ChatViewProvider` yet** — the layout below is what the wiring will read and write.
+Three measured problems drive it: the row is re-serialized and rewritten in full on every
+write (17.2 M chars, multi-second `persist-done`), it costs 100–250 ms of *blocking* host
+work per burst, and it is keyed by the extension id — a rename made every conversation
+undiscoverable and the first activation under the new id wrote an empty row over it.
+
+- **A root that survives a rename — but only with discovery.** The store's own root is
+  `<globalStorage>/spinney/`: a *fixed* last segment, overridable by the `spinney.dataDir`
+  setting (`defaultDataRoot(globalStorage, override)`). That alone is **not** enough, and
+  the first live migration proved it: VS Code's `context.globalStorageUri` is
+  `<profile>/globalStorage/<publisher.name>` — **the parent folder is the extension id** —
+  so a rename moves the whole tree and the files become invisible. What actually survives
+  is the pair: `SessionStore.discover([...siblings])` + `adoptFrom(root)`, run at
+  activation whenever this root has no session for the workspace *and* the Memento row is
+  empty (i.e. the state a rename leaves). The candidates are every sibling
+  `<profile>/globalStorage/<other-id>/spinney` — found by listing the profile's
+  `globalStorage` — plus the default location under the current id when `dataDir` pins the
+  root somewhere else. Adoption only **reads** the other root; the sessions are copied into
+  the live one, and a placeholder session created because this root looked empty is moved to
+  `.trash`. A rename therefore costs one activation where the sidebar is briefly empty, then
+  the history is back.
+- **One subfolder per workspace**: `sessions/<workspaceKey>/`, the key a digest of the
+  workspace folder's uri (`workspaceKeyFor`), `no-workspace` when no folder is open. That
+  keeps today's "another folder shows other sessions" behaviour while leaving **one root
+  to back up**.
+- **The index is a cache.** `index.json` holds the sidebar-sized `SessionSummary[]`;
+  `rebuildIndex()` reconstructs it from the files alone, so nothing that can be lost
+  orphans the content. A corrupt or foreign session file is skipped and reported —
+  one bad file never costs the rest of the history.
+- **Every write is atomic and keeps one generation**: `.tmp` → the old file renamed to
+  `.bak` → the tmp renamed over it (all renames), so a reader always sees a complete
+  version and a `.tmp`-only leftover is ignored.
+- **What a write costs, measured**: a turn end writes the changed node plus the header
+  (27–70 KB for an 18 MB session, `persist-queued` 5–8 ms, `persist-phases` splitting that into
+  change detection / build / queue). The one exception is the **first write of a window**,
+  which re-serializes everything because the digest map starts empty (measured 60–90 ms of
+  host work), and the **v1→v2 layout migration**, which runs once per root at activation and
+  writes one folder per session (measured 19.3 MB / 72 files / ~480 ms, in the background).
+  `persist-written ms=… writes=… skipped=… chars=…` reports a persist's *own* bytes; `writes=0
+  skipped=N` means its content was coalesced into a later write for the same path, which is
+  the queue working and not a missing measurement.
+- **A deletion moves to `.trash/<ts>/`**, never unlinks (the rule the v1 state backup
+  already follows), and it cancels a write still queued for that path first.
+- **One writer per workspace**: `locks/<key>.lock` with a heartbeat; a lock held by a live
+  owner is refused, one whose heartbeat is older than `LOCK_STALE_MS` or whose pid is gone
+  is taken over, so a killed window cannot brick the store. A window that cannot take the
+  lock does **not** fall back to "read-only": it keeps writing the **Memento** (`via=memento`
+  on its `persist-*` lines) and says so in the output channel. That is the one combination
+  that both keeps the user's window working and guarantees no two windows ever write the
+  same session file.
+- **Discovery and adoption** make a rename a non-event: `SessionStore.discover(candidates)`
+  orders the roots that look like ours, and `adoptFrom(otherRoot)` imports another root's
+  sessions (existing ids untouched, the source never modified).
+- Writes go through the shared coalescing queue (`fileWriteQueue.ts`): the answer is
+  synchronous, the bytes are not, a later body for one path replaces the pending one, and
+  `flush()` belongs at the same hand-off points as `flushPersist()` / `flushTranscripts()`.
+- `tools/session-store-acceptance.js` pins all of it windowless — including the rename-survival
+  path: adopt, discovery order, and no cross-talk between workspaces.
+- **The root also holds the diagnostics logs** (`perf-<pid>.log`, one per window, bounded and
+  trimmed — see `streaming-perf.md`), so the data folder is the one folder to back up *and* the
+  one folder a user is told to look in when they are asked for a log.

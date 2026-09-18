@@ -147,6 +147,32 @@ export function globToRegex(glob: string): RegExp {
   return new RegExp('^' + s + '$');
 }
 
+/**
+ * The glob patterns the *user's* settings tell a file search to skip:
+ * `search.exclude` + `files.exclude` in their effective, defaults-included form —
+ * the same two maps VS Code's own search honours, so a repo-wide grep and the
+ * search UI agree on what is even *there*. An entry set to `false` is off; the
+ * object form (`{ when: … }`) still names a pattern worth skipping, so it counts
+ * as on. Duplicates are dropped: the two maps often repeat a pattern, and the
+ * caller turns each one into an `rg --glob` (and, in the fallback walk, a regex).
+ */
+export function searchExcludeGlobs(): string[] {
+  const patterns = new Set<string>();
+  const settings = vscode.workspace.getConfiguration();
+  for (const section of ['search', 'files']) {
+    const excluded = settings.get<Record<string, unknown>>(`${section}.exclude`);
+    if (!excluded || typeof excluded !== 'object') {
+      continue;
+    }
+    for (const [pattern, value] of Object.entries(excluded)) {
+      if (pattern && value !== false && value !== null && value !== undefined) {
+        patterns.add(pattern);
+      }
+    }
+  }
+  return [...patterns];
+}
+
 const RAW_TOKEN_RE = /<<<RAW:([A-Za-z0-9_]+)>>>|<<<END_RAW:([A-Za-z0-9_]+)>>>/g;
 
 function truncate(s: string, n = 200): string {

@@ -449,7 +449,14 @@ const sandbox = {
     disconnect() {}
   },
   IntersectionObserver: class {
-    observe() {}
+    constructor(callback) {
+      this.callback = callback;
+    }
+    // There is no layout here, so an observed element counts as on screen — the
+    // honest reading, and what the agent-items queue needs to promote a card.
+    observe(target) {
+      this.callback([{ target, isIntersecting: true }], this);
+    }
     unobserve() {}
     disconnect() {}
   },
@@ -1109,6 +1116,112 @@ if (contextLabel !== 'ctx 50%') {
   const inlineItems = checkedOut ? findByClass(checkedOut, 'node-items') : null;
   if (!inlineItems || inlineItems.children.length === 0) {
     problems.push('a `path` carrying items no longer renders them (a checked-out sidecar must render immediately)');
+  }
+}
+
+// --- A repaint's sidecar burst is capped, and a long transcript is windowed -----
+// A cold repaint re-expands every sidecar card of a session at once. Firing all of
+// their `loadAgentItems` requests in the same burst asked one measured session for
+// 15 transcripts at once (~5.35 M chars, 2692 DOM nodes, handlers stuck at 900 ms),
+// so the requests are queued behind `AGENT_ITEMS_CONCURRENCY` and an answer releases
+// the next slot. And a *finished* card with a long transcript renders a window
+// instead of every item — the tail is what a finished card opens on, so the newest
+// items must be the rendered ones.
+{
+  const ROOT = 'burst-root';
+  const SUBS = ['burst-a', 'burst-b', 'burst-c', 'burst-d'];
+  const node = (id, parentId, children, extra) => Object.assign(
+    { id, parentId, children, title: id, status: 'done', createdAt: 0, preview: id, usage: null, size: null },
+    extra || {},
+  );
+  const cardOf = (id) => {
+    for (const child of elementById('tree-canvas').children) {
+      if (child.dataset && child.dataset.id === id) return child;
+    }
+    return null;
+  };
+
+  dispatch({ type: 'reset' });
+  posted.length = 0;
+  dispatch({
+    type: 'tree',
+    viewId: ROOT,
+    activeId: null,
+    rootId: ROOT,
+    // Four sidecar children of the view focus: all four cards are expanded.
+    nodes: [node(ROOT, null, SUBS), ...SUBS.map((id) => node(id, ROOT, [], { kind: 'agent', agentStatus: 'done', itemCount: 2 }))],
+  });
+  dispatch({ type: 'path', ids: [ROOT], nodes: [{ id: ROOT, status: 'done', items: [] }] });
+  const burstAsked = posted.filter((m) => m && m.type === 'loadAgentItems');
+  // The webview's cap, restated here on purpose: a change to it must be a deliberate
+  // change to this guard, not a silent one.
+  const CONCURRENCY = 3;
+  if (burstAsked.length !== CONCURRENCY) {
+    problems.push(
+      `a repaint burst posted ${burstAsked.length} loadAgentItems request(s), expected ${CONCURRENCY} ` +
+        '(the in-flight cap; the rest must queue)',
+    );
+  }
+  if (burstAsked.some((m) => SUBS.indexOf(m.id) < 0)) {
+    problems.push(`a burst request named a node that is not a sidecar card: ${JSON.stringify(burstAsked)}`);
+  }
+  // One answer frees one slot: the queued card must be asked for right after it.
+  dispatch({ type: 'agentItems', id: burstAsked[0].id, items: [{ kind: 'assistant', text: 'ans' }] });
+  const afterAnswer = posted.filter((m) => m && m.type === 'loadAgentItems');
+  if (afterAnswer.length !== CONCURRENCY + 1) {
+    problems.push(
+      `an agentItems answer left the burst at ${afterAnswer.length} request(s), expected ${CONCURRENCY + 1} ` +
+        '(one slot released, the queued card promoted)',
+    );
+  }
+
+  // A finished node with more than 60 items renders a window whose items are the
+  // newest ones (`_needsBottomScroll` opens a finished card at its newest content).
+  const LONG = 'burst-long';
+  const items = [];
+  for (let i = 0; i < 61; i++) items.push({ kind: 'assistant', text: `item-${i}` });
+  dispatch({ type: 'reset' });
+  dispatch({
+    type: 'tree',
+    viewId: LONG,
+    activeId: LONG,
+    rootId: LONG,
+    nodes: [node(LONG, null, [])],
+  });
+  dispatch({ type: 'path', ids: [LONG], nodes: [{ id: LONG, status: 'done', items }] });
+  const longCard = cardOf(LONG);
+  const longItems = longCard ? findByClass(longCard, 'node-items') : null;
+  if (!longItems) {
+    problems.push('the long-transcript fixture produced no `.node-items` container');
+  } else {
+    const rendered = longItems.children.length;
+    // 24 rendered items + at most two spacers (above/below).
+    if (rendered > 26) {
+      problems.push(`a 61-item finished card rendered ${rendered} element(s) in one go — it must window the list`);
+    }
+    if (!findByClass(longCard, 'node-items-spacer')) {
+      problems.push('a windowed transcript has no spacer standing in for the items outside the window');
+    }
+    // The numbers are read off the spacers rather than the item text: the sandbox
+    // DOM does not aggregate `textContent`, and "how many items are above/below the
+    // window" is exactly what says *which* slice was rendered. A finished card opens
+    // at its newest content, so 61 items must render the last 24 with 37 above and
+    // nothing below.
+    const spacers = Array.prototype.slice
+      .call(longItems.children)
+      .filter((child) => (child.className || '').indexOf('node-items-spacer') >= 0);
+    const above = spacers.find((child) => (child.className || '').indexOf('above') >= 0);
+    const below = spacers.find((child) => (child.className || '').indexOf('below') >= 0);
+    const aboveCount = above && above.dataset ? Number(above.dataset.items) : null;
+    if (aboveCount !== 61 - 24) {
+      problems.push(
+        `a windowed 61-item card reports ${aboveCount} item(s) above the window, expected 37 ` +
+          '(the window must be the newest page, because a finished card opens at its newest content)',
+      );
+    }
+    if (below) {
+      problems.push('a windowed card shows a spacer below its newest page — there is nothing newer to stand in for');
+    }
   }
 }
 

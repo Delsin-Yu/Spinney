@@ -75,7 +75,7 @@ import { defaultSessionTitle, isDefaultSessionTitle } from '../i18n';
 import { BackgroundHub, BackgroundOwner } from './backgroundHub';
 import { PromptSnippet } from './promptSnippets';
 import { SubAgentPool } from './SubAgentPool';
-import { sumUsage, summarizeTranscript } from './transcript';
+import { hasPendingTranscriptWrite, sumUsage, summarizeTranscript } from './transcript';
 import { opPayload, opTag, perf, startRepaintOp, timedSync } from '../perf';
 
 /** Cap tool output stored/shown in the webview so a 16 MiB command dump cannot freeze the UI. */
@@ -457,6 +457,17 @@ export interface RuntimeHost {
    * for the chatty call sites (card sizes, delivered flags, tail lines).
    */
   persist(): void;
+  /**
+   * Name the session whose content just changed, so the next write can be limited to it.
+   *
+   * Every `RuntimeHost.persist()` from a `SessionRuntime` is about that runtime's own
+   * session, which makes the runtime the one place that knows *what* changed — and the
+   * reason a large profile no longer re-serializes all of its conversations on every turn
+   * end (measured: 382 ms of blocked host for 30 sessions / 86 M chars). Marking is
+   * advisory on purpose: a write with **nothing** marked writes everything, so a path that
+   * forgets to mark costs time and never loses content.
+   */
+  markSessionDirty(sessionId: string): void;
   /**
    * Write the content **now**. For the moments where a delayed write would lose
    * real conversation state or leave the memento disagreeing with the disk (a
@@ -1180,7 +1191,7 @@ export class SessionRuntime {
     // loop — a worker is seeded from its own node, and `beginTurn` re-checks the
     // node's card anyway).
     this.pushNodeCard(view, nextCard, nextEffort);
-    this.host.persist();
+    this.persistTurn();
     this.host.persistRuntimeConfig(nextCardId, nextEffort);
     this.postConfig();
     this.postContext();
@@ -1234,7 +1245,7 @@ export class SessionRuntime {
       // The seed itself did not move; only the session's stored pick may have (a
       // stale one being retired).
       if (hadPick) {
-        this.host.persist();
+        this.persistTurn();
       }
       return;
     }
@@ -1249,7 +1260,7 @@ export class SessionRuntime {
       worker.agent.setCard(this.cardForNode(node));
       worker.agent.setThinkingEffort(this.effortForNode(node));
     }
-    this.host.persist();
+    this.persistTurn();
     this.postConfig();
     this.postContext();
     // The notice is only about a request whose card really moved: a seed change is
@@ -1307,7 +1318,7 @@ export class SessionRuntime {
     this.session.effortFromSettings = seedCard.defaultEffort;
     this.seedEffort = normalizeEffort(seedCard, next);
     this.pushNodeCard(view, nextCard, next);
-    this.host.persist();
+    this.persistTurn();
     this.host.persistRuntimeConfig(this.seedCardId, this.seedEffort);
     this.postConfig();
     if (this.hasHistory()) {
@@ -1545,7 +1556,7 @@ export class SessionRuntime {
       return;
     }
     node.customSize = { w, h };
-    this.host.persist();
+    this.persistTurn();
   }
 
   /** Prompt size of the checked-out branch, taken from its latest turn's usage. */
@@ -2139,7 +2150,7 @@ export class SessionRuntime {
     }
     // A finished turn is the state that must never be lost (its history is what the
     // next turn sends), so it is written now rather than coalesced.
-    this.host.persistNow();
+    this.persistTurnNow();
     // A union kill that hit this node while its turn was winding down: the interrupt
     // message can only be appended now (the turn's own slice was just stored).
     this.flushWritebacks();
@@ -2530,8 +2541,18 @@ export class SessionRuntime {
     if (!this.host.getConfig().saveSessionTranscripts) {
       return false;
     }
+    const file = this.rolloverTranscriptPath(nodeId);
+    // The dump now reaches disk through a queue off the host thread, so a
+    // **queued** write counts as present: queueing it is what makes it present,
+    // and only a deletion (`removeTranscriptDir` / `removeTranscripts`) cancels
+    // it. Without this the rollover would point at a file that is about to appear
+    // microseconds later. `existsSync` stays for the ordinary case — a dump
+    // written by an earlier turn.
+    if (hasPendingTranscriptWrite(file)) {
+      return true;
+    }
     try {
-      return fs.existsSync(this.rolloverTranscriptPath(nodeId));
+      return fs.existsSync(file);
     } catch {
       return false;
     }
@@ -2778,7 +2799,7 @@ export class SessionRuntime {
       this.renderSignalCards(nodeId, batch);
       // …and the interrupt travels with the next request instead of starting one.
       node.messages = [...node.messages, { role: 'user', content: combineSignalText(batch) }];
-      this.host.persist();
+      this.persistTurn();
       this.postTree();
       this.postState();
     }
@@ -2961,6 +2982,23 @@ export class SessionRuntime {
     }
   }
 
+  /**
+   * Persist **this session**: mark it as the one that changed, then use the provider's
+   * usual queue. Every runtime-driven write is about this runtime's own session (a turn
+   * ending, a tool boundary, a card's size), so marking here is exact — and it is the
+   * single place that makes the write a per-session one instead of a whole-profile one.
+   */
+  private persistTurn(): void {
+    this.host.markSessionDirty(this.session.id);
+    this.host.persist();
+  }
+
+  /** The same, for the moments where a delayed write would lose real state. */
+  private persistTurnNow(): void {
+    this.host.markSessionDirty(this.session.id);
+    this.host.persistNow();
+  }
+
   private appendDelta(run: TurnRun, text: string): void {
     run.pendingText += text;
     this.scheduleStreamFlush(run);
@@ -3111,6 +3149,14 @@ export class SessionRuntime {
     if (!parent) {
       return Promise.resolve('Error: no active turn to attach sub-agents to.');
     }
+    // The shape of the fan-out, in one line: a report from a machine where "it is still
+    // slow" is unreadable unless the log says how many sub-agents were asked for at once
+    // (the concurrency limit, not the machine, may be the answer).
+    perf(
+      () =>
+        `spawn-request count=${Array.isArray(args.agents) ? args.agents.length : '?'} ` +
+        `mode=${String(args.mode ?? 'sync')} depth=1 node=${node.id}`,
+    );
     return this.spawnChildren(parent, args, signal);
   }
 
@@ -3232,7 +3278,7 @@ export class SessionRuntime {
       // informed by construction — settle the card (D1).
       if (!node.delivered) {
         node.delivered = true;
-        this.host.persist();
+        this.persistTurn();
         this.postTree();
       }
       return JSON.stringify({
@@ -3264,11 +3310,11 @@ export class SessionRuntime {
       // Stop killed this resume: record the interrupt where the next request will
       // pick it up instead of delivering a notice turn.
       this.queueWriteback(this.buildSubAgentSignal(parent, [{ ok: result.ok, summary: result.summary, node }], cardText));
-      this.host.persist();
+      this.persistTurn();
       return;
     }
     this.queueSubAgentSignal(parent, [{ ok: result.ok, summary: result.summary, node }], cardText);
-    this.host.persist();
+    this.persistTurn();
   }
 
   /**
@@ -3386,7 +3432,7 @@ export class SessionRuntime {
           job.node.delivered = true;
         }
       }
-      this.host.persist();
+      this.persistTurn();
       this.postTree();
       return {
         results: results.map((r, i) => ({
@@ -3454,7 +3500,7 @@ export class SessionRuntime {
         // The sub-agent's whole conversation (and the transcript dump it points at)
         // is written now: a `send_agent_message` may resume it at any moment, and a
         // coalesced write would lose the conversation the resume builds on.
-        this.host.persistNow();
+        this.persistTurnNow();
         // This sub-agent (depth-1) may have queued its depth-2 children's completion
         // signals while it ran. Now that it stopped, the drain can hand them over:
         // an idle sub-agent node is resumed with them (a live one would have taken
@@ -3694,7 +3740,7 @@ export class SessionRuntime {
       node.agentStatus = result.ok ? 'done' : 'killed';
       node.agentSummary = result.summary;
       this.post({ type: 'agentDone', id: node.id, status: node.agentStatus, summary: result.summary });
-      this.host.persist();
+      this.persistTurn();
     }
   }
 
@@ -3750,11 +3796,11 @@ export class SessionRuntime {
       // back into the owning turn's history instead of opening a turn — and a stopped
       // sub-agent is never resumed just because its own children settled.
       this.queueWriteback(this.buildSubAgentSignal(parent, results));
-      this.host.persist();
+      this.persistTurn();
       return;
     }
     this.queueSubAgentSignal(parent, results);
-    this.host.persist();
+    this.persistTurn();
   }
 
   private cleanupSubAgents(): void {
@@ -3906,7 +3952,7 @@ export class SessionRuntime {
     attachNode(this.session, node);
     this.session.activeNodeId = prevActive;
     this.bgNodes.set(task.id, node.id);
-    this.host.persist();
+    this.persistTurn();
     this.postTree();
     this.postBackgrounds();
   }
@@ -3947,7 +3993,7 @@ export class SessionRuntime {
     node.bgElapsedMs = Math.max(0, Date.now() - task.startedAt);
     node.bgOutputTail = out.length > 800 ? `…${out.slice(-800)}` : out;
     node.status = task.killed ? 'interrupted' : 'done';
-    this.host.persist();
+    this.persistTurn();
     this.postTree();
   }
 
@@ -4206,7 +4252,7 @@ export class SessionRuntime {
       this.post({ type: 'backgroundNotice', nodeId, item: signal.card });
     }
     this.settleSignals(batch);
-    this.host.persist();
+    this.persistTurn();
     if (node) {
       this.post({ type: 'nodeUpdate', ...this.nodeStatePatch(node) });
     }
@@ -4225,7 +4271,7 @@ export class SessionRuntime {
       }
     }
     if (touched) {
-      this.host.persist();
+      this.persistTurn();
       this.postTree();
     }
   }

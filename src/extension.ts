@@ -121,6 +121,11 @@ export function activate(context: vscode.ExtensionContext): void {
     // The Model Card Tree page: the command and the gear beside the chat's model
     // dropdown both land on the same window-owned tab.
     vscode.commands.registerCommand('spinney.openModelCards', () => chatProvider?.openModelTree()),
+    // Export/import of the session data folder: the user's own copy of their history, and the
+    // way a rename or a new machine recovers it (see invariants/session-persistence.md).
+    vscode.commands.registerCommand('spinney.exportData', () => chatProvider?.exportSessionData()),
+    vscode.commands.registerCommand('spinney.openDiagnosticsLog', () => chatProvider?.openDiagnosticsLog()),
+    vscode.commands.registerCommand('spinney.importData', () => chatProvider?.importSessionData()),
     vscode.commands.registerCommand('spinney.openSession', (arg) => {
       const id = toSessionId(arg);
       if (id) {

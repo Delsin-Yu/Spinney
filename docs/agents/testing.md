@@ -210,6 +210,114 @@ exactly the bug class. The method that does, with no real API key and no tokens:
    longer needs an idle host or a detached run; `POST /session/start {sessionId}`
    (no prompt) hands the UI back afterwards.
 
+`tools/search-files-acceptance.js` is the **fifth** windowless acceptance run, for the
+`search_files` tool (`src/tools/searchFiles.ts`). That tool used to walk the whole tree
+in-process, on the extension host's only JS thread — 397 calls / 782.7 s in one customer
+log, a hitless search costing as much as a hit-heavy one, and the host blocked for up to
+10.3 s — and now runs in a **ripgrep child process** with the original walk kept as the
+fallback for a machine where no `rg` can be found. Two execution paths that must keep
+**one** contract is exactly the kind of thing that drifts silently, so the script stubs
+`vscode` (a `Module._load` hook) and drives the compiled tool for real: `file:line: text`
+with workspace-relative slash paths, `-` context separators, a single-file `path`, the
+exact `maxResults` cut plus its `…[search stopped early: …]` note, `search.exclude` /
+`files.exclude` pruning (a directory pattern, a directory glob and a file glob), no hit
+inside a font-like binary in either path, `(no matches)` for a hitless search, the fresh
+`search-files … via=rg|walk scope=` perf line, and the three `Error:` strings unchanged.
+Its last section re-runs the whole script in a child process with `env.appRoot` absent
+and `PATH` stripped — the "no ripgrep here" case — and asserts the walk produces the same
+behaviour. `npx tsc -p ./ && node tools/search-files-acceptance.js` (an explicit out dir
+checks the checker itself); it needs `out/`, so it runs after `compile` like
+`check:signals`, but it is **not** in `vscode:prepublish`.
+
+`tools/transcript-queue-acceptance.js` is the **sixth** windowless acceptance run, for the
+transcript write queue (`src/chat/transcript.ts`). A dump used to be `mkdirSync` +
+`writeFileSync` on the extension host's only JS thread — 700 KB–1 MB per turn, and a storm
+of 15 sub-agents finishes dozens at once. The write is queued now, and a queue introduces
+an ordering question synchronous code could not have: **a deletion has to win over a write
+that is still pending**, or "the files are gone" is undone a moment later
+(`invariants/session-persistence.md`). It drives the compiled module directly and pins:
+the synchronous `{ file, lines, bytes }` answer while the bytes are still queued, the
+untouched JSONL layout (meta on line 1, then one message per line, 0-based `index`),
+`hasPendingTranscriptWrite()` counting a queued dump as present, `flushTranscripts()`
+draining the queue, a later body for one path replacing the earlier pending one, a
+deletion cancelling a queued dump (and reporting it as removed) and tombstoning an
+in-flight one so the whole session folder is gone once the queue drains, a new write
+clearing the tombstone, and a sub-agent dump taking the same path. Removing the
+`cancelPendingWrites` call fails four of its checks — that is how to prove it still bites.
+`npx tsc -p ./ && node tools/transcript-queue-acceptance.js` (an explicit out dir checks
+the checker itself); it needs `out/`, so it runs after `compile`, but it is **not** in
+`vscode:prepublish`.
+
+`tools/session-store-acceptance.js` is the **seventh** windowless acceptance run, for the
+file-backed session store (`src/chat/sessionStore.ts` + `src/chat/fileWriteQueue.ts`). The
+store moves session content out of the single Memento row — the row is re-serialized in full
+on every write, and it is keyed by the extension id, which is how a rename once made every
+conversation undiscoverable. The module is deliberately **vscode-free** (the caller passes
+the global-storage path and the workspace identity), so this script needs no stub and drives
+it for real over a throwaway root under `.spinney/`. It pins the four properties that are
+invisible until the day they matter: an id-independent root (`defaultDataRoot` never
+contains the publisher identity; `workspaceKeyFor` is stable per uri and independent across
+workspaces) · a write that cannot destroy the previous one (the synchronous answer, the
+self-describing envelope, the `.bak` generation, a `.tmp`-only file ignored) · a loss that is
+survivable (a missing `index.json` rebuilt from the files, one corrupt session skipped while
+the rest load, a mismatched id refused) · a deletion that is recoverable and ordered (moved
+to `.trash`, nothing unlinked, and it beats a write still in the queue) · one live lock per
+workspace (refused while the holder is alive, taken over when the heartbeat is stale or the
+pid is gone, a release by a former owner ignored) · and rename survival itself
+(`adoptFrom` imports another root's sessions, discovery picks the newest root, the source is
+untouched). Replacing the trash move with an unlink fails it.
+`npx tsc -p ./ && node tools/session-store-acceptance.js` (an explicit out dir checks the
+checker itself); it needs `out/`, so it runs after `compile`, but it is **not** in
+`vscode:prepublish`.
+
+`tools/sim/` is the **simulation harness** (dev-only, never shipped, never in CI): it
+reproduces a customer's storm — a session whose main agent runs whole-tree searches and then
+fans out 15 read-only sub-agents, each searching the same tree — with **no tokens**, and
+prints a PASS/FAIL table against the agreed thresholds. It is the instrument every
+performance fix in this repository is judged by, so its analyser is itself tested
+(`--selftest` feeds it the customer's own lines and asserts each one FAILs with the right
+value, a clean log passes, and an absent measurement is a WARN rather than a silent PASS).
+
+- `node tools/sim/run.mjs --selftest` — fixture + mock + plan + analyser, offline.
+- `node tools/sim/run.mjs` — the full run. It **launches its own throwaway window** with a
+  private `--user-data-dir` and a private `--extensions-dir`, a fixed control-plane port and
+  token, and the four `SPINNEY_HTTP*` bypass variables plus `SPINNEY_PERF_LOG` (the dev-only
+  perf tee, because the output channel has no read-back API). The developer's window is never
+  touched. Two traps it works around, both found the hard way: the extension declares only
+  `onWebviewPanel:*`, so a companion `sim-activator` extension focuses the Spinney container to
+  make it activate; and a fresh profile opening an untrusted folder runs in Restricted Mode,
+  where an extension that does not declare `capabilities.untrustedWorkspaces` is not enabled
+  at all.
+- `node tools/sim/run.mjs --rename-test` — the rename-survival path alone (an empty store
+  root adopting its sessions back from a sibling root another extension id left behind). It
+  cannot be run in the developer's own window without taking that very conversation off screen
+  if the adoption failed, so it runs in the throwaway one and is repeatable.
+- `node tools/sim/run.mjs --analyse <log>` — re-analyse an existing perf log.
+
+**Two readings for one metric.** `persist-queued` is what the host *pays* (a payload build —
+3 ms since the store replaced the single Memento row); `persist-done` is the write *queue*'s
+completion latency, so it is reported twice: the **median** against the agreed 300 ms (a rise
+there means every write got slow — a regression) and the **storm tail** against 500 ms (one
+long tail while fifteen sub-agents are writing is information: the queue was behind, not the
+host blocked). The measured band is ~15–25 ms idle and 90–314 ms mid-storm.
+
+`tools/diagnostics-log-acceptance.js` is the **eighth** windowless acceptance run, for the
+diagnostics log (`src/chat/diagnosticsLog.ts`). Every build keeps one file per window in the
+session data folder now, so "it cannot grow without end" and "it holds no conversation" are
+promises the product makes — and both would fail silently (a folder filling over months; a line
+of user text nobody noticed). It drives the compiled module and pins: the folder is created on
+demand, the self-describing header names the build and how to turn the log off, rotation at the
+limit keeps **one** `.prev` generation (and replaces an older one), a file below the limit is
+left alone, **exactly** five windows survive (the number is restated in the guard on purpose —
+reading it from the module under test once let a `KEEP = 50` mutation through), the newest file
+is what the command finds (an empty or missing folder reports nothing), and two source-level
+rules: a session title is written to the output channel rather than through the perf sink, and
+the API-key line interpolates `set`/`missing` rather than the key. Nonsense bounds are the point
+of a guard here: seeding `KEEP + 3` windows and asserting the survivors is how the retention
+rule is visible. `npx tsc -p ./ && node tools/diagnostics-log-acceptance.js` (an explicit out dir
+checks the checker itself); it needs `out/`, so it runs after `compile`, but it is **not** in
+`vscode:prepublish`.
+
 Rules learned the hard way: back up `.vscode/settings.json` byte-for-byte and
 restore it in a `finally` (a failed run must never leave a mock base URL behind — the
 file is `.gitignore`d, being per-developer state, so at least a botched run cannot be

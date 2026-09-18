@@ -279,5 +279,19 @@
   "modelCards[\"{0}\"]: oaiModel is required": "modelCards[\"{0}\"]：oaiModel 為必填",
   "modelCards[\"{0}\"]: defaultEffort \"{1}\" is not one of {2} — using \"{3}\"": "modelCards[\"{0}\"]：defaultEffort「{1}」不在 {2} 之中 —— 改用「{3}」",
   "spinney.{0} must be an object of id → fields (got {1})": "spinney.{0} 必須是 id → 欄位的物件（實際為 {1}）",
-  "{0}: a row has an empty id": "{0}：有一列的 id 為空"
+  "{0}: a row has an empty id": "{0}：有一列的 id 為空",
+  "Spinney: this window has no session data folder to export.": "Spinney：此視窗沒有可匯出的工作階段資料資料夾。",
+  "Spinney: this window has no session data folder to import into.": "Spinney：此視窗沒有可匯入工作階段資料的資料夾。",
+  "Export here": "匯出到此資料夾",
+  "Import from here": "從此資料夾匯入",
+  "Export Spinney session data": "匯出 Spinney 工作階段資料",
+  "Import Spinney session data": "匯入 Spinney 工作階段資料",
+  "Spinney: session data exported to {0}": "Spinney：工作階段資料已匯出至 {0}",
+  "Show in Explorer": "在檔案總管中顯示",
+  "Spinney: could not export the session data ({0}).": "Spinney：無法匯出工作階段資料（{0}）。",
+  "Spinney: that folder does not hold Spinney session data.": "Spinney：該資料夾中沒有 Spinney 工作階段資料。",
+  "Spinney: imported {0} session(s); {1} were already present.": "Spinney：已匯入 {0} 個工作階段；{1} 個已存在。",
+  "Spinney: could not import the session data ({0}).": "Spinney：無法匯入工作階段資料（{0}）。",
+  "Spinney: diagnostics log: {0}": "Spinney：診斷記錄：{0}",
+  "Spinney: no diagnostics log yet. Use the extension for a moment, or turn on spinney.diagnostics.log.": "Spinney：還沒有診斷記錄。先使用擴充功能一會兒，或開啟 spinney.diagnostics.log。"
 }

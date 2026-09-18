@@ -26,6 +26,7 @@ import { Balance, fetchBalance } from './balance';
 import { ModelCard, ProviderSpec, cards, providerById, providerSpecs } from './models';
 import { RequestGate, GateStats } from './requestGate';
 import { StreamChunk, UploadedFile, Usage } from './types';
+import { beginWork } from '../perf';
 
 /** What the registry needs from the host: the key of a provider, and nothing else. */
 export interface ClientRegistryHost {
@@ -176,7 +177,12 @@ export class ClientRegistry {
       providerGate.release();
       throw err;
     }
+    // From here until the caller releases it, one outbound request is in flight. It
+    // is the same lifetime the gates use, so it counts what the UI calls "in flight"
+    // and gives a `lag blocked` line something to name besides the searches.
+    const endWork = beginWork('req');
     return () => {
+      endWork();
       cardGate.release();
       providerGate.release();
     };

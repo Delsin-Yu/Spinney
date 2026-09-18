@@ -158,6 +158,123 @@ const live = new Map<number, PerfOp>();
 let opSeq = 0;
 
 /**
+ * How many correlated ops are still open (`Map.size`). A cheap readout for a
+ * diagnostic line that must not walk anything: the lag watch asks "how much work
+ * is in flight?" right after a stall, and the asking must not become part of it.
+ */
+export function liveOpCount(): number {
+  return live.size;
+}
+
+/**
+ * Live units of host work, by label. A unit that runs off the JS thread (a child
+ * process) still occupies the loop while its output is read and parsed, and that is
+ * exactly the kind of blocker a `lag blocked` line has to be able to name — the first
+ * measured storm (15 concurrent sub-agent searches, `lag blocked 305ms`) could only be
+ * exonerated from the persistence side, because nothing counted the searches.
+ *
+ * A counter read, never a walk; the caller is responsible for the release function
+ * running exactly once (a `finally`).
+ */
+const workCounts = new Map<string, number>();
+/** The highest concurrent count each label reached since the last lag report. */
+const workPeaks = new Map<string, number>();
+/** Monotonic counters (`rg-spawn=412`): a burst that is *not* concurrent still shows. */
+const workTotals = new Map<string, number>();
+
+/** Mark one unit of host work as started; call the returned function when it ends. */
+export function beginWork(label: string): () => void {
+  const now = (workCounts.get(label) ?? 0) + 1;
+  workCounts.set(label, now);
+  if (now > (workPeaks.get(label) ?? 0)) {
+    workPeaks.set(label, now);
+  }
+  let released = false;
+  return () => {
+    if (released) {
+      return;
+    }
+    released = true;
+    const left = (workCounts.get(label) ?? 0) - 1;
+    if (left > 0) {
+      workCounts.set(label, left);
+    } else {
+      workCounts.delete(label);
+    }
+  };
+}
+
+/** Count an event that is over as soon as it happens (`rg-spawn`, …). */
+export function countWork(label: string): void {
+  workTotals.set(label, (workTotals.get(label) ?? 0) + 1);
+}
+
+/** `rg:15 subagent:2` — the live units, or `''` when the host is idle. */
+export function workSummary(): string {
+  if (workCounts.size === 0) {
+    return '';
+  }
+  return [...workCounts.entries()].map(([label, count]) => `${label}:${count}`).join(' ');
+}
+
+/**
+ * The full picture for a `lag blocked` line: what is live **now**, the **peak** each
+ * label reached since the previous report (a stall that is over by the time the watch
+ * runs only shows in the peak), and the monotonic totals (a burst of short units never
+ * shows as a high concurrent count). Reset on read, so one burst is one line.
+ */
+export function workReadout(): string {
+  const parts: string[] = [];
+  const live = workSummary();
+  if (live) {
+    parts.push(live);
+  }
+  for (const [label, peak] of workPeaks) {
+    const now = workCounts.get(label) ?? 0;
+    if (peak > 1 || now > 0) {
+      parts.push(`peak ${label}:${peak}`);
+    }
+  }
+  for (const [label, total] of workTotals) {
+    parts.push(`${label}:${total}`);
+  }
+  workPeaks.clear();
+  workTotals.clear();
+  return parts.join(' ');
+}
+
+/**
+ * The same readout **without** consuming the peaks and totals — for the storm summary a
+ * clean run produces (`work-done`, see `startLagWatch`). The lag line keeps the
+ * destructive read: it is the rarer and more important one, and it must not find its
+ * counters already cleared by a summary that fired first.
+ */
+export function workPeek(): string {
+  const parts: string[] = [];
+  const live = workSummary();
+  if (live) {
+    parts.push(live);
+  }
+  for (const [label, peak] of workPeaks) {
+    const now = workCounts.get(label) ?? 0;
+    if (peak > 1 || now > 0) {
+      parts.push(`peak ${label}:${peak}`);
+    }
+  }
+  for (const [label, total] of workTotals) {
+    parts.push(`${label}:${total}`);
+  }
+  return parts.join(' ');
+}
+
+/** Heap in MiB, for the same line: a stall that is GC churn looks nothing like work. */
+export function heapReadout(): string {
+  const usage = process.memoryUsage();
+  const mib = (bytes: number): number => Math.round(bytes / (1024 * 1024));
+  return `heap=${mib(usage.heapUsed)}/${mib(usage.heapTotal)}MiB rss=${mib(usage.rss)}MiB`;
+}
+
+/**
  * Begin a correlated operation. The op becomes the *ambient* one, so every
  * `timedSync` / `opMark` below it lands in the same block without threading a
  * handle through (`PanelManager` → `ChatPanel` → `SessionRuntime`).
@@ -326,10 +443,37 @@ function safeJson(value: unknown): string {
 }
 
 /**
+ * Supplies the ` | ctx: …` tail of a `lag blocked` line: a one-line, O(1) readout
+ * of what is most likely blocking the host *right now*. `ChatViewProvider`
+ * registers one; diagnostics only, so the text stays English like every other
+ * `perf()` line.
+ *
+ * `startLagWatch` calls the provider **once per reported stall burst** — never per
+ * tick — and nothing at all is computed while none is registered. A throwing
+ * provider is caught and reported as `provider-error`, so a probe bug can never
+ * cost the watch its own line.
+ */
+let lagContext: (() => string | undefined) | null = null;
+
+export function setLagContextProvider(fn: (() => string | undefined) | null): void {
+  lagContext = fn;
+}
+
+/** The ` | ctx: …` tail for one `lag blocked` line, or `''`. */
+function lagContextText(): string {
+  try {
+    return lagContext?.() ?? '';
+  } catch {
+    return 'provider-error';
+  }
+}
+
+/**
  * Watch the host's own event loop. A timer that fires late means the extension
  * host was blocked — a `persist` write, a tree rebuild, a large stringify — and
  * that stall is what the user feels as a stutter. One line per stall burst, so a
- * blocked host is attributable even though it wrote nothing while blocked.
+ * blocked host is attributable even though it wrote nothing while blocked; its
+ * ` | ctx:` tail (see {@link setLagContextProvider}) says *what* it was blocked on.
  *
  * @returns a stopper (call it from `dispose`).
  */
@@ -338,10 +482,26 @@ export function startLagWatch(intervalMs = 250, thresholdMs = 120): () => void {
   let stalls = 0;
   let worst = 0;
   let lastStall = 0;
+  let wasWorking = false;
   const timer = setInterval(() => {
     const now = Date.now();
     const lag = now - expected;
     expected = now + intervalMs;
+    // A storm that never blocks the loop produces no `lag blocked` line at all, which
+    // would leave a *clean* log with no evidence that fifteen sub-agents ever ran. The
+    // falling edge of the work counters is that evidence: one `work-done` line per storm,
+    // peaks included, non-destructively (the lag line still owns the reset).
+    const working = workCounts.size > 0;
+    if (wasWorking && !working) {
+      const peek = workPeek();
+      // Nothing worth a line (a single unit that began and ended inside one tick, e.g. one
+      // balance request) stays quiet: a `work-done (counters were empty)` line would only
+      // teach a reader of the file to skip the ones that matter.
+      if (peek) {
+        perf(`work-done ${peek}`);
+      }
+    }
+    wasWorking = working;
     if (lag > thresholdMs) {
       stalls++;
       worst = Math.max(worst, lag);
@@ -350,7 +510,15 @@ export function startLagWatch(intervalMs = 250, thresholdMs = 120): () => void {
     }
     // Report once the stall is over, so the worst lag of a burst is one line.
     if (stalls > 0 && now - lastStall > 2 * intervalMs) {
-      perf(`lag blocked ${worst}ms (${stalls} late tick${stalls === 1 ? '' : 's'})`);
+      // The context is asked for exactly once, at the moment the line is written
+      // (never per tick), and only when a provider is registered: it reads state
+      // already in memory, and the host has only just become responsive again —
+      // computing anything expensive here would add to the stall it describes.
+      const context = lagContext ? lagContextText() : '';
+      perf(
+        `lag blocked ${worst}ms (${stalls} late tick${stalls === 1 ? '' : 's'})` +
+          (context ? ` | ctx: ${context}` : ''),
+      );
       stalls = 0;
       worst = 0;
     }

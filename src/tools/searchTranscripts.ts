@@ -52,7 +52,10 @@ export function makeSearchTranscriptsTool(getRoots: () => string[]): AgentTool {
       }
       let result;
       try {
-        result = searchTranscripts({
+        // The await sits *inside* this try on purpose: a regex that fails to
+        // compile now rejects the promise, and the tool text must stay
+        // `Error: invalid regex: …`.
+        result = await searchTranscripts({
           roots,
           pattern: query,
           sessionId,

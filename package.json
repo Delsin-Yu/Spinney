@@ -2,7 +2,7 @@
   "name": "spinney",
   "displayName": "Spinney",
   "description": "%description%",
-  "version": "0.0.2",
+  "version": "0.0.3",
   "publisher": "DE-YU",
   "license": "MIT",
   "author": {
@@ -125,6 +125,18 @@
       {
         "command": "spinney.clearApiKey",
         "title": "%command.spinney.clearApiKey.title%"
+      },
+      {
+        "command": "spinney.exportData",
+        "title": "%command.spinney.exportData.title%"
+      },
+      {
+        "command": "spinney.importData",
+        "title": "%command.spinney.importData.title%"
+      },
+      {
+        "command": "spinney.openDiagnosticsLog",
+        "title": "%command.spinney.openDiagnosticsLog.title%"
       }
     ],
     "menus": {
@@ -257,7 +269,10 @@
                     },
                     "transport": {
                       "type": "string",
-                      "enum": ["openai", "deepseek"],
+                      "enum": [
+                        "openai",
+                        "deepseek"
+                      ],
                       "default": "openai",
                       "description": "%spinney.modelCards.vision.transport.description%"
                     }
@@ -412,6 +427,12 @@
             "default": "",
             "description": "%spinney.subAgentTranscriptDir.description%",
             "scope": "window"
+          },
+          "spinney.dataDir": {
+            "type": "string",
+            "default": "",
+            "description": "%spinney.dataDir.description%",
+            "scope": "window"
           }
         }
       },
@@ -428,6 +449,12 @@
             "type": "number",
             "default": 0,
             "description": "%spinney.httpApi.port.description%",
+            "scope": "window"
+          },
+          "spinney.diagnostics.log": {
+            "type": "boolean",
+            "default": true,
+            "description": "%spinney.diagnostics.log.description%",
             "scope": "window"
           }
         }
@@ -449,6 +476,8 @@
     "check:l10n": "node tools/check-l10n.js",
     "check:grid": "node tools/check-tree-grid.js",
     "check:docs": "node tools/check-docs.js",
+    "sim": "node tools/sim/run.mjs",
+    "sim:selftest": "node tools/sim/run.mjs --selftest",
     "vscode:prepublish": "npm run compile && npm run sync:l10n && npm run check:models && npm run check:webview && npm run check:modeltree && npm run check:signals && npm run check:l10n && npm run check:rollover && npm run check:grid && npm run check:docs"
   },
   "devDependencies": {

@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.3] - 2026-09-18
+
+Performance and data-durability release. It comes from a reported slowdown on a machine
+running fifteen sub-agents at once, and from a data loss the project had already suffered
+once: changing the extension id made every conversation invisible.
+
+**Your session data moves to files on the first start.** The extension no longer keeps the
+conversations in one VS Code storage value (17.2 M characters on the reported profile,
+re-serialized in full on every write, and keyed by the extension id). It writes one folder
+per session and one file per node under a folder that is not named after the extension.
+The first start converts what is stored and keeps the previous copy as
+`migrated-state-<date>.json`; `Spinney: Export Session Data` and `Spinney: Import Session
+Data` move the folder, and `spinney.dataDir` puts it where you want it.
+
+### Added
+
+- `spinney.dataDir`: where the session data folder lives. Empty means a fixed folder in the
+  extension storage, which is deliberately not named after the extension id.
+- `Spinney: Export Session Data` and `Spinney: Import Session Data`: copy the data folder
+  where you choose, and adopt another folder's sessions into this window.
+- Sub-agent discovery recover the history of an earlier extension id (a rename, a
+  reinstall, another publisher): a session data folder left by another id is adopted on
+  start when this one has nothing.
+- `search_files` honours `search.exclude`, `files.exclude` and `.gitignore`, skips binary
+  files, and says so in its result, so "not found" is never confused with "excluded".
+- Diagnostics: every build keeps one log per window in the session data folder
+  (`perf-<pid>.log`), rotated at 2 MiB and trimmed to the newest five windows; it holds
+  timings, counters and paths, never the conversation. `spinney.diagnostics.log` turns it
+  off and `Spinney: Open Diagnostics Log` shows it. `lag blocked` carries what was in
+  flight and the heap; `persist-written` reports a write's own cost.
+
+### Changed
+
+- Session content lives in files: one folder per session, one file per node, written
+  atomically (a `.bak` generation is kept) and only for the nodes that changed.
+- `search_files` runs in the bundled `ripgrep` child process instead of walking the tree on
+  the extension host's only thread, with a six-child work budget.
+- Transcript dumps are written through an async queue, and a deletion cancels a queued dump.
+- The chat view asks for a few sub-agent transcripts at a time and renders a window of a
+  long transcript instead of all of it.
+- A second window on the same folder keeps its sessions in the storage value rather than
+  writing the files another window owns.
+
+### Fixed
+
+- The extension host no longer stalls under fifteen concurrent sub-agents: the reported
+  `lag blocked 10302ms` is gone (measured: none over 120 ms).
+- `search_files` no longer costs seconds per call: 397 calls took 782.7 s in the report,
+  with a worst case of 104 s; a whole-tree search is now about 0.4 s.
+- A session write no longer rewrites the whole profile, and no longer serializes every
+  conversation to store one change.
+- A rename, a reinstall or another publisher no longer makes the history invisible.
+
 ## [0.0.2] - 2026-09-16
 
 The first public release. No earlier build was ever shipped, so this entry covers

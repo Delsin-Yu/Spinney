@@ -173,6 +173,169 @@ export function sumUsage(usages: Array<Usage | undefined>): Usage | undefined {
   return total;
 }
 
+// ---- The write queue -------------------------------------------------------
+//
+// A dump is 700 KB–1 MB of JSONL and a storm of sub-agents finishes dozens of
+// them at once. `mkdirSync` + `writeFileSync` put that I/O on the extension
+// host's only JS thread, where the measured storm showed the loop starved (see
+// `invariants/streaming-perf.md`). The body is still serialized synchronously —
+// that is CPU work on data already in memory, `lines`/`bytes` stay cheap, and a
+// serialization error still throws *here*, where the caller turns it into a
+// `[transcript] …` line — but `mkdir` + `writeFile` go through `fs.promises` on
+// this queue, so the host thread is never blocked by the disk.
+//
+// **A deletion wins over a queued write** (`invariants/session-persistence.md`:
+// "the files are gone" must not be undone a moment later). A delete cancels the
+// queued writes it covers and tombstones the ones already in flight; the
+// tombstone re-deletes the file when that write lands, and a new write for the
+// path clears it (`queueTranscriptWrite`).
+//
+// One drain at a time, and a later body for a path *replaces* the earlier
+// pending one: only the last write to a dump matters, so a rewrite cannot grow
+// the queue without bound.
+
+interface PendingTranscriptWrite {
+  /** Absolute directory, created on demand. */
+  dir: string;
+  /** The JSONL body, already serialized. */
+  body: string;
+}
+
+/** File path -> the body queued for it (one entry per path; the last one wins). */
+const pendingWrites = new Map<string, PendingTranscriptWrite>();
+/** The write the drain is inside of: its bytes are past the point of recall. */
+let inFlightWrite: string | null = null;
+/**
+ * Paths a deletion removed while a write for them was in flight — that write
+ * lands *after* the delete, so it has to be undone when it does. `'dir'` says the
+ * whole folder was removed, in which case the write's own `mkdir` may have just
+ * recreated it and an empty folder is all that may be left behind.
+ */
+const tombstones = new Map<string, 'file' | 'dir'>();
+/** The running drain, or null while the queue is idle. */
+let drainPromise: Promise<void> | null = null;
+
+/** Is `file` inside `dir`? A folder delete covers every dump below it. */
+function isUnder(dir: string, file: string): boolean {
+  const rel = path.relative(dir, file);
+  return !!rel && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
+
+/** Queue one write. A later body for the same path replaces the pending one. */
+function queueTranscriptWrite(dir: string, file: string, body: string): void {
+  // This path exists again as far as a reader is concerned, so a tombstone for
+  // it (and only for it) is undone: queueing is what makes it present.
+  tombstones.delete(file);
+  pendingWrites.set(file, { dir, body });
+  if (!drainPromise) {
+    drainPromise = drainWrites().finally(() => {
+      drainPromise = null;
+    });
+  }
+}
+
+/**
+ * Write the queued bodies one by one off the host thread, then apply a tombstone
+ * to anything a deletion cancelled mid-flight. Never rejects: a dump that cannot
+ * be written is dropped (the `remove*` helpers are best effort in the same way),
+ * and a failed dump must never break the turn that produced it. A reader that
+ * opens the path in the same tick can still miss it — that is what
+ * `flushTranscripts()` is for, at the hand-off points.
+ */
+async function drainWrites(): Promise<void> {
+  for (;;) {
+    const next = pendingWrites.keys().next();
+    if (next.done) {
+      return;
+    }
+    const file = next.value;
+    const job = pendingWrites.get(file);
+    pendingWrites.delete(file);
+    if (!job) {
+      continue;
+    }
+    inFlightWrite = file;
+    try {
+      await fs.promises.mkdir(job.dir, { recursive: true });
+      await fs.promises.writeFile(file, job.body, 'utf8');
+    } catch {
+      // Best effort: the dump is lost, never the turn.
+    }
+    inFlightWrite = null;
+    const tombstone = tombstones.get(file);
+    if (tombstone) {
+      tombstones.delete(file);
+      await discardTombstoned(file, tombstone === 'dir');
+    }
+  }
+}
+
+/** Delete a tombstoned path again now that its write has landed. */
+async function discardTombstoned(file: string, dropDir: boolean): Promise<void> {
+  try {
+    await fs.promises.rm(file, { force: true });
+  } catch {
+    return;
+  }
+  if (dropDir) {
+    // The in-flight `mkdir` may have recreated the removed session folder a
+    // moment before this write landed; `rmdir` only succeeds while it is empty.
+    try {
+      await fs.promises.rmdir(path.dirname(file));
+    } catch {
+      // A sibling dump (or something else) is still there: nothing to clean up.
+    }
+  }
+}
+
+/**
+ * Cancel every queued write covering the path(s) a deletion is about to remove,
+ * and tombstone one already in flight (see `tombstones`). Returns how many dumps
+ * that covered: a dump that only ever made it into the queue is gone too, and
+ * `removeTranscripts` reports it as removed.
+ */
+function cancelPendingWrites(matches: (file: string) => boolean, kind: 'file' | 'dir'): number {
+  let cancelled = 0;
+  for (const file of [...pendingWrites.keys()]) {
+    if (matches(file)) {
+      pendingWrites.delete(file); // never written: the deletion already won
+      cancelled++;
+    }
+  }
+  if (inFlightWrite && matches(inFlightWrite) && !tombstones.has(inFlightWrite)) {
+    tombstones.set(inFlightWrite, kind);
+    cancelled++;
+  }
+  return cancelled;
+}
+
+/**
+ * Resolve when the queue is empty: every queued body written, every in-flight
+ * write finished, every tombstone applied. Belongs at the **same hand-off points
+ * as `ChatViewProvider.flushPersist()` / `persistNow()`** — the
+ * `controlWaitForFinish` / `controlReloadWindow` hand-offs and `shutdown()`. The
+ * dump is asynchronous now, so a reboot or a hand-off that does not await this
+ * can lose the last turn's transcript.
+ */
+export async function flushTranscripts(): Promise<void> {
+  while (drainPromise) {
+    await drainPromise;
+  }
+}
+
+/**
+ * Is a dump for `file` written but not yet complete? A **queued** write counts as
+ * present — queueing it is what makes it present, and only a deletion cancels it
+ * — so this is what `SessionRuntime.rolloverTranscriptOnDisk` has to ask before
+ * handing a reader a pointer to the file.
+ */
+export function hasPendingTranscriptWrite(file: string): boolean {
+  if (pendingWrites.has(file)) {
+    return true;
+  }
+  return inFlightWrite === file && !tombstones.has(file);
+}
+
 /** Shared writer: meta on line 1, then one API message per line. */
 function writeTranscriptFile(
   dir: string,
@@ -185,9 +348,8 @@ function writeTranscriptFile(
     lines.push(JSON.stringify({ type: 'message', index, ...msg }));
   });
   const body = lines.join('\n') + '\n';
-  fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, `${nodeId}.jsonl`);
-  fs.writeFileSync(file, body, 'utf8');
+  queueTranscriptWrite(dir, file, body);
   return { file, lines: lines.length, bytes: Buffer.byteLength(body, 'utf8') };
 }
 
@@ -255,8 +417,14 @@ export function writeSessionTranscript(input: SessionTranscriptInput): Transcrip
   return writeTranscriptFile(input.dir, input.nodeId, meta, input.messages);
 }
 
-/** Remove a session's transcript folder (best effort — never throws). */
+/**
+ * Remove a session's transcript folder (best effort — never throws). Any queued
+ * write below it is cancelled **first**: a dump written a moment later would
+ * resurrect the folder the deletion just removed, and one already in flight is
+ * tombstoned so it is deleted again when it lands.
+ */
 export function removeTranscriptDir(dir: string): void {
+  cancelPendingWrites((file) => isUnder(dir, file), 'dir');
   try {
     fs.rmSync(dir, { recursive: true, force: true });
   } catch {
@@ -270,7 +438,8 @@ const SAFE_NODE_ID = /^[A-Za-z0-9_-]+$/;
 /**
  * Remove the dumps of specific nodes — `<dir>/<nodeId>.jsonl` each — and return
  * how many files actually existed. Used when a branch is deleted, so the on-disk
- * record matches the history that is kept. Best effort (never throws).
+ * record matches the history that is kept. Best effort (never throws). A dump
+ * that was queued but never written counts as removed too.
  */
 export function removeTranscripts(dir: string, nodeIds: string[]): number {
   let removed = 0;
@@ -279,9 +448,15 @@ export function removeTranscripts(dir: string, nodeIds: string[]): number {
       continue;
     }
     const file = path.join(dir, `${nodeId}.jsonl`);
+    // Before the removal (see `removeTranscriptDir`).
+    const cancelled = cancelPendingWrites((candidate) => candidate === file, 'file');
     try {
       if (fs.existsSync(file)) {
         fs.rmSync(file, { force: true });
+        removed++;
+      } else if (cancelled > 0) {
+        // Only ever queued: it never reached disk, but the dump is gone all the
+        // same, so it counts as removed.
         removed++;
       }
     } catch {
@@ -300,9 +475,12 @@ export function removeTranscriptFile(file: string): boolean {
   if (!file || !file.endsWith('.jsonl') || !path.isAbsolute(file)) {
     return false;
   }
+  // Before the removal (see `removeTranscriptDir`).
+  const cancelled = cancelPendingWrites((candidate) => candidate === file, 'file');
   try {
     if (!fs.existsSync(file)) {
-      return false;
+      // Never reached disk, but the dump is gone: report it as removed.
+      return cancelled > 0;
     }
     fs.rmSync(file, { force: true });
     return true;
@@ -508,6 +686,63 @@ function listTranscriptFiles(roots: string[], sessionId?: string): { files: Tran
   return { files: out, capped };
 }
 
+/**
+ * Async twin of `listTranscriptFiles` for the search path: a search walks up to
+ * `MAX_TRANSCRIPT_FILES` files, and a `readdirSync`/`existsSync` walk of that size
+ * is exactly the host-thread stall this phase removes. Kept as a separate walk on
+ * purpose — `listTranscriptSessions` is still synchronous and must not regress.
+ * A missing folder is handled by `readdir` throwing, which is the sync version's
+ * `existsSync` guard.
+ */
+async function listTranscriptFilesAsync(
+  roots: string[],
+  sessionId?: string,
+): Promise<{ files: TranscriptFileRef[]; capped: boolean }> {
+  const out: TranscriptFileRef[] = [];
+  let capped = false;
+  const walk = async (dir: string, session: string, depth: number): Promise<void> => {
+    if (out.length >= MAX_TRANSCRIPT_FILES) {
+      capped = true;
+      return;
+    }
+    let entries: fs.Dirent[];
+    try {
+      entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      if (out.length >= MAX_TRANSCRIPT_FILES) {
+        capped = true;
+        return;
+      }
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) {
+        if (depth >= 2) {
+          continue;
+        }
+        if (sessionId && depth === 0 && entry.name !== sessionId) {
+          continue;
+        }
+        await walk(full, session || entry.name, depth + 1);
+        continue;
+      }
+      if (!entry.name.endsWith('.jsonl')) {
+        continue;
+      }
+      out.push({ file: full, session: session || path.basename(path.dirname(full)) });
+    }
+  };
+  for (const root of roots) {
+    if (sessionId) {
+      await walk(path.join(root, sessionId), sessionId, 0);
+      continue;
+    }
+    await walk(root, '', 0);
+  }
+  return { files: out, capped };
+}
+
 export interface TranscriptSearchOptions {
   /** Transcript roots; each holds one folder per session. */
   roots: string[];
@@ -534,13 +769,20 @@ export interface TranscriptSearchResult {
 
 /**
  * Grep every transcript line for `pattern` and return `file:line: text` hits
- * (context lines use `-` separators, like `search_files`). Invalid regex throws.
+ * (context lines use `-` separators, like `search_files`). Invalid regex rejects —
+ * the caller awaits this inside its `try`, which is where the synchronous throw
+ * used to be caught.
+ *
+ * Asynchronous on purpose: the search reads every transcript file and runs on the
+ * extension host's only JS thread, so a `statSync`/`readFileSync` sweep of a whole
+ * transcript root is itself a stall. Only the `await`s changed: the returned text
+ * is byte for byte what the synchronous version built.
  */
-export function searchTranscripts(opts: TranscriptSearchOptions): TranscriptSearchResult {
+export async function searchTranscripts(opts: TranscriptSearchOptions): Promise<TranscriptSearchResult> {
   const re = new RegExp(opts.pattern, opts.caseSensitive ? '' : 'i');
   const maxResults = Math.min(Math.max(1, opts.maxResults ?? 50), MAX_TRANSCRIPT_MATCHES);
   const context = Math.min(Math.max(0, Math.floor(opts.context ?? 0)), MAX_CONTEXT_LINES);
-  const { files, capped: listCapped } = listTranscriptFiles(opts.roots, opts.sessionId);
+  const { files, capped: listCapped } = await listTranscriptFilesAsync(opts.roots, opts.sessionId);
   const results: string[] = [];
   let matches = 0;
   let scanned = 0;
@@ -554,11 +796,12 @@ export function searchTranscripts(opts: TranscriptSearchOptions): TranscriptSear
     }
     let raw: string;
     try {
-      if (fs.statSync(ref.file).size > MAX_TRANSCRIPT_FILE) {
+      const stat = await fs.promises.stat(ref.file);
+      if (stat.size > MAX_TRANSCRIPT_FILE) {
         skippedLarge++;
         continue;
       }
-      raw = fs.readFileSync(ref.file, 'utf8');
+      raw = await fs.promises.readFile(ref.file, 'utf8');
     } catch {
       continue;
     }

@@ -161,7 +161,13 @@ One session owns exactly one tab. Opening a session focuses its tab. It never op
 
 With `spinney.autoSessionTitles` on, Spinney names a session from its conversation after the first turn, and again as the conversation grows. The wait between two names is at least two minutes. A rename stops the automatic naming.
 
-A session keeps its history in the stored state of the extension, not in a file.
+A session keeps its history in the session data folder of the extension, as plain files: one folder per session, one file per node.
+
+| Action | What happens |
+|---|---|
+| Export the data | `Spinney: Export Session Data` copies the folder where you say. The deleted sessions and the internal locks stay behind. |
+| Import data | `Spinney: Import Session Data` adopts the sessions of another folder into this window. A session already here is not replaced. |
+| Keep the data on a synced drive | Set `spinney.dataDir` to that folder. It applies on the next window reload. |
 
 | Event | What happens |
 |---|---|
@@ -169,6 +175,7 @@ A session keeps its history in the stored state of the extension, not in a file.
 | Close a tab | The session stays. Only the tab goes away. A running turn continues. |
 | Delete a session | Spinney removes the history, deletes the transcript dumps, and kills the background terminals. It refuses while a turn runs. |
 | Delete the last session | Spinney creates a fresh empty one. |
+| Move to another computer | `Spinney: Export Session Data`, then `Spinney: Import Session Data` on the other one. |
 
 ## 6. Models and providers
 
@@ -386,6 +393,8 @@ All keys start with `spinney.`. Open the Settings UI, or edit `settings.json`.
 | `spinney.saveSessionTranscripts` | `true` | Write each finished turn to disk as JSONL. |
 | `spinney.saveSubAgentTranscripts` | `true` | Write each finished sub-agent conversation to disk as JSONL. |
 | `spinney.subAgentTranscriptDir` | `""` | The folder for the transcript files, relative to the agent root. Empty means the extension storage. |
+| `spinney.dataDir` | `""` | The folder that keeps the sessions. Empty means a fixed folder in the extension storage, which is not named after the extension id — renaming or reinstalling never moves your history. Set it to a folder you back up to keep the history outside this machine profile. Applied on the next window reload. |
+| `spinney.diagnostics.log` | `true` | Write a diagnostics log for this window. It holds timings, counters and paths — never your conversation. One file per window, oldest removed, rotating at 2 MiB. |
 | `spinney.httpApi.enabled` | `false` | Turn on the local HTTP control plane. See section 14. |
 | `spinney.httpApi.port` | `0` | The port of that control plane. `0` lets the system pick one. |
 
@@ -403,6 +412,9 @@ Every command lives in the Command Palette under `Spinney: `.
 | `Spinney: Auto-rename Session` | Drops the title lock and names the session again. |
 | `Spinney: Copy Session ID` | Copies a session id to the clipboard. |
 | `Spinney: Delete Session` | Deletes the current session. |
+| `Spinney: Export Session Data` | Copies your session data folder to a folder you choose. |
+| `Spinney: Import Session Data` | Adopts the sessions of a folder you choose into this window. |
+| `Spinney: Open Diagnostics Log` | Shows the diagnostics log of this window, and offers to reveal it. |
 | `Spinney: Delete Branch at Checked-out Turn` | Deletes the branch at the checked-out turn. |
 | `Spinney: Clear Conversation` | Empties the conversation of the current session. |
 | `Spinney: Open Model Cards` | Opens the model-cards page. |
@@ -493,3 +505,17 @@ Open a folder in the same window, or close one, and Spinney switches the mode at
 The **Spinney** output channel holds the diagnostics. Open it with View → Output, then select `Spinney` in the list. It names the display language, the model configuration problems, and the layout and performance lines.
 
 Run **`Spinney: Show System Prompt`** to see the exact prompt, and **`Spinney: Show User Manual`** to reopen this manual.
+
+
+## 18. Report a slow or broken session
+
+Spinney keeps one diagnostics log per window. It holds timings, counters and paths — never anything you typed, and never an API key.
+
+| Step | How |
+|---|---|
+| 1 | Reproduce the problem. |
+| 2 | Run `Spinney: Open Diagnostics Log`, then **Show in Explorer**. |
+| 3 | Send that one file to the person who supports you. |
+
+The log stops if you set `spinney.diagnostics.log` to `false`.
+

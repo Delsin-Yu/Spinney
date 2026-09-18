@@ -74,11 +74,28 @@ import {
   removeTranscriptFile,
   removeTranscripts,
   sumUsage,
+  flushTranscripts,
   writeSessionTranscript,
   writeSubAgentTranscript,
 } from './transcript';
 import { ControlHost, ControlResult, ControlState, WaitForFinishOptions } from '../http/controlServer';
-import { beginOp, logWebviewReport, opMark, perf, setPerfSink, startLagWatch, startRepaintOp, timedSync } from '../perf';
+import { SessionStore, SessionSummary, defaultDataRoot, looksLikeStoreRoot, workspaceKeyFor } from './sessionStore';
+import { diagnosticsHeader, newestDiagnosticsLog, prepareDiagnosticsLog } from './diagnosticsLog';
+import { nodeDigest } from './persistDigest';
+import {
+  beginOp,
+  liveOpCount,
+  logWebviewReport,
+  opMark,
+  perf,
+  setLagContextProvider,
+  setPerfSink,
+  startLagWatch,
+  startRepaintOp,
+  timedSync,
+  heapReadout,
+  workReadout,
+} from '../perf';
 
 // Model cards, providers, context windows and image support all live in one
 // place: `src/agent/models.ts` (their editor is the Model Card Tree page,
@@ -100,6 +117,12 @@ const ACTIVE_SESSION_KEY = 'spinney.activeSession';
 const PERSIST_DEBOUNCE_MS = 800;
 /** …but never leave the newest state unpublished longer than this. */
 const PERSIST_MAX_WAIT_MS = 3000;
+/**
+ * Dev-only perf tee buffer cap (see `openPerfTee`): past this many un-flushed
+ * bytes the tee drops lines rather than grow, so it stays out of the host's way.
+ * Only relevant while `SPINNEY_PERF_LOG` is set.
+ */
+const PERF_TEE_MAX_BUFFER = 1 << 20;
 /** One-shot marker for the historical-transcript backfill (see `backfillTranscripts`). */
 const TRANSCRIPT_BACKFILL_KEY = 'spinney.transcriptBackfill';
 const TRANSCRIPT_BACKFILL_VERSION = 'v1';
@@ -116,10 +139,45 @@ const STORAGE_BACKUP_KEY = 'spinney.state.v1backup';
 const V1_BACKUP_FILE = 'state-v1-backup.json';
 const CONFIG_KEY = 'spinney.runtimeConfig';
 /**
+ * One-shot marker: the session content has been moved from the Memento row to the store
+ * files. In the **small** scope, like the other markers, so clearing the big row does not
+ * clear it.
+ */
+const DATA_MIGRATED_KEY = 'spinney.dataMigrated';
+const DATA_MIGRATED_VERSION = 'v1';
+/** The parked copy of the pre-store row, in the store root (never in the Memento). */
+const MIGRATION_BACKUP_PREFIX = 'migrated-state';
+/** The store's folder name inside a global-storage folder (see `defaultDataRoot`). */
+const STORE_DIR_NAME = 'spinney';
+/**
+ * How often the workspace lock is refreshed. Comfortably under the store’s
+ * `LOCK_STALE_MS` (45 s), so three missed beats are needed before another window may
+ * take the files over.
+ */
+const STORE_HEARTBEAT_MS = 15_000;
+/**
  * The last assistant text a finished turn produced (used to carry a hopped
  * session's answer back to the session that dispatched it). Reasoning-only
  * turns fall back to the reasoning text so the caller is not left with nothing.
  */
+/**
+ * The sidebar-sized view of one stored session — the shape the store's index holds.
+ * Everything a session list needs to render without loading a single conversation.
+ */
+function storeSummaryOf(session: AgentSession): SessionSummary {
+  return {
+    id: session.id,
+    title: session.title,
+    titleSource: session.titleSource,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+    nodeCount: Object.keys(session.nodes).length,
+    activeNodeId: session.activeNodeId ?? '',
+    model: session.model ?? undefined,
+    effort: session.effort ?? undefined,
+  };
+}
+
 function lastAssistantText(node: TreeNode): string {
   for (let i = node.messages.length - 1; i >= 0; i--) {
     const msg = node.messages[i];
@@ -203,6 +261,20 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   private deferredWrites = 0;
   /** The coalescing timer, or `null`. */
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * Shape of the **last** content write, kept for the lag context provider
+   * (`hostContext`): how many chars it serialized and its
+   * `sessions=/nodes=/items=/msgs=` readout. `persistNow()` computes both anyway,
+   * and remembering them is what lets a stall say "it was that write" without a
+   * second pass over the whole state.
+   */
+  private persistChars = 0;
+  private persistCounts = '';
+  /** When the in-flight content write started (0 = none running). */
+  private persistInFlightSince = 0;
+  /** When the last content write settled (0 = none in this window), and how long it took. */
+  private persistLastDoneAt = 0;
+  private persistLastMs = 0;
   /** While `Date.now() < controlHoldUntil` an external controller is rebooting. */
   private controlHoldUntil = 0;
   /** Set when the provider is being torn down; suppresses background notifications. */
@@ -229,6 +301,14 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    */
   private defaultModel = DEFAULT_MODEL;
   private defaultThinkingEffort: ThinkingEffort = '';
+  /** Settles when the workspace lock is decided (writes wait for it, never guess). */
+  private lockPending: Promise<boolean> | null = null;
+  /** Roots a rename/reinstall could have left the history in (see `storeCandidatesFor`). */
+  private storeCandidates: string[] = [];
+  /** The workspace lock heartbeat timer (see `STORE_HEARTBEAT_MS`). */
+  private storeHeartbeat: ReturnType<typeof setInterval> | null = null;
+  /** This window's lock owner string — unique per extension host. */
+  private readonly ownerId = `${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
   /**
    * The live API key of a provider is **not** cached here: `ClientRegistry`
    * caches it per provider and re-reads through `readApiKeyFor` when it is
@@ -237,6 +317,26 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    */
   private missingKeyNotified = false;
   private sessions: AgentSession[] = [];
+  /**
+   * The file-backed session store (see `invariants/session-persistence.md`). `null` when
+   * this window has no global storage (a test host), in which case everything falls back
+   * to the Memento exactly as before.
+   */
+  private store: SessionStore | null = null;
+  /** The store root is writable and we hold (or could not be denied) its workspace lock. */
+  private storeWritable = false;
+  /** Another live window owns this workspace's files: we keep writing the Memento. */
+  private storeLockedOut = false;
+  /**
+   * The sessions whose content changed since the last write, or `null` for "unknown — write
+   * everything". A runtime marks its own session at every persist (it is the only thing a
+   * runtime can change), so a turn in a large profile re-serializes **one** conversation
+   * instead of all of them; any write nobody marked writes everything, which is why a
+   * forgotten mark costs time and never content (see `writePayload`).
+   */
+  private dirtySessions = new Set<string>();
+  /** node key (\u0000-separated) -> the digest the last write put on disk (see persistDigest). */
+  private nodeDigests = new Map<string, string>();
   private activeSessionId = '';
   /** The one in-flight automatic-title request (a session switch does not cancel it). */
   private titleJob: { sessionId: string; controller: AbortController } | null = null;
@@ -244,6 +344,24 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   private titlePending = new Set<string>();
   /** Stopper for the host event-loop lag watch (diagnostics only). */
   private stopLagWatch: (() => void) | null = null;
+  /**
+   * Dev-only tee of the perf lines (see `openPerfTee`): non-null only when
+   * `SPINNEY_PERF_LOG` named a file at construction. The output channel stays the
+   * primary sink — this is a copy for the simulation harness (`tools/sim/run.mjs`),
+   * which has no way to read the channel back.
+   */
+  private perfTee: fs.WriteStream | null = null;
+  /** The file the tee writes to (for the `Spinney: Open Diagnostics Log` command). */
+  private perfTeeFile: string | null = null;
+  /** Lines the tee dropped because it could not keep up (reported when it closes). */
+  private perfTeeDropped = 0;
+  /**
+   * This extension's own version, read once from its `package.json`. It names the build
+   * in the `[env]` line *and* decides whether the diagnostics log is on by default: a
+   * version carrying `-diag` is a build made for a user to run and send back (see
+   * `openPerfTee`), so no environment variable and no setting are involved.
+   */
+  private extensionVersion = '?';
   /** Sidebar refreshes per second — a runaway refresh rate is a stutter on its own. */
   private refreshCount = 0;
   private refreshWindow = 0;
@@ -273,8 +391,15 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     private readonly secrets?: vscode.SecretStorage,
   ) {
     this.mediaVersion = Date.now().toString(36);
+    this.readOwnVersion(extensionUri);
     this.output = vscode.window.createOutputChannel('Spinney');
-    setPerfSink((line) => this.output.appendLine(line));
+    this.openPerfTee();
+    // The output channel is the primary sink; the tee only copies what is already
+    // written there (dev-only, and off unless `SPINNEY_PERF_LOG` names a file).
+    setPerfSink((line) => {
+      this.output.appendLine(line);
+      this.teePerfLine(line);
+    });
     // Which display language the UI is in, and whether a catalog was found for it
     // (see src/i18n.ts): a non-English window without one simply stays English, and
     // this line is the only way to tell that apart from "nothing to translate".
@@ -283,6 +408,19 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     // host (persist, a tree rebuild) shows up as a late timer, which no `perf()`
     // line can report while it is blocked.
     this.stopLagWatch = startLagWatch();
+    // …and what is most likely to have blocked it is appended to that same line: an
+    // O(1) readout of the persistence machinery (see `hostContext`).
+    setLagContextProvider(() => this.hostContext());
+    // Keep the workspace lock alive: a heartbeat that stops is how a *live* window is
+    // told apart from a killed one, and letting it lapse would hand the files to a second
+    // window while this one is still writing them.
+    this.storeHeartbeat = setInterval(() => {
+      const store = this.store;
+      if (store && !this.disposed) {
+        void store.heartbeat(this.ownerId).catch(() => undefined);
+      }
+    }, STORE_HEARTBEAT_MS);
+    this.storeHeartbeat.unref?.();
     // The user's providers and model cards must be installed before anything
     // derives a model list, a context window or an image capability from the
     // catalog.
@@ -295,6 +433,10 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     // Snapshot AGENTS.md before building the prompts so the workspace
     // instructions are fixed for the whole session.
     this.loadAgentsMd();
+    // The session store comes up before anything reads a session: it decides whether the
+    // content lives in files from here on, or falls back to the Memento row.
+    this.store = this.openStore();
+    this.storeWritable = this.openStoreLock();
     // The client registry must exist before any runtime builds its agent: it is
     // what turns a card into a provider, its `baseUrl` and its API key.
     this.clients = new ClientRegistry({ apiKeyFor: (providerId) => this.readApiKeyFor(providerId) });
@@ -325,6 +467,11 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       onClosed: (sessionId) => this.onPanelClosed(sessionId),
     });
     this.loadSessions();
+    // The two context lines come after the sessions are in, so they can name the store
+    // root and the workspace key that will hold them: every later line is unreadable
+    // without them (a user's report has no developer sitting next to it).
+    this.logEnvironment();
+    this.logEffectiveConfig();
     // Every background terminal belongs to a (session, node); the hub routes an
     // update/finish to the runtime that owns the session (an absent runtime
     // means the session is not loaded — nothing to repaint).
@@ -835,8 +982,16 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
 
   private loadSessions(): void {
     const t0 = Date.now();
-    const rawState = this.storage.get<unknown>(STORAGE_KEY);
-    const { activeSessionId, sessions, migrated } = migrateState(rawState);
+    const legacyRaw = this.storage.get<unknown>(STORAGE_KEY);
+    const fromStore = this.storeWritable && this.store ? this.store.readAllSync() : null;
+    const storeSessions = (fromStore?.sessions ?? []) as AgentSession[];
+    // The files win; the Memento row is the fallback (state written before the store
+    // existed, or a window that could not take the workspace lock).
+    const useStore = storeSessions.length > 0;
+    const rawState = useStore ? undefined : legacyRaw;
+    const { activeSessionId, sessions, migrated } = useStore
+      ? { activeSessionId: this.readSmall<string>(ACTIVE_SESSION_KEY) ?? '', sessions: storeSessions, migrated: false }
+      : migrateState(rawState);
     // migrateState/normalizeTreeSession already prune every session (drop the
     // stale system prompt, downgrade a turn that was still running, unlink
     // dangling children), so the loaded tree is always API-valid on activation.
@@ -850,18 +1005,33 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       this.createSessionInMemory();
       createdSession = true;
     }
+    const placeholderId = createdSession ? this.sessions[0].id : null;
     // The pointer lives in its own key; the blob's field is the pre-split fallback.
     const remembered = this.readSmall<string>(ACTIVE_SESSION_KEY);
     const wanted = typeof remembered === 'string' && remembered ? remembered : activeSessionId;
     const active = this.sessions.find((s) => s.id === wanted);
     this.activeSessionId = active ? active.id : this.sessions[0].id;
     const nodes = this.sessions.reduce((n, s) => n + Object.keys(s.nodes).length, 0);
+    const skipped = fromStore?.skipped ?? 0;
     perf(
       () =>
         `load-sessions ${Date.now() - t0}ms sessions=${this.sessions.length} nodes=${nodes}` +
+        ` source=${useStore ? 'store' : rawState === undefined ? 'empty' : 'memento'}` +
+        (skipped ? ` skipped=${skipped}` : '') +
         (migrated ? ' migrated=v1' : ''),
     );
     this.persistActiveSession();
+    // Move the content out of the row on first sight of legacy state. It verifies what it
+    // wrote before it clears anything (see `migrateToStore`).
+    if (!useStore && rawState !== undefined) {
+      this.migrateToStore(rawState, sessions);
+    }
+    if (!useStore && rawState === undefined) {
+      // Nothing here and nothing in the row: this workspace's sessions may still exist
+      // under a *different* extension id (a rename, a reinstall, a second publisher) —
+      // `globalStorage` itself is named after the id, so that is where they would be.
+      this.adoptFromOtherRoots(placeholderId);
+    }
     // Write the state back only when loading actually *changed* it: the heal pass
     // (`migrateState` / `normalizeTreeSession`) is idempotent and re-runs on every
     // activation, so re-serializing ~108 M chars "just in case" cost a couple of
@@ -870,6 +1040,425 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     if (migrated || createdSession) {
       this.persistNow();
     }
+  }
+
+  /**
+   * Open the session store, if this window can have one. The root is a **fixed** folder
+   * under global storage (never derived from the extension id, so a rename moves nothing),
+   * overridable by `spinney.dataDir`. No global storage (a test host) means no store and
+   * the Memento keeps doing the work.
+   */
+  private openStore(): SessionStore | null {
+    const globalStorage = this.globalStorage?.fsPath;
+    if (!globalStorage) {
+      return null;
+    }
+    const configured = vscode.workspace.getConfiguration('spinney').get<string>('dataDir') ?? '';
+    const key = workspaceKeyFor(vscode.workspace.workspaceFolders?.[0]?.uri.toString());
+    const root = defaultDataRoot(globalStorage, configured);
+    // Where else could this workspace's sessions be? `context.globalStorageUri` is
+    // `<profile>/globalStorage/<publisher.name>` — **the parent folder is the extension
+    // id** — so a fixed last segment alone does NOT survive a rename: the whole folder
+    // moves. What does is looking at the siblings (`*/spinney`) and adopting from them,
+    // which is why that list is computed here, before anything reads a session.
+    this.storeCandidates = this.storeCandidatesFor(globalStorage, root, configured);
+    const store = new SessionStore({
+      root,
+      workspaceKey: key,
+      onLog: (line) => this.output.appendLine(line),
+    });
+    perf(() => `store-open root=${store.root} key=${key} candidates=${this.storeCandidates.length}`);
+    return store;
+  }
+
+  /**
+   * The roots worth looking at, besides the one we write to: every sibling
+   * `<profile>/globalStorage/<other-id>/spinney` — what a rename, a reinstall or a
+   * second publisher leaves behind — and, when `spinney.dataDir` pins the root, the
+   * default location under the current id (so pinning the setting does not hide history
+   * that was already there).
+   */
+  private storeCandidatesFor(globalStorage: string, ownRoot: string, configured: string): string[] {
+    const out: string[] = [];
+    const push = (candidate: string): void => {
+      if (candidate && candidate !== ownRoot && !out.includes(candidate)) {
+        out.push(candidate);
+      }
+    };
+    const profile = path.dirname(globalStorage); // …/globalStorage
+    if (configured.trim()) {
+      push(defaultDataRoot(globalStorage));
+    }
+    try {
+      for (const entry of fs.readdirSync(profile, { withFileTypes: true })) {
+        if (entry.isDirectory()) {
+          push(path.join(profile, entry.name, STORE_DIR_NAME));
+        }
+      }
+    } catch {
+      /* no readable profile folder: nothing to discover */
+    }
+    return out;
+  }
+
+  /**
+   * Adopt another root's sessions when this one has none — the rename case. It runs after
+   * the workspace lock is settled (an adoption is a write) and only ever **reads** the
+   * other root: the sessions are copied into this one, which stays the single live root.
+   * A placeholder session created because this root looked empty is cleaned up, so the
+   * user does not get an empty conversation beside their restored history.
+   */
+  private adoptFromOtherRoots(placeholderId: string | null): void {
+    const store = this.store;
+    if (!store || !this.storeWritable || this.storeCandidates.length === 0) {
+      return;
+    }
+    void (async () => {
+      try {
+        await (this.lockPending ?? Promise.resolve(true));
+        const roots = await SessionStore.discover(this.storeCandidates);
+        let adopted = 0;
+        for (const root of roots) {
+          const result = await store.adoptFrom(root);
+          adopted += result.adopted;
+          if (result.adopted > 0) {
+            this.output.appendLine(`[store] restored ${result.adopted} session(s) from ${root}`);
+          }
+        }
+        if (adopted === 0) {
+          return;
+        }
+        if (placeholderId) {
+          await store.deleteSession(placeholderId);
+        }
+        const back = store.readAllSync();
+        const sessions = back.sessions as AgentSession[];
+        if (sessions.length === 0) {
+          return;
+        }
+        this.sessions = sessions;
+        if (!this.sessions.some((s) => s.id === this.activeSessionId)) {
+          this.activeSessionId = this.sessions[0].id;
+          this.persistActiveSession();
+        }
+        this.notifyStateChanged();
+        perf(() => `store-adopted sessions=${adopted} total=${sessions.length} placeholders=${placeholderId ? 1 : 0}`);
+      } catch (err) {
+        this.output.appendLine(
+          `[store] could not adopt another root (${err instanceof Error ? err.message : String(err)})`,
+        );
+      }
+    })();
+  }
+
+  /**
+   * Bring the store up and take its workspace lock. A lock held by a **live** window is
+   * not stolen: that window keeps writing files alone and this one falls back to the
+   * Memento, because two windows writing the same session file is the one way to lose
+   * content that the Memento's whole-state write could not. A stale lock (a killed window,
+   * a dead pid) is taken over, so a crash never freezes the store.
+   */
+  private openStoreLock(): boolean {
+    const store = this.store;
+    if (!store) {
+      return false;
+    }
+    if (!store.ensureRootSync()) {
+      return false;
+    }
+    const owner = `${this.ownerId}`;
+    let acquired = false;
+    let tookOver = false;
+    let holder: string | undefined;
+    // `acquireLock` is async (it re-reads to break a takeover race), so the very first
+    // writes of this window are held back until it answers — the lock is a promise the
+    // rest of the provider can rely on being settled, not a guess.
+    const pending = store.acquireLock(owner).then(
+      (result) => {
+        acquired = result.acquired;
+        tookOver = result.tookOver;
+        holder = result.holder?.owner;
+        this.storeWritable = acquired;
+        this.storeLockedOut = !acquired;
+        perf(
+          () =>
+            `store-lock ${acquired ? 'acquired' : 'refused'}${tookOver ? ' took-over=true' : ''}` +
+            (holder ? ` holder=${holder}` : ''),
+        );
+        if (!acquired) {
+          this.output.appendLine(
+            '[store] another window owns this workspace\u2019s session files — this window ' +
+              'keeps its sessions in the Memento until that window closes',
+          );
+        }
+        return acquired;
+      },
+      () => false,
+    );
+    this.lockPending = pending;
+    return true;
+  }
+
+  /**
+   * Move the content out of the Memento row into the store files — once, verifiably:
+   *
+   *  1. write every session through the store and flush;
+   *  2. **read it all back** and compare (a session count that does not match, or an
+   *     unreadable file, aborts the migration and leaves the row alone);
+   *  3. park the raw row as `<root>/migrated-state-<date>.json`, so the pre-migration
+   *     state exists as a file the user could restore;
+   *  4. only then clear the big key — the small keys stay, they are the pointer and the
+   *     model defaults, and they are what tells a future activation which session was open.
+   *
+   * Idempotent and resumable: the marker is written last, and anything that fails leaves
+   * the row in place so the next activation simply tries again.
+   */
+  private migrateToStore(legacyRaw: unknown, parsed: AgentSession[]): void {
+    const store = this.store;
+    if (!store || !this.storeWritable) {
+      return;
+    }
+    if (this.readSmall<string>(DATA_MIGRATED_KEY) === DATA_MIGRATED_VERSION) {
+      return;
+    }
+    void (async () => {
+      const t0 = Date.now();
+      try {
+        await (this.lockPending ?? Promise.resolve(true));
+        const sessions = parsed;
+        if (sessions.length === 0) {
+          return;
+        }
+        // 1. Park the raw row **first**: the copied source exists as a file before a single
+        // byte is written anywhere else, and if the parking fails nothing else happens.
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        const parked = await store.parkFile(`${MIGRATION_BACKUP_PREFIX}-${stamp}.json`, JSON.stringify(legacyRaw));
+        if (!parked) {
+          this.output.appendLine('[store] migration NOT completed: could not park the copied row');
+          return;
+        }
+        // 2. Write every session through the store, then **read it all back** and compare.
+        // A count that does not match, or one unreadable file, aborts with the row intact.
+        for (const session of sessions) {
+          store.writeSession(session.id, session, storeSummaryOf(session));
+        }
+        await store.writeIndex(sessions.map(storeSummaryOf));
+        await store.flush();
+        const back = store.readAllSync();
+        if (back.sessions.length !== sessions.length || back.skipped > 0) {
+          this.output.appendLine(
+            `[store] migration NOT completed: wrote ${sessions.length} session(s), read back ` +
+              `${back.sessions.length} (skipped ${back.skipped}) — the Memento row is untouched, ` +
+              `the copied row is at ${parked}`,
+          );
+          return;
+        }
+        // 3. Only now clear the big key. The small keys stay: they are the pointer and the
+        // model defaults, and they are what tells the next activation which session was open.
+        await this.storage.update(STORAGE_KEY, undefined);
+        await this.writeSmall(DATA_MIGRATED_KEY, DATA_MIGRATED_VERSION);
+        this.storeWritable = true;
+        perf(() => `store-migrated sessions=${sessions.length} ms=${Date.now() - t0} parked=${parked}`);
+        this.output.appendLine(
+          `[store] session content moved out of the Memento → ${store.root} ` +
+            `(${sessions.length} session(s)); the previous row is kept at ${parked}`,
+        );
+      } catch (err) {
+        this.output.appendLine(
+          `[store] migration failed (${err instanceof Error ? err.message : String(err)}) — the Memento row is untouched`,
+        );
+      }
+    })();
+  }
+
+  /**
+   * Re-read every session from the store and put it in front of the user — the half that
+   * makes an import (or an adoption) visible without a window reload: the sessions array is
+   * the single source the sidebar, the panels and the control plane all read.
+   */
+  private refreshSessionsFromStore(): boolean {
+    const store = this.store;
+    if (!store) {
+      return false;
+    }
+    const back = store.readAllSync();
+    const sessions = back.sessions as AgentSession[];
+    if (sessions.length === 0) {
+      return false;
+    }
+    this.sessions = sessions;
+    if (!this.sessions.some((s) => s.id === this.activeSessionId)) {
+      this.activeSessionId = this.sessions[0].id;
+      this.persistActiveSession();
+    }
+    this.notifyStateChanged();
+    return true;
+  }
+
+  /**
+   * `Spinney: Export Session Data` — copy the whole data root where the user says, so the
+   * history can live outside this machine profile (a backup, a synced folder, another box).
+   *
+   * The live store is copied **as it stands**: the `.trash` folder (deleted sessions), the
+   * `locks` (per-window, and a stale lock in a restored copy would block writing) and the
+   * parked migration blobs (the pre-store Memento copy, tens of megabytes) stay behind, so an
+   * export is exactly "the sessions and nothing else".
+   */
+  async exportSessionData(): Promise<void> {
+    const store = this.store;
+    if (!store) {
+      void vscode.window.showWarningMessage(
+        vscode.l10n.t('Spinney: this window has no session data folder to export.'),
+      );
+      return;
+    }
+    const picked = await vscode.window.showOpenDialog({
+      canSelectFiles: false,
+      canSelectFolders: true,
+      canSelectMany: false,
+      openLabel: vscode.l10n.t('Export here'),
+      title: vscode.l10n.t('Export Spinney session data'),
+    });
+    const target = picked?.[0]?.fsPath;
+    if (!target) {
+      return;
+    }
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const destination = path.join(target, `spinney-export-${stamp}`);
+    try {
+      const skip = [path.join(store.root, 'locks'), path.join(store.sessionsDir, '.trash')];
+      fs.cpSync(store.root, destination, {
+        recursive: true,
+        filter: (source) =>
+          !skip.includes(source) &&
+          !path.basename(source).startsWith(`${MIGRATION_BACKUP_PREFIX}-`) &&
+          !source.includes(`${path.sep}.trash`),
+      });
+      this.output.appendLine(`[store] exported ${store.root} → ${destination}`);
+      const open = vscode.l10n.t('Show in Explorer');
+      const answer = await vscode.window.showInformationMessage(
+        vscode.l10n.t('Spinney: session data exported to {0}', destination),
+        open,
+      );
+      if (answer === open) {
+        void vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(destination));
+      }
+    } catch (err) {
+      void vscode.window.showErrorMessage(
+        vscode.l10n.t(
+          'Spinney: could not export the session data ({0}).',
+          err instanceof Error ? err.message : String(err),
+        ),
+      );
+    }
+  }
+
+  /**
+   * `Spinney: Import Session Data` — adopt another root's sessions into this one: an export
+   * taken from another machine, or the folder an older install left behind under another
+   * extension id (which is how a rename is recovered). It only ever **reads** the folder the
+   * user picks, and a session already here wins, so importing twice is a no-op.
+   */
+  async importSessionData(): Promise<void> {
+    const store = this.store;
+    if (!store) {
+      void vscode.window.showWarningMessage(
+        vscode.l10n.t('Spinney: this window has no session data folder to import into.'),
+      );
+      return;
+    }
+    const picked = await vscode.window.showOpenDialog({
+      canSelectFiles: false,
+      canSelectFolders: true,
+      canSelectMany: false,
+      openLabel: vscode.l10n.t('Import from here'),
+      title: vscode.l10n.t('Import Spinney session data'),
+    });
+    const source = picked?.[0]?.fsPath;
+    if (!source) {
+      return;
+    }
+    if (!looksLikeStoreRoot(source)) {
+      void vscode.window.showWarningMessage(
+        vscode.l10n.t('Spinney: that folder does not hold Spinney session data.'),
+      );
+      return;
+    }
+    try {
+      const result = await store.adoptFrom(source);
+      if (result.adopted > 0) {
+        this.refreshSessionsFromStore();
+      }
+      this.output.appendLine(`[store] imported ${result.adopted} session(s) from ${source} (${result.skipped} already present)`);
+      void vscode.window.showInformationMessage(
+        vscode.l10n.t(
+          'Spinney: imported {0} session(s); {1} were already present.',
+          String(result.adopted),
+          String(result.skipped),
+        ),
+      );
+    } catch (err) {
+      void vscode.window.showErrorMessage(
+        vscode.l10n.t(
+          'Spinney: could not import the session data ({0}).',
+          err instanceof Error ? err.message : String(err),
+        ),
+      );
+    }
+  }
+  /**
+   * A `SessionRuntime` reporting that its own session's content changed (see
+   * `RuntimeHost.markSessionDirty`). Called on every one of its writes, so this set is the
+   * complete answer to "what has to be re-serialized" for the hot path.
+   */
+  markSessionDirty(sessionId: string): void {
+    if (sessionId) {
+      this.dirtySessions.add(sessionId);
+    }
+  }
+
+  /**
+   * Write the changed sessions (plus the index) through the store.
+   *
+   * `built` holds **only the sessions whose content changed** — a runtime names its own at
+   * every persist, so a turn in a 30-session profile re-serializes one conversation instead
+   * of all of them (measured: 382 ms of blocked host and 803 ms of writes for 86 M chars
+   * before this). `summaries` is the *whole* list, from memory: the index is the sidebar's
+   * view of the profile and must not shrink to whatever this write happened to touch.
+   *
+   * Without a usable store the Memento keeps working exactly as before, with the full
+   * payload (a test host, a read-only profile, or another window holding the workspace lock).
+   */
+  private writePayload(
+    built: { session: AgentSession; dirtyNodes: string[] }[],
+    full: StoredState,
+    summaries: SessionSummary[],
+  ): Promise<{ ms: number; writes: number; skipped: number; chars: number } | undefined> {
+    const store = this.store;
+    if (!store || !this.storeWritable) {
+      // No store: the Memento write reports nothing (there is nothing to attribute).
+      return Promise.resolve(this.storage.update(STORAGE_KEY, full)).then(() => undefined);
+    }
+    const jobs: Promise<{ chars: number; ms: number; skipped: boolean }[]>[] = [];
+    for (const { session, dirtyNodes } of built) {
+      // The session object carries **every** node id (the store needs them to notice a node
+      // that is gone), but only `dirtyNodes` are serialized: that is the whole v2 win. Each
+      // returned job settles with what *that* write cost, so the report is this persist's own.
+      jobs.push(store.writeSession(session.id, session, storeSummaryOf(session), dirtyNodes));
+    }
+    void store.writeIndex(summaries);
+    return Promise.all(jobs).then((groups) => {
+      const results = groups.flat();
+      return {
+        ms: results.reduce((n, r) => n + r.ms, 0),
+        writes: results.filter((r) => !r.skipped).length,
+        // A job the queue replaced before it ran: this persist's content is still on disk, in
+        // the body that superseded it. Reporting the count keeps a `writes=0` line from
+        // looking like a broken instrument.
+        skipped: results.filter((r) => r.skipped).length,
+        chars: results.reduce((n, r) => n + r.chars, 0),
+      };
+    });
   }
 
   /**
@@ -1042,32 +1631,88 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       }
       return clipped;
     };
+    // **Which sessions changed?** A runtime names its own at every persist (see
+    // `markSessionDirty`), and nothing marked means "unknown — write everything". That
+    // asymmetry is deliberate: a forgotten mark costs time, never content.
+    const dirty = this.dirtySessions;
+    const targets = dirty.size > 0 ? this.sessions.filter((s) => dirty.has(s.id)) : this.sessions;
+    /** One node, clipped for storage (the caller decides *which* nodes need it). */
+    const clipNode = (node: TreeNode): TreeNode => {
+      addText(node.title);
+      addText(node.bgCommand);
+      addText(node.bgOutputTail);
+      return {
+        ...node,
+        displayItems: node.displayItems.map(clipItem),
+        messages: node.messages.map(clipMsg),
+      };
+    };
+    const clipSession = (s: AgentSession): AgentSession => {
+      addText(s.title);
+      return {
+        ...s,
+        orphanItems: s.orphanItems.map(clipItem),
+        nodes: Object.fromEntries(
+          Object.entries(s.nodes).map(([id, node]): [string, TreeNode] => {
+            addText(node.title);
+            addText(node.bgCommand);
+            addText(node.bgOutputTail);
+            return [
+              id,
+              {
+                ...node,
+                displayItems: node.displayItems.map(clipItem),
+                messages: node.messages.map(clipMsg),
+              },
+            ];
+          }),
+        ),
+      };
+    };
+    // The files we rewrite this time, and — separately — the index, which describes the
+    // whole profile and must not shrink to whatever this write happened to touch.
+    // Without a usable store the Memento still needs the **whole** state, so the full
+    // payload is built only on that path: the store path never walks an unchanged session.
+    const tSelect = Date.now();
+    const storeWrite = Boolean(this.store && this.storeWritable);
+    // **Which nodes changed?** One digest per node, compared with what the last write put on
+    // disk. A session holds its whole history, so writing it whole on every turn end cost
+    // 17.5 MB of `JSON.stringify` and 17.5 MB of writes per *turn* while 99% of it had not
+    // moved; from here only the nodes whose digest moved are clipped and written, and every
+    // other node keeps its file untouched.
+    const dirtyNodesFor = (s: AgentSession): string[] => {
+      const changed: string[] = [];
+      for (const [nodeId, node] of Object.entries(s.nodes)) {
+        const key = `${s.id}\u0000${nodeId}`;
+        const digest = nodeDigest(node);
+        if (this.nodeDigests.get(key) !== digest) {
+          changed.push(nodeId);
+          this.nodeDigests.set(key, digest);
+        }
+      }
+      return changed;
+    };
+    const built = storeWrite
+      ? targets.map((s) => {
+          const dirtyNodes = dirtyNodesFor(s);
+          const nodes: Record<string, TreeNode> = {};
+          for (const [nodeId, node] of Object.entries(s.nodes)) {
+            // An untouched node is handed through **as it is**: it is never serialized (the
+            // store queues only the dirty ones), its id is all the header needs.
+            nodes[nodeId] = dirtyNodes.includes(nodeId) ? clipNode(node) : node;
+          }
+          addText(s.title);
+          return { session: { ...s, orphanItems: s.orphanItems.map(clipItem), nodes }, dirtyNodes };
+        })
+      : [];
     const payload: StoredState = {
       version: STORED_STATE_VERSION,
       activeSessionId: this.activeSessionId,
-      sessions: this.sessions.map((s) => {
-        addText(s.title);
-        return {
-          ...s,
-          orphanItems: s.orphanItems.map(clipItem),
-          nodes: Object.fromEntries(
-            Object.entries(s.nodes).map(([id, node]): [string, TreeNode] => {
-              addText(node.title);
-              addText(node.bgCommand);
-              addText(node.bgOutputTail);
-              return [
-                id,
-                {
-                  ...node,
-                  displayItems: node.displayItems.map(clipItem),
-                  messages: node.messages.map(clipMsg),
-                },
-              ];
-            }),
-          ),
-        };
-      }),
+      sessions: storeWrite ? [] : this.sessions.map(clipSession),
     };
+    const summaries = storeWrite ? this.sessions.map(storeSummaryOf) : [];
+    const tBuild = Date.now();
+    dirty.clear();
     const session = this.getActiveSession();
     const nodeCount = session ? Object.keys(session.nodes).length : 0;
     const msgCount = session ? pathMessages(session, session.activeNodeId).length : 0;
@@ -1076,10 +1721,33 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         ? session.nodes[session.activeNodeId]?.displayItems.length ?? 0
         : session.orphanItems.length
       : 0;
+    const counts = `sessions=${this.sessions.length} nodes=${nodeCount} items=${items} msgs=${msgCount}`;
+    const via = this.store && this.storeWritable ? 'store' : 'memento';
     const extra =
-      `sessions=${this.sessions.length} nodes=${nodeCount} items=${items} msgs=${msgCount}` +
+      counts +
+      ` via=${via}` +
+      (via === 'store' ? ` dirty=${built.length}/${this.sessions.length}` : '') +
       (coalesced > 1 ? ` coalesced=${coalesced}` : '');
-    const pending = this.storage.update(STORAGE_KEY, payload);
+    // Remember the shape of this write for the lag context provider (`hostContext`):
+    // both numbers are in hand here already, so a stall can name the write that
+    // caused it without a second pass over the whole state.
+    this.persistChars = chars;
+    this.persistCounts = counts;
+    // From here until the promise settles a content write is in flight. Everything
+    // above this line is synchronous, so no timer could have fired inside it.
+    this.persistInFlightSince = Date.now();
+    const writeStartedAt = Date.now();
+    // One file per **changed** session, plus the index — never the whole window at once.
+    const pending = this.writePayload(built, payload, summaries);
+    const tQueue = Date.now();
+    // Where the synchronous part of a write goes, in one line: the change detection
+    // (`select`), the payload build of what changed (`build`) and queuing it (`queue`).
+    // `persist-queued` is the sum, and this is what says which of the three to look at.
+    perf(
+      () =>
+        `persist-phases select=${tBuild - tSelect}ms build=${tQueue - tBuild}ms queue=${Date.now() - tQueue}ms ` +
+        `dirtyNodes=${built.reduce((n, b) => n + b.dirtyNodes.length, 0)}`,
+    );
     // The control plane awaits these before handing over to a reboot, so a kill
     // right after a turn cannot lose the last write.
     this.trackWrite(pending);
@@ -1088,9 +1756,25 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     this.persistActiveSession();
     perf(() => `persist-queued ${Date.now() - t0}ms ${extra} chars≈${chars}`);
     void pending.then(
-      () => perf(() => `persist-done ${Date.now() - t0}ms ${extra} chars≈${chars}`),
-      (err: unknown) =>
-        perf(() => `persist-fail ${Date.now() - t0}ms ${extra} ${err instanceof Error ? err.message : String(err)}`),
+      (stats) => {
+        if (stats) {
+          // The write's own cost, measured inside the queue. `persist-done` below measures how
+          // late the callback ran on a busy host, which is a different question.
+          perf(() => `persist-written ms=${stats.ms} writes=${stats.writes} skipped=${stats.skipped} chars=${stats.chars}`);
+        }
+        this.persistLastMs = Date.now() - writeStartedAt;
+        this.persistInFlightSince = 0;
+        this.persistLastDoneAt = Date.now();
+        perf(() => `persist-done ${Date.now() - t0}ms ${extra} chars≈${chars}`);
+      },
+      (err: unknown) => {
+        this.persistLastMs = Date.now() - writeStartedAt;
+        this.persistInFlightSince = 0;
+        this.persistLastDoneAt = Date.now();
+        perf(
+          () => `persist-fail ${Date.now() - t0}ms ${extra} ${err instanceof Error ? err.message : String(err)}`,
+        );
+      },
     );
   }
 
@@ -1104,6 +1788,220 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       this.persistNow();
     }
     await this.lastPersist;
+    // The store's queue is where the bytes actually go; a hand-off that does not await
+    // it can lose the just-finished turn.
+    await this.store?.flush();
+  }
+
+  /**
+   * The ` | ctx:` tail of a `lag blocked` line: one line, O(1), answering "what is
+   * most likely blocking the host right now?". Registered with
+   * `setLagContextProvider` in the constructor and asked once per reported stall
+   * burst.
+   *
+   * It must never build a payload, `JSON.stringify` anything or walk
+   * sessions/nodes/messages: it runs *after* the loop was blocked, so any real work
+   * here would only extend the stall it describes. Everything it prints was already
+   * computed by `persistNow()` (kept in fields for exactly this) or is a counter
+   * read (`dirty`, `deferredWrites`, `Map.size`).
+   *
+   * Extension point: the next useful term is a *per-instant* blocker counter — how
+   * many tree rebuilds, sub-agent jobs and streaming turns are live right now. Those
+   * live in `src/chat/runtime.ts`; when they are wired up, keep them as plain
+   * counters on the existing objects (never a walk) and append them below.
+   */
+  private hostContext(): string {
+    const now = Date.now();
+    const persist = this.persistInFlightSince
+      ? `persist in-flight ${now - this.persistInFlightSince}ms`
+      : this.persistLastDoneAt
+        ? `persist idle, last done ${now - this.persistLastDoneAt}ms ago (took ${this.persistLastMs}ms)`
+        : 'persist idle, none this window';
+    // `deferredWrites` counts the content changes coalesced behind the running (or
+    // pending) write, so a rising `queued=` is a burst accumulating.
+    const queued = this.dirty ? this.deferredWrites : 0;
+    // Live units of host work (`rg:15` while 15 sub-agents search at once, …) plus the
+    // open webview ops: a stall the persistence side cannot explain has to name whatever
+    // else was running, or the next investigation starts from zero again.
+    const work = [workReadout(), liveOpCount() ? `op:${liveOpCount()}` : ''].filter(Boolean).join(' ');
+    return (
+      `${persist}, chars≈${this.persistChars}, queued=${queued}` +
+      (work ? `, work=[${work}]` : ', work=[idle]') +
+      ` | ${heapReadout()}` +
+      (this.persistCounts ? `, ${this.persistCounts}` : '')
+    );
+  }
+
+  /**
+   * The perf tee: every `[perf]` (and `harnessLog`) line also goes to a file.
+   *
+   * **It is on in a released build**, because the person who has to send the file is a user
+   * with a slow machine, not a developer with an environment variable: the Spinney output
+   * channel has no read-back API, so a file is the only thing a report can contain. The file
+   * is one per window, bounded by rotation, and only the newest few survive
+   * (`src/chat/diagnosticsLog.ts`); `spinney.diagnostics.log` turns it off.
+   *
+   * `SPINNEY_PERF_LOG` still wins when it is set: that is how the simulation harness
+   * (`tools/sim/run.mjs`) reads the lines, and it must be able to point the log anywhere.
+   *
+   * A *bounded* async writer on purpose: an append must never block the host (that is the very
+   * thing the perf lines measure), so writes go through a stream (`fs.createWriteStream`,
+   * flags `'a'`) instead of `appendFileSync`; past {@link PERF_TEE_MAX_BUFFER} of un-flushed
+   * bytes lines are dropped rather than queued, and every error is swallowed. The output
+   * channel stays the primary sink, so a failing tee can never lose a diagnostic line.
+   */
+  private openPerfTee(): void {
+    const requested = (process.env.SPINNEY_PERF_LOG ?? '').trim();
+    let file = requested;
+    if (!file && this.diagnosticsEnabled()) {
+      const dir = this.store?.root ?? (this.globalStorage ? path.join(this.globalStorage.fsPath, 'spinney') : '');
+      if (dir) {
+        file = prepareDiagnosticsLog(dir, process.pid);
+      }
+    }
+    if (!file || this.perfTee) {
+      return;
+    }
+    try {
+      const fresh = !fs.existsSync(file) || fs.statSync(file).size === 0;
+      const stream = fs.createWriteStream(file, { flags: 'a' });
+      // A dev-only tee must never surface an error (a read-only path, a full disk):
+      // swallowing the event is what keeps an EPIPE from becoming an unhandled one.
+      stream.on('error', () => undefined);
+      this.perfTee = stream;
+      this.perfTeeFile = file;
+      if (fresh) {
+        // Self-describing, and the first thing a reader sees: this file exists to be sent.
+        stream.write(diagnosticsHeader(file, this.extensionVersion));
+      }
+    } catch {
+      this.perfTee = null;
+      this.perfTeeFile = null;
+    }
+  }
+
+  /** Is the diagnostics log enabled? A setting, so a user can stop the file. */
+  private diagnosticsEnabled(): boolean {
+    return vscode.workspace.getConfiguration('spinney').get<boolean>('diagnostics.log') ?? true;
+  }
+
+  /**
+   * `Spinney: Open Diagnostics Log` — reveal the newest log in the OS file manager. Without it
+   * a user asked to "send the log" has to be told a path with a profile name in it; with it
+   * they get the file selected and can attach it.
+   */
+  async openDiagnosticsLog(): Promise<void> {
+    const dir = this.store?.root ?? (this.globalStorage ? path.join(this.globalStorage.fsPath, 'spinney') : '');
+    const file = dir ? newestDiagnosticsLog(dir) : null;
+    if (!file) {
+      void vscode.window.showInformationMessage(
+        vscode.l10n.t('Spinney: no diagnostics log yet. Use the extension for a moment, or turn on spinney.diagnostics.log.'),
+      );
+      return;
+    }
+    const open = vscode.l10n.t('Show in Explorer');
+    const answer = await vscode.window.showInformationMessage(
+      vscode.l10n.t('Spinney: diagnostics log: {0}', file),
+      open,
+    );
+    if (answer === open) {
+      void vscode.commands.executeCommand('revealFileInOS', vscode.Uri.file(file));
+    }
+  }
+
+  /** Read this extension's own version (and remember it) — the build's name. */
+  private readOwnVersion(extensionUri: vscode.Uri): void {
+    try {
+      const raw = fs.readFileSync(path.join(extensionUri.fsPath, 'package.json'), 'utf8');
+      const parsed = JSON.parse(raw) as { version?: unknown };
+      if (typeof parsed.version === 'string' && parsed.version) {
+        this.extensionVersion = parsed.version;
+      }
+    } catch {
+      /* an unreadable package.json is not a reason to fail activation */
+    }
+  }
+
+  /**
+   * One line describing the machine, the build and where the data lives — the context every
+   * other line needs. A report from a user's machine is unreadable without it: which build
+   * ran, which VS Code (that decides whether the bundled ripgrep is findable at all), how
+   * many cores, and which workspace and store root are in play.
+   */
+  private logEnvironment(): void {
+    const folders = vscode.workspace.workspaceFolders ?? [];
+    const memGb = (os.totalmem() / 1024 ** 3).toFixed(1);
+    perf(
+      () =>
+        `env version=${this.extensionVersion} diag=${this.diagnosticsEnabled() ? 'on' : 'off'} ` +
+        `vscode=${vscode.version} node=${process.versions.node} ${process.platform}-${process.arch} ` +
+        `cpus=${os.cpus().length} mem=${memGb}GB appRoot=${vscode.env.appRoot || '(none)'} ` +
+        `folders=${folders.length}${folders[0] ? ` root=${folders[0].uri.fsPath}` : ''} ` +
+        `store=${this.store?.root ?? '(none)'} key=${workspaceKeyFor(folders[0]?.uri.toString())} ` +
+        `language=${vscode.env.language}`,
+    );
+  }
+
+  /**
+   * The settings this build actually reads, resolved once, in one line: a report that says
+   * "still slow with 15 sub-agents" is only interpretable next to the concurrency limits,
+   * the transcript settings and the data folder that were in force.
+   */
+  private logEffectiveConfig(): void {
+    const cfg = this.getConfig();
+    const raw = vscode.workspace.getConfiguration('spinney');
+    const num = (key: string, fallback: number): number => raw.get<number>(key) ?? fallback;
+    perf(
+      () =>
+        `config effective maxSubagents=${cfg.maxConcurrentSubagents} maxLevel2=${cfg.maxLevel2Subagents} ` +
+        `maxInlineToolOutput=${num('maxInlineToolOutput', 32768)} commandTimeout=${num('commandTimeout', 600)}s ` +
+        `saveSessionTranscripts=${cfg.saveSessionTranscripts} saveSubAgentTranscripts=${cfg.saveSubAgentTranscripts} ` +
+        `transcriptDir=${cfg.subAgentTranscriptDir || '(global storage)'} ` +
+        `dataDir=${(raw.get<string>('dataDir') ?? '').trim() || '(default)'} ` +
+        `autoSessionTitles=${cfg.autoSessionTitles} replyLanguage=${cfg.replyLanguage} ` +
+        `defaultCard=${cfg.defaultCardId} providers=${providerSpecs().length} cards=${cards().length}`,
+    );
+  }
+
+  /** Append one perf line to the dev-only tee (see `openPerfTee`); never blocks. */
+  private teePerfLine(line: string): void {
+    const stream = this.perfTee;
+    if (!stream) {
+      return;
+    }
+    if (stream.writableLength > PERF_TEE_MAX_BUFFER) {
+      this.perfTeeDropped++;
+      return;
+    }
+    try {
+      stream.write(`${line}\n`);
+    } catch {
+      /* dev-only tee: losing a line here must not affect the host */
+    }
+  }
+
+  /**
+   * Flush and close the dev-only tee. Called from `dispose()`, i.e. also from
+   * `shutdown()` (which awaits `flushPersist()` first, so the teed lines of the last
+   * write are still written). A gap is reported *into the file*, where the harness
+   * reading it can see it.
+   */
+  private closePerfTee(): void {
+    const stream = this.perfTee;
+    const dropped = this.perfTeeDropped;
+    this.perfTee = null;
+    this.perfTeeDropped = 0;
+    if (!stream) {
+      return;
+    }
+    try {
+      if (dropped > 0) {
+        stream.write(`[perf] dev tee dropped ${dropped} line(s) (SPINNEY_PERF_LOG could not keep up)\n`);
+      }
+      stream.end();
+    } catch {
+      /* dev-only tee */
+    }
   }
 
   /** The last focused tab's session id (persisted active session). */
@@ -2569,8 +3467,10 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       await new Promise((resolve) => setTimeout(resolve, 150));
     }
     // Hand-off: everything pending must be on disk before the caller (an external
-    // supervisor) may kill or reload this window.
+    // supervisor) may kill or reload this window — the state write *and* the queued
+    // transcript dumps, which reach disk asynchronously now.
     await this.flushPersist();
+    await flushTranscripts();
     const holdMs = Number.isFinite(opts.holdMs) ? Math.max(0, Math.min(opts.holdMs ?? 0, 600000)) : 0;
     if (holdMs > 0) {
       this.controlHoldUntil = Date.now() + holdMs;
@@ -2792,7 +3692,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     }
     // A reload kills this process: flush the coalesced write first, or the reload
     // itself could lose the state it is reloading for.
-    void this.flushPersist().finally(() => {
+    void Promise.all([this.flushPersist(), flushTranscripts()]).finally(() => {
       setTimeout(() => {
         void vscode.commands.executeCommand('workbench.action.reloadWindow');
       }, 400);
@@ -3001,8 +3901,16 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   async shutdown(): Promise<void> {
     try {
       await this.flushPersist();
+      await flushTranscripts();
     } catch {
       /* best effort: a failing write must not block teardown */
+    }
+    // Give the workspace lock back, so the next window (or the next activation) is not
+    // waiting out the heartbeat before it may write the files.
+    try {
+      await this.store?.releaseLock(this.ownerId);
+    } catch {
+      /* the lock file may already be gone */
     }
     this.dispose();
   }
@@ -3023,7 +3931,12 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     this.titlePending.clear();
     this.stopLagWatch?.();
     this.stopLagWatch = null;
+    if (this.storeHeartbeat) {
+      clearInterval(this.storeHeartbeat);
+      this.storeHeartbeat = null;
+    }
     setPerfSink(null);
+    setLagContextProvider(null);
     for (const rt of this.runtimes.values()) {
       rt.dispose();
     }
@@ -3036,6 +3949,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     // back through the webview panel serializer on the next activation
     // (restorePanel). VS Code tears the webviews down with the extension host.
     this.output.dispose();
+    this.closePerfTee();
   }
 
   private getHtml(webview: vscode.Webview): string {

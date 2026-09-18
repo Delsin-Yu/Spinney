@@ -45,9 +45,14 @@
   "spinney.saveSubAgentTranscripts.description": "将每个已完成的子智能体的完整对话以 JSONL 写入磁盘（每行一条 API 消息，第 1 行为元数据 + 工具调用统计），并把其路径交回调用方。",
   "spinney.saveSessionTranscripts.description": "将主智能体每个已完成的回合以 JSONL 写入磁盘（格式与子智能体转写相同），以便 search_transcripts 能回溯更早的对话。否则会话历史只保存在扩展的存储状态中。",
   "spinney.subAgentTranscriptDir.description": "转写文件的输出文件夹（主智能体回合 + 子智能体运行），相对于 harness 根目录（工作区文件夹；未打开文件夹时为 harness 临时文件夹）；其内会创建按会话划分的子文件夹。留空则使用扩展的全局存储。",
+  "spinney.dataDir.description": "会话数据（会话本身）的存放文件夹。留空则在扩展全局存储下使用一个固定文件夹——刻意不以扩展 id 命名，因此重命名或重装扩展都不会移动你的历史。填入你想备份（或同步）的文件夹，即可把历史放在本机 profile 之外；该项在下次重载窗口后生效。",
   "spinney.autoSessionTitles.description": "自动为会话命名：在第一个回合之后，以及对话增长后（最多每 2 分钟一次）。标题由模型生成，请求失败时回退到第一条消息。手动重命名会话会锁定其标题。在此功能之前创建的会话会在激活时命名一次。",
   "spinney.maxInlineToolOutput.description": "search_files / list_dir / search_transcripts 结果以内联方式返回的最大大小（字节）。更大的结果会写入临时文件，只返回其路径和简短预览。设为 0 则始终内联。",
   "spinney.httpApi.enabled.description": "在 127.0.0.1 上开放本地 HTTP 控制面（需 bearer token 鉴权），让 tools/hyper-vscode 之类的外部控制器可以读取状态、等待智能体进入空闲、导航到某个节点并从该节点继续。默认关闭；/continue 允许调用方让智能体执行一条指令，因此请把它视为本地信任边界。",
   "spinney.httpApi.port.description": "HTTP 控制面使用的端口。0 表示自动选择空闲端口；所选端口和 token 会写入 <globalStorage>/http/<instanceId>.json，供 supervisor 发现。",
-  "spinney.providers.balance.description": "该端点的剩余额度如何读取。`none` 不读取余额，`deepseek` 读取 `GET /user/balance`，`openrouter` 读取 `GET /credits`（剩余 = 总额度减去已用量），`moonshot` 读取 `GET /users/me/balance`。该读取不会重试。省略此字段的行会使用其主机对应的方言（`api.deepseek.com` → `deepseek`，其他 → `none`）。"
+  "spinney.providers.balance.description": "该端点的剩余额度如何读取。`none` 不读取余额，`deepseek` 读取 `GET /user/balance`，`openrouter` 读取 `GET /credits`（剩余 = 总额度减去已用量），`moonshot` 读取 `GET /users/me/balance`。该读取不会重试。省略此字段的行会使用其主机对应的方言（`api.deepseek.com` → `deepseek`，其他 → `none`）。",
+  "command.spinney.exportData.title": "Spinney: 导出会话数据",
+  "command.spinney.importData.title": "Spinney: 导入会话数据",
+  "spinney.diagnostics.log.description": "为本窗口写诊断日志（每个窗口一个文件，位于会话数据文件夹；更旧的文件会被删除，单个文件到 2 MiB 时轮转）。其中只有耗时、计数与路径——不含你的对话，也不含密钥。用 Spinney: Open Diagnostics Log 找到它。",
+  "command.spinney.openDiagnosticsLog.title": "Spinney: 打开诊断日志"
 }

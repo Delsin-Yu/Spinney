@@ -279,5 +279,19 @@
   "modelCards[\"{0}\"]: oaiModel is required": "modelCards[\"{0}\"]：oaiModel 不能为空",
   "modelCards[\"{0}\"]: defaultEffort \"{1}\" is not one of {2} — using \"{3}\"": "modelCards[\"{0}\"]：defaultEffort“{1}”不在 {2} 之中 —— 改用“{3}”",
   "spinney.{0} must be an object of id → fields (got {1})": "spinney.{0} 必须是 id → 字段的对象（实际为 {1}）",
-  "{0}: a row has an empty id": "{0}：有一行的 id 为空"
+  "{0}: a row has an empty id": "{0}：有一行的 id 为空",
+  "Spinney: this window has no session data folder to export.": "Spinney：此窗口没有可导出的会话数据文件夹。",
+  "Spinney: this window has no session data folder to import into.": "Spinney：此窗口没有可导入会话数据的文件夹。",
+  "Export here": "导出到此文件夹",
+  "Import from here": "从此文件夹导入",
+  "Export Spinney session data": "导出 Spinney 会话数据",
+  "Import Spinney session data": "导入 Spinney 会话数据",
+  "Spinney: session data exported to {0}": "Spinney：会话数据已导出至 {0}",
+  "Show in Explorer": "在资源管理器中显示",
+  "Spinney: could not export the session data ({0}).": "Spinney：无法导出会话数据（{0}）。",
+  "Spinney: that folder does not hold Spinney session data.": "Spinney：该文件夹中没有 Spinney 会话数据。",
+  "Spinney: imported {0} session(s); {1} were already present.": "Spinney：已导入 {0} 个会话；{1} 个已存在。",
+  "Spinney: could not import the session data ({0}).": "Spinney：无法导入会话数据（{0}）。",
+  "Spinney: diagnostics log: {0}": "Spinney：诊断日志：{0}",
+  "Spinney: no diagnostics log yet. Use the extension for a moment, or turn on spinney.diagnostics.log.": "Spinney：还没有诊断日志。先使用扩展一会儿，或开启 spinney.diagnostics.log。"
 }
