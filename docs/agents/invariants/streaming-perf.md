@@ -84,24 +84,29 @@ re-derives the fold from the items, exactly like the zones), `routeTo` (label re
 only, after the append) and the `config` handler (a changed default re-applies to the
 cards on screen).
 
-**The two zones' share is a *priority*, not a ratio: the answer first, the log the
-rest.** Both wrappers are flex children of `.node-body`, and the split is settled in JS
-(`settleAnswerSplit`) rather than in CSS, because "the height this answer needs" is not
-something a stylesheet can read. A hard 1:2 lock (`flex: 1 1 0` / `2 1 0`, which is what
-came first) was wrong for exactly that reason: it divided the card even when neither zone
-wanted its half, so a short answer sat above a block of blank space while the log
-scrolled inside a third of the card. The measurement suspends the split (the card class
-`split-measure`, whose CSS puts both zones back on a content basis) and then either:
+**The answer's own height grows the card; the log is a strip that scrolls.** Both wrappers
+are flex children of `.node-body`, and the split is settled in JS (`settleAnswerSplit`)
+rather than in CSS, because "the height this answer needs" is not something a stylesheet
+can read. The card class `answer-split` marks a settled card, and the measurement that
+decides it suspends the split (the card class `split-measure`, whose CSS puts both zones
+back on a content basis) and then writes:
 
-- **`answer-fit`** — the two together fit the card's room (its cap below, a tree-layout
-  stretch, or a manual drag-resize): each zone takes its *content* (`flex: 0 0 auto`) and
-  the card grows only as tall as the two of them. Nothing blank, nothing scrolling.
-- **`answer-scarce`** — they do not fit: the card fills its room, the answer is pinned to
-  the share it can use (`min(answer, room − floor)`, written as an inline height on
-  `.node-answer-wrap`) and the log takes the remainder (`flex: 1 1 0`, the basis that
-  absorbs precisely what is left) with a readable floor of `LOG_FLOOR_PX` (200px, never
-  more than half the room). Either zone scrolls when its own content is longer than the
-  share it got.
+- the answer is pinned to the share it can use — `min(answer, room − floor)` as an inline
+  height on `.node-answer-wrap` — and **the answer is what makes the card taller**;
+- the log takes the rest of the body (`flex: 1 1 0`), but **its own growth never grows the
+  card**: its share is `LOG_FLOOR_PX` (360px, and never more than half the room) or its
+  whole content when that is shorter, so a conversation that grows in zone 2 scrolls inside
+  the strip. A height the user dragged is an explicit budget: the answer takes only what it
+  needs and the leftover of that height goes to the log (`max(strip, room − answer)`), which
+  is how more of the work log is asked for — never by the log growing on its own;
+- nothing has to be showing for this: while a turn runs there is no zone 3 yet, and the same
+  strip is what keeps the card from stretching with every tool call.
+
+Two rules came first and were wrong, so they are not tried again. A hard 1:2 lock divided
+the card even when neither zone wanted its half — a short answer sat above blank space while
+the log scrolled inside a third of the card. A "hug whichever content is longer" rule then
+let a long log stretch the card to its cap: a thirteen-tool turn pinned every card at 1200px
+whatever its answer said.
 
 The card's cap is **1200px** (`media/style.css`, `.node`), doubled from 600 when the body
 stopped being one scroller, and a card may not be shrunk below
@@ -126,7 +131,11 @@ its 321px). Without the lift the split is computed for room the card does not ha
 squeezes the body, and the log — the only zone without a pinned height — takes the whole
 loss. Settling
 runs from the fold helpers (`setWorkFold` /
-`autoWorkFold`), from `expandedCard` and from the end of a drag-resize, and it hands the
+`autoWorkFold`), from `expandedCard`, from the end of a drag-resize and from
+`setBlockOpen` — a block folding inside the log changes the log's content height and the box
+is *measured*, so without that trigger a short log kept the height it had while the block
+was still open (a band of blank space under it) until the next settle happened along. It
+hands the
 tree a debounced `scheduleLayout()` because the card's size just changed. The read clears
 the answer's inline height first: `flex-basis: auto` takes a *set* height as the basis, so
 measuring a zone the previous pass pinned would read the old share instead of the content

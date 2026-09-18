@@ -1206,30 +1206,20 @@ button.icon-btn {
   align-self: stretch;
 }
 
-/* How the two zones share the card — a priority, not a ratio, and it is settled in
-   JS (`settleAnswerSplit`), because "the height the answer needs" cannot be read in
-   CSS. A hard 1:2 lock used to live here: it divided the card even when neither zone
-   wanted its half, so a short answer sat above a block of blank space while the log
-   scrolled inside a third of the card. */
-.node.answer-fit .node-work-wrap {
-  /* Both fit: the log takes exactly its content and the card hugs the two of them. */
-  flex: 0 0 auto;
-}
-
-.node.answer-fit .node-answer-wrap {
-  /* Its own content, plus whatever the tree layout stretched the card by: the slack
-     belongs under the answer (inside its surface), never as a gap between the zones. */
-  flex: 1 1 auto;
-}
-
-.node.answer-scarce .node-work-wrap {
-  /* Scarce: the log takes whatever the answer's share leaves — its own content may be
-     longer, in which case it scrolls. */
+/* How the two zones share the card: the answer's own height grows the card, the log is a
+   strip that scrolls — a conversation growing in zone 2 must not stretch the card. The
+   numbers are measured in JS (`settleAnswerSplit`), because "the height this answer needs"
+   cannot be read in CSS. History, so it is not tried again: a hard 1:2 lock divided the
+   card even when neither zone wanted its half, and a "hug whichever content is longer"
+   rule let a long log stretch the card to its cap. */
+.node.answer-split .node-work-wrap {
+  /* The log takes whatever the answer's pinned share leaves; the wrapper carries the
+     strip's height, so a longer conversation scrolls inside it. */
   flex: 1 1 0;
   min-height: 0;
 }
 
-.node.answer-scarce .node-answer-wrap {
+.node.answer-split .node-answer-wrap {
   /* Its height is the inline one `settleAnswerSplit` measured and wrote; `auto` here
      would let a long answer push the log back to nothing. */
   flex: 0 0 auto;

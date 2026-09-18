@@ -467,6 +467,13 @@
     const chev = block.querySelector('.chev');
     if (chev) chev.classList.toggle('open', open);
     if (block.classList.contains('thinking')) block.classList.toggle('open', open);
+    // A block inside the work log just changed the log's *content* height: the live
+    // reasoning block folding away as the answer takes over, a click on any block header,
+    // a settings change. The split's numbers are measured, so it has to be told — without
+    // this the log kept the box it had while the block was open, and a short log showed a
+    // band of blank space under it until the next settle happened along (the promotion at
+    // the end of the turn, which is why it looked like it "shrinks back" only then).
+    settleAnswerSplit(owningCard(body));
   }
 
   /** A click on a block header hands that block to the user: the rule stops here. */
@@ -501,6 +508,22 @@
     if (body._userTouched || !body._autoOpen) return;
     setBlockOpen(body, false);
     body._autoOpen = false;
+  }
+
+  /**
+   * The card an element inside one of its zones belongs to. Walked by `parentElement`
+   * rather than `closest`: the offline webview checker's stub DOM has no `closest`, and
+   * this runs on a fold (see `setBlockOpen`), so it must not throw there.
+   */
+  function owningCard(el) {
+    let node = el;
+    while (node) {
+      if (node.classList && node.classList.contains('node') && node.dataset && node.dataset.id) {
+        return node;
+      }
+      node = node.parentElement;
+    }
+    return null;
   }
 
   /**
@@ -1397,17 +1420,20 @@
   // it divided the card even when neither zone needed its half, so a short answer sat
   // above a block of blank space while the log scrolled inside a third of the card —
   // see the `flex-basis: 0` note in the CSS). The answer comes first; the log takes
-  // what is left and keeps a readable strip while it is open:
-  //   - both zones fit the card's room → each takes its content and the card hugs
-  //     them: nothing blank, nothing scrolling;
-  //   - they do not → the card fills its room, the answer takes all of its content if
-  //     it can (otherwise everything but the log's floor) and the log takes the rest.
-  // The measurement below is what makes that possible: with the split suspended
-  // (`SPLIT_MEASURE`) both zones report their natural height, and only then can either
-  // be given "what it needs" instead of a guessed share.
+  // the answer's own height — and nothing else — grows the card. The log is a strip that
+  // scrolls: a conversation that grows in zone 2 must not stretch the card, and a height
+  // the user dragged is a budget they asked for (its leftover belongs to the log, the
+  // answer taking only what it needs). The measurement below is what makes that possible:
+  // with the split suspended (`SPLIT_MEASURE`) both zones report their natural height, and
+  // only then can either be given "what it needs" instead of a guessed share.
   const SPLIT_MEASURE = 'split-measure';
-  /** The log's readable strip in the scarce case: never less, never more than half. */
-  const LOG_FLOOR_PX = 200;
+  /**
+   * The log's own strip: what it shows while scrolling, by default. It is the one number
+   * that decides how much of the process stays visible under an answer, and dragging the
+   * card taller gives the log the leftover of that height — so a user who wants more room
+   * asks for it, and the card does not grow behind their back.
+   */
+  const LOG_FLOOR_PX = 360;
   /**
    * The floor the two zones share when an answer is showing. A card may not be shrunk
    * out of `header + prompt + composer + this` — the drag's own floor (`MIN_H`) is a
@@ -1457,13 +1483,13 @@
   }
 
   /**
-   * Settle how the answer and the log share this card, in one pass:
-   *   - `answer-fit` — both zones take their content and the card hugs them;
-   *   - `answer-scarce` — the card fills its room, the answer is pinned to the share
-   *     measured for it and the log scrolls in the remainder.
-   * Nothing is written when the rule does not apply (no answer, a folded log, a
-   * collapsed card) or when the host has no layout at all — the offline webview
-   * checker measures 0, and a wrong definite height would be worse than none.
+   * Settle how the answer and the log share this card. One state (`answer-split`): the
+   * answer is pinned to the share measured for it and the log fills the rest of the body.
+   * An answer is not required — while a turn runs there is no zone 3 yet, and this is what
+   * keeps the card from stretching with every tool call. Nothing is written when the rule
+   * does not apply (a folded log, a collapsed card) or when the host has no layout at all:
+   * the offline webview checker measures 0, and a height written on a guess — or a split
+   * class with no measurement behind it — would be worse than none.
    */
   function settleAnswerSplit(card) {
     if (!card || kindOf(card) === 'bg') return;
@@ -1471,14 +1497,10 @@
     const workWrap = card.querySelector('.node-work-wrap');
     const answerWrap = card.querySelector('.node-answer-wrap');
     if (!body || !workWrap || !answerWrap) return;
-    const wanted =
-      card.classList.contains('expanded') &&
-      card.classList.contains('has-answer') &&
-      !card.classList.contains('work-folded');
+    const wanted = card.classList.contains('expanded') && !card.classList.contains('work-folded');
     let bodyH = 0;
     let answerH = '';
-    let fit = false;
-    let scarce = false;
+    let split = false;
     let lifted = false;
     if (wanted) {
       // One read with the split suspended (see the CSS): what the two zones would be
@@ -1537,21 +1559,27 @@
           lifted = true;
         }
         const room = Math.max(0, cap - others);
-        if (logH + answerNatural <= room) {
-          // Everything fits: the card is exactly as tall as the two of them.
-          fit = true;
-        } else {
-          // Scarce: the answer first — all of it if the log's floor leaves room for
-          // it — and the log gets the remainder (its content may be longer: it scrolls).
-          const floor = Math.min(LOG_FLOOR_PX, room * 0.5);
-          answerH = Math.min(answerNatural, Math.max(0, room - floor));
-          bodyH = room;
-          scarce = true;
+        // The log shows a strip: `LOG_FLOOR_PX` at most, its whole content when that is
+        // shorter (nothing blank when a turn is short). Its *growth* is not the card's
+        // business — a longer conversation scrolls in the strip.
+        const floor = Math.min(LOG_FLOOR_PX, room * 0.5);
+        // The answer comes first, and it is what grows the card.
+        const answerShare = Math.min(answerNatural, Math.max(0, room - floor));
+        let logShare = Math.min(logH, floor);
+        const dragged = meta && meta.size && meta.size.h ? meta.size.h : 0;
+        if (dragged > 0) {
+          // An explicit card height is a budget the user asked for: the answer already
+          // takes only what it needs, so the leftover of that height is the log's.
+          logShare = Math.max(logShare, Math.min(logH, room - answerShare));
         }
+        bodyH = Math.min(room, answerShare + logShare);
+        answerH = answerShare;
+        split = true;
       }
     }
-    card.classList.toggle('answer-fit', fit);
-    card.classList.toggle('answer-scarce', scarce);
+    // One state, not two: the split is either settled — with measurements behind it — or
+    // it is not, and then the base CSS keeps both zones content-sized.
+    card.classList.toggle('answer-split', split);
     const setH = (el, value) => {
       if (el.style.height === value) return false;
       el.style.height = value;
