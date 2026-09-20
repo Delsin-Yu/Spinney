@@ -397,8 +397,9 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     // The output channel is the primary sink; the tee only copies what is already
     // written there (dev-only, and off unless `SPINNEY_PERF_LOG` names a file).
     setPerfSink((line) => {
-      this.output.appendLine(line);
-      this.teePerfLine(line);
+      const stamped = this.stampLine(line);
+      this.output.appendLine(stamped);
+      this.teePerfLine(stamped);
     });
     // Which display language the UI is in, and whether a catalog was found for it
     // (see src/i18n.ts): a non-English window without one simply stays English, and
@@ -1964,6 +1965,24 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     );
   }
 
+  /**
+   * `<line> | at=<ISO>` — every line that reaches the output channel or the diagnostics file
+   * carries the time it was written, because neither has a per-line clock of its own: the
+   * log's header only names when the window started, so "when did this happen?" — and worse,
+   * "was there a hole here?" — used to be unanswerable. A tool that hangs writes no line at
+   * all until it returns, which is why `executeToolCall` announces each call's start.
+   *
+   * A **suffix**, deliberately, not a prefix: `tools/sim/run.mjs` (`analysePerfLog`) keeps
+   * lines with `startsWith('[perf]')`, strips `^\[perf\]\s*` and then matches several
+   * `^`-anchored patterns (`^lag blocked`, `^persist-queued`, `^op#…`), so a prefix would
+   * silently drop every one of those measurements; a suffix breaks nothing (its only
+   * `$`-anchored shape tolerates a trailing detail). The diagnostics header lines keep
+   * their `#` shape — they are written straight to the stream by `openPerfTee`.
+   */
+  private stampLine(line: string): string {
+    return `${line} | at=${new Date().toISOString()}`;
+  }
+
   /** Append one perf line to the dev-only tee (see `openPerfTee`); never blocks. */
   private teePerfLine(line: string): void {
     const stream = this.perfTee;
@@ -3380,7 +3399,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
 
   /** Append a line to the Spinney output channel (used by the control plane). */
   outputLog(line: string): void {
-    this.output.appendLine(line);
+    this.output.appendLine(this.stampLine(line));
   }
 
   controlState(): ControlState {

@@ -888,6 +888,10 @@ export class Agent {
       index,
       startedAt,
     });
+    // Announce the start **before** the body runs. The line below only fires once a tool
+    // returns, so a call that hangs (or a turn killed while one is running) used to leave
+    // no line at all for it — a silent hole of hours in the diagnostics log.
+    perf(`tool-start ${call.function.name} args=${call.function.arguments.length}`);
     let result: string;
     if (call.function.name === 'spawn_agents') {
       // Orchestrating sub-agents is the provider's job (node creation, pool,

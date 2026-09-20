@@ -21,6 +21,14 @@
  * — timings, counters and **paths**. The conversation never does (a session title, for
  * instance, is written to the output channel directly, not through the perf sink), and neither
  * does an API key (`[config] api keys` says "set"/"missing" only).
+ *
+ * **Every line of the file ends with ` | at=<ISO8601>`** (`ChatViewProvider.stampLine`), the
+ * four header lines below being the only exception — they would otherwise only say when the
+ * window *started*, so a report cannot say *when* a stall happened, and a tool that never
+ * returned writes no line at all — a multi-hour hole with nothing in it (`tool-start` in
+ * `src/agent/agent.ts` plus this stamp is what makes that hole datable). The stamp is a
+ * **suffix** on purpose: `tools/sim/run.mjs` parses `[perf]` lines with `^`-anchored patterns,
+ * and a prefix would drop every measurement it reads.
  */
 import * as fs from 'fs';
 import * as path from 'path';
@@ -34,7 +42,14 @@ export function diagnosticsFileName(pid: number): string {
   return `perf-${pid}.log`;
 }
 
-/** The lines written at the top of a fresh log: what it is, and how to stop it. */
+/**
+ * The lines written at the top of a fresh log: what it is, and how to stop it.
+ *
+ * These are the only lines of the file **without** a ` | at=<ISO8601>` stamp: they start with
+ * `#` and name the window (the `started` field is already an ISO timestamp), and they are
+ * written straight to the stream rather than through the perf sink. Every other line of the
+ * file ends with that stamp (`ChatViewProvider.stampLine`).
+ */
 export function diagnosticsHeader(file: string, build: string, now = new Date()): string {
   return (
     `# Spinney diagnostics log — send this whole file back.\n` +
