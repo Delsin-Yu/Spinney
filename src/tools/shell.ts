@@ -18,6 +18,13 @@ import { spawnSync } from 'child_process';
  *  - Windows PowerShell 5.1 is still bound to the console OEM code page (GBK),
  *    so we force its output encoding to UTF-8, but it is worse than pwsh.
  *  - cmd.exe is the last-resort fallback.
+ *  - MSYS2's argument conversion is switched off for Git Bash
+ *    (`MSYS_NO_PATHCONV=1`): it rewrites an argument that looks like a Unix path
+ *    into a Windows one before a native child sees it, which silently corrupted
+ *    `taskkill /PID <n> /T /F` into `invalid argument/option -
+ *    'C:/Program Files/Git/PID'` and left stuck processes alive. The command is
+ *    handed to bash, and a native tool that wants a Windows path must receive
+ *    the syntax Windows uses, so the conversion is never what we want here.
  *
  * Before a process is spawned we call `spawn(shell.file, shell.buildArgs(cmd))`
  * — never `exec` through cmd — so the command line reaches the shell binary as
@@ -134,6 +141,15 @@ function detectShell(): ShellInfo {
         // zh_CN.UTF-8 is shipped by Git for Windows; keeps messages in Chinese
         // while guaranteeing UTF-8 (no GBK mojibake). Only forced on Windows.
         ...(isWin ? { LANG: 'zh_CN.UTF-8', LC_ALL: 'zh_CN.UTF-8' } : {}),
+        // MSYS_NO_PATHCONV=1: by default MSYS2 rewrites an argument that looks
+        // like a Unix path into a Windows one before a *native* child sees it.
+        // That silently corrupted `taskkill /PID 67188 /T /F`, which answered
+        // `invalid argument/option - 'C:/Program Files/Git/PID'`, so three stuck
+        // Godot processes were never killed. The command is handed to bash, and
+        // a native tool that wants a Windows path must receive the syntax
+        // Windows uses — the conversion is never what we want here. Windows-only
+        // (the switch means nothing to a POSIX bash).
+        ...(isWin ? { MSYS_NO_PATHCONV: '1' } : {}),
       },
     };
   }
