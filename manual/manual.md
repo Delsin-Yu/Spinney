@@ -110,7 +110,7 @@ The row under the input box shows the state of the session.
 
 Each answer and each tool card carries its own token line: `tokens {0} (prompt {1} + completion {2}) · cache hit {3} / miss {4}`.
 
-Tool cards hold the call, the arguments, and the result. A `HARNESS` block holds the exact text that the harness sent to the model. The reasoning blocks, the tool cards, and the `HARNESS` blocks sit in the work log. Click a block header to fold or unfold it. `spinney.foldThinking` and `spinney.foldToolCalls` set the resting state of those blocks (section 11).
+Tool cards hold the call, the arguments, and the result. Each tool card shows how long the call took, and the number stays after the call ends. A `HARNESS` block holds the exact text that the harness sent to the model. The reasoning blocks, the tool cards, and the `HARNESS` blocks sit in the work log. Click a block header to fold or unfold it. `spinney.foldThinking` and `spinney.foldToolCalls` set the resting state of those blocks (section 11).
 
 Codes that stay in English on purpose: `SUB`, `BG`, `CTX`, `HARNESS`, `Delivered`.
 
@@ -273,8 +273,8 @@ The agent starts a sub-agent with the `spawn_agents` tool. Each sub-agent runs i
 | Count | `spinney.maxConcurrentSubagents` level-1 sub-agents at a time (default 15). Extra tasks wait in a queue. |
 | Second level | Each sub-agent starts at most `spinney.maxLevel2Subagents` children (default 2). |
 | Mode | A writable sub-agent can change files and run commands. A read-only sub-agent can only read. |
-| Card | The badge line shows the depth, the model, and `write` or `ro`. The **✕** button kills it. |
-| Result | When the sub-agent finishes, Spinney delivers a notice to the parent. The card shows `Delivered`. |
+| Card | The badge line shows the depth, the model, and `write` or `ro`. The **✕** button kills it. The card also shows how long the run takes. The number ticks while the sub-agent runs, and it stays on the card after the run ends. |
+| Result | When the sub-agent finishes, Spinney delivers a notice to the parent. The notice carries the duration of the run. The card shows `Delivered`. |
 | Report | Spinney delivers the notice at the next tool boundary of the parent turn. While the parent is idle, Spinney injects the notice into the parent node. It never makes a new node. |
 
 You cannot type into a sub-agent card. To continue a finished sub-agent, ask the parent agent to do it.
@@ -287,7 +287,9 @@ After a restart, a sub-agent that was running shows as `killed`.
 
 A background terminal holds a long command while the turn continues. The agent starts one through `exec_command` with `timeout_behavior`.
 
-The card shows `#<id>`, the status, the elapsed time, the command, and the last output lines.
+The agent does not start a process in the background itself, for example with `&` or `Start-Process`. Spinney cannot track such a process, and you cannot stop it from a card.
+
+The card shows `#<id>`, the status, the elapsed time, the command, and the last output lines. The elapsed time ticks while the command runs, and it stays on the card after the command ends. The result of the command also tells the agent how long the command took.
 
 | Status | Meaning |
 |---|---|

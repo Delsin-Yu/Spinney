@@ -5,6 +5,15 @@
 > when one is open, otherwise the no-repo scratch folder
 > `<globalStorage>/no-workspace`. Nothing else serves as a path base. See
 > `docs/agents/no-repo-mode.md`.
+>
+> **Drive paths.** On Windows, `resolvePath` first reads a leading `/<letter>/`
+> as an MSYS/Git-Bash drive path (`/d/Repos/x` → `D:\Repos\x`), but only when that
+> drive exists. Without it the path survives as "rooted at the current drive"
+> (win32 `path.isAbsolute` calls `/d/…` absolute), so the model's bash-shaped path
+> silently became `D:\d\Repos\x` — a wrong file, or a `spawn … ENOENT` when it was
+> a `cwd`. The rule is unconditional once the drive exists, so a `/dev/null` on
+> Windows is read as `D:\dev\null`; that is the accepted trade, because the model
+> that writes `/d/…` means the drive.
 
 | Tool | Args | Behavior |
 | --- | --- | --- |
@@ -30,11 +39,11 @@
 > `read_file` can page it, and `search_files` can grep it **by its exact path**
 > (`.spinney` is in `SKIP_DIRS`, so repo-wide walks skip it). A write failure
 > falls back to inlining, so a result is never lost.
-| `exec_command` | `command` (alias `cmd`), `cwd?`, `timeout?`, `timeout_behavior?` | Runs through the detected shell (`getShell()`), returns combined stdout+stderr trimmed. `timeout` is in **seconds** and defaults to the `spinney.commandTimeout` setting — **600 s (10 minutes)** when that key is absent or not a positive number (`DEFAULT_COMMAND_TIMEOUT_SEC` in `src/tools/execCommand.ts`); an explicit `timeout` always wins. Errors/timeouts/aborts are prefixed with a `[...]` note. `timeout_behavior` = `stop` (default, kill on timeout) / `move_to_background` (promote a still-running command to a background terminal and return its id) / `start_in_background` (launch immediately, return id, don't wait). |
-| `check_background_terminal` | `pid` | Status of a background terminal (running / finished, exit code, output so far). |
-| `kill_background` | `pid` | Kills a background terminal's process tree. Tool-initiated kills suppress the injected completion notice. |
-| `join_background` | `pid` | Blocks until the background terminal finishes and returns its final exit code + output. Honours Stop. |
-| `read_image` | `path` | Not a registry tool — handled by the Agent. Reads the image and queues it for injection as a `user`-role image block; **how** depends on the card's `vision.transport` (`tryReadImage`, `src/agent/agent.ts:996-1005`): a `deepseek` card **uploads** it to the Files API and injects `{ type: 'file', file_id }`, answering `Loaded image <path> -> file-api-… (…, N KiB)`; an `openai` card uploads nothing — the bytes ride along inline as a `data:` URL in an `image_url` part and the confirmation reads `Loaded image <path> inline (N KiB)`. Either way the tool message carries only the short confirmation, never the bytes. Only valid on the vision model; unsupported format/too large (>64 MiB) return a friendly error. |
+| `exec_command` | `command` (alias `cmd`), `cwd?`, `timeout?`, `timeout_behavior?` | Runs through the detected shell (`getShell()`), returns combined stdout+stderr trimmed, and **always leads with a timing line that also names the working directory** (`[exit 0 in 3.4s · cwd D:\repo]`, `[command exited with code 3 in 3.4s · cwd …]`, … — see "Timing in tool results"). The model-facing point of the `cwd` half is behavioural: every command already starts in the harness root, and a model that sees the directory on every result stops prefixing the same `cd <root> && …` to every command (in the transcripts of one workspace: 10 333 `exec_command` calls, **1** used the `cwd` argument and ~3 400 carried a redundant `cd` to the root). `cwd` is **relative to the harness root or absolute**; it is resolved through `resolvePath` (so `/d/…` means `D:\…` on Windows, see "Path base") and **checked before the spawn**: a missing path or a file answers `the working directory "x" → <resolved> does not exist / is not a directory. Pass cwd relative to the harness root (…), or omit cwd to run in the root.` — without that check, `spawn` reports the failure as `spawn <shell.exe> ENOENT`, blaming the shell and teaching the model that the `cwd` argument is broken. `timeout` is in **seconds** and defaults to the `spinney.commandTimeout` setting — **600 s (10 minutes)** when that key is absent or not a positive number (`DEFAULT_COMMAND_TIMEOUT_SEC` in `src/tools/execCommand.ts`); an explicit `timeout` always wins. Errors/timeouts/aborts are prefixed with a `[...]` note. `timeout_behavior` = `stop` (default, kill on timeout) / `move_to_background` (promote a still-running command to a background terminal and return its id, adding `Ran 3.4s in the foreground before it was promoted.`) / `start_in_background` (launch immediately, return id, don't wait — unchanged, no foreground time to report). The description and the system prompt both state the other half of that contract: **never background the command inside the shell** (`&`, `nohup`, `disown`, `Start-Process`) — a process the harness did not spawn has no card, no `id` and no notice, so it can neither be joined nor killed by Stop; `timeout_behavior` is the only tracked way to outlive the call. |
+| `check_background_terminal` | `pid` | Status of a background terminal (running / finished, exit code, output so far), with the elapsed time in the answer: `Background terminal 3 is running. (command: …, 3.4s elapsed)`, `Background terminal 3 finished with exit code 0 after 3.4s.`, or `Background terminal 3 was killed after 3.1s. (command: …)`. |
+| `kill_background` | `pid` | Kills a background terminal's process tree, answering `Killed background terminal 3 after 3.4s (command: …).` Tool-initiated kills suppress the injected completion notice. |
+| `join_background` | `pid` | Blocks until the background terminal finishes and returns its final exit code + output, naming the duration (`Background terminal 3 finished with exit code 0 after 3.4s.`). Honours Stop. |
+| `read_image` | `path` | Not a registry tool — handled by the Agent. Reads the image and queues it for injection as a `user`-role image block; **how** depends on the card's `vision.transport` (`tryReadImage`, `src/agent/agent.ts:996-1005`): a `deepseek` card **uploads** it to the Files API and injects `{ type: 'file', file_id }`, answering `Loaded image <path> -> file-api-… (…, N KiB)`; an `openai` card uploads nothing — the bytes ride along inline as a `data:` URL in an `image_url` part and the confirmation reads `Loaded image <path> inline (N KiB)`. Either way the tool message carries only the short confirmation, never the bytes. Only valid on the vision model; unsupported format/too large (>64 MiB) return a friendly error. The call is **timed like any other**, so a slow read is marked by the generic prefix. |
 | `spawn_agents` | `agents`, `mode` | Orchestrated by the provider. Spawns parallel sub-agent branches (`write` REQUIRED, `model?`), `mode: 'sync'` blocks returning summaries + each agent's `stats` + `transcript` path, `'async'` returns `{ spawned, async:true, ids, transcriptDir }` and delivers one combined notice when the batch settles. Only on agents whose `canSpawn` is true (`depth < 2 && write`) — a read-only sub-agent never sees it. Two caps beyond the depth limit: a **level-1** batch is bounded by `spinney.maxConcurrentSubagents` (default **15**, `SubAgentPool`, the surplus queues) and each parent may start at most `spinney.maxLevel2Subagents` (default **2**) depth-2 children (`runtime.ts:3301-3309`), past which the spawn returns `Error: this sub-agent may start at most N sub-sub-agents (M already started).` |
 | `spawn_readonly_agents` | `agents`, `mode` | Read-only fan-out variant: the agent specs have **no `write` field**, so a child can never be writable. Exposed only when `canSpawnReadOnly` (`depth < 2 && !write`), i.e. to a read-only depth-1 sub-agent. Same result shape as `spawn_agents`. |
 | `send_agent_message` | `id`, `message`, `write?`, `model?`, `mode` | Orchestrated by the provider. Resumes a finished sub-agent (`id` from a prior `spawn_agents`) with a follow-up. `sync` returns the resumed result + `stats` + `transcript`, `async` returns `{ resumed, id, async:true }` and delivers the result as a notice. `model` is resolved to a card (id / display name / wire name; unknown ⇒ `Error: unknown model "…".`). Only on agents whose `canSpawn` is true (`depth < 2 && write`). The `write?` override is honoured **only for the main agent**; a sub-agent caller goes through `handleSubAgentSendMessage`, which requires the target to be its own direct child and caps `write` at `caller.write && target.write` (no promotion). |
@@ -43,6 +52,43 @@
 | `list_nodes` | — | Orchestrated by the provider. Renders the active session's chat tree — one indented line per node, `- <id>  [<kind>[, delivered][, status][, checked out]] parent=<id>  <title>` (the ` parent=<id>` part is omitted for the root) — so the agent can name a node (e.g. `hop_session`'s `returnNodeId`). The kind mark is `turn` / `agent` / `bg` and the bracket also carries `delivered` for a sidecar whose notice already reached its reader, so `kind:'bg'` job cards **do** appear here (a sub-agent's line shows its `agentStatus`). Main agent only (same `canHop` gate). |
 | `rename_session` | `title`, `sessionId?` | Orchestrated by the provider. Renames a **session** (not a node) and **locks** the title, so the automatic namer never overwrites it. `sessionId` defaults to the active session. Main agent only (same `canHop` gate). Returns the new title. |
 > `read_image` is **not** resolved by `ToolRegistry.execute` — it is intercepted in `Agent.executeToolCall` because a tool message cannot carry an image block, so the image must be delivered as an injected user message. Likewise `spawn_agents` / `spawn_readonly_agents` / `send_agent_message` / `send_readonly_agent_message` / `hop_session` / `list_nodes` / `rename_session` are intercepted and delegated to the provider (`setSpawnHandler` / `setSendMessageHandler` / `setHopHandler` / `setListNodeHandler` / `setRenameSessionHandler`); a read-only depth-1 sub-agent gets only the `*_readonly_*` pair, a depth-2 sub-agent gets none of them, and an intercepted call when the matching `canSpawn*` / `canHop` flag is false returns an explicit error. **Every** tool is advertised with its full schema: `Agent.getTools` sends `ToolRegistry.definitions` plus the intercepted tools the agent's flags allow, so the model always sees the complete surface — there is no folded/gradual disclosure and no interface-fetch tool (`list_advanced_tool` was removed).
+
+## Timing in tool results
+
+Every call is measured by the **Agent** (`Agent.executeToolCall`), for the main agent and for
+sub-agents alike — `read_image` included, although it is intercepted rather than resolved by
+`ToolRegistry`. The elapsed time goes into the model-facing result and into the `kind:'tool'`
+display item (`startedAt` / `ms`), which is what the webview's chip ticks from and freezes on. One
+format is used everywhere, from `formatDuration` (`src/duration.ts`, mirrored in `media/main.js`
+because no host string arrives per tick): under 1000 ms → `420ms`, under 10 s → `3.4s`, under 60 s
+→ `42s`, under 60 min → `3m 12s`, otherwise `1h 3m`. The token is locale-free and deliberately
+**not** localized — it is read by the model, not by the user.
+
+- **`exec_command` always leads with its own timing line**, first in the result, one of:
+  `[exit 0 in 3.4s · cwd D:\repo]`, `[command exited with code 3 in 3.4s · cwd …]`,
+  `[command timed out after 600000 ms (ran 600.4s) · cwd …]`,
+  `[command output exceeded 16777216 bytes; truncated after 3.4s · cwd …]`,
+  `[command was interrupted after 3.4s · cwd …]`, or
+  `[command failed to start after 0.01s: <message> (shell <shell.exe>) · cwd …]` — the cwd half is
+  the directory the command actually ran in (the harness root unless a `cwd` argument moved it),
+  and it rides this line for the same reason the duration does: every command starts in the root,
+  and saying so on every result is what stops the model from prefixing `cd <root> && …` defensively.
+  It is first
+  **on purpose**: an oversized result is spilled by `limitInline`, whose preview keeps only the
+  first 8 lines, so a timing line anywhere lower is the first thing lost — exactly for the long
+  command whose duration matters most. A promoted command adds
+  `Ran 3.4s in the foreground before it was promoted.`; `start_in_background` is unchanged, because
+  it returns before any foreground time has passed.
+- **Every other text result gets a generic prefix — but only from 1 second up.** A call that took at
+  least 1000 ms starts with `[<tool-name> 3.4s]` (e.g. `[search_files 3.4s]`); a fast call stays
+  unmarked, so the common case costs no context. `exec_command` never gets this prefix: its own
+  status line already carries the time.
+- **The `spawn_*` / `send_*` results are JSON, so they carry `durationMs` inside it.** A text prefix
+  would break a caller that parses the result, so `spawn_agents`, `spawn_readonly_agents`,
+  `send_agent_message` and `send_readonly_agent_message` report the duration as a JSON field: per
+  sub-agent, plus one `durationMs` for the whole sync batch.
+- **A call that is still streaming its arguments shows no chip at all** — the clock starts with the
+  call, not with the drafted arguments.
 
 Deeper per-tool notes live in `docs/agents/**` — the tool group in `AGENTS.md`'s
 index maps each area (sub-agents, background terminals, transcripts, vision) to

@@ -5,8 +5,9 @@
  * Round-trips a persisted session through `migrateState` (the exact load path
  * `ChatViewProvider.loadSessions` uses) and asserts that a `kind:'bg'` card
  * survives a restart with its `delivered` flag and terminal-state snapshot
- * intact, that a `bg` card never claims to be running after a restart, and that
- * both sidecar kinds stay out of the API path / checkout chain.
+ * intact, that a `bg` card never claims to be running after a restart, that a
+ * sub-agent's live start clock does not outlive the run it timed, and that both
+ * sidecar kinds stay out of the API path / checkout chain.
  *
  * Needs `out/` (run `npm run compile` first: it requires the compiled tree module).
  *
@@ -48,13 +49,21 @@ const raw = {
       nodes: {
         root: {
           ...turnNode('root', null, 'root turn'),
-          children: ['bg-done', 'bg-running', 'agent', 'next'],
+          children: ['bg-done', 'bg-running', 'agent', 'agent-live', 'next'],
         },
         'bg-done': { ...bgNode('bg-done', 'root', 'done'), delivered: true },
         'bg-running': bgNode('bg-running', 'root', 'running'),
         agent: {
           ...turnNode('agent', 'root', 'sub-agent'),
           kind: 'agent', agentStatus: 'done', agentSummary: 'summary', delivered: true,
+          agentElapsedMs: 4000,
+          messages: [{ role: 'user', content: 'sidecar-only history' }],
+        },
+        // A sub-agent that was mid-run when the host went away: its start clock is
+        // live state with no process behind it, so it must not survive the load.
+        'agent-live': {
+          ...turnNode('agent-live', 'root', 'sub-agent'),
+          kind: 'agent', agentStatus: 'running', agentStartedAt: 1700000000000, agentElapsedMs: 9000,
           messages: [{ role: 'user', content: 'sidecar-only history' }],
         },
         next: {
@@ -89,6 +98,16 @@ ok('  … and the .bgnotify block is still in its transcript', (n['bg-done'].dis
 console.log('-- a card that was mid-flight when the host died --');
 ok('a still-running bg card stops claiming to run', n['bg-running'] && n['bg-running'].status !== 'running', n['bg-running'] && n['bg-running'].status);
 ok('  … and is marked delivered (its notice can never arrive)', n['bg-running'] && n['bg-running'].delivered === true);
+
+console.log('-- the sub-agent clock --');
+ok('a finished run keeps its duration', n.agent && n.agent.agentElapsedMs === 4000, n.agent && String(n.agent.agentElapsedMs));
+ok('a run that was live stops claiming to run', n['agent-live'] && n['agent-live'].agentStatus === 'killed', n['agent-live'] && String(n['agent-live'].agentStatus));
+ok(
+  '  … and its start clock is dropped (never tick for a process that is gone)',
+  n['agent-live'] && n['agent-live'].agentStartedAt === undefined,
+  n['agent-live'] && String(n['agent-live'].agentStartedAt),
+);
+ok('  … while the duration of its last completed run survives', n['agent-live'] && n['agent-live'].agentElapsedMs === 9000);
 
 console.log('-- sidecars stay out of the API path and the checkout chain --');
 ok('the sub-agent card keeps delivered', n.agent && n.agent.delivered === true);

@@ -46,6 +46,17 @@
   history and `pathMessages` (in `tree.ts`) skips it, so it never leaks into the parent's API path. On
   finish the sub-agent's conversation (minus the synthesized system prompt) is stored in `node.messages`
   so a follow-up can continue it, even across a restart.
+- **A sub-agent's clock lives on the node and on two messages.** `TreeNode` carries `agentStartedAt`
+  (stamped when the run starts, **cleared** when it ends) and `agentElapsedMs` (the last run's
+  duration, kept after the run so the card's frozen chip survives a reload or a restart); both are
+  healed like the other optional fields on load. When a run begins the host posts
+  `agentStart { id, startedAt }`, when it ends `agentDone { id, status, summary, elapsedMs }`. The
+  card renders that as the **elapsed chip** the job cards use (see
+  `invariants/background-terminals.md`): it ticks from `startedAt` on the webview's 250 ms local
+  interval and freezes at `elapsedMs`, so the host polls nothing and a resume still shows a moving
+  number. A **resume** (`send_agent_message` / `send_readonly_agent_message`) times **that run
+  only**: `agentStartedAt` is stamped again for the follow-up and `agentElapsedMs` ends up as the
+  resume's own duration, never the total across runs.
 - A node whose async sub-agent batch is still running (or whose batch notice is already
   queued for it) reports in `state.lockedNodes`, so the composer offers **Stop** there.
   That Stop (`SessionRuntime.stop(nodeId)`) aborts the batch **and its depth-2 children**
@@ -71,8 +82,12 @@
   (`src/chat/transcript.ts`, `kind: 'subagent'`) and returns the absolute path: `spawn_agents` sync
   results carry `stats` (tool-call / denied-call counts) plus `transcript` per agent,
   `send_agent_message` sync results carry them too, and the async notices append
-  `· transcript: <path>` to each line. Line 1 is a `meta` record (ids, spec, status, summary, system
-  prompt, `stats.toolCalls` / `stats.deniedToolCalls` / `stats.usage`); every following line is one API
+  `· transcript: <path>` to each line. The sync results also carry `durationMs` — per agent, plus one
+  for the whole sync batch — and because a `spawn_*` / `send_*` result is **JSON**, it never takes
+  the generic `[tool 3.4s]` prefix line that other tools use (see `tools.md`). Line 1 is a `meta`
+  record (ids, spec, status, summary, system prompt, `stats.toolCalls` / `stats.deniedToolCalls` / `stats.usage`);
+  it **already carried** `durationMs` before this feature and still does, so the dump and the card
+  report the same measure. Every following line is one API
   message (`{type:'message', index, ...}`), so `read_file` can page it and `search_transcripts` can
   grep it. A resume **overwrites** the same `<nodeId>.jsonl` with the extended conversation. Folder,
   config and the shared search surface are described in "Transcripts" above.
@@ -84,7 +99,9 @@
   resumes the parent with the notice when it already finished (its history is not in the API path, so
   it cannot receive an injected turn; the idle drain does the same, `runtime.ts:4094-4106`). Either way
   the notice lands inside the parent node's own card as a `.bgnotify` block (`renderSignalCards`,
-  `runtime.ts:4191`) — a child's completion never opens a node under it.
+  `runtime.ts:4191`) — a child's completion never opens a node under it. The notice names the
+  duration — `Sub-agent #abc123 finished in 3.4s: …` — and the batch block's status text is the
+  compact `3 sub-agent(s) finished (3m 12s)`, the same `formatDuration` token the card's chip shows.
 - A sub-agent branch is checked-out as **read-only** and the composer pane is **hidden** while such a node
   is focused (`setComposerVisible(false)` in `setActiveLeaf`); only the parent drives it via
   `spawn_agents` / `send_agent_message`. `onKillAgent` aborts a running sub-agent from its card's ✕.

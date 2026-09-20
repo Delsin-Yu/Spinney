@@ -1,5 +1,6 @@
 import { AgentTool } from '../agent/types';
 import type { BackgroundAccess } from '../chat/backgroundHub';
+import { formatDuration } from '../duration';
 import { limitInline } from './index';
 
 export function makeCheckBackgroundTool(getAccess: () => BackgroundAccess | null): AgentTool {
@@ -35,13 +36,16 @@ export function makeCheckBackgroundTool(getAccess: () => BackgroundAccess | null
       if (!task) {
         return `Error: no background terminal with id ${id}.`;
       }
-      const elapsed = Math.round((Date.now() - task.startedAt) / 1000);
+      // Elapsed time of the job the agent is asking about: a running task is
+      // measured to now, a finished (or killed) one to its recorded finish time so
+      // the number is stable across repeated checks.
+      const dur = formatDuration((task.finishedAt ?? Date.now()) - task.startedAt);
       const out = task.handle.getOutput().trim();
       const statusLine = task.killed
-        ? `Background terminal ${id} was killed. (command: ${task.command})`
+        ? `Background terminal ${id} was killed after ${dur}. (command: ${task.command})`
         : task.status === 'running'
-          ? `Background terminal ${id} is running. (command: ${task.command}, ${elapsed}s elapsed)`
-          : `Background terminal ${id} finished with exit code ${task.exitCode ?? 'unknown'}.`;
+          ? `Background terminal ${id} is running. (command: ${task.command}, ${dur} elapsed)`
+          : `Background terminal ${id} finished with exit code ${task.exitCode ?? 'unknown'} after ${dur}.`;
       const outLine = out ? `\nOutput:\n${out}` : '';
       return limitInline(`${statusLine}${outLine}`, 'check_background_terminal');
     },
@@ -83,9 +87,11 @@ export function makeKillBackgroundTool(getAccess: () => BackgroundAccess | null)
         return `Background terminal ${id} is not running (exit code ${task.exitCode ?? 'unknown'}).`;
       }
       // Tool-initiated kill: the tool result is the signal the agent sees, so the
-      // separate completion notice is suppressed (`notifyAgent: false`).
+      // separate completion notice is suppressed (`notifyAgent: false`). The kill
+      // is what sets `finishedAt`, so the elapsed time is read AFTER it.
       access.hub.kill(sessionId, id, { notifyAgent: false });
-      return `Killed background terminal ${id} (command: ${task.command}).`;
+      const dur = formatDuration((task.finishedAt ?? Date.now()) - task.startedAt);
+      return `Killed background terminal ${id} after ${dur} (command: ${task.command}).`;
     },
   };
 }
@@ -139,9 +145,10 @@ export function makeJoinBackgroundTool(getAccess: () => BackgroundAccess | null)
         return `Error: background terminal ${id} disappeared.`;
       }
       const out = done.handle.getOutput().trim();
+      const dur = formatDuration((done.finishedAt ?? Date.now()) - done.startedAt);
       const resultLine = done.killed
-        ? `Background terminal ${id} was killed.`
-        : `Background terminal ${id} finished with exit code ${done.exitCode ?? 'unknown'}.`;
+        ? `Background terminal ${id} was killed after ${dur}.`
+        : `Background terminal ${id} finished with exit code ${done.exitCode ?? 'unknown'} after ${dur}.`;
       return limitInline(`${resultLine}${out ? `\nOutput:\n${out}` : ''}`, 'join_background');
     },
   };

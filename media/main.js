@@ -338,6 +338,143 @@
     return node;
   }
 
+  // ---- Elapsed readouts: a local ticker over a registry of live chips ----
+  // While a job / sub-agent / tool call runs, its card carries a live duration, and
+  // it is the *webview* that makes it tick: the host sends only the start clock and,
+  // when the run ends, its authoritative duration. Host and webview share one machine
+  // clock (`Date.now()`), so nothing has to travel for 4 ticks a second — and the
+  // number on screen is honest even while the panel is flooded with messages.
+  //
+  // The ticker walks a registry, never the DOM: there is no cheap "which chips are
+  // live" query in the webview (a `querySelectorAll` per tick would cost real work in
+  // a 40-card session), and the offline webview checker's stub answers `[]` for every
+  // `querySelectorAll`, so a DOM scan would be untestable there — which is exactly the
+  // kind of silent breakage that checker exists to catch.
+
+  /**
+   * `1250` -> `1.2s`, `3400` -> `3.4s`, `192000` -> `3m 12s`.
+   *
+   * The host's `src/duration.ts` in miniature: this readout is a locale-free token
+   * (no unit words, no `Intl`, no punctuation of its own) that is dropped straight
+   * into a chip, so the webview mirrors the host's shapes instead of inventing a
+   * second dialect — and, being a token, it needs no `tr()` key. The shape coarsens
+   * with magnitude on purpose: milliseconds stay exact, a few seconds keep one
+   * decimal, past ten seconds the tenth is noise, past a minute the seconds are
+   * context.
+   */
+  function formatDuration(ms) {
+    // NaN / Infinity / negative all mean "no duration measured": clamp rather than
+    // print "NaNms" or "-1s" into a user-facing chip.
+    const t = Number.isFinite(ms) && ms > 0 ? ms : 0;
+    if (t < 1000) {
+      return Math.round(t) + 'ms';
+    }
+    // Round to the tenth *first*, then test: 9950 becomes 10.0 and must fall through
+    // to the whole-second shape rather than print "10.0s".
+    const secs = Math.round(t / 100) / 10;
+    if (secs < 10) {
+      return secs.toFixed(1) + 's';
+    }
+    // Below a minute the seconds are rounded — 59600ms reads "1m 0s", never the
+    // nonsensical "60s". From a minute up they are truncated, exactly as
+    // `src/duration.ts` does it: the chip on a card and a duration quoted in a tool
+    // result describe the same run, and a one-second disagreement between the two
+    // readouts would be a lie. So 3599999ms is "59m 59s", and only a full 3600000ms
+    // is "1h 0m".
+    const sec = Math.round(t / 1000);
+    if (t < 60000) {
+      return sec < 60 ? sec + 's' : '1m 0s';
+    }
+    const whole = Math.floor(t / 1000);
+    const min = Math.floor(whole / 60);
+    if (t < 3600000) {
+      return min + 'm ' + (whole - min * 60) + 's';
+    }
+    return Math.floor(min / 60) + 'h ' + (min % 60) + 'm';
+  }
+
+  /** Chips whose value is still moving; the frozen ones are never in here. */
+  const liveElapsed = [];
+  let elapsedTimer = null;
+
+  /**
+   * One 250ms interval for the whole session, started the first time a chip goes
+   * live. Four ticks a second is what a "1.2s" readout needs to look alive; a card
+   * that is merely *rendered* twice does not pay for it.
+   */
+  function startElapsedTicker() {
+    if (elapsedTimer != null) return;
+    elapsedTimer = setInterval(tickElapsed, 250);
+  }
+
+  /**
+   * Recompute every live chip. A chip whose element left the tree (its body was
+   * rebuilt, or its card was dropped) is forgotten here - the registry must not
+   * grow with the session.
+   */
+  function tickElapsed() {
+    for (let i = liveElapsed.length - 1; i >= 0; i--) {
+      const chip = liveElapsed[i];
+      if (!chip.parentElement || chip.isConnected === false) { liveElapsed.splice(i, 1); continue; }
+      const text = formatDuration(Date.now() - chip._start);
+      if (chip.textContent !== text) chip.textContent = text;   // write only on change
+    }
+  }
+
+  /**
+   * Show, refresh or drop one card's elapsed chip.
+   *   start != null -> live: it ticks until it is frozen
+   *   ms != null    -> frozen value from the host
+   *   neither       -> no chip (nothing is known about this run)
+   *
+   * The chip is found with `byClass`, not `querySelector`: "there is no chip yet" has
+   * to be *observable* — the offline checker's stub answers a plain query with a
+   * forgiving dummy element, so a lookup that missed would read as a hit and the real
+   * chip would never be created. `beforeEl` keeps the chip where the head's design
+   * wants it (a chip appended after the delete button would sit at the wrong end of
+   * the row).
+   */
+  function syncElapsed(parent, cls, start, ms, beforeEl) {
+    if (!parent) return null;
+    let chip = byClass(parent, cls);
+    // Created lazily, in one place: a live and a frozen chip differ only in what
+    // their text is set to below, so both take the same position in the row.
+    const ensure = () => {
+      if (!chip) {
+        chip = el('span', cls, '');
+        // Only an anchor that really is a child of `parent` may be used: inserting
+        // before a foreign element would move the chip into the wrong subtree.
+        if (beforeEl && beforeEl.parentElement === parent) parent.insertBefore(chip, beforeEl);
+        else parent.appendChild(chip);
+      }
+      return chip;
+    };
+    if (start != null) {
+      chip = ensure();
+      chip._start = start;
+      // A repaint that re-registers the same chip must not grow the registry (the
+      // ticker would then format the same element twice per tick, forever).
+      if (liveElapsed.indexOf(chip) < 0) liveElapsed.push(chip);
+      // Write the value now, not 250ms from now: the first paint of a card that was
+      // restored from the tree must not show an empty chip.
+      chip.textContent = formatDuration(Date.now() - start);
+      startElapsedTicker();
+      return chip;
+    }
+    if (ms != null) {
+      // The host's own number wins, and this chip stops moving: leaving it in the
+      // registry would let a later tick overwrite the authoritative value.
+      const at = liveElapsed.indexOf(chip);
+      if (at >= 0) liveElapsed.splice(at, 1);
+      chip = ensure();
+      chip.textContent = formatDuration(ms);
+      return chip;
+    }
+    // Nothing is known about this run any more: no chip at all beats a stale one.
+    if (chip) chip.remove();
+    return null;
+  }
+
   // ---- Markdown ----
   const md = window.markdownit
     ? window.markdownit({ html: false, breaks: true, linkify: true, typographer: false })
@@ -832,7 +969,34 @@
     return name + (value ? ' ' + value.slice(0, 60) : '');
   }
 
-  function addTool(name, args, id, usage) {
+  /**
+   * One tool card by its message id, walked depth-first.
+   *
+   * `updateTool` / `setToolStatus` used to ask `root.querySelector('[data-id="…"]')`,
+   * a *compound* selector: the offline webview checker's stub answers those with a
+   * shared dummy element, so the card the freeze writes into could not be observed
+   * there (the assertions would pass on a dummy and miss a real regression). Walking
+   * `root.children` keeps both the browser and the checker on the card itself, the
+   * same reason `byClass` exists.
+   */
+  function toolNodeById(root, id) {
+    for (const child of (root && root.children) || []) {
+      if (
+        child.classList &&
+        child.classList.contains('msg') &&
+        child.classList.contains('tool') &&
+        child.dataset &&
+        child.dataset.id === id
+      ) {
+        return child;
+      }
+      const nested = toolNodeById(child, id);
+      if (nested) return nested;
+    }
+    return null;
+  }
+
+  function addTool(name, args, id, usage, start, ms) {
     if (!messagesEl) return;
     const node = el('div', 'msg tool');
     node.dataset.id = id;
@@ -847,6 +1011,11 @@
     const status = el('span', 'tool-status running', tr('running'));
     status.dataset.role = 'status';
     head.appendChild(status);
+    // The call's own duration, right after its status: `start` for a call that is
+    // running, `ms` for one that is already over (a repaint of history). Neither is
+    // passed while a call is still streaming its arguments — nothing has started yet,
+    // so the card deliberately shows no chip.
+    syncElapsed(head, 'tool-elapsed', start, ms);
     node.appendChild(head);
 
     const body = el('div', 'tool-body hidden');
@@ -959,7 +1128,7 @@
     return node;
   }
 
-  function finalizeLiveTool(index, id, name, args) {
+  function finalizeLiveTool(index, id, name, args, start, ms) {
     if (!messagesEl) return;
     const bucket = liveBucket(undefined, false);
     const indexed = index !== undefined && index !== null;
@@ -968,7 +1137,7 @@
       node = messagesEl.querySelector('.msg.tool.live[data-id="' + id + '"]');
     }
     if (!node) {
-      return addTool(name, args, id);
+      return addTool(name, args, id, undefined, start, ms);
     }
     if (indexed && bucket) delete bucket[index];
     if (id) node.dataset.id = id;
@@ -978,6 +1147,10 @@
     if (name) node._nameEl.textContent = name;
     node._statusEl.className = 'tool-status running';
     node._statusEl.textContent = tr('running');
+    // The arguments are settled, so the call is *running* now: that is the moment its
+    // elapsed chip is born (a card that is still streaming args deliberately has none).
+    const head = byClass(node, 'tool-head');
+    if (head) syncElapsed(head, 'tool-elapsed', start, ms);
 
     node._bodyEl.innerHTML = '';
     if (args && args !== '{}') {
@@ -1007,15 +1180,20 @@
     }
   }
 
-  function updateTool(id, content) {
+  function updateTool(id, content, ms) {
     if (!messagesEl) return;
-    const node = messagesEl.querySelector('[data-id="' + id + '"]');
+    const node = toolNodeById(messagesEl, id);
     if (!node) return;
     const statusEl = node.querySelector('.tool-status');
     if (statusEl) {
       statusEl.className = 'tool-status done';
       statusEl.textContent = tr('done');
     }
+    // The call is over: freeze the chip at the host's own duration. A host that
+    // predates the field sends none, and then the chip goes rather than ticking on
+    // forever over a call that has already reported its result.
+    const head = byClass(node, 'tool-head');
+    if (head) syncElapsed(head, 'tool-elapsed', null, ms);
     const body = node.querySelector('.tool-body');
     if (body) {
       body.appendChild(el('pre', 'tool-result', content));
@@ -1028,7 +1206,7 @@
 
   function setToolStatus(id, status) {
     if (!messagesEl) return;
-    const node = messagesEl.querySelector('[data-id="' + id + '"]');
+    const node = toolNodeById(messagesEl, id);
     if (!node) return;
     const statusEl = node.querySelector('.tool-status');
     if (statusEl) {
@@ -1751,7 +1929,9 @@
       addBackgroundNotice(item);
     } else if (item.kind === 'tool') {
       const toolId = item.id || 'history-' + item.name + '-' + (item.status || '');
-      addTool(item.name, item.args, toolId, item.usage);
+      // The stored duration travels with the item: a repainted call that is still
+      // running ticks again, a finished one shows the host's frozen value.
+      addTool(item.name, item.args, toolId, item.usage, item.status === 'running' ? item.startedAt : null, item.ms);
       if (item.status === 'done' && item.content) {
         setToolStatus(toolId, 'done');
         const node = messagesEl.querySelector('[data-id="' + toolId + '"]');
@@ -1842,9 +2022,22 @@
     row.appendChild(el('span', 'bg-card-id', '#' + (meta && meta.bgTaskId != null ? meta.bgTaskId : '')));
     const status = el('span', 'bg-status' + (task && task.pendingDelivery ? ' pending' : ''), statusTextFor(task, meta));
     row.appendChild(status);
-    if (task && typeof task.elapsed === 'number' && running) {
-      row.appendChild(el('span', 'bg-elapsed', task.elapsed + 's'));
-    }
+    // The chip is shown whenever a duration is known — a running job ticks, and a
+    // finished one freezes: at its own `finishedAt` while the snapshot still carries
+    // it (a finished-but-undelivered job), else at the duration persisted on the
+    // node, which is all a record card restored after a restart has left.
+    syncElapsed(
+      row,
+      'bg-elapsed',
+      running && task ? task.startedAt : null,
+      running
+        ? null
+        : task && typeof task.finishedAt === 'number'
+          ? task.finishedAt - task.startedAt
+          : typeof meta.bgElapsedMs === 'number'
+            ? meta.bgElapsedMs
+            : null,
+    );
     itemsEl.appendChild(row);
 
     const cmd = el('div', 'bg-card-cmd', (meta && meta.bgCommand) || (task && task.command) || '');
@@ -2551,6 +2744,14 @@
       if (del) head.insertBefore(info, del); else head.appendChild(info);
     }
     info.textContent = tr('d{0} · {1} · {2}', msg.depth || 1, msg.model || '', msg.write ? tr('write') : tr('ro'));
+    // The run's duration, next to the SUB line and left of the delete button: the
+    // host hands over the start clock, the chip ticks it locally.
+    syncElapsed(head, 'node-agent-elapsed', msg.startedAt, null, head.querySelector('.node-del'));
+    if (treeNodes[msg.id]) {
+      treeNodes[msg.id].agentStartedAt = msg.startedAt;
+      treeNodes[msg.id].agentElapsedMs = undefined;
+      treeNodes[msg.id].agentStatus = 'running';
+    }
     if (!card.querySelector('.node-kill')) {
       const kill = el('button', 'node-kill', '✕');
       kill.title = tr('Kill this sub-agent');
@@ -2588,7 +2789,12 @@
       if (treeNodes[msg.id]) {
         treeNodes[msg.id].agentStatus = msg.status;
         treeNodes[msg.id].agentSummary = msg.summary || '';
+        treeNodes[msg.id].agentElapsedMs = msg.elapsedMs;
+        treeNodes[msg.id].agentStartedAt = undefined;
       }
+      // The run is over, so the chip stops where the host says it stopped — the
+      // local tick would otherwise keep counting into a card that reads `done`.
+      syncElapsed(card.querySelector('.node-head'), 'node-agent-elapsed', null, msg.elapsedMs, card.querySelector('.node-del'));
       if (msg.summary) {
         // Sub-agent cards get a one-line result footer (the card footer no
         // longer carries token/cache counts — the transcript's usage line does).
@@ -2957,6 +3163,22 @@
       if (meta.kind === 'bg') {
         renderBgBody(nodeEls[id], meta);
       }
+      // A sub-agent head outlives the transcript rebuilds below it, so its elapsed
+      // chip is derived from the node's own meta on every pass: still ticking while
+      // the run is live (`agentStartedAt` + `agentStatus`), frozen at the host's
+      // `agentElapsedMs` once it ended, and absent when neither is known. The
+      // registry lookup inside `syncElapsed` is what keeps a repaint from stacking
+      // one chip per pass.
+      if (meta.kind === 'agent' || meta.agentStartedAt != null || meta.agentElapsedMs != null) {
+        const agentLive = meta.agentStatus === 'running' && typeof meta.agentStartedAt === 'number';
+        syncElapsed(
+          nodeEls[id].querySelector('.node-head'),
+          'node-agent-elapsed',
+          agentLive ? meta.agentStartedAt : null,
+          !agentLive && typeof meta.agentElapsedMs === 'number' ? meta.agentElapsedMs : null,
+          nodeEls[id].querySelector('.node-del'),
+        );
+      }
     }
     setActiveLeaf(treeActiveId);
     if (Object.keys(nodeEls).length === 0) {
@@ -3028,6 +3250,20 @@
       // A job card has no conversation: its body mirrors the live job.
       if (meta.kind === 'bg') {
         renderBgBody(nodeEls[id], meta);
+      }
+      // Same rule as the identical pass in `renderTree`: this loop can be the one
+      // that creates a card, and a sub-agent's head chip is derived from the node's
+      // own meta — leaving it out here would show a live run with no clock until the
+      // next `tree` arrived.
+      if (meta.kind === 'agent' || meta.agentStartedAt != null || meta.agentElapsedMs != null) {
+        const agentLive = meta.agentStatus === 'running' && typeof meta.agentStartedAt === 'number';
+        syncElapsed(
+          nodeEls[id].querySelector('.node-head'),
+          'node-agent-elapsed',
+          agentLive ? meta.agentStartedAt : null,
+          !agentLive && typeof meta.agentElapsedMs === 'number' ? meta.agentElapsedMs : null,
+          nodeEls[id].querySelector('.node-del'),
+        );
       }
     }
     setActiveLeaf(treeActiveId);
@@ -4343,10 +4579,10 @@
         routeTo(msg.nodeId, () => appendLiveTool(msg.index, msg.id, msg.name, msg.args));
         break;
       case 'toolStart':
-        routeTo(msg.nodeId, () => { finalizeStreamingAnswer(); finalizeLiveTool(msg.index, msg.id, msg.name, msg.args); });
+        routeTo(msg.nodeId, () => { finalizeStreamingAnswer(); finalizeLiveTool(msg.index, msg.id, msg.name, msg.args, msg.startedAt, null); });
         break;
       case 'toolEnd':
-        routeTo(msg.nodeId, () => updateTool(msg.id, msg.content));
+        routeTo(msg.nodeId, () => updateTool(msg.id, msg.content, msg.ms));
         break;
       case 'agentStart':
         onAgentStart(msg);

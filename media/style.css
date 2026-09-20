@@ -707,9 +707,27 @@ button.icon-btn {
   word-break: break-all;
 }
 
+/* The elapsed readouts (`.bg-elapsed` here, `.node-agent-elapsed` / `.tool-elapsed`
+   below): a job's status row, a sub-agent head and a tool head each count up while
+   their run is live. All three are numbers that change under the reader's eyes, so
+   the digits must not reflow the row every tick. */
 .bg-elapsed {
   color: var(--text-dim);
   margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+/* A sub-agent head's / a tool head's duration: the dim, small, monospace treatment
+   of `.node-agent-info` next to it, so it reads as metadata rather than a message —
+   and tabular digits, because the value ticks. */
+.node-agent-elapsed,
+.tool-elapsed {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-family: "Consolas", "Courier New", monospace;
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 /* `Delivered` badge (D1): this sidecar's completion signal already reached the

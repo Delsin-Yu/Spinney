@@ -31,7 +31,7 @@ jobs:
         run: npm ci
 
       # One step, because the gate is one list: `vscode:prepublish` compiles, runs
-      # `sync:l10n`, and runs the eight guards (docs/agents/testing.md). Listing the
+      # `sync:l10n`, and runs the nine guards (docs/agents/testing.md). Listing the
       # guards here individually is how this job previously fell four of them behind.
       - name: Release gate
         run: npm run vscode:prepublish

@@ -128,12 +128,15 @@
   `health`, `sessions`, `concurrency`, `navigation`, `background`, `signals`,
   `branch`, `selftest`). Dev tooling: `.vscodeignore` excludes `tools/**`, so it is never shipped.
 - `tools/rollover-acceptance.js` · `tools/modeltree-acceptance.js` ·
-  `tools/model-switch-acceptance.js` · `tools/gate-acceptance.js` — the four
+  `tools/model-switch-acceptance.js` · `tools/gate-acceptance.js` — four of the five
   **windowless acceptance drivers** (dev-only, not build guards, not shipped): the
   context rollover's runtime half, the Model Card Tree page's host half, the
   per-node model selection, and the request gate through `ClientRegistry`. Each
   stubs the `vscode` module and needs `out/` (`npm run compile` first); no window,
   no network. See `testing.md`.
+- `tools/exec-cwd-acceptance.js` — the fifth windowless driver, and the one that *is*
+  a build guard (`npm run check:cwd`): the working directory and path base, driven
+  through the compiled tools with a `vscode` stub and a real shell. See `testing.md`.
 - `tools/migrate-state.mjs` — the one migration this repo carries: an install that
   only ever ran Minimal Agent Harness (`minimal-host.minimal-agent-harness`) moves
   to Spinney (`DE-YU.spinney`) — the memento row key keeps the case the manifest
@@ -208,11 +211,12 @@
   four names are gitignored. See `docs/agents/invariants/i18n.md`.
 - `tools/check-models.js` · `tools/check-webview.js` · `tools/check-signal-persist.js`
   · `tools/check-l10n.js` · `tools/check-context-rollover.js` ·
-  `tools/check-modeltree.js` · `tools/check-tree-grid.js` · `tools/check-docs.js` —
+  `tools/check-modeltree.js` · `tools/check-tree-grid.js` · `tools/check-docs.js` ·
+  `tools/exec-cwd-acceptance.js` —
   the packaging guards
   (`npm run check:models` / `check:webview` / `check:signals` / `check:l10n` /
-  `check:rollover` / `check:modeltree` / `check:grid` / `check:docs`, run by
-  `vscode:prepublish`):
+  `check:rollover` / `check:modeltree` / `check:grid` / `check:docs` / `check:cwd`, run
+  by `vscode:prepublish`):
   model-config drift (the default is the fallback card, `providers` / `modelCards`
   exist as object schemas, no `enum` on `model`, no model id in the code or the
   webviews), "does the chat webview still survive every message the provider
@@ -229,7 +233,10 @@
   measuring and applying the new one after), and the shipped user manual against the
   manifest (`manual/**`: a page per catalog language, one shared heading structure, a
   spot for every command title and every `spinney.*` key, and no `.vscodeignore`
-  pattern that would keep a page out of the `.vsix`). See `testing.md`.
+  pattern that would keep a page out of the `.vsix`), and the working directory and path
+  base (`resolvePath`'s `/d/x` → `D:\x` on Windows only, a command's first line naming
+  the directory it ran in, a broken `cwd` naming the path instead of the shell, and the
+  `/d/...` form reaching the file it means). See `testing.md`.
 - `src/agent/tools/` — one file per intercepted tool (`readImage`, `spawnAgents`,
   `spawnReadonlyAgents`, `sendAgentMessage`, `sendReadonlyAgentMessage`,
   `hopSession`, `listNodes`, `renameSession`) plus `index.ts`, the barrel that

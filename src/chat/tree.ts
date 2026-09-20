@@ -38,6 +38,14 @@ export interface DisplayItem {
   args?: string;
   content?: string;
   status?: 'running' | 'done';
+  /**
+   * `kind:'tool'` only: the host clock (ms) when the call started running, and the
+   * call's own wall-clock duration once it ended. The pair is what lets a card
+   * show a ticking chip while the call runs and the frozen number afterwards —
+   * including after a repaint or a restart, where no live timer exists.
+   */
+  startedAt?: number;
+  ms?: number;
   error?: boolean;
   attachments?: UserAttachment[];
   usage?: Usage;
@@ -115,6 +123,16 @@ export interface TreeNode {
   agentSummary?: string;
   agentModel?: string;
   agentWrite?: boolean;
+  /**
+   * `kind:'agent'` only: the host clock (ms) when the **current** run started, and
+   * the wall-clock duration of the run that ended last. A run is timed on its own
+   * (a resume replaces the pair, it never accumulates), because that is exactly what
+   * the caller is told in the tool result. `agentStartedAt` exists only while the run
+   * is live — it is cleared when the run ends, and a restart drops it too (the run
+   * did not survive), so a card can never tick for a process that is gone.
+   */
+  agentStartedAt?: number;
+  agentElapsedMs?: number;
   /** Absolute path of this sub-agent's JSONL transcript dump (when enabled). */
   agentTranscript?: string;
   /** kind === 'bg': the session-local background task this card mirrors. */
@@ -553,9 +571,14 @@ export function pruneSession(session: AgentSession): void {
       node.status = 'interrupted';
     }
     // A sub-agent that was still running when the host went away is gone; mark its
-    // card killed so a resumed follow-up does not double-run a live branch.
+    // card killed so a resumed follow-up does not double-run a live branch. Its
+    // timer dies with it: a live start clock with no process behind it would make
+    // the card tick forever.
     if (node.kind === 'agent' && node.agentStatus === 'running') {
       node.agentStatus = 'killed';
+    }
+    if (node.kind === 'agent') {
+      node.agentStartedAt = undefined;
     }
     // A background card survives a restart as a record (D1), but its process does
     // not: the hub is in-memory and tore every job down on dispose. Never leave a
@@ -688,6 +711,8 @@ function normalizeTreeSession(raw: AgentSession): AgentSession {
     n.agentSummary = typeof node.agentSummary === 'string' ? node.agentSummary : undefined;
     n.agentModel = typeof node.agentModel === 'string' ? node.agentModel : undefined;
     n.agentWrite = typeof node.agentWrite === 'boolean' ? node.agentWrite : undefined;
+    n.agentStartedAt = typeof node.agentStartedAt === 'number' ? node.agentStartedAt : undefined;
+    n.agentElapsedMs = typeof node.agentElapsedMs === 'number' ? node.agentElapsedMs : undefined;
     n.agentTranscript = typeof node.agentTranscript === 'string' ? node.agentTranscript : undefined;
     n.bgTaskId = typeof node.bgTaskId === 'number' ? node.bgTaskId : undefined;
     n.bgCommand = typeof node.bgCommand === 'string' ? node.bgCommand : undefined;

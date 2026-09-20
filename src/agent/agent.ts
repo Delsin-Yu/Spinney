@@ -17,7 +17,45 @@ import {
 import { MAX_IMAGE_BYTES, ModelCard, cardDisplayName, isVisionCard, visionCardsLabel } from './models';
 import * as prompt from './prompt';
 import { ToolCapabilities, interceptedDefinitions } from './tools';
+import { formatDuration } from '../duration';
 import { perf } from '../perf';
+
+/**
+ * Tools whose result must never carry the generic duration prefix. Two reasons, one
+ * list: the `spawn_*` / `send_*` tools answer with **JSON**, where a leading line would
+ * break a caller that parses the result (they report `durationMs` inside it instead),
+ * and the command tools already name their own duration in the status line the agent
+ * reads first.
+ */
+const DURATION_PREFIX_SKIP = new Set([
+  'exec_command',
+  'check_background_terminal',
+  'kill_background',
+  'join_background',
+  'spawn_agents',
+  'spawn_readonly_agents',
+  'send_agent_message',
+  'send_readonly_agent_message',
+]);
+
+/** From this duration up, a text result is marked with the call's own time. */
+const DURATION_PREFIX_MIN_MS = 1000;
+
+/**
+ * Mark a text tool result with how long its call took — but only once that is worth
+ * knowing (a second or more). A fast call stays unmarked on purpose: the marker then
+ * means "this one was slow" instead of costing every result a line, and the common
+ * `read_file` / `search_files` round trip reads exactly as it always did. The marker is
+ * the FIRST line because an oversized result is spilled by `limitInline`, whose preview
+ * keeps only the first 8 lines — a line at the bottom would be the first thing lost,
+ * exactly for the slow call whose duration matters most. See `docs/agents/tools.md`.
+ */
+function withCallDuration(name: string, result: string, ms: number): string {
+  if (ms < DURATION_PREFIX_MIN_MS || DURATION_PREFIX_SKIP.has(name)) {
+    return result;
+  }
+  return `[${name} ${formatDuration(ms)}]\n${result}`;
+}
 
 /**
  * One image `read_image` attached this turn: either uploaded to the provider's
@@ -838,14 +876,18 @@ export class Agent {
       await this.executeReadImage(call, signal, index);
       return;
     }
+    // Capture the start before announcing the call: the UI's elapsed chip ticks
+    // from the moment the card appears, and this is the clock the `ms` readout
+    // below is measured against.
+    const startedAt = Date.now();
     this.onEvent({
       type: 'toolStart',
       id: call.id,
       name: call.function.name,
       args: call.function.arguments,
       index,
+      startedAt,
     });
-    const t0 = Date.now();
     let result: string;
     if (call.function.name === 'spawn_agents') {
       // Orchestrating sub-agents is the provider's job (node creation, pool,
@@ -920,13 +962,17 @@ export class Agent {
     } else {
       result = await this.tools.execute(call.function.name, call.function.arguments, signal);
     }
+    const ms = Date.now() - startedAt;
     perf(
       () =>
-        `tool ${call.function.name} ${Date.now() - t0}ms args=${call.function.arguments.length} ` +
+        `tool ${call.function.name} ${ms}ms args=${call.function.arguments.length} ` +
         `result=${result.length}`,
     );
-    this.onEvent({ type: 'toolEnd', id: call.id, name: call.function.name, content: result });
-    this.messages.push({ role: 'tool', tool_call_id: call.id, content: result });
+    // The model reads the marked result; the UI shows the same number on the card, and
+    // both come from this one measurement.
+    const content = withCallDuration(call.function.name, result, ms);
+    this.onEvent({ type: 'toolEnd', id: call.id, name: call.function.name, content, ms });
+    this.messages.push({ role: 'tool', tool_call_id: call.id, content });
   }
 
   /**
@@ -936,12 +982,16 @@ export class Agent {
    * itself carries only a short confirmation, never the image bytes.
    */
   private async executeReadImage(call: ToolCall, signal: AbortSignal, index?: number): Promise<void> {
+    // Same clock as the regular path: start before the card is announced, so the
+    // upload/read time is included in what the elapsed chip shows.
+    const startedAt = Date.now();
     this.onEvent({
       type: 'toolStart',
       id: call.id,
       name: 'read_image',
       args: call.function.arguments,
       index,
+      startedAt,
     });
 
     let imagePath = '';
@@ -953,8 +1003,11 @@ export class Agent {
     }
 
     const result = await this.tryReadImage(imagePath, signal);
-    this.onEvent({ type: 'toolEnd', id: call.id, name: 'read_image', content: result });
-    this.messages.push({ role: 'tool', tool_call_id: call.id, content: result });
+    const ms = Date.now() - startedAt;
+    // An image read is a call like any other: a slow upload is marked the same way.
+    const content = withCallDuration('read_image', result, ms);
+    this.onEvent({ type: 'toolEnd', id: call.id, name: 'read_image', content, ms });
+    this.messages.push({ role: 'tool', tool_call_id: call.id, content });
   }
 
   /** Read + validate an image file and attach it, or return a friendly error. */

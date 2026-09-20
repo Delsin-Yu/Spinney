@@ -142,7 +142,8 @@ const TURN_MESSAGES = [
         status: 'running',
         exitCode: null,
         killed: false,
-        elapsed: 1,
+        startedAt: Date.now() - 1000,
+        finishedAt: null,
         truncated: false,
         outputTail: 'x',
         pendingDelivery: false,
@@ -155,13 +156,15 @@ const TURN_MESSAGES = [
   { type: 'user', text: 'smoke prompt', attachments: [] },
   { type: 'imagePicked', dataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB', name: 'smoke.png' },
   { type: 'toolCallDelta', nodeId: NODE_ID, index: 0, id: 'smoke-tool', name: 'read_file', args: '{"path":"a"}' },
-  { type: 'toolStart', nodeId: NODE_ID, index: 0, id: 'smoke-tool', name: 'read_file', args: '{"path":"a"}' },
-  { type: 'toolEnd', nodeId: NODE_ID, id: 'smoke-tool', content: 'ok' },
+  // `startedAt` / `ms` are the two numbers the elapsed chips are built from (the
+  // webview ticks the first locally and freezes at the second).
+  { type: 'toolStart', nodeId: NODE_ID, index: 0, id: 'smoke-tool', name: 'read_file', args: '{"path":"a"}', startedAt: Date.now() - 250 },
+  { type: 'toolEnd', nodeId: NODE_ID, id: 'smoke-tool', content: 'ok', ms: 420 },
   { type: 'delta', nodeId: NODE_ID, text: 'smoke answer' },
   { type: 'thinkingDelta', nodeId: NODE_ID, text: 'smoke thought' },
   { type: 'usage', nodeId: NODE_ID, usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 } },
-  { type: 'agentStart', id: 'smoke-agent', name: 'smoke agent', instruction: 'smoke', model: 'smoke-model' },
-  { type: 'agentDone', id: 'smoke-agent', status: 'done', summary: 'smoke summary' },
+  { type: 'agentStart', id: 'smoke-agent', name: 'smoke agent', instruction: 'smoke', model: 'smoke-model', startedAt: Date.now() - 1500 },
+  { type: 'agentDone', id: 'smoke-agent', status: 'done', summary: 'smoke summary', elapsedMs: 1500 },
   { type: 'nodeUpdate', id: NODE_ID, status: 'done', title: 'smoke', usage: null },
   { type: 'panTo', id: NODE_ID },
   // An in-place continue writes an inline harness block into that node's own
@@ -937,7 +940,8 @@ if (contextLabel !== 'ctx 50%') {
       status: 'running',
       exitCode: null,
       killed: false,
-      elapsed: 1,
+      startedAt: Date.now() - 1000,
+      finishedAt: null,
       truncated: false,
       outputTail: command + ' output',
       pendingDelivery: false,
@@ -2190,7 +2194,8 @@ if (contextLabel !== 'ctx 50%') {
           status: 'running',
           exitCode: null,
           killed: false,
-          elapsed: 1,
+          startedAt: Date.now() - 1000,
+          finishedAt: null,
           truncated: false,
           outputTail: 'x',
           pendingDelivery: false,
@@ -2545,7 +2550,8 @@ if (contextLabel !== 'ctx 50%') {
           status: 'running',
           exitCode: null,
           killed: false,
-          elapsed: 1,
+          startedAt: Date.now() - 1000,
+          finishedAt: null,
           truncated: false,
           outputTail: 'x',
           pendingDelivery: false,
@@ -2571,6 +2577,271 @@ if (contextLabel !== 'ctx 50%') {
     expectFold(job, false, 'a `kind:bg` job card after a delta and a `done`');
     checkHeadStructure(job, 'a `kind:bg` job card');
   }
+}
+
+// --- Elapsed chips: a live duration per card, frozen at the host's number -------
+// A running job / sub-agent / tool call shows a duration that the *webview* ticks
+// (one 250ms interval over `liveElapsed`), and the host's own value takes over the
+// moment the run ends. Nothing has to be waited for here: a chip writes its value the
+// instant it is created (`syncElapsed`), so a fixture can say what it must read — the
+// contract being checked is the three fields that travel (`startedAt`, `ms` /
+// `elapsedMs`, and the node meta a repaint rebuilds the chip from) plus the rule that
+// a repaint reuses the card's one chip instead of stacking another.
+{
+  const node = (id, parentId, children, extra) =>
+    Object.assign(
+      { id, parentId, children, title: id, status: 'done', createdAt: 0, preview: id, usage: null, size: null },
+      extra || {},
+    );
+  const cardOf = (id) => {
+    for (const child of elementById('tree-canvas').children) {
+      if (child.dataset && child.dataset.id === id) return child;
+    }
+    return null;
+  };
+  /** Every descendant of `element` carrying `name` (the stub's `querySelectorAll` sees none). */
+  const countClass = (element, name) => {
+    let n = 0;
+    for (const child of (element && element.children) || []) {
+      if (child.classList && child.classList.contains(name)) n++;
+      n += countClass(child, name);
+    }
+    return n;
+  };
+  /** The chip's text, or null when the card has no chip at all. */
+  const chipTextOf = (root, name) => {
+    const chip = findByClass(root, name);
+    return chip ? String(chip.textContent) : null;
+  };
+  /** Mount one fresh card on the view path, as the other blocks do. */
+  const mount = (id, extra, status, items) => {
+    dispatch({ type: 'reset' });
+    dispatch({ type: 'tree', viewId: id, activeId: null, rootId: id, nodes: [node(id, null, [], extra)] });
+    dispatch({ type: 'path', ids: [id], nodes: [{ id, status, items }] });
+    return cardOf(id);
+  };
+
+  // (a) A tool call. Its chip appears when the call starts *running* (a card still
+  // streaming the arguments has none — nothing has started), ticks the start clock the
+  // host sent, and is frozen in place by `toolEnd`'s `ms` — the same chip, not a
+  // second one next to a leftover live readout.
+  {
+    const id = 'el-tool-node';
+    const card = mount(id, { status: 'running' }, 'running', []);
+    const work = findByClass(card, 'node-work');
+    dispatch({ type: 'toolCallDelta', nodeId: id, index: 0, id: 'el-tool', name: 'read_file', args: '{"path":"a"}' });
+    const tool = findByClass(work, 'tool');
+    if (!tool) {
+      problems.push('no tool card was rendered for the elapsed-chip fixture');
+    } else if (findByClass(tool, 'tool-elapsed')) {
+      problems.push('a tool card that is still streaming its arguments already shows an elapsed chip');
+    }
+    dispatch({
+      type: 'toolStart',
+      nodeId: id,
+      index: 0,
+      id: 'el-tool',
+      name: 'read_file',
+      args: '{"path":"a"}',
+      startedAt: Date.now() - 1200,
+    });
+    const chip = tool ? findByClass(tool, 'tool-elapsed') : null;
+    const running = chipTextOf(tool, 'tool-elapsed');
+    if (!/^1\.[0-9]s$/.test(String(running))) {
+      problems.push(
+        `a running tool card reads ${JSON.stringify(running)} in its elapsed chip, expected the running form "1.2s"`,
+      );
+    }
+    dispatch({ type: 'toolEnd', nodeId: id, id: 'el-tool', content: 'ok', ms: 3400 });
+    const frozen = chipTextOf(tool, 'tool-elapsed');
+    if (frozen !== '3.4s') {
+      problems.push(`a finished tool card reads ${JSON.stringify(frozen)} in its elapsed chip, expected the host's "3.4s"`);
+    }
+    if (tool && findByClass(tool, 'tool-elapsed') !== chip) {
+      problems.push('`toolEnd` replaced the elapsed chip instead of freezing the live one in place');
+    }
+    if (countClass(tool, 'tool-elapsed') > 1) {
+      problems.push('a tool card carries more than one elapsed chip');
+    }
+  }
+
+  // (b) A job card whose snapshot has already finished: it freezes at `finishedAt`
+  // (delivered but not yet taken out of the snapshot), which is the host's number and
+  // not a local guess — and a record card restored after a restart has only
+  // `bgElapsedMs`, checked through the same code path.
+  {
+    const R = 'el-bg-root';
+    const JOB = 'el-bg-job';
+    const startedAt = Date.now() - 75000;
+    dispatch({ type: 'reset' });
+    dispatch({
+      type: 'tree',
+      viewId: R,
+      activeId: null,
+      rootId: R,
+      nodes: [
+        node(R, null, [JOB], { status: 'running' }),
+        node(JOB, R, [], { kind: 'bg', bgTaskId: 41, bgCommand: 'sleep 75', status: 'done' }),
+      ],
+    });
+    dispatch({ type: 'path', ids: [R], nodes: [{ id: R, status: 'running', items: [] }] });
+    dispatch({
+      type: 'backgrounds',
+      tasks: [
+        {
+          id: 41,
+          nodeId: R,
+          cardNodeId: JOB,
+          command: 'sleep 75',
+          status: 'finished',
+          exitCode: 0,
+          killed: false,
+          startedAt,
+          finishedAt: startedAt + 75000,
+          truncated: false,
+          outputTail: 'x',
+          pendingDelivery: true,
+        },
+      ],
+    });
+    const text = chipTextOf(cardOf(JOB), 'bg-elapsed');
+    if (text !== '1m 15s') {
+      problems.push(`a finished job card reads ${JSON.stringify(text)} in its elapsed chip, expected "1m 15s"`);
+    }
+    // The persisted form of the same card (a record restored after a restart): there is
+    // no live snapshot at all any more, so the duration can only come from the node
+    // itself — one number, no start clock, and the same frozen chip.
+    dispatch({ type: 'backgrounds', tasks: [] });
+    dispatch({
+      type: 'tree',
+      viewId: R,
+      activeId: null,
+      rootId: R,
+      nodes: [
+        node(R, null, [JOB], { status: 'done' }),
+        node(JOB, R, [], {
+          kind: 'bg',
+          bgTaskId: 41,
+          bgCommand: 'sleep 75',
+          status: 'done',
+          bgExitCode: 0,
+          bgElapsedMs: 75000,
+        }),
+      ],
+    });
+    const persisted = chipTextOf(cardOf(JOB), 'bg-elapsed');
+    if (persisted !== '1m 15s') {
+      problems.push(`a job record card reads ${JSON.stringify(persisted)} in its elapsed chip, expected the persisted "1m 15s"`);
+    }
+  }
+
+  // (c) A sub-agent: the chip sits in the card head next to the SUB line and *before*
+  // the delete button, ticks while its run is live, and `agentDone` freezes it at the
+  // host's `elapsedMs`.
+  {
+    const R = 'el-agent-root';
+    const SUB = 'el-agent-sub';
+    dispatch({ type: 'reset' });
+    dispatch({
+      type: 'tree',
+      viewId: R,
+      activeId: null,
+      rootId: R,
+      nodes: [
+        node(R, null, [SUB], { status: 'running' }),
+        node(SUB, R, [], { kind: 'agent', status: 'running', agentStatus: 'running' }),
+      ],
+    });
+    dispatch({ type: 'path', ids: [R], nodes: [{ id: R, status: 'running', items: [] }] });
+    dispatch({
+      type: 'agentStart',
+      id: SUB,
+      name: 'el agent',
+      instruction: 'x',
+      model: 'm',
+      startedAt: Date.now() - 1000,
+    });
+    const card = cardOf(SUB);
+    const head = findByClass(card, 'node-head');
+    const live = chipTextOf(head, 'node-agent-elapsed');
+    if (!/^1\.[0-9]s$/.test(String(live))) {
+      problems.push(
+        `a running sub-agent card reads ${JSON.stringify(live)} in its elapsed chip, expected the running form "1.0s"`,
+      );
+    }
+    const chipAt = head ? head.children.indexOf(findByClass(head, 'node-agent-elapsed')) : -1;
+    const delAt = head ? head.children.indexOf(findByClass(head, 'node-del')) : -1;
+    if (chipAt < 0 || delAt < 0 || chipAt > delAt) {
+      problems.push('a sub-agent card\'s elapsed chip is not in the head, before the delete button');
+    }
+    dispatch({ type: 'agentDone', id: SUB, status: 'done', summary: 'ok', elapsedMs: 192000 });
+    const frozen = chipTextOf(head, 'node-agent-elapsed');
+    if (frozen !== '3m 12s') {
+      problems.push(
+        `a finished sub-agent card reads ${JSON.stringify(frozen)} in its elapsed chip, expected the host's "3m 12s"`,
+      );
+    }
+  }
+
+  // (d) A repaint (`tree`). The host puts the run's start clock on the node itself, so
+  // a card rebuilt from the session — a session switch, a branch checkout — comes back
+  // with a *live* chip; and the repaint reuses that one chip rather than adding one per
+  // pass (a session that repaints often would otherwise grow a row of readouts).
+  {
+    const R = 'el-repaint-root';
+    const SUB = 'el-repaint-sub';
+    const treeMsg = {
+      type: 'tree',
+      viewId: R,
+      activeId: null,
+      rootId: R,
+      nodes: [
+        node(R, null, [SUB], { status: 'running' }),
+        node(SUB, R, [], {
+          kind: 'agent',
+          status: 'running',
+          agentStatus: 'running',
+          agentStartedAt: Date.now() - 5000,
+        }),
+      ],
+    };
+    dispatch({ type: 'reset' });
+    dispatch(treeMsg);
+    dispatch({ type: 'path', ids: [R], nodes: [{ id: R, status: 'running', items: [] }] });
+    const text = chipTextOf(cardOf(SUB), 'node-agent-elapsed');
+    if (!/^5(\.[0-9])?s$/.test(String(text))) {
+      problems.push(`a sub-agent card repainted from the tree reads ${JSON.stringify(text)}, expected a live "5.0s"`);
+    }
+    dispatch(treeMsg);
+    const chips = countClass(cardOf(SUB), 'node-agent-elapsed');
+    if (chips !== 1) {
+      problems.push(`a second \`tree\` for the same sub-agent left ${chips} elapsed chips (the repaint must reuse the one chip)`);
+    }
+  }
+
+  // (e) A legacy tool item (the shape a host that predates the fields sends): neither
+  // `startedAt` nor `ms`, so nothing is known about the run and the card renders with
+  // no chip at all — and, more to the point, without throwing.
+  {
+    const id = 'el-legacy-node';
+    const card = mount(
+      id,
+      { status: 'done' },
+      'done',
+      [
+        { kind: 'user', text: 'the ask' },
+        { kind: 'tool', name: 'read_file', args: '{"path":"a"}', content: 'ok', status: 'done' },
+      ],
+    );
+    const tool = findByClass(card, 'tool');
+    if (!tool) {
+      problems.push('a legacy tool item no longer renders a tool card on a repaint');
+    } else if (findByClass(tool, 'tool-elapsed')) {
+      problems.push('a legacy tool item (no `startedAt`, no `ms`) renders an elapsed chip for a run nothing is known about');
+    }
+  }
+
+  notes.push('elapsed chips: running, frozen (tool/job/agent), repainted and legacy');
 }
 
 // --- report ------------------------------------------------------------------

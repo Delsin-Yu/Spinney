@@ -205,12 +205,16 @@ export type AgentEvent =
       args: string;
       /** The stream index this tool call was drafted under (used to reconcile a live card). */
       index?: number;
+      /** Host clock (ms) when the call started running (drives the UI's elapsed chip). */
+      startedAt: number;
     }
   | {
       type: 'toolEnd';
       id: string;
       name: string;
       content: string;
+      /** Wall-clock duration of the call, in ms. */
+      ms: number;
     }
   | { type: 'done' }
   | { type: 'interrupted' }

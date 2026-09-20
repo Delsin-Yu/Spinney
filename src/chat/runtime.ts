@@ -71,6 +71,7 @@ import {
 } from './tree';
 import { ToolRegistry } from '../tools';
 import { BackgroundTask } from '../tools/background';
+import { formatDuration } from '../duration';
 import { defaultSessionTitle, isDefaultSessionTitle } from '../i18n';
 import { BackgroundHub, BackgroundOwner } from './backgroundHub';
 import { PromptSnippet } from './promptSnippets';
@@ -333,6 +334,31 @@ export interface HarnessConfig {
   promptSnippets: PromptSnippet[];
 }
 
+/**
+ * What one finished sub-agent run hands back. `durationMs` is that run's own
+ * wall-clock time — the same number the node stores as `agentElapsedMs` and the
+ * card freezes on, so the caller, the transcript dump's meta and the UI can never
+ * disagree about how long the sub-agent took.
+ */
+export interface SubAgentRunResult {
+  ok: boolean;
+  summary: string;
+  model?: string;
+  modelName?: string;
+  durationMs: number;
+}
+
+/**
+ * One settled sub-agent of a batch, as the completion notice names it. `durationMs`
+ * is that run's own time (absent only for a caller that could not have measured it).
+ */
+export interface SubAgentBatchEntry {
+  ok: boolean;
+  summary: string;
+  node: TreeNode;
+  durationMs?: number;
+}
+
 /** One sub-agent run: its dispatch spec plus the tree node that owns it. */
 export interface SubAgentJob {
   /**
@@ -361,7 +387,15 @@ interface BackgroundInfo {
   status: 'running' | 'finished';
   exitCode: number | null;
   killed: boolean;
-  elapsed: number;
+  /**
+   * The job's clock, in **host epoch ms**: `startedAt` is the origin the webview's
+   * elapsed chip ticks from, and `finishedAt` (null while the job runs) is where it
+   * freezes. Shipping the two clocks instead of a pre-computed `elapsed` is what
+   * lets a quiet command — one that prints nothing for minutes — still show a
+   * moving number, without the host pushing a snapshot every second.
+   */
+  startedAt: number;
+  finishedAt: number | null;
   truncated: boolean;
   outputTail: string;
   /** True when the job finished but the agent has not yet been notified. */
@@ -1623,6 +1657,11 @@ export class SessionRuntime {
       agentStatus: node.agentStatus,
       agentModel: node.agentModel,
       agentWrite: node.agentWrite,
+      // A sub-agent's clock: `agentStartedAt` is live-only (it drives the card's
+      // ticking chip) and `agentElapsedMs` is the last run's duration (what the card
+      // shows once the run is over, and what the caller was told in its result).
+      agentStartedAt: node.agentStartedAt,
+      agentElapsedMs: node.agentElapsedMs,
       // A `kind:'bg'` card carries the terminal snapshot of its job, so it renders
       // (and re-renders after a reload) without asking the hub, which is
       // in-memory and forgot the job the moment the window went away.
@@ -2914,6 +2953,9 @@ export class SessionRuntime {
             name: event.name,
             args: clipForUi(event.args, 8 * 1024),
             status: 'running',
+            // The host's start clock, not the webview's: a card created by a repaint
+            // mid-call must tick from the same origin the live one does.
+            startedAt: event.startedAt,
           });
           this.post({
             type: 'toolStart',
@@ -2922,18 +2964,20 @@ export class SessionRuntime {
             args: clipForUi(event.args, 8 * 1024),
             index: event.index,
             nodeId: run.nodeId,
+            startedAt: event.startedAt,
           });
         }
         break;
       case 'toolEnd':
         if (run) {
-          this.updateToolItem(run, event.id, event.content);
+          this.updateToolItem(run, event.id, event.content, event.ms);
           this.post({
             type: 'toolEnd',
             id: event.id,
             name: event.name,
             content: clipForUi(event.content),
             nodeId: run.nodeId,
+            ms: event.ms,
           });
         }
         break;
@@ -3107,11 +3151,15 @@ export class SessionRuntime {
     }
   }
 
-  private updateToolItem(run: TurnRun, id: string, content: string): void {
+  private updateToolItem(run: TurnRun, id: string, content: string, ms: number): void {
     const item = run.items.find((it) => it.kind === 'tool' && it.id === id);
     if (item) {
       item.status = 'done';
       item.content = clipForUi(content);
+      // The call's own duration: the card freezes on it, and the start clock goes
+      // away with it (the pair is "running" or "took this long", never both).
+      item.ms = ms;
+      item.startedAt = undefined;
     }
   }
 
@@ -3290,6 +3338,7 @@ export class SessionRuntime {
         summary: r.summary,
         model: r.model,
         modelName: r.modelName,
+        durationMs: r.durationMs,
         transcript: node.agentTranscript,
         stats: summarizeTranscript(node.messages),
       });
@@ -3299,23 +3348,26 @@ export class SessionRuntime {
   /** Async resume: deliver the resumed sub-agent's outcome to whoever owns it —
    * the main agent (a card + one signal), or a sub-agent parent (queued for its
    * next tool boundary, or auto-resumed when it is already done). */
-  private deliverResumeAsync(
-    node: TreeNode,
-    result: { ok: boolean; summary: string; model?: string; modelName?: string },
-  ): void {
+  private deliverResumeAsync(node: TreeNode, result: SubAgentRunResult): void {
     const parent = this.session.nodes[node.parentId ?? ''] ?? null;
     if (!parent) {
       return;
     }
-    const cardText = `Sub-agent #${node.id.slice(-6)} ${result.ok ? 'finished' : 'failed'}: ${result.summary || '(no summary)'}${this.transcriptNote(node)}`;
+    const entry: SubAgentBatchEntry = {
+      ok: result.ok,
+      summary: result.summary,
+      node,
+      durationMs: result.durationMs,
+    };
+    const cardText = `Sub-agent #${node.id.slice(-6)} ${result.ok ? 'finished' : 'failed'} in ${formatDuration(result.durationMs)}: ${result.summary || '(no summary)'}${this.transcriptNote(node)}`;
     if (this.isStoppedLine(node.id)) {
       // Stop killed this resume: record the interrupt where the next request will
       // pick it up instead of delivering a notice turn.
-      this.queueWriteback(this.buildSubAgentSignal(parent, [{ ok: result.ok, summary: result.summary, node }], cardText));
+      this.queueWriteback(this.buildSubAgentSignal(parent, [entry], cardText));
       this.persistTurn();
       return;
     }
-    this.queueSubAgentSignal(parent, [{ ok: result.ok, summary: result.summary, node }], cardText);
+    this.queueSubAgentSignal(parent, [entry], cardText);
     this.persistTurn();
   }
 
@@ -3327,6 +3379,9 @@ export class SessionRuntime {
    */
   private async spawnChildren(parent: TreeNode, args: Record<string, unknown>, signal: AbortSignal): Promise<string> {
     const session = this.session;
+    // The batch's own wall clock, for the sync result's top-level `durationMs` and the
+    // async notice's status line: in parallel mode it is *not* the sum of the runs.
+    const batchStartedAt = Date.now();
     // Capture the view focus BEFORE attachNode below moves it to the new
     // (sidecar) agent node, so we can restore it: a sub-agent card is display-only
     // and must never become the view focus/composer dock.
@@ -3411,9 +3466,9 @@ export class SessionRuntime {
       // same way now — the batch belongs to `parent`, whoever it is).
       void Promise.allSettled(tasks).then((settled) => {
         const list = settled.map((s, i) =>
-          s.status === 'fulfilled' ? s.value : { job: jobs[i], result: { ok: false, summary: 'cancelled' } },
+          s.status === 'fulfilled' ? s.value : { job: jobs[i], result: { ok: false, summary: 'cancelled', durationMs: 0 } },
         );
-        this.onAsyncBatchDone(parent, list.map((l) => ({ ...l.result, node: l.job.node })));
+        this.onAsyncBatchDone(parent, list.map((l) => ({ ...l.result, node: l.job.node })), Date.now() - batchStartedAt);
       });
       return JSON.stringify({
         spawned: jobs.length,
@@ -3443,6 +3498,9 @@ export class SessionRuntime {
           stats: summarizeTranscript(jobs[i].node.messages),
           ...r,
         })),
+        // The whole batch: one number for "how long did asking for N sub-agents take",
+        // which the per-agent `durationMs` cannot answer when they ran in parallel.
+        durationMs: Date.now() - batchStartedAt,
       };
     };
     return JSON.stringify(await runAll());
@@ -3453,13 +3511,16 @@ export class SessionRuntime {
   private runSubAgent(
     job: SubAgentJob,
     signal: AbortSignal,
-  ): Promise<{ ok: boolean; summary: string; model?: string; modelName?: string }> {
+  ): Promise<SubAgentRunResult> {
     return new Promise((resolve) => {
       const abort = new AbortController();
       const onAbort = () => abort.abort();
       signal.addEventListener('abort', onAbort, { once: true });
 
       const startedAt = Date.now();
+      // The card's ticking chip reads this; it is cleared the moment the run ends so
+      // a card can never count for a run that is over (see `finish`).
+      job.node.agentStartedAt = startedAt;
       const subTools = this.subAgentTools(job.node, job.spec.write);
       // The card this sub-agent runs on: the one its spec named (a card id, or the
       // name a caller typed — `resolveCard` accepts both), else the card of the node
@@ -3484,11 +3545,16 @@ export class SessionRuntime {
       const finish = (status: 'done' | 'killed' | 'error', summary: string) => {
         if (finished) return;
         finished = true;
+        const durationMs = Math.max(0, Date.now() - startedAt);
         signal.removeEventListener('abort', onAbort);
         this.runningSubAgents.delete(job.node.id);
         job.node.agentStatus = status;
         job.node.status = status === 'done' ? 'done' : status === 'error' ? 'error' : 'interrupted';
         job.node.agentSummary = summary;
+        // This run is over: the card swaps a ticking chip for the frozen number, and
+        // the start clock goes away with the run it timed.
+        job.node.agentElapsedMs = durationMs;
+        job.node.agentStartedAt = undefined;
         // Persist the sub-agent's conversation (minus the synthesized system prompt)
         // so a later send_agent_message (or an async child-notice resume) can
         // continue it, even across an extension-host restart.
@@ -3498,7 +3564,7 @@ export class SessionRuntime {
           // read the full tool-call history it cannot see in the summary.
           job.node.agentTranscript = this.host.writeSubAgentTranscript(job, subAgent, status, summary, startedAt);
         }
-        this.post({ type: 'agentDone', id: job.node.id, status, summary });
+        this.post({ type: 'agentDone', id: job.node.id, status, summary, elapsedMs: durationMs });
         // The sub-agent's whole conversation (and the transcript dump it points at)
         // is written now: a `send_agent_message` may resume it at any moment, and a
         // coalesced write would lose the conversation the resume builds on.
@@ -3509,7 +3575,7 @@ export class SessionRuntime {
         // them at its own tool boundary — see `takeSignalsFor`).
         this.drainSignals();
         settle();
-        resolve({ ok: status === 'done', summary, model: subCard.id, modelName: cardDisplayName(subCard) });
+        resolve({ ok: status === 'done', summary, model: subCard.id, modelName: cardDisplayName(subCard), durationMs });
       };
 
       const sub = new Agent(this.clients, subTools, (event) => this.handleSubAgentEvent(job.node, event, finish));
@@ -3563,6 +3629,9 @@ export class SessionRuntime {
         model: subCard.id,
         modelName: cardDisplayName(subCard),
         write: job.spec.write,
+        // The chip's origin: this run's own start, not the card's creation (a task
+        // queued behind the sub-agent pool has not started running yet).
+        startedAt,
       });
       void sub.sendUserMessage(job.spec.instruction);
     });
@@ -3581,8 +3650,13 @@ export class SessionRuntime {
    *    conversation is a separate history, so it cannot be "injected" into a turn
    *    that no longer exists).
    */
-  private queueSubAgentSignal(parent: TreeNode, results: Array<{ ok: boolean; summary: string; node: TreeNode }>, cardText?: string): void {
-    const signal = this.buildSubAgentSignal(parent, results, cardText);
+  private queueSubAgentSignal(
+    parent: TreeNode,
+    results: SubAgentBatchEntry[],
+    cardText?: string,
+    elapsedMs?: number,
+  ): void {
+    const signal = this.buildSubAgentSignal(parent, results, cardText, elapsedMs);
     if (parent.kind === 'agent' && !this.isNodeLive(parent.id)) {
       // A finished sub-agent parent cannot receive an injected turn on its own
       // node (its history is not in the API path), so resume it with the text.
@@ -3599,19 +3673,25 @@ export class SessionRuntime {
   /** The one-notice-per-batch signal both delivery paths share (D2). */
   private buildSubAgentSignal(
     parent: TreeNode,
-    results: Array<{ ok: boolean; summary: string; node: TreeNode }>,
+    results: SubAgentBatchEntry[],
     cardText?: string,
+    elapsedMs?: number,
   ): SignalNotice {
-    const lines = results.map(
-      (r) => `Sub-agent #${r.node.id.slice(-6)} ${r.ok ? 'finished' : 'failed'}: ${r.summary || '(no summary)'}${this.transcriptNote(r.node)}`,
-    );
+    // Each line carries that sub-agent's own run time; the batch's wall clock (when
+    // the caller measured it) is what the status line names, because in parallel mode
+    // the runs overlap and only the batch length is a fact about the whole request.
+    const lines = results.map((r) => {
+      const took = typeof r.durationMs === 'number' ? ` in ${formatDuration(r.durationMs)}` : '';
+      return `Sub-agent #${r.node.id.slice(-6)} ${r.ok ? 'finished' : 'failed'}${took}: ${r.summary || '(no summary)'}${this.transcriptNote(r.node)}`;
+    });
     const body = cardText ?? lines.join('\n');
+    const batchTime = typeof elapsedMs === 'number' ? ` (${formatDuration(elapsedMs)})` : '';
     // A batch the user stopped with Stop did not "finish": say what actually happened,
     // because this block is what the next request's context carries.
     const stopped = this.isStoppedLine(parent.id);
     const doneText = stopped
-      ? `${results.length} sub-agent(s) stopped by Stop`
-      : `${results.length} sub-agent(s) finished`;
+      ? `${results.length} sub-agent(s) stopped by Stop${batchTime}`
+      : `${results.length} sub-agent(s) finished${batchTime}`;
     return {
       nodeId: parent.id,
       kind: 'subagent',
@@ -3649,12 +3729,12 @@ export class SessionRuntime {
         this.post({ type: 'thinkingDelta', text: event.content, nodeId: id });
         break;
       case 'toolStart':
-        this.commitSubTool(items, event.id, event.name, event.args);
-        this.post({ type: 'toolStart', id: event.id, name: event.name, args: clipForUi(event.args, 8 * 1024), index: event.index, nodeId: id });
+        this.commitSubTool(items, event.id, event.name, event.args, event.startedAt);
+        this.post({ type: 'toolStart', id: event.id, name: event.name, args: clipForUi(event.args, 8 * 1024), index: event.index, nodeId: id, startedAt: event.startedAt });
         break;
       case 'toolEnd':
-        this.commitSubToolResult(items, event.id, event.content);
-        this.post({ type: 'toolEnd', id: event.id, name: event.name, content: clipForUi(event.content), nodeId: id });
+        this.commitSubToolResult(items, event.id, event.content, event.ms);
+        this.post({ type: 'toolEnd', id: event.id, name: event.name, content: clipForUi(event.content), nodeId: id, ms: event.ms });
         break;
       case 'usage':
         this.commitSubUsage(items, event.usage);
@@ -3707,15 +3787,17 @@ export class SessionRuntime {
     }
   }
 
-  private commitSubTool(items: DisplayItem[], id: string, name: string, args: string): void {
-    items.push({ kind: 'tool', id, name, args: clipForUi(args, 8 * 1024), status: 'running' });
+  private commitSubTool(items: DisplayItem[], id: string, name: string, args: string, startedAt: number): void {
+    items.push({ kind: 'tool', id, name, args: clipForUi(args, 8 * 1024), status: 'running', startedAt });
   }
 
-  private commitSubToolResult(items: DisplayItem[], id: string, content: string): void {
+  private commitSubToolResult(items: DisplayItem[], id: string, content: string, ms: number): void {
     const item = items.find((it) => it.kind === 'tool' && it.id === id);
     if (item) {
       item.status = 'done';
       item.content = clipForUi(content);
+      item.ms = ms;
+      item.startedAt = undefined;
     }
   }
 
@@ -3792,16 +3874,20 @@ export class SessionRuntime {
    * signal is actually delivered (`takePendingSignals`), so what the UI shows and
    * what the agent knew stay in step.
    */
-  private onAsyncBatchDone(parent: TreeNode, results: Array<{ ok: boolean; summary: string; node: TreeNode }>): void {
+  private onAsyncBatchDone(
+    parent: TreeNode,
+    results: SubAgentBatchEntry[],
+    elapsedMs?: number,
+  ): void {
     if (this.isStoppedLine(parent.id)) {
       // The user's Stop killed this work: the batch's interrupt message is written
       // back into the owning turn's history instead of opening a turn — and a stopped
       // sub-agent is never resumed just because its own children settled.
-      this.queueWriteback(this.buildSubAgentSignal(parent, results));
+      this.queueWriteback(this.buildSubAgentSignal(parent, results, undefined, elapsedMs));
       this.persistTurn();
       return;
     }
-    this.queueSubAgentSignal(parent, results);
+    this.queueSubAgentSignal(parent, results, undefined, elapsedMs);
     this.persistTurn();
   }
 
@@ -3865,7 +3951,8 @@ export class SessionRuntime {
       status: task.status,
       exitCode: task.exitCode,
       killed: task.killed,
-      elapsed: Math.round((Date.now() - task.startedAt) / 1000),
+      startedAt: task.startedAt,
+      finishedAt: task.finishedAt,
       truncated: task.truncated,
       outputTail,
       pendingDelivery: task.status === 'finished' && !task.delivered,
@@ -3992,7 +4079,10 @@ export class SessionRuntime {
     node.bgCommand = task.command;
     node.bgExitCode = task.exitCode;
     node.bgKilled = task.killed === true;
-    node.bgElapsedMs = Math.max(0, Date.now() - task.startedAt);
+    // The card's own frozen duration (the hub is in-memory, so this is what a
+    // restored record card shows); `finishedAt` is exact, `Date.now()` is only the
+    // fallback for a task that somehow finished without going through `complete()`.
+    node.bgElapsedMs = Math.max(0, (task.finishedAt ?? Date.now()) - task.startedAt);
     node.bgOutputTail = out.length > 800 ? `…${out.slice(-800)}` : out;
     node.status = task.killed ? 'interrupted' : 'done';
     this.persistTurn();
@@ -4020,11 +4110,19 @@ export class SessionRuntime {
 
   private buildBackgroundSignal(owner: BackgroundOwner, task: BackgroundTask): SignalNotice {
     const cmd = this.truncateField(task.command, 100);
-    const doneText = task.killed
+    // How long the job ran. `finishedAt` is set by the registry's `complete()`, which
+    // every ending goes through (natural exit, kill, session teardown).
+    const took = formatDuration((task.finishedAt ?? Date.now()) - task.startedAt);
+    const outcome = task.killed
       ? 'was killed by the user'
       : `finished with exit code ${task.exitCode ?? 'unknown'}`;
     const output = this.truncateField(task.handle.getOutput().trim(), 1200);
-    const text = `Background command \`${cmd}\` (id ${task.id}) ${doneText}.${output ? `\nOutput:\n${output}` : ''}`;
+    const text = `Background command \`${cmd}\` (id ${task.id}) ${outcome} after ${took}.${output ? `\nOutput:\n${output}` : ''}`;
+    // The card's status text is the compact token form shown next to the `#id` — not
+    // the English sentence above, which belongs to the agent. The webview renders this
+    // verbatim (it never re-translates a payload the host built), so it stays
+    // locale-free.
+    const doneText = task.killed ? `killed (${took})` : `exit ${task.exitCode ?? '?'} (${took})`;
     const card = this.bgCardFor(task.id);
     return {
       nodeId: owner.nodeId,

@@ -127,6 +127,8 @@ export interface BackgroundTask {
   command: string;
   cwd: string;
   startedAt: number;
+  /** Host clock (ms) when the process ended; null while it still runs. */
+  finishedAt: number | null;
   status: 'running' | 'finished';
   exitCode: number | null;
   /** True when the process was killed (by the user or via kill_background). */
@@ -181,6 +183,7 @@ export class BackgroundRegistry {
       command,
       cwd,
       startedAt: Date.now(),
+      finishedAt: null,
       status: 'running',
       exitCode: null,
       killed: false,
@@ -210,6 +213,9 @@ export class BackgroundRegistry {
       return;
     }
     task.status = 'finished';
+    // Stamped before the hook so an observer (the finish notice / the panel) can
+    // already read the elapsed time off the task.
+    task.finishedAt = Date.now();
     task.exitCode = code;
     task.truncated = task.handle.isTruncated();
     for (const w of task.waiters.splice(0)) {

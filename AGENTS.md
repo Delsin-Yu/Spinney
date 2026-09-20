@@ -20,7 +20,7 @@ A change to anything under `src/`, `media/`, or `package.json` is not finished u
 
 - The version follows SemVer. We are at `0.x`, which is pre-1.0: a breaking change bumps the minor version only.
 - Tag every release as `vX.Y.Z`.
-- `vscode:prepublish` (compile plus the eight guards) is the release gate: a release does not ship when that script fails.
+- `vscode:prepublish` (compile plus the nine guards) is the release gate: a release does not ship when that script fails.
 - `CHANGELOG.md` uses the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
 ## Hard invariants (read before you touch code)

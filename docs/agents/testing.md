@@ -12,7 +12,7 @@ gitignored, so a leftover is harmless). Before a release, confirm `npm run compi
 `npm run vscode:prepublish` — on a push to `main`, on a `v*` tag, on a pull request and on
 demand, so a red workflow and a red gate are the same thing instead of two lists that drift.
 
-Eight build-time guards are the exception, all run by `vscode:prepublish` so a
+Nine build-time guards are the exception, all run by `vscode:prepublish` so a
 regression fails *packaging* instead of the user's session:
 
 - `npm run check:models` (`tools/check-models.js`) — the model configuration:
@@ -122,11 +122,28 @@ regression fails *packaging* instead of the user's session:
   the base name). `node tools/check-docs.js <dir>` points it at another manual folder,
   which is how to prove it still catches what it is for. See
   `docs/agents/user-manual.md`.
+- `npm run check:cwd` (`tools/exec-cwd-acceptance.js`) — the **working directory and
+  path base** (`docs/agents/tools.md`), and the one acceptance driver that is part of
+  the gate: the contract lives in the *compiled* tools, so it stubs `vscode` (a
+  `Module._load` hook), drives `ToolRegistry.execute` against a real shell, and
+  asserts that `resolvePath` maps the Git-Bash form `/d/Repos/x` onto `D:\Repos\x` on
+  Windows while leaving it alone elsewhere (on POSIX `/d` is a directory, not a
+  drive), that a command starts in the harness root and **names that directory in the
+  first line** of its result, that a `cwd` it cannot use answers `does not exist` /
+  `is not a directory` with the resolved path and the harness root instead of Node's
+  `spawn <shell> ENOENT` — that message read as "the shell is missing" and is why the
+  model took to prefixing every command with a defensive `cd <dir> && …` — and that
+  `read_file` reaches the file the `/d/...` form means rather than `D:\d\…`. It also
+  reads the `exec_command` schema, because the two rules stated there (use `cwd`,
+  never background the command inside the shell) are the only copy a sub-agent ever
+  sees. Portable by construction: every drive path is derived from the checkout and
+  the Windows-only half is skipped elsewhere, so the linux CI runs the same gate.
 
-`tools/rollover-acceptance.js` is the first of the four acceptance runs that need
-neither a window nor a provider — dev-only, **not** in `vscode:prepublish`. The
-guards above can only reach the pure modules, while the risky half of a context
-rollover lives in `SessionRuntime`: it stubs the `vscode` module (a `Module._load`
+`tools/exec-cwd-acceptance.js` above is the one windowless acceptance run that *is* a
+guard. The other four — `tools/rollover-acceptance.js` first — need neither a window
+nor a provider and are dev-only, **not** in `vscode:prepublish`. The guards that only
+reach pure modules cannot see the risky half of a context rollover, which lives in
+`SessionRuntime`: it stubs the `vscode` module (a `Module._load`
 hook) plus an offline client and drives `rolloverContext()` for real. What it pins:
 the new window's first request is `[system, harness]` with no ancestor message in
 it, the old node's background terminal is killed while another node's job is left

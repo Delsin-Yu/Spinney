@@ -5,6 +5,15 @@
   at `timeout`, promotes it instead of killing it. The id is minted by the hub
   (`BackgroundHub.mintId`) — a monotonic per-session counter, **not** a real OS pid — and is only
   resolvable inside its own session.
+- **A command must not background itself** (`&`, `nohup`, `disown`, `Start-Process`): the hub
+  tracks only the handle it spawned, so a process the shell started on its own has no id, no
+  card and no completion notice — its output is never reported — and Stop's union kill may leave
+  it running, because the kill tears down the **spawned** tree (`taskkill /T /F` on Windows, the
+  detached POSIX process group) and an orphaned or re-parented child escapes it.
+  `timeout_behavior` is the only way to make a command outlive the call with a card behind it.
+  The rule is stated twice, on purpose: in the `exec_command` description (which is what every
+  agent, sub-agents included, is sent as a schema) and in the system prompt's
+  `## Delegation (when to hand work off)` line about long-running commands.
 - `BackgroundHub` (`src/chat/backgroundHub.ts`, one per window) owns every job in the window,
   keyed by `(session, node)`: `registries: Map<sessionId, Map<nodeId, BackgroundRegistry>>`
   (`registryFor(owner)` creates lazily) plus a per-session `id → owner` index
@@ -29,6 +38,14 @@
   id it cannot itself manage — a call to any of the three answers `Error: unknown tool "…"`. The
   job registers under the sub-agent's own node, its notice still reaches the sub-agent, and only
   the user (the job card's kill button / Stop on that line) can kill it.
+- **Every background tool result carries the duration** (`formatDuration`, `src/duration.ts`):
+  `check_background_terminal` answers `Background terminal 3 is running. (command: …, 3.4s elapsed)`
+  for a live job, `Background terminal 3 finished with exit code 0 after 3.4s.` for a finished one
+  and `Background terminal 3 was killed after 3.1s. (command: …)` for a kill;
+  `kill_background` answers `Killed background terminal 3 after 3.4s (command: …).`; and
+  `join_background` answers `Background terminal 3 finished with exit code 0 after 3.4s.`. These
+  are **model-facing** strings, so they are deliberately not localized — the same locale-free token
+  the webview's chips render, not a translated status word.
 - **A job's card is a flying `kind:'bg'` node, not a dock.** `SessionRuntime.onBackgroundRegistered`
   (`runtime.ts:3891`) creates it under the owning turn node once per job: `bgTaskId` = the
   session-local id, `bgCommand` = the command, title = the command clipped to 60 chars
@@ -40,15 +57,25 @@
   view focus. The card lives in the same right-hand column-major grid as the sub-agent windows
   (`media/tree.js` `isSidecarKind` `tree.js:89`, `agentKids` `tree.js:140`).
 - **Webview rendering:** there is no standalone panel and no dock at the bottom of a card any more
-  (`#bg-panel`, `.node-bg`, `.bg-dock-*`, `.bg-item*` are gone). `renderBgBody`
-  (`media/main.js:1136-1176`) fills a `kind:'bg'` card from the tree node's own meta plus the latest
-  snapshot: a status row of `#taskId` + status + elapsed (and the card head's status chip), then the
-  command and the output tail, plus a
-  `kill` button (`media/main.js:1166-1175`; built by `killBackgroundButton`, `media/main.js:1103-1112`,
-  which posts `killBackground { id }`) only while the job runs.
+  (`#bg-panel`, `.node-bg`, `.bg-dock-*`, `.bg-item*` are gone). `renderBgBody` fills a `kind:'bg'`
+  card from the tree node's own meta plus the latest snapshot: a status row of `#taskId` + status +
+  the **elapsed chip** (and the same value as the card head's status chip), then the command and the
+  output tail, plus a `kill` button (built by `killBackgroundButton`, which posts
+  `killBackground { id }`) only while the job runs.
+- **The elapsed chip is rendered locally, from clocks the host sends.** The snapshot ships
+  `startedAt` and `finishedAt`, never a counter: a running card ticks its chip from `startedAt` on a
+  **250 ms `setInterval` in the webview**, so a command that prints nothing for minutes still shows
+  a moving number and the host never pushes a snapshot just to advance the display. A finished card
+  freezes the chip at `finishedAt - startedAt` (the host's own value — the local ticker stops, it
+  never keeps counting), and a record card restored after a restart, which has no live task, shows
+  the node's persisted `bgElapsedMs`. Both numbers go through `formatDuration` (`src/duration.ts`,
+  mirrored in `media/main.js`, because no host string arrives per tick); the token is locale-free
+  and deliberately **not** localized — `420ms`, `3.4s`, `42s`, `3m 12s`, `1h 3m`.
 - **Snapshot:** `postBackgrounds` sends one flat `{ type: 'backgrounds', tasks }` list, every task
-  (`BackgroundInfo`, `runtime.ts:349-367`) tagged with `nodeId` (its owner), `cardNodeId` (the
-  `kind:'bg'` card mirroring it, `runtime.ts:3815`) and `pendingDelivery`. The list carries running
+  (`BackgroundInfo`) tagged with `nodeId` (its owner), `cardNodeId` (the
+  `kind:'bg'` card mirroring it) and `pendingDelivery`, and carrying the job's two **clocks** —
+  `startedAt` plus `finishedAt` (`null` while it runs). A pre-computed `elapsed` field is gone: the
+  webview derives the number, so no snapshot has to be sent per second. The list carries running
   jobs plus finished ones still awaiting delivery (`runtime.ts:3851-3854`); a delivered job drops
   out, but its card keeps the persisted terminal state. The webview keys the snapshot by `task.id`
   and patches the card of each tree node with a `bgTaskId` (`renderBackgrounds`,
@@ -60,7 +87,10 @@
   `done`/`interrupted`) — the hub is in-memory, the card must outlive it — then queues one
   `SignalNotice` (`buildBackgroundSignal` `runtime.ts:3973`; `pushSignal` `runtime.ts:3996`;
   75 ms debounce `scheduleSignalDrain` `runtime.ts:4016`) keyed by the **owner** node
-  (`nodeId: owner.nodeId`, never the view focus).
+  (`nodeId: owner.nodeId`, never the view focus). The notice text and the card's status text both
+  name how long the job ran: the notice reads
+  ``Background command `cmd` (id 3) finished with exit code 0 after 3.4s.``, while the card's status
+  line is the compact `exit 0 (3m 12s)` (`killed (3m 12s)` for a kill).
 - Delivery has two paths, and neither creates a node:
   - owner turn still running → the agent hook `Agent.setSignalHandler` (`agent.ts:402`; wired in
     `workerFor` at `runtime.ts:925`, and per sub-agent at `runtime.ts:3473`) is called after the **whole** tool batch
@@ -141,7 +171,10 @@
   nodes, calls `hub.removeNode(..., { kill: true })` and forgets the cards whose nodes are gone
   (`runtime.ts:4318-4329`). A `bg` card has no children, so its own delete button
   (`deleteBranch`) is equivalent to deleting that one record.
-- **Lifecycles** (`src/tools/background.ts` owns the process plumbing):
+- **Lifecycles** (`src/tools/background.ts` owns the process plumbing): `BackgroundTask` carries
+  `startedAt` plus `finishedAt: number | null` — `finishedAt` is stamped once when the job settles
+  (exit, kill, or a failed start) and is what a snapshot's chip freezes on, while the card's
+  persisted `bgElapsedMs` is the same subtraction done once when the terminal state is snapshotted.
   `hub.removeNode(session, node, {kill})` drops one node's jobs + registry (the session counter is
   kept — ids are never reused), `hub.removeSession(session, {kill})` drops a whole session
   (`SessionRuntime.dispose()`), and `hub.killAll()` tears every job down (window dispose) so

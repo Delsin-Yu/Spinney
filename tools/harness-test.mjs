@@ -2296,7 +2296,7 @@ function suiteSelftest(cx) {
   );
 
   // -- completion notices (the `signals` suite)
-  const noticeText = 'Background command `node -e "setTimeout(()=>{},6000)"` (id 1) finished with exit code 0.';
+  const noticeText = 'Background command `node -e "setTimeout(()=>{},6000)"` (id 1) finished with exit code 0 after 6.0s.';
   const sigJsonl = (messages) =>
     [
       JSON.stringify({ type: 'meta', kind: 'session', sessionId: 's1', nodeId: 'n1' }),
@@ -2482,7 +2482,7 @@ async function selftestAsync(cx, result) {
   fs.mkdirSync(sigDir, { recursive: true });
   const sigLines = (nodeId, body) =>
     [JSON.stringify({ type: 'meta', kind: 'session', nodeId }), ...body.map((m) => JSON.stringify(m))].join('\n') + '\n';
-  const sigNotice = 'Background command `cmd` (id 1) finished with exit code 0.';
+  const sigNotice = 'Background command `cmd` (id 1) finished with exit code 0 after 6.0s.';
   fs.writeFileSync(
     path.join(sigDir, 'n1.jsonl'),
     sigLines('n1', [{ role: 'user', content: 'prompt' }, { role: 'user', content: sigNotice }]),

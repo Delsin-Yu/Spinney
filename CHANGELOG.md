@@ -7,6 +7,48 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Elapsed time on the cards that do work: a background job, a sub-agent run and a tool call each
+  show how long they take while they run, and keep the number after they end. The chip ticks in the
+  panel itself, so a quiet command still shows a moving number.
+- The agent is told how long a call took: an `exec_command` result always leads with `[exit 0 in
+  3.4s · cwd D:\repo]` — the same line names the directory the command ran in, so the agent stops
+  prefixing every command with a defensive `cd <root> && …` — and a background-terminal notice
+  reads `… finished with exit code 0 after 3.4s.`
+- A ninth build guard, `npm run check:cwd` (`tools/exec-cwd-acceptance.js`): the working
+  directory and path base above, driven through the compiled tools with a stubbed `vscode`,
+  so a `cwd` regression fails the package instead of reaching the agent. It derives every
+  drive path from the checkout and skips the Windows-only half elsewhere, which is what lets
+  the linux CI run the same gate.
+
+### Fixed
+
+- A `cwd` that cannot be used is no longer reported as a missing shell. `exec_command` checks the
+  directory **before** it spawns and answers `the working directory "x" → <resolved> does not
+  exist / is not a directory. Pass cwd relative to the harness root (…), or omit cwd to run in the
+  root.` Previously the spawn failed and Node blamed the shell (`spawn …\bash.exe ENOENT`), which
+  taught the agent that the `cwd` argument was broken.
+- A Git-Bash style path is understood on Windows: `/d/Repos/x` now means `D:\Repos\x` in every
+  tool, instead of being read as a path on the current drive (`D:\d\Repos\x`).
+
+### Changed
+
+- Tool results carry the duration in one locale-free format (`420ms`, `3.4s`, `42s`, `3m 12s`,
+  `1h 3m`). Any call that took at least a second is marked with `[tool 3.4s]`; the JSON results of
+  `spawn_agents`, `spawn_readonly_agents`, `send_agent_message` and `send_readonly_agent_message`
+  carry a `durationMs` field instead.
+- A command promoted to a background terminal reports how long it ran in the foreground first, and
+  `check_background_terminal` / `kill_background` / `join_background` report the elapsed time of the
+  job they answer about.
+- A sub-agent notice names the duration of the run (`Sub-agent #abc123 finished in 3.4s`), and a
+  resumed sub-agent times that run alone, never the total of all its runs.
+- The agent is told to keep long work inside the background terminal it can see: the
+  `exec_command` description and the system prompt both state that a command must not put itself in
+  the background (`&`, `nohup`, `disown`, `Start-Process`), because a process the harness did not
+  spawn has no card, no id and no notice, and can outlive a Stop. The prompt also states that every
+  command already starts in the harness root, so a `cd … && …` prefix is not needed.
+
 ## [0.0.3] - 2026-09-18
 
 Performance and data-durability release. It comes from a reported slowdown on a machine

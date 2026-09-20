@@ -97,12 +97,42 @@ export function getAgentRoot(): string {
   return agentRootInfo().root;
 }
 
-/** Resolve a possibly-relative path against the agent root (workspace folder, or scratch). */
-export function resolvePath(input: string): string {
-  if (path.isAbsolute(input)) {
+/**
+ * Map an MSYS/Git-Bash style drive path (`/d/Repos/x`) onto its Windows form
+ * (`D:\Repos\x`).
+ *
+ * Node's win32 `path.isAbsolute` calls `/d/…` absolute — it is "rooted", but at
+ * the current drive — so such a path survives `resolvePath` verbatim and is then
+ * resolved by the OS against the wrong drive (`D:\d\Repos\x`). The model, which
+ * thinks in the shell it is talking to, writes that form often; the tools must
+ * understand it instead of silently reading another file.
+ *
+ * Only a single-letter first segment whose drive actually exists is mapped, and
+ * only on Windows: on POSIX `/d` is an ordinary directory, not a drive.
+ */
+function mapDrivePath(input: string): string {
+  if (process.platform !== 'win32') {
     return input;
   }
-  return path.resolve(getAgentRoot(), input);
+  const match = /^\/([a-zA-Z])(?=\/|$)/.exec(input);
+  if (!match) {
+    return input;
+  }
+  const drive = `${match[1].toUpperCase()}:`;
+  if (!fs.existsSync(drive + '\\')) {
+    return input;
+  }
+  // Keep the leading separator: `D:` alone is drive-relative, `D:\` is the root.
+  return drive + (input.slice(2).replace(/\//g, '\\') || '\\');
+}
+
+/** Resolve a possibly-relative path against the agent root (workspace folder, or scratch). */
+export function resolvePath(input: string): string {
+  const mapped = mapDrivePath(input);
+  if (path.isAbsolute(mapped)) {
+    return mapped;
+  }
+  return path.resolve(getAgentRoot(), mapped);
 }
 
 export function ensureNotAborted(signal?: AbortSignal): void {
