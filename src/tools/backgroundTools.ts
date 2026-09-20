@@ -41,8 +41,13 @@ export function makeCheckBackgroundTool(getAccess: () => BackgroundAccess | null
       // the number is stable across repeated checks.
       const dur = formatDuration((task.finishedAt ?? Date.now()) - task.startedAt);
       const out = task.handle.getOutput().trim();
+      // "Killed" alone would claim a clean end. A kill that could not be confirmed
+      // (no exit observed before the deadline) is said out loud, so the model does
+      // not treat a process tree that may still be alive as gone.
       const statusLine = task.killed
-        ? `Background terminal ${id} was killed after ${dur}. (command: ${task.command})`
+        ? task.killUnconfirmed
+          ? `Background terminal ${id} was killed after ${dur}, but the process tree did not report an exit. (command: ${task.command})`
+          : `Background terminal ${id} was killed after ${dur}. (command: ${task.command})`
         : task.status === 'running'
           ? `Background terminal ${id} is running. (command: ${task.command}, ${dur} elapsed)`
           : `Background terminal ${id} finished with exit code ${task.exitCode ?? 'unknown'} after ${dur}.`;
@@ -89,9 +94,23 @@ export function makeKillBackgroundTool(getAccess: () => BackgroundAccess | null)
       // Tool-initiated kill: the tool result is the signal the agent sees, so the
       // separate completion notice is suppressed (`notifyAgent: false`). The kill
       // is what sets `finishedAt`, so the elapsed time is read AFTER it.
-      access.hub.kill(sessionId, id, { notifyAgent: false });
-      const dur = formatDuration((task.finishedAt ?? Date.now()) - task.startedAt);
-      return `Killed background terminal ${id} after ${dur} (command: ${task.command}).`;
+      const killed = access.hub.kill(sessionId, id, { notifyAgent: false }) ?? task;
+      // The registry fired the kill's confirmation detached (Stop and the card must
+      // stay instant); this tool awaits it, because its result must not claim a
+      // clean end the OS never reported. A task with no confirmation at all behaves
+      // exactly as before.
+      if (killed.killConfirm) {
+        try {
+          await killed.killConfirm;
+        } catch {
+          /* killChildProcess never rejects; an escalation that does counts as unconfirmed */
+        }
+      }
+      const dur = formatDuration((killed.finishedAt ?? Date.now()) - killed.startedAt);
+      if (killed.killUnconfirmed) {
+        return `Killed background terminal ${id} after ${dur}, but the process tree did not report an exit (command: ${killed.command}).`;
+      }
+      return `Killed background terminal ${id} after ${dur} (command: ${killed.command}).`;
     },
   };
 }
