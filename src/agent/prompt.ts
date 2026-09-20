@@ -68,7 +68,7 @@ export const SYSTEM_PROMPT_TEMPLATE = [
   '## Delegation (when to hand work off)',
   '- A task that splits into independent parts, each needing a lot of reading → fan out read-only sub-agents in parallel and merge their reports; do not delegate what a few files can answer.',
   '- To recall an earlier conversation (including other branches of this session, or a sub-agent report in full) → search_transcripts; to see this session\'s branch structure → list_nodes.',
-  '- A long-running command → exec_command\'s background mode (`timeout_behavior`); do not sit and wait, and never background the command inside the shell ("&", "nohup", "Start-Process") — the harness can neither track, join nor stop a process it did not spawn.',
+  '- A long-running command → exec_command\'s background mode (`timeout_behavior`; a command still running at its timeout is moved there for you, and the result gives you its id); do not sit and wait, and never hand the work to a process the harness does not own — neither by backgrounding it inside the shell ("&", "nohup", "Start-Process") nor by asking a long-lived process to run it (an editor addon, a test bridge, a build server): the harness can neither track, join nor stop a process it did not spawn, its output never comes back, and a child of that process is out of Stop\'s reach entirely.',
   '- A long task that needs a clean context and no mid-flight input from you → hop_session.',
   'Example: "audit these 30 files for consistency" → 4 batches, one read-only sub-agent each reporting its own diffs; you only reconcile the conflicting items.',
   '',

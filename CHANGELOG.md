@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-09-21
+
 ### Added
 
 - Elapsed time on the cards that do work: a background job, a sub-agent run and a tool call each
@@ -21,6 +23,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   so a `cwd` regression fails the package instead of reaching the agent. It derives every
   drive path from the checkout and skips the Windows-only half elsewhere, which is what lets
   the linux CI run the same gate.
+- Every line of the diagnostics log ends with a timestamp (` | at=2026-09-21T04:14:48.123Z`),
+  and a tool call is bracketed by lines instead of being one closing line: `tool-start` before
+  the body, and — for `exec_command` — `exec start`, a 30 s `exec still-running` heartbeat while
+  the command holds the turn, `exec end` with the outcome, and `exec kill` with what the kill
+  actually achieved. A hang is no longer an undatable hole in the file. The command line itself
+  reaches the log masked and clipped (`src/redact.ts`): `--token=…` / `Authorization: …` become
+  `***`, and only the first 120 characters are kept.
+- `spinney.commandTimeoutMax` (default 1800): the ceiling the agent's `timeout` is clamped to,
+  whatever it asks for.
+- Three more build guards, all part of `vscode:prepublish`: `npm run check:shell`
+  (`tools/shell-argv-acceptance.js` — the arguments a native child really receives under Git
+  Bash), `npm run check:kill` (`tools/exec-kill-acceptance.js` — a kill reports its outcome and
+  an unconfirmed one is flagged), and `npm run check:timeout`
+  (`tools/exec-timeout-acceptance.js` — the promotion default above and the ceiling).
 
 ### Fixed
 
@@ -31,6 +47,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   taught the agent that the `cwd` argument was broken.
 - A Git-Bash style path is understood on Windows: `/d/Repos/x` now means `D:\Repos\x` in every
   tool, instead of being read as a path on the current drive (`D:\d\Repos\x`).
+- A Windows command no longer loses its arguments to the shell. Git Bash rewrote anything that
+  looked like a POSIX path before a native program saw it: `taskkill /PID 67188 /T /F` arrived as
+  `C:/Program Files/Git/PID …` and was rejected with `invalid argument/option`, so killing a stuck
+  process silently did not work (and the `//F` escape that used to work no longer did either).
+  The shell is now started with `MSYS_NO_PATHCONV=1`, so a native tool receives the argument as
+  written.
+- A kill that could not be confirmed is no longer reported as a clean kill. `kill`/`killAll` and
+  `exec_command`'s timeout and Stop paths wait for the process to really exit (Windows
+  `taskkill /PID … /T /F`, then the child's `exit`; POSIX `SIGTERM` and then `SIGKILL`), and an
+  outcome other than an exit is flagged: `Killed background terminal 3 after 3.4s, but the process
+  tree did not report an exit (command: …).` The state transition stays instantaneous, so Stop and
+  the card do not wait for the confirmation.
 
 ### Changed
 
@@ -48,6 +76,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the background (`&`, `nohup`, `disown`, `Start-Process`), because a process the harness did not
   spawn has no card, no id and no notice, and can outlive a Stop. The prompt also states that every
   command already starts in the harness root, so a `cd … && …` prefix is not needed.
+- A command that is still running when its timeout is reached is **moved to the background**, not
+  killed: the result names the timeout, the new background id and the directory, and says the
+  command keeps running, so the agent keeps a command it did not wait for. `timeout_behavior:
+  "stop"` is the way to kill at the timeout, `"move_to_background"` is now only the explicit
+  spelling of the default, and a session with no background terminal to offer still kills at the
+  timeout rather than failing. The agent's `timeout` is clamped to `spinney.commandTimeoutMax`.
+- The system prompt and the `exec_command` description name the second half of the
+  ownership rule: a command must not hand its work to a long-lived process the harness does not
+  own either — an editor addon, a test bridge, a build server. Its children are outside the
+  spawned tree, so Stop cannot reach them and their output is never reported (this is the shape a
+  customer hit: a test bridge's headless runner outlived its editor for two days).
 
 ## [0.0.3] - 2026-09-18
 

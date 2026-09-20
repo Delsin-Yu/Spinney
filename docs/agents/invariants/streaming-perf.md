@@ -42,7 +42,10 @@
   folding rule above is unchanged** by the split: the block taking deltas is
   still expanded in place, it simply sits in zone 2 with the rest of the log.
 - `[perf]` lines (request JSON size, assistant-round, tool timings, persist, stream
-  flush) go to the **Spinney** output channel. Open View → Output → "Spinney".
+  flush) go to the **Spinney** output channel. Open View → Output → "Spinney". Every
+  one that reaches the diagnostics file also ends with a ` | at=<ISO8601>` stamp, and
+  each tool call now writes a `tool-start` line before it runs — see the log section
+  below.
 
 ### The three zones of a card: `ask` / `work` / `answer`
 
@@ -310,6 +313,24 @@ simulation harness points the log anywhere.
 the conversation nor a credential can appear. `tools/diagnostics-log-acceptance.js` pins the
 bounds *and* those two source-level rules, because both failures would be silent.
 
+**Every line of the file ends with ` | at=<ISO8601>`** (`ChatViewProvider.stampLine`), the file's
+four `#` header lines being the only exception (they are written straight to the stream, and their
+`started` field is already an ISO timestamp). The stamp is a deliberate **suffix**:
+`tools/sim/run.mjs`'s `analysePerfLog` keeps the lines that `startsWith('[perf]')`, strips the
+marker and then matches several **`^`-anchored** patterns, so a *prefix* would silently drop exactly
+the measurements it reads — `lag blocked`, `persist-queued`, `op#… end`. Without it the header's
+`started` is the only time in the file: "when did this stall happen?" has no answer, and a call that
+never returned leaves a hole nobody can date.
+
+**A tool call is now bracketed.** `Agent.executeToolCall` writes `[perf] tool-start <name> args=<len>`
+*before* the body runs — the old log had nothing before the end line, so a call that hung (a shell
+waiting for input, an API request with no deadline) or a turn killed while one was running left
+**nothing at all** for it, and the file simply had a hole in it. With the start line, the end line
+that matches it (`tool <name> <ms>ms args=… result=…`, or the `exec …` family below for
+`exec_command`) and the ` | at=` stamp on each, that hole becomes **measurable**: a start without an
+end *is* the hung call, and the two timestamps say for how long — which is the difference between
+"the session was idle" and "the session was blocked for three hours".
+
 The lines that make such a report diagnosable, in the order they appear:
 
 - `[env version=… diag=… vscode=… node=… <platform>-<arch> cpus=… mem=…GB appRoot=… folders=… root=… store=… key=… language=…]`
@@ -320,6 +341,14 @@ The lines that make such a report diagnosable, in the order they appear:
 - `[search rg=<path>]` (or `rg=missing (… the fix is NOT in play)`, or a spawn-failure line)
   — **the first thing to check**: whether the child-process search path is actually the one
   running. `via=walk` on the per-call line and `rg=missing` here mean the fix is not in play.
+- `[perf] tool-start <name> args=<len>` — every tool call, written **before** the body runs; the
+  line that matches it is the runtime's `tool <name> <ms>ms args=… result=…`, so a start without an
+  end is a hang rather than a hole (`exec_command` adds its own `exec end …`).
+- `[perf] exec start …` / `still-running …` / `end …` / `kill …` — the `exec_command` lifecycle in
+  one grammar: the call as executed (with the redacted command line — `redactCommand` in
+  `src/redact.ts`, whitespace collapsed, secrets masked, clipped to 120 chars), a 30 s heartbeat
+  while a foreground command holds the turn, what ended the call, and what a kill actually
+  achieved. See `docs/agents/tools.md`.
 - `[perf] search-files ms=… files=… matches=… capped=… via=rg|walk scope=… wait=…ms` — per
   call; `wait=` is the time the call spent queued behind the work budget.
 - `[perf] spawn-request count=N mode=… depth=1 node=…` — the shape of the fan-out.

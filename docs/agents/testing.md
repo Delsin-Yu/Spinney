@@ -12,7 +12,7 @@ gitignored, so a leftover is harmless). Before a release, confirm `npm run compi
 `npm run vscode:prepublish` — on a push to `main`, on a `v*` tag, on a pull request and on
 demand, so a red workflow and a red gate are the same thing instead of two lists that drift.
 
-Nine build-time guards are the exception, all run by `vscode:prepublish` so a
+Twelve build-time guards are the exception, all run by `vscode:prepublish` so a
 regression fails *packaging* instead of the user's session:
 
 - `npm run check:models` (`tools/check-models.js`) — the model configuration:
@@ -123,8 +123,10 @@ regression fails *packaging* instead of the user's session:
   which is how to prove it still catches what it is for. See
   `docs/agents/user-manual.md`.
 - `npm run check:cwd` (`tools/exec-cwd-acceptance.js`) — the **working directory and
-  path base** (`docs/agents/tools.md`), and the one acceptance driver that is part of
-  the gate: the contract lives in the *compiled* tools, so it stubs `vscode` (a
+  path base** (`docs/agents/tools.md`), and the first of the four acceptance drivers
+  that make up the gate (with `check:shell` / `check:kill` / `check:timeout` below,
+  which drive the same compiled tools): the contract lives in the *compiled* tools, so
+  it stubs `vscode` (a
   `Module._load` hook), drives `ToolRegistry.execute` against a real shell, and
   asserts that `resolvePath` maps the Git-Bash form `/d/Repos/x` onto `D:\Repos\x` on
   Windows while leaving it alone elsewhere (on POSIX `/d` is a directory, not a
@@ -138,10 +140,79 @@ regression fails *packaging* instead of the user's session:
   never background the command inside the shell) are the only copy a sub-agent ever
   sees. Portable by construction: every drive path is derived from the checkout and
   the Windows-only half is skipped elsewhere, so the linux CI runs the same gate.
+- `npm run check:shell` (`tools/shell-argv-acceptance.js`) — the argv a **native**
+  child actually receives under the shell we spawn. It exists because of one incident:
+  the model ran `taskkill /PID 67188 /T /F` through `exec_command` (Git Bash on
+  Windows), MSYS had rewritten `/PID` into `C:/Program Files/Git/PID`, taskkill
+  answered `invalid argument/option`, and three stuck Godot processes were never
+  killed. None of that is visible in the tool's own source — only the argv a native
+  program sees shows it — so the script drives the *compiled* shell selection
+  (`out/tools/shell.js`) the way `spawnShellCommand` does (`shell.file` +
+  `shell.buildArgs(cmd)` + `env: shell.env`) and makes the child print its own argv as
+  JSON. It asserts that no probe argument carries a Git/MSYS installation prefix, that
+  `/PID` arrives verbatim (the exact regression), and that `MSYS_NO_PATHCONV` is `'1'`
+  on Windows and absent off it (the switch means nothing to a POSIX bash, so it must
+  not leak there); it also *prints* what `//F` and `//IM` arrive as, which is a
+  measurement rather than an assertion, because those two spellings are the MSYS
+  double-slash escape and their fate depends on a rule we do not own. Needs `out/`
+  (`npm run compile` first), and the Windows half is skipped on POSIX, so the linux CI
+  runs the same gate. Part of `vscode:prepublish`.
+- `npm run check:kill` (`tools/exec-kill-acceptance.js`) — the **kill-confirmation
+  contract**. A kill used to be fire-and-forget: the old shape returned as soon as the
+  signal had been *sent* (or `taskkill` had run, which only says taskkill ran), so Stop,
+  the terminal card and the tool result all claimed a clean ending while the process
+  tree could still be alive — the user's "commands do not end properly". It stubs
+  `vscode` and drives the compiled `out/tools/background.js` for real, pinning four
+  facts that were previously unobservable: `handle.kill()` resolves `'exited'` for a
+  long-running command **and does so comfortably before the child would have ended on
+  its own** (an 8 s command killed in well under 2 s — the outcome is a measurement,
+  not a restatement of the intent), a second kill on the same handle is safe, an
+  already-finished command resolves `'exited'` too (the "already gone" path that keeps
+  a Stop from hanging on the OS), and every observed outcome is a member of
+  `{'exited','no-exit','no-pid'}` (the type is the contract, so a kill that answers
+  anything else, or never answers, fails here — every await is bounded, because a kill
+  that never answers is a failure and not a hang). It also holds
+  `BackgroundRegistry.kill` to its **synchronous** transition (the task reads as
+  finished immediately, so Stop and the card stay instant) with the confirmation fired
+  detached: an unconfirmed kill sets `killUnconfirmed` and writes one
+  `bg kill id=… pid=… outcome=… ms=…` diagnostics line, a confirmed one stays quiet.
+  Needs `out/` and is portable — the POSIX and Windows halves exercise the same public
+  API. Part of `vscode:prepublish`.
+- `npm run check:timeout` (`tools/exec-timeout-acceptance.js`) — the new **default
+  `timeout_behavior`** and the timeout ceiling, the two rules that decide what happens
+  to work the agent can no longer see. With background access, a command that outlives
+  `timeout` and passes no `timeout_behavior` is **moved to the background**: the result
+  leads with `[command moved to background: id 7]`, names `check_background_terminal(7)`,
+  says the command was still running and that nothing was killed, and the job is
+  registered with the hub under the **owner of the turn** — one `hub.register`, under
+  the node that spawned it, because a job registered under the wrong owner renders in
+  the wrong branch and its completion notice is delivered to nobody. The regression it
+  prevents is losing a 40-minute build to a timeout that used to kill it, which is the
+  failure the agent cannot undo. Without background access — a bare `ToolRegistry`,
+  exactly what `exec-cwd-acceptance.js` constructs — the same call must behave as it
+  always did: kill at the timeout, report `timed out`, register nothing, and never
+  throw `Background terminals are not available` (the default is derived from what the
+  session can actually do, not assumed). An explicit `"stop"` still kills even where a
+  background terminal was available. And `timeout` is clamped to
+  `spinney.commandTimeoutMax`: the settings stub keys the two settings separately
+  (`commandTimeoutMax` → 2, `commandTimeout` → 600), because the clamp is only
+  observable if the two keys can differ, so asking for 9999 s on a 3 s command must
+  come back after ~2 s and *say* 2000 ms. Needs `out/` (`npm run compile` first) and is
+  portable by construction: the "slow" command is `process.execPath -e …`, so it needs
+  no `sleep`, no shell builtin and no PATH lookup. Part of `vscode:prepublish`.
 
-`tools/exec-cwd-acceptance.js` above is the one windowless acceptance run that *is* a
-guard. The other four — `tools/rollover-acceptance.js` first — need neither a window
-nor a provider and are dev-only, **not** in `vscode:prepublish`. The guards that only
+All three of those need `out/` (`npm run compile` first), for the same reason
+`check:signals` does — they drive compiled tools — and they are wired into
+`vscode:prepublish` immediately **after `check:cwd`**, whose subject they continue
+(`check:cwd` is the working directory and path base, `check:shell` the argv the shell
+hands on, `check:kill` the end of a command, `check:timeout` what happens when it does
+not end).
+
+`tools/exec-cwd-acceptance.js` and the three scripts listed after it above
+(`shell-argv-acceptance.js` / `exec-kill-acceptance.js` / `exec-timeout-acceptance.js`)
+are the four windowless acceptance runs that *are* guards. The rest —
+`tools/rollover-acceptance.js` first — need neither a window nor a provider and are
+dev-only, **not** in `vscode:prepublish`. The guards that only
 reach pure modules cannot see the risky half of a context rollover, which lives in
 `SessionRuntime`: it stubs the `vscode` module (a `Module._load`
 hook) plus an offline client and drives `rolloverContext()` for real. What it pins:

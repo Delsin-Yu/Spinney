@@ -2,8 +2,8 @@
 The settings are contributed in **groups**: `contributes.configuration` is an array of
 `{ title, properties }` sections — Model & API (`model`, `providers`, `modelCards`) · Chat & Display
 (`replyLanguage`, `foldThinking`, `foldToolCalls`, `foldWork`, `promptSections`) · Tools & Execution
-(`commandTimeout`, `maxInlineToolOutput`) · Sub-agents (`maxConcurrentSubagents`,
-`maxLevel2Subagents`) · Sessions & Transcripts (`autoSessionTitles`,
+(`commandTimeout`, `commandTimeoutMax`, `maxInlineToolOutput`) · Sub-agents
+(`maxConcurrentSubagents`, `maxLevel2Subagents`) · Sessions & Transcripts (`autoSessionTitles`,
 `saveSessionTranscripts`, `saveSubAgentTranscripts`, `subAgentTranscriptDir`) ·
 Control Plane (`httpApi.*`). The Settings UI renders one section per entry and keeps
 the order the properties are declared in, so the array *is* the grouping and the
@@ -22,7 +22,16 @@ card id → `{ name, providerId, oaiModel, contextWindow, concurrency, vision: {
 enabled, transport }, efforts, defaultEffort }`), `commandTimeout`
 (seconds, default 600 = 10 minutes — the default for `exec_command` when the tool
 call does not pass its own `timeout`; a non-positive/absent value falls back to
-600), `replyLanguage` (`auto` — the default, i.e. follow the VS Code display language —
+600; a command that reaches it is **moved to the background**, not killed, unless
+the call passed `timeout_behavior: "stop"` — see
+`invariants/background-terminals.md`),
+`commandTimeoutMax` (seconds, default 1800 = 30 minutes — the **ceiling** on a
+command, applied to whatever `timeout` the model passes *and* to the
+`commandTimeout` default; a non-positive/absent value falls back to 1800. It was
+added with the move-to-background default, because that pairing is what makes a
+ceiling harmless: a command that hits it is promoted to a background terminal and
+the result names the clamped value, so the work is kept rather than lost),
+`replyLanguage` (`auto` — the default, i.e. follow the VS Code display language —
 or one of the language tags VS Code ships display translations for; resolved into
 the **name** the prompt carries by `replyLanguageName` in
 `src/agent/languages.ts` — the tags live only in the setting's `enum`, ordered
@@ -105,7 +114,7 @@ no handling.
 | `foldToolCalls`, `foldThinking`, `foldWork` | immediately, incl. cards already on screen | pushed: `postConfig()` → the webview re-applies the default to existing cards (`foldWork` re-runs the card's automatic work-log fold after the push, which is how a finished card folds or unfolds without a repaint) |
 | `promptSections` | immediately, incl. a chat tab already open | pushed: `postConfig()` → the webview rebuilds the snippet menu from `snippets` (it keeps no copy of the list, and the shipped rows are merged in again on every push, so a renamed or emptied row shows up at once) |
 | `httpApi.enabled`, `httpApi.port` | immediately | pushed: `ControlServer.restart()` (rebind the listener; disabling just leaves `start()` a no-op) |
-| `commandTimeout`, `maxInlineToolOutput`, `maxLevel2Subagents`, `saveSessionTranscripts`, `saveSubAgentTranscripts`, `subAgentTranscriptDir`, `autoSessionTitles` | immediately | pulled at the point of use (they already were — no listener needed) |
+| `commandTimeout`, `commandTimeoutMax`, `maxInlineToolOutput`, `maxLevel2Subagents`, `saveSessionTranscripts`, `saveSubAgentTranscripts`, `subAgentTranscriptDir`, `autoSessionTitles` | immediately | pulled at the point of use (they already were — no listener needed; the two timeout keys are read per `exec_command` call, so a change applies to the next command and never to a command already running) |
 
 - **`model` / `thinkingEffort` arbitration (P4):** the selection belongs to the **node**.
   A turn records the card and level it ran with on the node it creates; a follow-up

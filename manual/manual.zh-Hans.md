@@ -287,6 +287,8 @@ Spinney 绝不发送卡片没有声明的级别。卡片不提供的级别会回
 
 后台终端在回合继续的同时保持一条长命令。智能体通过带 `timeout_behavior` 的 `exec_command` 启动一个后台终端。
 
+不带 `timeout_behavior` 的 `exec_command` 调用，其默认超时取自 `spinney.commandTimeout`（600 秒），且 Spinney 会把模型的 `timeout` 限制在 `spinney.commandTimeoutMax`（1800 秒）以内。命令达到超时时间时仍在运行，就会被转入后台：结果会写明该超时时间、新的后台 id 和目录，并说明命令会继续运行。`timeout_behavior` 为 `"stop"` 的调用则改为在超时处终止命令。
+
 智能体不会自己把进程放到后台，例如用 `&` 或 `Start-Process`。Spinney 无法跟踪这样的进程，你也不能从卡片上终止它。
 
 卡片显示 `#<id>`、状态、已用时间、命令和最后几行输出。命令运行期间，已用时间会走动，命令结束后仍然保留在卡片上。命令的结果也会告诉智能体该命令花了多长时间。
@@ -400,7 +402,8 @@ Spinney 不重试这些失败：
 | `spinney.foldToolCalls` | `true` | 默认折叠工作日志中的工具调用卡片。正在运行的调用保持展开。 |
 | `spinney.foldWork` | `true` | 默认在回合完成时把工作日志折叠成单行标题；你点击过的标题会保持你留下的状态。 |
 | `spinney.promptSections` | `{}` | 额外的提示词片段，以菜单中的名称为键。与自带片段同名的名称会替换其文本。 |
-| `spinney.commandTimeout` | `600` | 默认命令超时，单位为秒。 |
+| `spinney.commandTimeout` | `600` | 命令的默认超时时间，单位为秒。工具调用未传入 `timeout` 时使用它。命令达到该时间时仍在运行，就会被转入后台。工具调用传入 `timeout_behavior` `"stop"` 时，改为在超时处终止。 |
+| `spinney.commandTimeoutMax` | `1800` | 命令超时的绝对上限，单位为秒。无论模型传入多大的 `timeout`，Spinney 都会把它限制在该上限内。1800 即 30 分钟。 |
 | `spinney.maxInlineToolOutput` | `32768` | 工具结果的大小上限，单位为字节。更大的结果会写入文件。`0` 关闭该上限。 |
 | `spinney.maxConcurrentSubagents` | `15` | 同时可以运行多少个第 1 层子智能体。多出的任务等待。 |
 | `spinney.maxLevel2Subagents` | `2` | 一个子智能体可以启动多少个子节点。 |
@@ -409,7 +412,7 @@ Spinney 不重试这些失败：
 | `spinney.saveSubAgentTranscripts` | `true` | 把每个已结束的子智能体对话以 JSONL 写入磁盘。 |
 | `spinney.subAgentTranscriptDir` | `""` | 转写文件的文件夹，相对于智能体根目录。为空表示扩展存储。 |
 | `spinney.dataDir` | `""` | 存放会话的文件夹。为空表示扩展存储下的固定文件夹，且不以扩展 id 命名——重命名或重装都不会移动你的历史。填入你备份的文件夹即可把历史放在本机 profile 之外。下次重载窗口后生效。 |
-| `spinney.diagnostics.log` | `true` | 为本窗口写诊断日志。其中只有耗时、计数与路径——不含你的对话。每个窗口一个文件，更旧的文件被删除，单个文件到 2 MiB 时轮转。 |
+| `spinney.diagnostics.log` | `true` | 为本窗口写诊断日志。其中只有耗时、计数与路径——不含你的对话。每一行都以时间戳结尾。命令开始时还会写一行，运行期间每 30 秒写一行心跳，结束时写一行。每个窗口一个文件，更旧的文件被删除，单个文件到 2 MiB 时轮转。 |
 | `spinney.httpApi.enabled` | `false` | 打开本地 HTTP 控制平面。见第 14 节。 |
 | `spinney.httpApi.port` | `0` | 该控制平面的端口。`0` 让系统选一个。 |
 
@@ -526,6 +529,8 @@ Spinney 在未打开任何文件夹的窗口中也能工作。
 
 Spinney 为每个窗口保留一份诊断日志。其中只有耗时、计数与路径——不含你输入的内容，也不含 API 密钥。
 
+日志的每一行都以时间戳结尾，例如 ` | at=2026-09-21T04:14:48.123Z`。日志还会在命令开始时写一行、命令运行期间每 30 秒写一行心跳，并在命令结束时写一行。因此，卡住的命令事后能在日志中看到。
+
 | 步骤 | 做法 |
 |---|---|
 | 1 | 复现问题。 |
@@ -533,4 +538,12 @@ Spinney 为每个窗口保留一份诊断日志。其中只有耗时、计数与
 | 3 | 把那一份文件发给支持你的人。 |
 
 把 `spinney.diagnostics.log` 设为 `false` 可以停掉它。
+
+Spinney 没有启动的进程可能残留。当一条命令把工作交给另一个程序时就会发生这种情况，例如编辑器、构建服务器或测试桥接程序。该程序的子进程在 Spinney 的进程树之外。**停止** 无法触及它，它的输出也永远回不来。Spinney 无法替你找到这样的进程。请使用任务管理器，或在 PowerShell 中运行以下命令：
+
+```powershell
+Get-CimInstance Win32_Process -Filter "name like '<program>%'" | Where-Object { $_.CreationDate -lt (Get-Date).AddHours(-2) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+```
+
+把 `<program>` 替换为残留程序的名称。该筛选条件匹配启动超过两小时的进程。
 

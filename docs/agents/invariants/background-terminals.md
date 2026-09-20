@@ -1,10 +1,38 @@
 ## Background terminals
-- `exec_command` accepts a `timeout_behavior` arg (`stop` default, `move_to_background`,
-  `start_in_background`). `start_in_background` launches immediately and returns a
+- `exec_command` accepts a `timeout_behavior` arg (`move_to_background` **is the default**,
+  `stop`, `start_in_background`). `start_in_background` launches immediately and returns a
   **session-local** `id`; `move_to_background` runs it in the foreground and, if still running
-  at `timeout`, promotes it instead of killing it. The id is minted by the hub
+  at `timeout`, promotes it to a background terminal instead of killing it — the result names
+  the timeout that promoted it, the `id` it was given, the working directory, the fact that
+  **nothing was killed** and that it keeps running (`[command moved to background: id 7]`, then
+  the output so far and the three tools that manage it). That promotion is its own kind of
+  ending in the diagnostics: `outcome=promoted`, neither `exit` nor `timeout`, because the
+  process is alive and now belongs to the hub — whose card, id and completion notice take over.
+  `move_to_background` written out is therefore merely the explicit spelling of the default;
+  `"stop"` is the only way to ask for the old behaviour (kill the process tree at the timeout,
+  ending in `[command timed out after …]`) and `start_in_background` is unchanged. The default
+  is derived from what the session can actually do, never assumed: `getAccess()` returns null in
+  a bare `ToolRegistry` — the acceptance drivers build one — and in a worker with no hub, and
+  there the default falls back to **`stop` semantics** rather than throwing, because the tool
+  must never become unusable where the hub is absent; that fallback is what keeps the `check:cwd`
+  gate (which builds a bare registry) green. An *explicit* `timeout_behavior` other than `stop`
+  in such a context does throw — `Background terminals are not available in this session.` —
+  because that is a request the context cannot honour. The id is minted by the hub
   (`BackgroundHub.mintId`) — a monotonic per-session counter, **not** a real OS pid — and is only
   resolvable inside its own session.
+- **`timeout` has a ceiling, and the effective value is the one every message names.**
+  `spinney.commandTimeoutMax` (default 1800 s, `DEFAULT_COMMAND_TIMEOUT_MAX_SEC` in
+  `src/tools/execCommand.ts`) clamps whatever `timeout` the model passes **and** the
+  `commandTimeout` default alike — the ceiling exists to bound how long one tool call can hold
+  the turn, and a setting that ignored it would bound nothing. The clamp is never silent:
+  `timeoutNote` reads ` (the requested timeout 9999s was clamped to 1800s;
+  spinney.commandTimeoutMax=1800s)` and is appended to the two messages that name a timeout (the
+  promotion line above and the `stop` timeout line), because a model that asked for 9999 s and
+  then reads an unexplained `1800 ms` learns that `timeout` is ignored — the very belief the
+  ceiling is meant to avoid. `tools/exec-timeout-acceptance.js` (`npm run check:timeout`, part of
+  `vscode:prepublish`) pins the clamp with a settings stub whose two keys answer different
+  values, which is the only way a clamp is observable at all. The key itself is documented in
+  `invariants/config-keys.md`.
 - **A command must not background itself** (`&`, `nohup`, `disown`, `Start-Process`): the hub
   tracks only the handle it spawned, so a process the shell started on its own has no id, no
   card and no completion notice — its output is never reported — and Stop's union kill may leave
@@ -14,6 +42,17 @@
   The rule is stated twice, on purpose: in the `exec_command` description (which is what every
   agent, sub-agents included, is sent as a schema) and in the system prompt's
   `## Delegation (when to hand work off)` line about long-running commands.
+- **A third "we cannot own it" case sits next to that rule**, recorded here because it happened
+  in the field: a command can hand its work to a **long-lived process the harness does not own**
+  — an editor addon, a test bridge, a build server. Its children are not in the spawned tree, so
+  the union kill and Stop structurally cannot reach them, and their output is never reported.
+  That is an **ownership boundary, not a bug**: the hub tracks the handle it spawned, and a
+  process someone else spawned was never in that set. The **known limitation** is that the
+  harness deliberately does **not** scan for such stray processes — there is no `Show Stray
+  Processes` command and no process scanner, because a process table does not say which entry
+  belongs to which tool. The remedy is the one above: the runner is started by the harness
+  (`exec_command` in the foreground, or through `timeout_behavior`, so it gets a card, an id and
+  a completion notice), or the user stops the stray themselves.
 - `BackgroundHub` (`src/chat/backgroundHub.ts`, one per window) owns every job in the window,
   keyed by `(session, node)`: `registries: Map<sessionId, Map<nodeId, BackgroundRegistry>>`
   (`registryFor(owner)` creates lazily) plus a per-session `id → owner` index
@@ -46,6 +85,54 @@
   `join_background` answers `Background terminal 3 finished with exit code 0 after 3.4s.`. These
   are **model-facing** strings, so they are deliberately not localized — the same locale-free token
   the webview's chips render, not a translated status word.
+- **A kill reports what it achieved** (`src/tools/background.ts`): `CommandHandle.kill()` is
+  `() => Promise<KillOutcome>` with `KillOutcome = 'exited' | 'no-exit' | 'no-pid'` — the child's
+  exit was observed, the kill was issued but no exit arrived before the deadline (so the process
+  tree may still be alive), or there was no pid to signal (the spawn never succeeded). On Windows
+  the tree is torn down with `execFile('taskkill', ['/PID', pid, '/T', '/F'])` (an argument
+  array, never a shell string) and the child's **`exit`** event is then awaited for up to
+  `KILL_CONFIRM_MS = 800` ms; on POSIX the detached process group gets `SIGTERM`, waits
+  `SIGTERM_GRACE_MS = 300` ms, escalates to `SIGKILL` and waits `SIGKILL_CONFIRM_MS = 500` ms
+  (`ESRCH` on the group signal is itself a confirmed exit, and an already-exited child answers
+  `'exited'` without signalling anything — which is what makes a second `kill()` safe and
+  idempotent). The deadlines bound the *confirmation*, not the kill: a stuck or unkillable
+  process must not hold a tool result, or a Stop, open. **Why `exit` and not `close`**: `close`
+  additionally waits for the stdio pipes to drain, and a grandchild that survived the kill (or a
+  shell that had already left one behind) holds them open indefinitely — so `close` may never
+  fire for a process that is already gone. Confirming on `close` was exactly the bug that hid a
+  dead process behind a live-looking job.
+- **A kill that cannot be confirmed says so, and is logged.** `BackgroundRegistry.kill()` and
+  `killAll()` stay **synchronous** in their state transition — Stop and the card stay instant,
+  and `complete(task, null)` is unchanged — and fire the confirmation **detached**
+  (`confirmKill`), because a caller must not wait on the OS. A non-`exited` outcome sets
+  `task.killUnconfirmed = true` and writes exactly one diagnostics line:
+  `bg kill id=<id> pid=<pid|none> outcome=<exited|no-exit|no-pid> ms=<elapsed>`. The task also
+  carries `killConfirm?: Promise<KillOutcome>`, so the tool layer can await the confirmation the
+  registry deliberately did not await. A registered handle that answers no outcome at all (the
+  plain objects the smoke tests build) is treated as nothing to claim: that task keeps the plain
+  wording it had before this existed.
+- The two model-facing strings a non-`exited` kill produces: `kill_background` answers
+  ``Killed background terminal ${id} after ${dur}, but the process tree did not report an exit
+  (command: ${task.command}).`` and `check_background_terminal` answers ``Background terminal
+  ${id} was killed after ${dur}, but the process tree did not report an exit. (command:
+  ${task.command})``. Confirmed kills keep the old wording byte for byte — `Killed background
+  terminal 3 after 3.4s (command: …).` and `Background terminal 3 was killed after 3.1s.
+  (command: …)` — because "killed" alone would claim a clean end the OS never reported.
+  `tools/exec-kill-acceptance.js` (`npm run check:kill`) pins both halves: a confirmed kill is
+  silent and sets nothing, an unconfirmed one raises the flag and logs the line.
+- **The Windows `taskkill` trap is why the old advice was wrong** (`src/tools/shell.ts`):
+  `spawnShellCommand` runs the command through Git Bash, and MSYS rewrites an argument that
+  looks like a Unix path into a Windows one before a **native** child sees it — so
+  `taskkill /PID 1234 /T /F` reached taskkill as `C:/Program Files/Git/PID …` and was rejected
+  with `invalid argument/option`, silently teaching a model that killing a stuck process "does
+  not work" (`//F`, the MSYS double-slash escape, was the workaround, and MSYS could de-fang that
+  too). `src/tools/shell.ts` now sets `MSYS_NO_PATHCONV: '1'` in the Git Bash env on Windows —
+  the switch means nothing to a POSIX bash, so it is not set there — so a native tool receives
+  the argument as written and the double-slash workaround is no longer needed.
+  `tools/shell-argv-acceptance.js` (`npm run check:shell`, part of `vscode:prepublish`) drives
+  the compiled shell selection the
+  way `spawnShellCommand` does (`shell.file` + `buildArgs` + `env`) and pins the argv a native
+  child actually receives, because nothing about this failure is visible in the tool's source.
 - **A job's card is a flying `kind:'bg'` node, not a dock.** `SessionRuntime.onBackgroundRegistered`
   (`runtime.ts:3891`) creates it under the owning turn node once per job: `bgTaskId` = the
   session-local id, `bgCommand` = the command, title = the command clipped to 60 chars
@@ -178,10 +265,11 @@
   `hub.removeNode(session, node, {kill})` drops one node's jobs + registry (the session counter is
   kept — ids are never reused), `hub.removeSession(session, {kill})` drops a whole session
   (`SessionRuntime.dispose()`), and `hub.killAll()` tears every job down (window dispose) so
-  nothing is orphaned. `spawnShellCommand`/`killChildProcess` do the process-tree kill (Windows
-  `taskkill /T /F`, otherwise the detached POSIX process group), keep draining output past
-  `OUTPUT_CAP` (a per-stream `StringDecoder` keeps a multi-byte character split across pipe chunks
-  intact). `ControlSessionInfo.backgroundNodes` is unchanged: it reports the **owning turn nodes**
+  nothing is orphaned. `spawnShellCommand`/`killChildProcess` do the process-tree kill and report
+  the `KillOutcome` above (Windows `taskkill /T /F`, otherwise the detached POSIX process group),
+  and the handle keeps draining output past `OUTPUT_CAP` (a per-stream `StringDecoder` keeps a
+  multi-byte character split across pipe chunks intact).
+  `ControlSessionInfo.backgroundNodes` is unchanged: it reports the **owning turn nodes**
   (from the hub's per-`(session, node)` registries, `runtime.ts:1025`), so the control plane —
   and the `background` acceptance suite — can verify ownership survived a view move. The `kind:'bg'`
   cards are display-only and never appear there.

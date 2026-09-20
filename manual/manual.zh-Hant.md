@@ -287,6 +287,8 @@ Spinney 絕不傳送卡片沒有宣告的層級。卡片沒有提供的層級會
 
 背景終端在回合繼續時保留一個長時間執行的命令。代理透過帶有 `timeout_behavior` 的 `exec_command` 啟動一個背景終端。
 
+未帶 `timeout_behavior` 的 `exec_command` 呼叫，其預設逾時取自 `spinney.commandTimeout`（600 秒），而 Spinney 會把模型的 `timeout` 限制在 `spinney.commandTimeoutMax`（1800 秒）之內。命令在達到逾時時仍在執行，就會被移到背景：結果會寫明該逾時、新的背景 id 和目錄，並說明命令會繼續執行。帶有 `timeout_behavior` `"stop"` 的呼叫則改為在逾時時終止命令。
+
 代理不會自己把進程放到背景，例如用 `&` 或 `Start-Process`。Spinney 無法追蹤這樣的進程，你也不能從卡片上終止它。
 
 卡片顯示 `#<id>`、狀態、經過時間、命令，以及最後幾行輸出。命令執行期間，經過時間會變動，命令結束後仍會留在卡片上。命令的結果也會告訴代理該命令花了多久。
@@ -400,7 +402,8 @@ Spinney 不重試這些失敗：
 | `spinney.foldToolCalls` | `true` | 預設摺疊工作日誌中的工具呼叫卡片。正在執行的呼叫會保持展開。 |
 | `spinney.foldWork` | `true` | 預設在回合完成時把工作日誌摺疊成單行標頭；你點選過的標頭會保持你留下的狀態。 |
 | `spinney.promptSections` | `{}` | 額外的提示詞片段，以選單中的名稱作為設定鍵。與內建片段同名的項目會取代其文字。 |
-| `spinney.commandTimeout` | `600` | 預設的命令逾時時間，以秒為單位。 |
+| `spinney.commandTimeout` | `600` | 命令的預設逾時時間，以秒為單位。工具呼叫未傳入 `timeout` 時使用它。命令達到該時間時仍在執行，就會被移到背景。工具呼叫傳入 `timeout_behavior` `"stop"` 時，改為在逾時時終止。 |
+| `spinney.commandTimeoutMax` | `1800` | 命令逾時的絕對上限，以秒為單位。無論模型傳入多大的 `timeout`，Spinney 都會將它限制在上限之內。1800 即 30 分鐘。 |
 | `spinney.maxInlineToolOutput` | `32768` | 工具結果的大小上限，以位元組為單位。更大的結果會寫入檔案。`0` 關閉上限。 |
 | `spinney.maxConcurrentSubagents` | `15` | 同時可以執行多少個第 1 層子代理。多出的工作會等待。 |
 | `spinney.maxLevel2Subagents` | `2` | 一個子代理可以啟動多少個子項。 |
@@ -409,7 +412,7 @@ Spinney 不重試這些失敗：
 | `spinney.saveSubAgentTranscripts` | `true` | 把每個已結束的子代理對話以 JSONL 寫入磁碟。 |
 | `spinney.subAgentTranscriptDir` | `""` | 逐字稿檔案的資料夾，相對於代理根目錄。留空表示使用擴充功能儲存區。 |
 | `spinney.dataDir` | `""` | 存放工作階段的資料夾。留空表示擴充功能儲存區下的固定資料夾，且不以擴充功能 id 命名——重新命名或重新安裝都不會移動你的歷史。填入你備份的資料夾即可把歷史放在本機設定檔之外。下次重新載入視窗後生效。 |
-| `spinney.diagnostics.log` | `true` | 為本視窗寫診斷記錄。其中只有耗時、計數與路徑——不含你的對話。每個視窗一個檔案，較舊的檔案被刪除，單一檔案到 2 MiB 時輪替。 |
+| `spinney.diagnostics.log` | `true` | 為本視窗寫診斷記錄。其中只有耗時、計數與路徑——不含你的對話。每一行都以時間戳結尾。命令開始時還會寫一行，執行期間每 30 秒寫一行心跳，結束時寫一行。每個視窗一個檔案，較舊的檔案被刪除，單一檔案到 2 MiB 時輪替。 |
 | `spinney.httpApi.enabled` | `false` | 開啟本機 HTTP 控制平面。請參閱第 14 節。 |
 | `spinney.httpApi.port` | `0` | 該控制平面的連接埠。`0` 讓系統自行選擇。 |
 
@@ -526,6 +529,8 @@ Spinney 可以在未開啟資料夾的視窗中運作。
 
 Spinney 為每個視窗保留一份診斷記錄。其中只有耗時、計數與路徑——不含你輸入的內容，也不含 API 金鑰。
 
+記錄的每一行都以時間戳結尾，例如 ` | at=2026-09-21T04:14:48.123Z`。記錄也會在命令開始時寫一行、命令執行期間每 30 秒寫一行心跳，並在命令結束時寫一行。因此，卡住的命令事後可以在記錄中看到。
+
 | 步驟 | 做法 |
 |---|---|
 | 1 | 重現問題。 |
@@ -533,4 +538,12 @@ Spinney 為每個視窗保留一份診斷記錄。其中只有耗時、計數與
 | 3 | 把那一份檔案寄給支援你的人。 |
 
 把 `spinney.diagnostics.log` 設為 `false` 可以停掉它。
+
+Spinney 沒有啟動的處理程序可能殘留。當一個命令把工作交給另一個程式時就會發生，例如編輯器、建置伺服器或測試橋接程式。該程式的子處理程序在 Spinney 的處理程序樹之外。**停止** 無法觸及它，它的輸出也永遠不會回來。Spinney 無法替你找到這樣的處理程序。請使用工作管理員，或在 PowerShell 中執行下列命令：
+
+```powershell
+Get-CimInstance Win32_Process -Filter "name like '<program>%'" | Where-Object { $_.CreationDate -lt (Get-Date).AddHours(-2) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+```
+
+把 `<program>` 替換為殘留處理程序的名稱。該篩選條件會比對啟動超過兩小時的處理程序。
 

@@ -128,15 +128,27 @@
   `health`, `sessions`, `concurrency`, `navigation`, `background`, `signals`,
   `branch`, `selftest`). Dev tooling: `.vscodeignore` excludes `tools/**`, so it is never shipped.
 - `tools/rollover-acceptance.js` · `tools/modeltree-acceptance.js` ·
-  `tools/model-switch-acceptance.js` · `tools/gate-acceptance.js` — four of the five
+  `tools/model-switch-acceptance.js` · `tools/gate-acceptance.js` — four of the
   **windowless acceptance drivers** (dev-only, not build guards, not shipped): the
   context rollover's runtime half, the Model Card Tree page's host half, the
   per-node model selection, and the request gate through `ClientRegistry`. Each
   stubs the `vscode` module and needs `out/` (`npm run compile` first); no window,
   no network. See `testing.md`.
-- `tools/exec-cwd-acceptance.js` — the fifth windowless driver, and the one that *is*
-  a build guard (`npm run check:cwd`): the working directory and path base, driven
-  through the compiled tools with a `vscode` stub and a real shell. See `testing.md`.
+- `tools/exec-cwd-acceptance.js` — a windowless driver that *is* a build guard
+  (`npm run check:cwd`): the working directory and path base, driven through the
+  compiled tools with a `vscode` stub and a real shell. See `testing.md`.
+- `tools/shell-argv-acceptance.js` · `tools/exec-kill-acceptance.js` ·
+  `tools/exec-timeout-acceptance.js` — the three guards next to it
+  (`npm run check:shell` / `check:kill` / `check:timeout`, all part of
+  `vscode:prepublish`, all needing `out/`): the argv a **native** child really
+  receives under Git Bash (the `MSYS_NO_PATHCONV` fix — `/PID` must arrive verbatim,
+  and what `//F` / `//IM` become is printed), the kill contract
+  (`'exited' | 'no-exit' | 'no-pid'`, a real exit confirmed before the deadline,
+  `BackgroundRegistry.kill` staying synchronous, an unconfirmed kill flagged *and*
+  logged), and the default `timeout_behavior` (promote to a background terminal —
+  `[command moved to background: id 7]` and one `hub.register` under the owner of the
+  turn — with the kill fallback where there is no background access, explicit `"stop"`,
+  and the `spinney.commandTimeoutMax` clamp). See `testing.md`.
 - `tools/migrate-state.mjs` — the one migration this repo carries: an install that
   only ever ran Minimal Agent Harness (`minimal-host.minimal-agent-harness`) moves
   to Spinney (`DE-YU.spinney`) — the memento row key keeps the case the manifest
@@ -212,10 +224,12 @@
 - `tools/check-models.js` · `tools/check-webview.js` · `tools/check-signal-persist.js`
   · `tools/check-l10n.js` · `tools/check-context-rollover.js` ·
   `tools/check-modeltree.js` · `tools/check-tree-grid.js` · `tools/check-docs.js` ·
-  `tools/exec-cwd-acceptance.js` —
+  `tools/exec-cwd-acceptance.js` · `tools/shell-argv-acceptance.js` ·
+  `tools/exec-kill-acceptance.js` · `tools/exec-timeout-acceptance.js` —
   the packaging guards
   (`npm run check:models` / `check:webview` / `check:signals` / `check:l10n` /
-  `check:rollover` / `check:modeltree` / `check:grid` / `check:docs` / `check:cwd`, run
+  `check:rollover` / `check:modeltree` / `check:grid` / `check:docs` / `check:cwd` /
+  `check:shell` / `check:kill` / `check:timeout`, run
   by `vscode:prepublish`):
   model-config drift (the default is the fallback card, `providers` / `modelCards`
   exist as object schemas, no `enum` on `model`, no model id in the code or the
@@ -236,7 +250,13 @@
   pattern that would keep a page out of the `.vsix`), and the working directory and path
   base (`resolvePath`'s `/d/x` → `D:\x` on Windows only, a command's first line naming
   the directory it ran in, a broken `cwd` naming the path instead of the shell, and the
-  `/d/...` form reaching the file it means). See `testing.md`.
+  `/d/...` form reaching the file it means), and the command's other three contracts —
+  the argv a native child receives under Git Bash (the `MSYS_NO_PATHCONV` fix), the
+  kill-confirmation rules (`'exited'` / `'no-exit'` / `'no-pid'`, a confirmed exit before
+  the deadline, a synchronous `BackgroundRegistry.kill`, an unconfirmed kill flagged and
+  logged), and the default `timeout_behavior` (promotion to a background terminal, its
+  `hub.register` under the owner of the turn, the kill fallback without background
+  access, and the `spinney.commandTimeoutMax` clamp). See `testing.md`.
 - `src/agent/tools/` — one file per intercepted tool (`readImage`, `spawnAgents`,
   `spawnReadonlyAgents`, `sendAgentMessage`, `sendReadonlyAgentMessage`,
   `hopSession`, `listNodes`, `renameSession`) plus `index.ts`, the barrel that
@@ -276,7 +296,12 @@
   `CommandHandle`/`spawnShellCommand` (live output capture, process-tree kill),
   per-session lifecycle.
 - `src/tools/shell.ts` — cross-platform shell detection for `exec_command`
-  (Git Bash > pwsh > Windows PowerShell 5.1 > cmd.exe) with UTF-8 safeguards.
+  (Git Bash > pwsh > Windows PowerShell 5.1 > cmd.exe) with UTF-8 safeguards — and
+  the environment those shells run with: `MSYS_NO_PATHCONV: '1'` on Windows, so MSYS
+  does not rewrite an argument that looks like a Unix path before a **native** child
+  sees it (`taskkill /PID … /T /F` used to reach taskkill as `invalid argument/option`
+  on `C:/Program Files/Git/PID`, and three stuck processes were never killed; the
+  `//F` double-slash spelling is obsolete). Pinned by `tools/shell-argv-acceptance.js`.
   The WSL launcher (`System32\bash.exe` / `WindowsApps`) is **not** accepted as
   Git Bash (different filesystem, no `zh_CN.UTF-8`, Windows cwd).
 - `src/perf.ts` — the `[perf]` diagnostics: `perf()` (sink = the Spinney
@@ -286,6 +311,14 @@
   (`beginOp`/`opMark`/`opTag`/`opPayload`, whose id travels to the webview and back
   — see `invariants/streaming-perf.md`), `logWebviewReport` (the webview's
   `perfDiag` half) and `startLagWatch()` (a late timer = a blocked extension host).
+- `src/redact.ts` — command-line redaction for the diagnostics log:
+  `redactCommand(text, max = REDACT_MAX)` collapses whitespace, masks the value after a
+  secret-looking name (`token`, `api-key`, `authorization`, …) and a bare
+  `Bearer <token>`, then clips to 120 chars with a `…(+N chars)` tail — the evidence a
+  report needs to attribute a slow `exec_command` (which command caused it), without the
+  credential that command may have carried. Deliberately dependency-free and
+  vscode-free, which is what lets `tools/diagnostics-log-acceptance.js` drive the rules
+  from plain node.
 - `media/main.js` — webview client (tree rendering, pan/zoom, streaming into the
   active node, composer, streaming meter, live tool drafts, drag-to-resize cards,
   background job cards + `.bgnotify` notification blocks).

@@ -287,6 +287,8 @@ After a restart, a sub-agent that was running shows as `killed`.
 
 A background terminal holds a long command while the turn continues. The agent starts one through `exec_command` with `timeout_behavior`.
 
+A plain `exec_command` call takes its default timeout from `spinney.commandTimeout` (600 seconds), and Spinney clamps the `timeout` of the model to `spinney.commandTimeoutMax` (1800 seconds). A command that still runs when its timeout is reached moves to the background: the result names the timeout, the new background id, and the directory, and it says that the command keeps running. A call with `timeout_behavior` `"stop"` kills the command at the timeout instead.
+
 The agent does not start a process in the background itself, for example with `&` or `Start-Process`. Spinney cannot track such a process, and you cannot stop it from a card.
 
 The card shows `#<id>`, the status, the elapsed time, the command, and the last output lines. The elapsed time ticks while the command runs, and it stays on the card after the command ends. The result of the command also tells the agent how long the command took.
@@ -400,7 +402,8 @@ All keys start with `spinney.`. Open the Settings UI, or edit `settings.json`.
 | `spinney.foldToolCalls` | `true` | Fold the tool-call cards of the work log by default. The running call stays open. |
 | `spinney.foldWork` | `true` | Fold the work log into its one-line header by default when a turn completes; a header that you clicked stays as you left it. |
 | `spinney.promptSections` | `{}` | Extra prompt snippets, keyed by the name in the menu. A name that matches a shipped snippet replaces its text. |
-| `spinney.commandTimeout` | `600` | The default command timeout, in seconds. |
+| `spinney.commandTimeout` | `600` | The default command timeout, in seconds. It applies when the tool call passes no `timeout`. A command that is still running when it is reached moves to the background. A tool call that passes `timeout_behavior` `"stop"` is killed at the timeout instead. |
+| `spinney.commandTimeoutMax` | `1800` | The absolute ceiling on a command timeout, in seconds. Spinney clamps the `timeout` of the model to it, whatever the model passes. 1800 is 30 minutes. |
 | `spinney.maxInlineToolOutput` | `32768` | The size limit of a tool result, in bytes. A larger result goes to a file. `0` turns the limit off. |
 | `spinney.maxConcurrentSubagents` | `15` | How many level-1 sub-agents can run at once. Extra tasks wait. |
 | `spinney.maxLevel2Subagents` | `2` | How many children one sub-agent can start. |
@@ -409,7 +412,7 @@ All keys start with `spinney.`. Open the Settings UI, or edit `settings.json`.
 | `spinney.saveSubAgentTranscripts` | `true` | Write each finished sub-agent conversation to disk as JSONL. |
 | `spinney.subAgentTranscriptDir` | `""` | The folder for the transcript files, relative to the agent root. Empty means the extension storage. |
 | `spinney.dataDir` | `""` | The folder that keeps the sessions. Empty means a fixed folder in the extension storage, which is not named after the extension id — renaming or reinstalling never moves your history. Set it to a folder you back up to keep the history outside this machine profile. Applied on the next window reload. |
-| `spinney.diagnostics.log` | `true` | Write a diagnostics log for this window. It holds timings, counters and paths — never your conversation. One file per window, oldest removed, rotating at 2 MiB. |
+| `spinney.diagnostics.log` | `true` | Write a diagnostics log for this window. It holds timings, counters and paths — never your conversation. Every line ends with a timestamp. A command also writes one line when it starts, a heartbeat line every 30 seconds, and one line when it ends. One file per window, oldest removed, rotating at 2 MiB. |
 | `spinney.httpApi.enabled` | `false` | Turn on the local HTTP control plane. See section 14. |
 | `spinney.httpApi.port` | `0` | The port of that control plane. `0` lets the system pick one. |
 
@@ -526,6 +529,8 @@ Run **`Spinney: Show System Prompt`** to see the exact prompt, and **`Spinney: S
 
 Spinney keeps one diagnostics log per window. It holds timings, counters and paths — never anything you typed, and never an API key.
 
+Every line of the log ends with a timestamp, for example ` | at=2026-09-21T04:14:48.123Z`. The log also holds one line when a command starts, a heartbeat line every 30 seconds while a command runs, and one line when a command ends. A command that hangs is therefore visible in the log after the fact.
+
 | Step | How |
 |---|---|
 | 1 | Reproduce the problem. |
@@ -533,4 +538,12 @@ Spinney keeps one diagnostics log per window. It holds timings, counters and pat
 | 3 | Send that one file to the person who supports you. |
 
 The log stops if you set `spinney.diagnostics.log` to `false`.
+
+A process that Spinney did not start can stay behind. This happens when a command hands its work to another program, for example an editor, a build server, or a test bridge. The child of that program is outside the process tree of Spinney. **Stop** cannot reach it, and its output never comes back. Spinney cannot find such a process for you. Use the Task Manager, or run this command in PowerShell:
+
+```powershell
+Get-CimInstance Win32_Process -Filter "name like '<program>%'" | Where-Object { $_.CreationDate -lt (Get-Date).AddHours(-2) } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+```
+
+Replace `<program>` with the name of the program that stayed behind. The filter matches a process that started more than two hours ago.
 
