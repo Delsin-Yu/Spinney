@@ -351,3 +351,9 @@
   (from the hub's per-`(session, node)` registries, `runtime.ts:1025`), so the control plane —
   and the `background` acceptance suite — can verify ownership survived a view move. The `kind:'bg'`
   cards are display-only and never appear there.
+- **A background terminal cannot drive a window reload.** `POST /reload-window` refuses while
+  any sub-agent or background terminal is live (`controlReloadWindow`), so a hub-owned job that
+  calls it is refused by its own existence, and a foreground call from inside a turn is refused
+  by the turn check. A reload has to come from outside the window — the `hvsc` supervisor, a
+  terminal issuing `wait-for-finish` + `reload-window`, or the user. This is the one action a job
+  the hub owns can never perform for the window that owns it; see `control-plane.md`.

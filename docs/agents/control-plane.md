@@ -135,6 +135,18 @@ Operational rules:
 - Never pass `--wait` to `hvsc reboot` from inside a turn: the supervisor's
   `/wait-for-finish` would wait for that very turn (deadlock). Fire it without
   `--wait` and let the supervisor `/continue` the agent afterwards.
+- **A reload can only be driven from outside the window.** `POST /reload-window`
+  refuses with **409** while any turn is live, and — checked separately — while any
+  sub-agent or **background terminal** is live (`controlReloadWindow`). A harness
+  background terminal *is* one of those, so a job the hub owns can never reload its
+  own window: the driver counts itself as busy (measured: 20 consecutive attempts,
+  every one `{"ok":false,"error":"sub-agents or background terminals are still
+  running","busy":true}`). A foreground call from inside a turn is refused by the
+  first check for the same reason. The driver therefore has to be the supervisor
+  (`wait-for-finish` → idle → `reload-window`), a plain terminal issuing those same
+  two requests, or the user's own `Developer: Reload Window`. An agent that promises
+  a self-reload from inside its own turn is promising something the gate forbids;
+  when the supervisor is down, ask the user instead of improvising a driver.
 - `/continue` makes the agent run a caller-supplied instruction — a
   **local-trust RCE boundary**. Keep `spinney.httpApi.enabled` off unless a
   controller needs it, and never log the token. `SPINNEY_HTTP=1` opens the very
