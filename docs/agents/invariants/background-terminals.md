@@ -1,38 +1,76 @@
 ## Background terminals
-- `exec_command` accepts a `timeout_behavior` arg (`move_to_background` **is the default**,
-  `stop`, `start_in_background`). `start_in_background` launches immediately and returns a
-  **session-local** `id`; `move_to_background` runs it in the foreground and, if still running
-  at `timeout`, promotes it to a background terminal instead of killing it — the result names
-  the timeout that promoted it, the `id` it was given, the working directory, the fact that
-  **nothing was killed** and that it keeps running (`[command moved to background: id 7]`, then
-  the output so far and the three tools that manage it). That promotion is its own kind of
-  ending in the diagnostics: `outcome=promoted`, neither `exit` nor `timeout`, because the
-  process is alive and now belongs to the hub — whose card, id and completion notice take over.
-  `move_to_background` written out is therefore merely the explicit spelling of the default;
-  `"stop"` is the only way to ask for the old behaviour (kill the process tree at the timeout,
-  ending in `[command timed out after …]`) and `start_in_background` is unchanged. The default
-  is derived from what the session can actually do, never assumed: `getAccess()` returns null in
-  a bare `ToolRegistry` — the acceptance drivers build one — and in a worker with no hub, and
-  there the default falls back to **`stop` semantics** rather than throwing, because the tool
-  must never become unusable where the hub is absent; that fallback is what keeps the `check:cwd`
-  gate (which builds a bare registry) green. An *explicit* `timeout_behavior` other than `stop`
-  in such a context does throw — `Background terminals are not available in this session.` —
-  because that is a request the context cannot honour. The id is minted by the hub
-  (`BackgroundHub.mintId`) — a monotonic per-session counter, **not** a real OS pid — and is only
-  resolvable inside its own session.
-- **`timeout` has a ceiling, and the effective value is the one every message names.**
-  `spinney.commandTimeoutMax` (default 1800 s, `DEFAULT_COMMAND_TIMEOUT_MAX_SEC` in
-  `src/tools/execCommand.ts`) clamps whatever `timeout` the model passes **and** the
-  `commandTimeout` default alike — the ceiling exists to bound how long one tool call can hold
-  the turn, and a setting that ignored it would bound nothing. The clamp is never silent:
-  `timeoutNote` reads ` (the requested timeout 9999s was clamped to 1800s;
-  spinney.commandTimeoutMax=1800s)` and is appended to the two messages that name a timeout (the
-  promotion line above and the `stop` timeout line), because a model that asked for 9999 s and
-  then reads an unexplained `1800 ms` learns that `timeout` is ignored — the very belief the
-  ceiling is meant to avoid. `tools/exec-timeout-acceptance.js` (`npm run check:timeout`, part of
-  `vscode:prepublish`) pins the clamp with a settings stub whose two keys answer different
-  values, which is the only way a clamp is observable at all. The key itself is documented in
-  `invariants/config-keys.md`.
+- **`exec_command` has one knob and three behaviors** (`timeout_behavior`: `stop` — **the default** —
+  `move_to_background`, `start_in_background`), and this matrix is the whole contract. The knob is
+  `spinney.commandMaxForegroundDuration` (seconds, default 300 = 5 minutes), the longest anything may
+  hold a turn; `timeout` is the command's **total budget** — foreground plus background, with **no
+  ceiling** — and the foreground slice a call may hold the turn for is `min(timeout, limit)`, zero
+  for `start_in_background` (which returns before waiting):
+
+  | `timeout` | no behavior / `stop` | `move_to_background` | `start_in_background` |
+  | --- | --- | --- | --- |
+  | omitted | killed at the limit | a job with **no deadline** | a job with **no deadline** |
+  | ≤ limit | killed at the timeout | killed at the timeout, **not** promoted | the whole budget as the job's deadline |
+  | > limit | **refused before the spawn** | promoted at the **limit**, the hub gets `timeout − limit` | the whole budget as the job's deadline |
+
+  `move_to_background` runs the command in the foreground up to the slice and, only when the budget
+  outlives the slice (`timeout > limit`, or no `timeout` at all), promotes it to a background terminal
+  at the **limit** instead of killing it: the result names the `id`, the working directory, the fact
+  that **nothing was killed** and that it keeps running, the budget the job now has, and the join
+  caveat below (`[command moved to background: id 7]`, then the output so far). The hub is handed the
+  **remainder** (`timeout − limit`), never the budget a second time, because the job's deadline is
+  measured from the registration that happens at the promotion. A promotion is its own kind of ending
+  in the diagnostics: `outcome=promoted`, neither `exit` nor `timeout`, because the process is alive
+  and now belongs to the hub — whose card, id and completion notice take over. `timeout ≤ limit` with
+  a background behavior is therefore killed at its timeout and **never** promoted: its budget is spent
+  exactly when the slice ends, so a promotion there would be "kill it immediately" in disguise.
+  `start_in_background` is unchanged: it launches immediately and returns a **session-local** `id`
+  with no foreground time to report. With **no background access** (a bare `ToolRegistry` — the
+  acceptance drivers build one — or a worker with no hub) the default `stop` path needs no hub and
+  must not throw, which is what keeps the `check:cwd` gate green; an *explicit* background behavior
+  there does throw — `Background terminals are not available in this session.` — because that is a
+  request the context cannot honour. The id is minted by the hub (`BackgroundHub.mintId`) — a
+  monotonic per-session counter, **not** a real OS pid — and is only resolvable inside its own session.
+- **A `timeout` that would outlive a turn is refused, never clamped** — the one rule that keeps the
+  single knob a knob. `spinney.commandMaxForegroundDuration` is read live per call
+  (`commandMaxForegroundDurationSec()` in `src/tools/execCommand.ts`, with
+  `DEFAULT_COMMAND_MAX_FOREGROUND_SEC = 300`), and a `timeout` longer than it with no behavior (or
+  with `stop`) throws `timeoutTooLongError` **before the spawn** — no process, no job, nothing
+  started, which is the half the model needs or it will go looking for an output that does not
+  exist — because a command that may run that long must say *which* kind of background job it is:
+  `timeout 1800 s is longer than the 300 s a turn may hold (spinney.commandMaxForegroundDuration).
+  A command that may run that long must not hold the turn: pass timeout_behavior "move_to_background"
+  (300 s in the foreground, the rest of its 1800 s budget in the background) or
+  "start_in_background" (the whole 1800 s in the background), or pass a timeout of 300 s or less.
+  Nothing was started.` (the registry adds the `Error: ` prefix). There is **no ceiling** on
+  `timeout` itself — `timeout: 99999` with `start_in_background` is accepted and the whole budget
+  travels to the hub — and `spinney.commandTimeout` / `spinney.commandTimeoutMax` no longer exist.
+  `tools/exec-timeout-acceptance.js` (`npm run check:timeout`, 47 checks, part of
+  `vscode:prepublish`) pins the matrix and the refusal with a settings stub keyed **by name**
+  (`commandMaxForegroundDuration` → 1), which is the only way the limit is observable at all — and a
+  stub that answered one value for every key would hide a leftover `commandTimeout` read. The key is
+  declared in `package.json`'s `contributes.configuration`, and `npm run check:docs` fails the build
+  while the user manual's settings reference does not name it: the documentation half of the same
+  contract.
+- **`join_background` is gated by the same limit** (`src/tools/backgroundTools.ts`), because a turn
+  must not wait longer than it may hold. A running job with more of its budget left than the limit is
+  refused — the gate is read **before** the task is touched, since a refused join must leave
+  everything as it was — with a **plain result**, not an `Error:` (nothing was malformed, and an
+  `Error:` would invite a retry with the same pid); the wording is deliberately imperative, because
+  ending the turn is the action that will actually reach the result:
+  `Background terminal 3 has 27m 30s of its 30m 0s budget left, which is longer than the 300 s a turn
+  may wait, so this join was refused and nothing changed. End your turn instead: the completion
+  notice for id 3 will reach you when it finishes (check_background_terminal(3) reports it sooner).
+  If you want to end the command rather than wait for it, call kill_background(3).` A job with **no
+  deadline** cannot be waited on at all and is refused for the same reason, saying so instead of
+  naming a budget: `Background terminal 3 has no deadline, so it can run longer than the 300 s a turn
+  may wait, and this join was refused — nothing changed. End your turn instead: the completion notice
+  for id 3 will reach you when it finishes (check_background_terminal(3) reports it sooner). If you
+  want to end the command rather than wait for it, call kill_background(3).`. A finished job is never
+  gated (the wait
+  returns at once, so there is nothing to bound, and a refusal would tell the model to expect a notice
+  for a job that already ended), and a job with ≤ the limit left joins exactly as before.
+  `remainingBudgetMs(task)` is what the gate reads: `null` is the contract's "no deadline", never
+  "0 left".
 - **A command must not background itself** (`&`, `nohup`, `disown`, `Start-Process`): the hub
   tracks only the handle it spawned, so a process the shell started on its own has no id, no
   card and no completion notice — its output is never reported — and Stop's union kill may leave
@@ -59,9 +97,11 @@
   (`lookup(sessionId, id)`). A job therefore belongs to the **node whose turn spawned it** and
   renders beside that node's card — never another branch or session. `listForNode`,
   `listForSession` (each hit tagged with its owner), `runningForNode`, `kill`, `waitFor` all take
-  `sessionId`, so a task id never leaks across sessions. `register` also fires the
-  `onRegistered` hook (`backgroundHub.ts:46`, called at `backgroundHub.ts:106`) once per job,
-  synchronously, so the coordinator can create the job's card.
+  `sessionId`, so a task id never leaks across sessions. `register(owner, handle, command, cwd, timeoutMs?)`
+  also fires the `onRegistered` hook (`backgroundHub.ts:46`, called at `backgroundHub.ts:106`) once
+  per job, synchronously, so the coordinator can create the job's card — and it hands the
+  `timeoutMs` it was given (the promotion's **remainder**) straight to `BackgroundRegistry.register`,
+  which is where that budget's timer is armed.
 - The tools reach the hub through a `BackgroundAccess` set on the `ToolRegistry`
   (`setBackgroundAccess`): `currentOwner()` is the running turn's **node** — for a node worker it
   closes over `{ sessionId, nodeId }` (`SessionRuntime.workerFor`) — so `exec_command` from node
@@ -69,8 +109,10 @@
 - Three tools manage a job: `check_background_terminal(pid)`, `kill_background(pid)`,
   `join_background(pid)` — the argument is a numeric **`pid`** in all three, not `id`
   (`src/tools/backgroundTools.ts`), even though what `exec_command` hands back is a
-  **session-local** id, not an OS pid. `join` blocks until the job finishes and honours Stop. All
-  three resolve the id through `hub.lookup` in the calling session — and none of them is in a
+  **session-local** id, not an OS pid. `join` blocks until the job finishes and honours Stop — subject
+  to the join gate above, which refuses the wait whenever the job still has more of its budget left
+  than a turn may wait. All three resolve the id through `hub.lookup` in the calling session — and none
+  of them is in a
   **sub-agent's** tool registry: `subAgentTools` (`src/chat/runtime.ts:3086-3097`) exposes only
   `read_file` / `list_dir` / `search_files` / `search_transcripts` (+ `write_file` /
   `replace_in_file` / `exec_command` when writable), so a sub-agent that backgrounds a job gets an
@@ -82,7 +124,12 @@
   for a live job, `Background terminal 3 finished with exit code 0 after 3.4s.` for a finished one
   and `Background terminal 3 was killed after 3.1s. (command: …)` for a kill;
   `kill_background` answers `Killed background terminal 3 after 3.4s (command: …).`; and
-  `join_background` answers `Background terminal 3 finished with exit code 0 after 3.4s.`. These
+  `join_background` answers `Background terminal 3 finished with exit code 0 after 3.4s.`. A job with
+  a **budget** names how much of it has gone — `Background terminal 3 is running. (command: …, 12m 30s
+  of its 30m 0s budget elapsed)` — and an ending the budget caused is told apart from a kill:
+  `Background terminal 3 was killed after 30m 0s — its 30m 0s budget ran out. (command: …)`, because
+  `killReason: 'timeout'` is not the user's doing. An unconfirmed kill adds
+  `, but the process tree did not report an exit`. These
   are **model-facing** strings, so they are deliberately not localized — the same locale-free token
   the webview's chips render, not a translated status word.
 - **A kill reports what it achieved** (`src/tools/background.ts`): `CommandHandle.kill()` is
@@ -106,7 +153,10 @@
   and `complete(task, null)` is unchanged — and fire the confirmation **detached**
   (`confirmKill`), because a caller must not wait on the OS. A non-`exited` outcome sets
   `task.killUnconfirmed = true` and writes exactly one diagnostics line:
-  `bg kill id=<id> pid=<pid|none> outcome=<exited|no-exit|no-pid> ms=<elapsed>`. The task also
+  `bg kill id=<id> pid=<pid|none> reason=<user|stop|timeout|rollover|none> outcome=<exited|no-exit|no-pid> ms=<elapsed>`
+  — `reason` is the `killReason` the kill path stamped, and the line exists **only** for a
+  confirmation that failed, so a clean budget kill is recorded by its own `bg expire` line instead
+  (see the lifecycles bullet). The task also
   carries `killConfirm?: Promise<KillOutcome>`, so the tool layer can await the confirmation the
   registry deliberately did not await. A registered handle that answers no outcome at all (the
   plain objects the smoke tests build) is treated as nothing to claim: that task keeps the plain
@@ -177,7 +227,11 @@
   (`nodeId: owner.nodeId`, never the view focus). The notice text and the card's status text both
   name how long the job ran: the notice reads
   ``Background command `cmd` (id 3) finished with exit code 0 after 3.4s.``, while the card's status
-  line is the compact `exit 0 (3m 12s)` (`killed (3m 12s)` for a kill).
+  line is the compact `exit 0 (3m 12s)` (`killed (3m 12s)` for a kill). A job the **budget** ended
+  replaces the whole clause — ``was killed after 30m 0s — its 30m 0s budget ran out`` (`isBudgetKill`,
+  i.e. `killReason === 'timeout'`) — because the command was promoted so the turn *could* end, and
+  "was killed by the user" would blame the wrong cause; assembling it from the verdict rather than
+  appending `after …` to a kill clause is what keeps it from saying the same thing three times.
 - Delivery has two paths, and neither creates a node:
   - owner turn still running → the agent hook `Agent.setSignalHandler` (`agent.ts:402`; wired in
     `workerFor` at `runtime.ts:925`, and per sub-agent at `runtime.ts:3473`) is called after the **whole** tool batch
@@ -262,6 +316,30 @@
   `startedAt` plus `finishedAt: number | null` — `finishedAt` is stamped once when the job settles
   (exit, kill, or a failed start) and is what a snapshot's chip freezes on, while the card's
   persisted `bgElapsedMs` is the same subtraction done once when the terminal state is snapshotted.
+  A job that was given a **budget** carries it too: `timeoutMs` (the total it may run, set only by
+  `register`'s last argument) and `deadlineAt` (`startedAt + timeoutMs`) — a deadline rather than a
+  countdown, so what is left can be read at any moment through `remainingBudgetMs(task)` (`null` for
+  a job with no budget, `max(0, deadlineAt − now)` otherwise, never a negative number, and a clock
+  read rather than a state read). Exactly **one** `setTimeout` is armed at `register()` for the time
+  left, kept in the registry's own `budgetTimers` map so the task stays a plain data record,
+  `unref()`ed (a budget is not a reason for the host to stay alive) and cleared in `complete()` —
+  the one place every ending goes through — so a command that ends by itself leaves no timer behind.
+  When it fires, `expireBudget` kills the job through the registry's **single kill path**, `killTask`,
+  with `killReason: 'timeout'`: the same method `kill` (`'stop'` — `kill_background`, the card's kill
+  button and Stop are one method from inside the registry) and `killAll` (`'rollover'` — session or
+  node delete, clear, window rollover) use, so a deadline guarantees exactly what Stop guarantees
+  (the immediate `finished` transition, the detached confirmation, the hook, the `killed` flag) and
+  only the reason differs. The budget's trail is three `[perf]` lines:
+  `bg register id=<id> pid=<pid|none> budget=<n>s|none`,
+  `bg expire id=<id> pid=<pid|none> budget=<n>s|none ms=<elapsed>` (the harness killed the job at its
+  own deadline — the **only** record of a clean budget kill, which is why the line exists at all) and
+  `bg kill id=<id> pid=<pid|none> reason=<user|stop|timeout|rollover|none> outcome=<exited|no-exit|no-pid> ms=<elapsed>`,
+  written only when the confirmation failed.
+  `tools/bg-budget-acceptance.js` (`npm run check:budget`, 28 checks, part of `vscode:prepublish`)
+  pins it: a 500 ms budget kills at about its deadline with `killReason: 'timeout'` and
+  `remainingBudgetMs` reading `0` afterwards, an unbudgeted job is still running a second later and
+  reads `null` (not `0`), a live job's remaining budget counts down, and the join gate refuses both
+  the over-budget and the no-deadline shape.
   `hub.removeNode(session, node, {kill})` drops one node's jobs + registry (the session counter is
   kept — ids are never reused), `hub.removeSession(session, {kill})` drops a whole session
   (`SessionRuntime.dispose()`), and `hub.killAll()` tears every job down (window dispose) so

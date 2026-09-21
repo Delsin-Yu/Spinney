@@ -2,7 +2,7 @@
 The settings are contributed in **groups**: `contributes.configuration` is an array of
 `{ title, properties }` sections — Model & API (`model`, `providers`, `modelCards`) · Chat & Display
 (`replyLanguage`, `foldThinking`, `foldToolCalls`, `foldWork`, `promptSections`) · Tools & Execution
-(`commandTimeout`, `commandTimeoutMax`, `maxInlineToolOutput`) · Sub-agents
+(`commandMaxForegroundDuration`, `maxInlineToolOutput`) · Sub-agents
 (`maxConcurrentSubagents`, `maxLevel2Subagents`) · Sessions & Transcripts (`autoSessionTitles`,
 `saveSessionTranscripts`, `saveSubAgentTranscripts`, `subAgentTranscriptDir`) ·
 Control Plane (`httpApi.*`). The Settings UI renders one section per entry and keeps
@@ -19,18 +19,28 @@ provider id → `{ name, baseUrl, balance, concurrency }`; `balance` is the wall
 dialect — `none` / `deepseek` / `openrouter` / `moonshot` — and a row that leaves it
 out is declared by host, see `invariants/model-cards.md`), `modelCards` (object of
 card id → `{ name, providerId, oaiModel, contextWindow, concurrency, vision: {
-enabled, transport }, efforts, defaultEffort }`), `commandTimeout`
-(seconds, default 600 = 10 minutes — the default for `exec_command` when the tool
-call does not pass its own `timeout`; a non-positive/absent value falls back to
-600; a command that reaches it is **moved to the background**, not killed, unless
-the call passed `timeout_behavior: "stop"` — see
+enabled, transport }, efforts, defaultEffort }`),
+`commandMaxForegroundDuration` (seconds, default 300 = 5 minutes — the **longest
+anything may hold a turn**: an `exec_command` foreground call, a `join_background`
+wait, a `spawn_agents` / `send_agent_message` `sync` wait. It is read **per call**
+— an `exec_command` invocation, a join, a spawn — and never cached;
+`commandMaxForegroundDurationSec` in `src/tools/execCommand.ts` is the reader, with a
+deliberate local copy in `src/chat/runtime.ts` for the two bounded waits, and a
+non-positive/absent value falls back to 300. It is the single knob of the command
+budget model: it caps the **foreground slice** (`min(timeout, limit)`, i.e. how long
+one call may hold the turn) and it is the number rule **R2** is checked against
+(`timeoutTooLongError`). `timeout` is **not** capped — it is the command's **total
+budget**, foreground plus background, with **no ceiling** — and a `timeout` above the
+limit is **refused before the spawn** unless the call asked for a background
+`timeout_behavior` (`move_to_background` gives the job the rest of that budget,
+`timeout − limit`, as its own deadline; `start_in_background` gives it the whole of
+it; a background behavior that omits `timeout` registers a job with **no deadline**).
+A background job carries that budget as its deadline (`BackgroundTask.timeoutMs` /
+`deadlineAt`, readable again through `remainingBudgetMs` in `src/tools/background.ts`);
+the two keys this replaced — `commandTimeout` (600) and `commandTimeoutMax` (1800) —
+were a default plus a ceiling, so an over-long command was silently shortened instead
+of becoming a job that says how long it runs and what ended it — see
 `invariants/background-terminals.md`),
-`commandTimeoutMax` (seconds, default 1800 = 30 minutes — the **ceiling** on a
-command, applied to whatever `timeout` the model passes *and* to the
-`commandTimeout` default; a non-positive/absent value falls back to 1800. It was
-added with the move-to-background default, because that pairing is what makes a
-ceiling harmless: a command that hits it is promoted to a background terminal and
-the result names the clamped value, so the work is kept rather than lost),
 `replyLanguage` (`auto` — the default, i.e. follow the VS Code display language —
 or one of the language tags VS Code ships display translations for; resolved into
 the **name** the prompt carries by `replyLanguageName` in
@@ -114,7 +124,7 @@ no handling.
 | `foldToolCalls`, `foldThinking`, `foldWork` | immediately, incl. cards already on screen | pushed: `postConfig()` → the webview re-applies the default to existing cards (`foldWork` re-runs the card's automatic work-log fold after the push, which is how a finished card folds or unfolds without a repaint) |
 | `promptSections` | immediately, incl. a chat tab already open | pushed: `postConfig()` → the webview rebuilds the snippet menu from `snippets` (it keeps no copy of the list, and the shipped rows are merged in again on every push, so a renamed or emptied row shows up at once) |
 | `httpApi.enabled`, `httpApi.port` | immediately | pushed: `ControlServer.restart()` (rebind the listener; disabling just leaves `start()` a no-op) |
-| `commandTimeout`, `commandTimeoutMax`, `maxInlineToolOutput`, `maxLevel2Subagents`, `saveSessionTranscripts`, `saveSubAgentTranscripts`, `subAgentTranscriptDir`, `autoSessionTitles` | immediately | pulled at the point of use (they already were — no listener needed; the two timeout keys are read per `exec_command` call, so a change applies to the next command and never to a command already running) |
+| `commandMaxForegroundDuration`, `maxInlineToolOutput`, `maxLevel2Subagents`, `saveSessionTranscripts`, `saveSubAgentTranscripts`, `subAgentTranscriptDir`, `autoSessionTitles` | immediately | pulled at the point of use (they already were — no listener needed; the limit is read **per call** — an `exec_command` invocation, a join, a spawn — and never cached, so a change applies to the next call and never to a call already waiting) |
 
 - **`model` / `thinkingEffort` arbitration (P4):** the selection belongs to the **node**.
   A turn records the card and level it ran with on the node it creates; a follow-up

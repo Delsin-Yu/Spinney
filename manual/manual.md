@@ -277,6 +277,8 @@ The agent starts a sub-agent with the `spawn_agents` tool. Each sub-agent runs i
 | Result | When the sub-agent finishes, Spinney delivers a notice to the parent. The notice carries the duration of the run. The card shows `Delivered`. |
 | Report | Spinney delivers the notice at the next tool boundary of the parent turn. While the parent is idle, Spinney injects the notice into the parent node. It never makes a new node. |
 
+A sub-agent batch waits at most `spinney.commandMaxForegroundDuration` as well. When the batch still runs at the limit, `spawn_agents` in `sync` mode (the default) and `send_agent_message` return the agent ids. Every summary then arrives later as one batch notice.
+
 You cannot type into a sub-agent card. To continue a finished sub-agent, ask the parent agent to do it.
 
 On **Stop**, Spinney kills the whole sub-agent subtree of that node. It writes the pending notices into the history of the node. A stopped sub-agent never resumes on its own.
@@ -287,7 +289,7 @@ After a restart, a sub-agent that was running shows as `killed`.
 
 A background terminal holds a long command while the turn continues. The agent starts one through `exec_command` with `timeout_behavior`.
 
-A plain `exec_command` call takes its default timeout from `spinney.commandTimeout` (600 seconds), and Spinney clamps the `timeout` of the model to `spinney.commandTimeoutMax` (1800 seconds). A command that still runs when its timeout is reached moves to the background: the result names the timeout, the new background id, and the directory, and it says that the command keeps running. A call with `timeout_behavior` `"stop"` kills the command at the timeout instead.
+Nothing holds a turn longer than `spinney.commandMaxForegroundDuration` (300 seconds, 5 minutes). The `timeout` of `exec_command` is the whole budget of the command: its foreground time plus its background time, with no ceiling. A `timeout` longer than the limit is refused before anything starts, unless the call also passes `timeout_behavior` `"move_to_background"` or `"start_in_background"`. The default `timeout_behavior` is again `"stop"`, so Spinney kills a command that still runs at the limit. With a background mode, a command that reaches the limit leaves the turn: Spinney moves it to the background and returns its id, and the rest of its budget is the budget of the job. Spinney kills the job when its budget runs out. A background mode with no `timeout` gives the job no deadline. `join_background` must not hold a turn past the limit either: while the job has more budget left than the limit, or no deadline at all, the join is refused and the agent is told to end its turn, so the completion notice reaches it later. `check_background_terminal` and `kill_background` still work.
 
 The agent does not start a process in the background itself, for example with `&` or `Start-Process`. Spinney cannot track such a process, and you cannot stop it from a card.
 
@@ -402,8 +404,7 @@ All keys start with `spinney.`. Open the Settings UI, or edit `settings.json`.
 | `spinney.foldToolCalls` | `true` | Fold the tool-call cards of the work log by default. The running call stays open. |
 | `spinney.foldWork` | `true` | Fold the work log into its one-line header by default when a turn completes; a header that you clicked stays as you left it. |
 | `spinney.promptSections` | `{}` | Extra prompt snippets, keyed by the name in the menu. A name that matches a shipped snippet replaces its text. |
-| `spinney.commandTimeout` | `600` | The default command timeout, in seconds. It applies when the tool call passes no `timeout`. A command that is still running when it is reached moves to the background. A tool call that passes `timeout_behavior` `"stop"` is killed at the timeout instead. |
-| `spinney.commandTimeoutMax` | `1800` | The absolute ceiling on a command timeout, in seconds. Spinney clamps the `timeout` of the model to it, whatever the model passes. 1800 is 30 minutes. |
+| `spinney.commandMaxForegroundDuration` | `300` | The longest time anything may hold a turn, in seconds. 300 is 5 minutes. A command that still runs at the limit leaves the turn: Spinney moves it to the background, with the rest of its own `timeout` as its budget. A command whose timeout is longer than the limit must ask for background mode. |
 | `spinney.maxInlineToolOutput` | `32768` | The size limit of a tool result, in bytes. A larger result goes to a file. `0` turns the limit off. |
 | `spinney.maxConcurrentSubagents` | `15` | How many level-1 sub-agents can run at once. Extra tasks wait. |
 | `spinney.maxLevel2Subagents` | `2` | How many children one sub-agent can start. |
@@ -529,13 +530,15 @@ Run **`Spinney: Show System Prompt`** to see the exact prompt, and **`Spinney: S
 
 Spinney keeps one diagnostics log per window. It holds timings, counters and paths — never anything you typed, and never an API key.
 
-Every line of the log ends with a timestamp, for example ` | at=2026-09-21T04:14:48.123Z`. The log also holds one line when a command starts, a heartbeat line every 30 seconds while a command runs, and one line when a command ends. A command that hangs is therefore visible in the log after the fact.
+Every line of the log ends with a timestamp, for example ` | at=2026-09-21T04:14:48.123Z`. The log also holds one line when a command starts, a heartbeat line every 30 seconds while a command runs, and one line when a command ends. A command that hangs is therefore visible in the log after the fact. The log also holds the budget of a background job: one line when Spinney registers the job (`bg register … budget=…`), and one line when the budget runs out (`bg expire …`).
 
 | Step | How |
 |---|---|
 | 1 | Reproduce the problem. |
 | 2 | Run `Spinney: Open Diagnostics Log`, then **Show in Explorer**. |
 | 3 | Send that one file to the person who supports you. |
+
+A copy that you take from the Output panel is not the same file: it has no header line, and that line names the build, the process and the start time of the window.
 
 The log stops if you set `spinney.diagnostics.log` to `false`.
 

@@ -294,6 +294,25 @@ Two probes catch what a single op cannot express:
   a harness needs to assert on these lines; the output channel stays the primary sink
   and a failing tee never loses a line from it.
 
+### Open: a webview that paints once and then never repaints
+
+A panel that paints once and never again is invisible to the op trace above unless
+someone correlates the last `op#N … painted` for its subject with the end of the file:
+an op **ends** on the webview's `perfDiag paint` report, so a webview that stops
+repainting leaves no `webview-paint`, no `webview-frames` and no further `op#N` line at
+all — the trace simply goes quiet while `webview-handler … message=delta` lines keep
+arriving, which is exactly what a customer log showed (`op#44 … painted`, `dom=41` — an
+**empty shell**, painted after a `new-session` switch — and then 1759 more lines of
+deltas with **zero** `post-tree` / `post-path` / `webview-paint` / `webview-frames` for
+that session, the host *not* blocked). Reading that quiet as "the session went idle" is
+the trap, and it is why the ` | at=` stamp (already shipped in this build,
+`ChatViewProvider.stampLine`) matters: without it the header's `started` is the only
+time in the file, and the last painted op cannot be placed relative to the deltas that
+followed it. The discriminating experiment is to re-select that tab with diagnostics
+on — posts appearing with **no** paint means the webview side aborted the burst, and
+`tools/check-webview.js` should then assert a paint after a repaint, so a silently dead
+probe cannot ship. Same issue recorded next to that guard in `testing.md`.
+
 ### Sending the log to someone else: the diagnostics log
 
 A report from a user's machine has to be self-describing, because there is no developer
@@ -336,7 +355,7 @@ The lines that make such a report diagnosable, in the order they appear:
 - `[env version=… diag=… vscode=… node=… <platform>-<arch> cpus=… mem=…GB appRoot=… folders=… root=… store=… key=… language=…]`
   — which build, on which VS Code (that decides whether the bundled ripgrep is findable at
   all), on what machine, for which workspace and store root.
-- `[config effective maxSubagents=… maxLevel2=… maxInlineToolOutput=… commandTimeout=… saveSessionTranscripts=… transcriptDir=… dataDir=… autoSessionTitles=… replyLanguage=… defaultCard=… providers=… cards=…]`
+- `[config effective maxSubagents=… maxLevel2=… maxInlineToolOutput=… commandMaxForegroundDuration=…s saveSessionTranscripts=… transcriptDir=… dataDir=… autoSessionTitles=… replyLanguage=… defaultCard=… providers=… cards=…]`
   — the settings in force, in one line.
 - `[search rg=<path>]` (or `rg=missing (… the fix is NOT in play)`, or a spawn-failure line)
   — **the first thing to check**: whether the child-process search path is actually the one
@@ -349,6 +368,17 @@ The lines that make such a report diagnosable, in the order they appear:
   `src/redact.ts`, whitespace collapsed, secrets masked, clipped to 120 chars), a 30 s heartbeat
   while a foreground command holds the turn, what ended the call, and what a kill actually
   achieved. See `docs/agents/tools.md`.
+- `[perf] bg register id=… pid=… budget=<n>s|none` · `bg expire id=… pid=… budget=<n>s|none ms=…` ·
+  `bg kill id=… pid=… reason=<user|stop|timeout|rollover|none> outcome=… ms=…` — the background
+  job's own life, written by `BackgroundRegistry` (`src/tools/background.ts`) rather than by the
+  tool: the **registration** and what the job was handed there, the **expiry** — the registry's own
+  event, written when the job's budget timer fires, i.e. the registry killing the job at its own
+  deadline, so `ms=` is how long it really ran — and the **kill whose confirmation failed**
+  (`outcome` is the non-`'exited'` answer; a confirmed kill is not news and stays quiet).
+  `register` / `expire` answer "which background job ate the time" (what it was, and the deadline
+  that ended it); `kill` answers "and why did it end" — a `reason=timeout` expiry, `stop` from Stop
+  or `kill_background`, `rollover` for the window break, `none` when the kill was never attributed.
+  The job's origin is `exec_command`'s own `exec start … budget=… behavior=…` line above.
 - `[perf] search-files ms=… files=… matches=… capped=… via=rg|walk scope=… wait=…ms` — per
   call; `wait=` is the time the call spent queued behind the work budget.
 - `[perf] spawn-request count=N mode=… depth=1 node=…` — the shape of the fan-out.

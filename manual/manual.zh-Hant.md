@@ -277,6 +277,8 @@ Spinney 絕不傳送卡片沒有宣告的層級。卡片沒有提供的層級會
 | 結果 | 子代理結束時，Spinney 把通知遞送給父節點。通知會帶有這次執行的耗時。卡片會顯示 `Delivered`。 |
 | 回報 | Spinney 在父回合的下一個工具邊界遞送通知。當父節點閒置時，Spinney 把通知注入父節點。它絕不會建立新節點。 |
 
+一個子代理批次等待的時間同樣不超過 `spinney.commandMaxForegroundDuration`。批次在該上限時仍在執行，`sync` 模式（預設）下的 `spawn_agents` 和 `send_agent_message` 就會傳回代理 id。所有摘要之後會以單一批次通知送達。
+
 你無法在子代理卡片中輸入。若要繼續已結束的子代理，請要求父代理去做。
 
 按 **停止** 時，Spinney 終止該節點的整個子代理子樹。它把待遞送的通知寫入該節點的歷史。已停止的子代理絕不會自行恢復。
@@ -287,7 +289,7 @@ Spinney 絕不傳送卡片沒有宣告的層級。卡片沒有提供的層級會
 
 背景終端在回合繼續時保留一個長時間執行的命令。代理透過帶有 `timeout_behavior` 的 `exec_command` 啟動一個背景終端。
 
-未帶 `timeout_behavior` 的 `exec_command` 呼叫，其預設逾時取自 `spinney.commandTimeout`（600 秒），而 Spinney 會把模型的 `timeout` 限制在 `spinney.commandTimeoutMax`（1800 秒）之內。命令在達到逾時時仍在執行，就會被移到背景：結果會寫明該逾時、新的背景 id 和目錄，並說明命令會繼續執行。帶有 `timeout_behavior` `"stop"` 的呼叫則改為在逾時時終止命令。
+任何操作佔用一個回合的時間都不會超過 `spinney.commandMaxForegroundDuration`（300 秒，即 5 分鐘）。`exec_command` 的 `timeout` 是命令的全部預算：前景時間加背景時間，沒有上限。`timeout` 長於該上限時，不會啟動任何東西，呼叫會先被拒絕，除非它同時傳入 `timeout_behavior` `"move_to_background"` 或 `"start_in_background"`。`timeout_behavior` 的預設值又是 `"stop"`，所以命令達到上限時仍在執行，Spinney 就會終止它。使用背景模式時，命令達到上限就會離開本回合：Spinney 把它移到背景並傳回它的 id，它的剩餘預算就是該工作的預算。預算用盡時，Spinney 會終止該工作。背景模式未傳入 `timeout` 時，該工作沒有截止時間。`join_background` 同樣不得讓一個回合超過該上限：只要該工作剩下的預算還多於該上限，或根本沒有截止時間，join 就會被拒絕，並告知代理結束本回合，完成通知之後才會到達。`check_background_terminal` 和 `kill_background` 仍然可用。
 
 代理不會自己把進程放到背景，例如用 `&` 或 `Start-Process`。Spinney 無法追蹤這樣的進程，你也不能從卡片上終止它。
 
@@ -402,8 +404,7 @@ Spinney 不重試這些失敗：
 | `spinney.foldToolCalls` | `true` | 預設摺疊工作日誌中的工具呼叫卡片。正在執行的呼叫會保持展開。 |
 | `spinney.foldWork` | `true` | 預設在回合完成時把工作日誌摺疊成單行標頭；你點選過的標頭會保持你留下的狀態。 |
 | `spinney.promptSections` | `{}` | 額外的提示詞片段，以選單中的名稱作為設定鍵。與內建片段同名的項目會取代其文字。 |
-| `spinney.commandTimeout` | `600` | 命令的預設逾時時間，以秒為單位。工具呼叫未傳入 `timeout` 時使用它。命令達到該時間時仍在執行，就會被移到背景。工具呼叫傳入 `timeout_behavior` `"stop"` 時，改為在逾時時終止。 |
-| `spinney.commandTimeoutMax` | `1800` | 命令逾時的絕對上限，以秒為單位。無論模型傳入多大的 `timeout`，Spinney 都會將它限制在上限之內。1800 即 30 分鐘。 |
+| `spinney.commandMaxForegroundDuration` | `300` | 任何操作佔用一個回合的最長時間，以秒為單位。300 即 5 分鐘。命令在達到該上限時仍在執行，就會離開本回合：Spinney 把它移到背景，並以它自己 `timeout` 的剩餘部分作為它的預算。`timeout` 長於該上限的命令必須明確要求背景模式。 |
 | `spinney.maxInlineToolOutput` | `32768` | 工具結果的大小上限，以位元組為單位。更大的結果會寫入檔案。`0` 關閉上限。 |
 | `spinney.maxConcurrentSubagents` | `15` | 同時可以執行多少個第 1 層子代理。多出的工作會等待。 |
 | `spinney.maxLevel2Subagents` | `2` | 一個子代理可以啟動多少個子項。 |
@@ -529,13 +530,15 @@ Spinney 可以在未開啟資料夾的視窗中運作。
 
 Spinney 為每個視窗保留一份診斷記錄。其中只有耗時、計數與路徑——不含你輸入的內容，也不含 API 金鑰。
 
-記錄的每一行都以時間戳結尾，例如 ` | at=2026-09-21T04:14:48.123Z`。記錄也會在命令開始時寫一行、命令執行期間每 30 秒寫一行心跳，並在命令結束時寫一行。因此，卡住的命令事後可以在記錄中看到。
+記錄的每一行都以時間戳結尾，例如 ` | at=2026-09-21T04:14:48.123Z`。記錄也會在命令開始時寫一行、命令執行期間每 30 秒寫一行心跳，並在命令結束時寫一行。因此，卡住的命令事後可以在記錄中看到。記錄也會寫下背景工作的預算：Spinney 登記該工作時寫一行（`bg register … budget=…`），預算用盡時再寫一行（`bg expire …`）。
 
 | 步驟 | 做法 |
 |---|---|
 | 1 | 重現問題。 |
 | 2 | 執行 `Spinney: 開啟診斷記錄`，然後按 **在檔案總管中顯示**。 |
 | 3 | 把那一份檔案寄給支援你的人。 |
+
+從輸出面板複製的文字不是同一份檔案：它沒有檔案標頭那一行，而該行會寫明建置、處理程序與視窗的啟動時間。
 
 把 `spinney.diagnostics.log` 設為 `false` 可以停掉它。
 

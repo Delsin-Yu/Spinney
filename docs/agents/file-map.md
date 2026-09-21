@@ -138,17 +138,23 @@
   (`npm run check:cwd`): the working directory and path base, driven through the
   compiled tools with a `vscode` stub and a real shell. See `testing.md`.
 - `tools/shell-argv-acceptance.js` · `tools/exec-kill-acceptance.js` ·
-  `tools/exec-timeout-acceptance.js` — the three guards next to it
-  (`npm run check:shell` / `check:kill` / `check:timeout`, all part of
+  `tools/exec-timeout-acceptance.js` · `tools/bg-budget-acceptance.js` — the four
+  guards next to it
+  (`npm run check:shell` / `check:kill` / `check:timeout` / `check:budget`, all part of
   `vscode:prepublish`, all needing `out/`): the argv a **native** child really
   receives under Git Bash (the `MSYS_NO_PATHCONV` fix — `/PID` must arrive verbatim,
   and what `//F` / `//IM` become is printed), the kill contract
   (`'exited' | 'no-exit' | 'no-pid'`, a real exit confirmed before the deadline,
   `BackgroundRegistry.kill` staying synchronous, an unconfirmed kill flagged *and*
-  logged), and the default `timeout_behavior` (promote to a background terminal —
-  `[command moved to background: id 7]` and one `hub.register` under the owner of the
-  turn — with the kill fallback where there is no background access, explicit `"stop"`,
-  and the `spinney.commandTimeoutMax` clamp). See `testing.md`.
+  logged), the **foreground limit** `spinney.commandMaxForegroundDuration` (a `timeout`
+  above it refused *before the spawn* unless a background `timeout_behavior` asked for
+  one, the promotion at the limit carrying only the `timeout − limit` that is left and
+  one `hub.register` under the owner of the turn, a background behavior with no
+  `timeout` registering a job with no deadline, and no ceiling on `timeout`), and the
+  **background budget** (a job killed at its deadline with `killReason:'timeout'`, an
+  unbudgeted job left alone, a `remainingBudgetMs` that counts down, and
+  `join_background`'s two refusals — more budget left than the limit, or no deadline at
+  all — plus the allowed case). See `testing.md`.
 - `tools/migrate-state.mjs` — the one migration this repo carries: an install that
   only ever ran Minimal Agent Harness (`minimal-host.minimal-agent-harness`) moves
   to Spinney (`DE-YU.spinney`) — the memento row key keeps the case the manifest
@@ -225,11 +231,12 @@
   · `tools/check-l10n.js` · `tools/check-context-rollover.js` ·
   `tools/check-modeltree.js` · `tools/check-tree-grid.js` · `tools/check-docs.js` ·
   `tools/exec-cwd-acceptance.js` · `tools/shell-argv-acceptance.js` ·
-  `tools/exec-kill-acceptance.js` · `tools/exec-timeout-acceptance.js` —
+  `tools/exec-kill-acceptance.js` · `tools/exec-timeout-acceptance.js` ·
+  `tools/bg-budget-acceptance.js` —
   the packaging guards
   (`npm run check:models` / `check:webview` / `check:signals` / `check:l10n` /
   `check:rollover` / `check:modeltree` / `check:grid` / `check:docs` / `check:cwd` /
-  `check:shell` / `check:kill` / `check:timeout`, run
+  `check:shell` / `check:kill` / `check:timeout` / `check:budget`, run
   by `vscode:prepublish`):
   model-config drift (the default is the fallback card, `providers` / `modelCards`
   exist as object schemas, no `enum` on `model`, no model id in the code or the
@@ -250,13 +257,16 @@
   pattern that would keep a page out of the `.vsix`), and the working directory and path
   base (`resolvePath`'s `/d/x` → `D:\x` on Windows only, a command's first line naming
   the directory it ran in, a broken `cwd` naming the path instead of the shell, and the
-  `/d/...` form reaching the file it means), and the command's other three contracts —
+  `/d/...` form reaching the file it means), and the command's other four contracts —
   the argv a native child receives under Git Bash (the `MSYS_NO_PATHCONV` fix), the
   kill-confirmation rules (`'exited'` / `'no-exit'` / `'no-pid'`, a confirmed exit before
   the deadline, a synchronous `BackgroundRegistry.kill`, an unconfirmed kill flagged and
-  logged), and the default `timeout_behavior` (promotion to a background terminal, its
-  `hub.register` under the owner of the turn, the kill fallback without background
-  access, and the `spinney.commandTimeoutMax` clamp). See `testing.md`.
+  logged), the foreground limit (`spinney.commandMaxForegroundDuration`: the refusal of a
+  `timeout` above it before the spawn without a background `timeout_behavior`, the
+  promotion at the limit with only the remaining budget, a job registered with no
+  deadline, no ceiling on `timeout`), and the background budget (a job killed at its own
+  deadline with `killReason:'timeout'`, an unbudgeted job left alone,
+  `remainingBudgetMs`, `join_background`'s refusals). See `testing.md`.
 - `src/agent/tools/` — one file per intercepted tool (`readImage`, `spawnAgents`,
   `spawnReadonlyAgents`, `sendAgentMessage`, `sendReadonlyAgentMessage`,
   `hopSession`, `listNodes`, `renameSession`) plus `index.ts`, the barrel that

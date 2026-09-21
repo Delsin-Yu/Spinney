@@ -30,13 +30,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   actually achieved. A hang is no longer an undatable hole in the file. The command line itself
   reaches the log masked and clipped (`src/redact.ts`): `--token=…` / `Authorization: …` become
   `***`, and only the first 120 characters are kept.
-- `spinney.commandTimeoutMax` (default 1800): the ceiling the agent's `timeout` is clamped to,
-  whatever it asks for.
-- Three more build guards, all part of `vscode:prepublish`: `npm run check:shell`
+- `spinney.commandMaxForegroundDuration` (default 300 s = 5 minutes): the longest time anything may
+  hold a turn — a foreground command, a `join_background` wait, a `sync` sub-agent batch. A command's
+  `timeout` is now its total budget (foreground + background) with no ceiling, and a job that has one
+  is logged when it is registered (`bg register … budget=…`) and again when the budget kills it
+  (`bg expire …`).
+- Four more build guards, all part of `vscode:prepublish`: `npm run check:shell`
   (`tools/shell-argv-acceptance.js` — the arguments a native child really receives under Git
   Bash), `npm run check:kill` (`tools/exec-kill-acceptance.js` — a kill reports its outcome and
-  an unconfirmed one is flagged), and `npm run check:timeout`
-  (`tools/exec-timeout-acceptance.js` — the promotion default above and the ceiling).
+  an unconfirmed one is flagged), `npm run check:timeout` (`tools/exec-timeout-acceptance.js` —
+  the five-minute foreground, the refusal of a longer timeout without a background mode, and the
+  budget that leaves the foreground) and `npm run check:budget`
+  (`tools/bg-budget-acceptance.js` — a job killed at its own deadline, an unbudgeted job left
+  alone, and the join that is refused rather than held).
 
 ### Fixed
 
@@ -76,12 +82,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the background (`&`, `nohup`, `disown`, `Start-Process`), because a process the harness did not
   spawn has no card, no id and no notice, and can outlive a Stop. The prompt also states that every
   command already starts in the harness root, so a `cd … && …` prefix is not needed.
-- A command that is still running when its timeout is reached is **moved to the background**, not
-  killed: the result names the timeout, the new background id and the directory, and says the
-  command keeps running, so the agent keeps a command it did not wait for. `timeout_behavior:
-  "stop"` is the way to kill at the timeout, `"move_to_background"` is now only the explicit
-  spelling of the default, and a session with no background terminal to offer still kills at the
-  timeout rather than failing. The agent's `timeout` is clamped to `spinney.commandTimeoutMax`.
+- A `timeout` longer than `spinney.commandMaxForegroundDuration` is **refused before anything
+  starts** unless the call asks for a background mode: the agent has to say when it expects long
+  work. The default `timeout_behavior` is `"stop"` again, so a command still running at the limit is
+  killed; with a background mode it leaves the turn at the limit carrying the rest of its budget as
+  the job's deadline, and a background mode that omits `timeout` gives the job no deadline at all.
+  The diagnostics kill line gained `reason=`.
+- `join_background` refuses to hold a turn longer than that limit — it points the agent at the
+  completion notice instead — and `spawn_agents` in `sync` mode, and a resumed sub-agent via
+  `send_agent_message`, waits at most the same limit and then returns the ids and delivers every
+  summary as one batch notice.
+- The reporting surfaces name a budget kill (`… was killed after 30m 0s — its 30m 0s budget ran
+  out.`), and `spinney.commandTimeout` / `spinney.commandTimeoutMax` are gone.
 - The system prompt and the `exec_command` description name the second half of the
   ownership rule: a command must not hand its work to a long-lived process the harness does not
   own either — an editor addon, a test bridge, a build server. Its children are outside the

@@ -277,6 +277,8 @@ Spinney 绝不发送卡片没有声明的级别。卡片不提供的级别会回
 | 结果 | 子智能体结束时，Spinney 向父节点投递一条通知。该通知带有这次运行的用时。卡片显示 `Delivered`。 |
 | 报告 | Spinney 在父回合的下一个工具边界投递该通知。父节点空闲时，Spinney 把该通知注入父节点。它绝不会新建节点。 |
 
+一个子智能体批次等待的时间同样不超过 `spinney.commandMaxForegroundDuration`。批次在该上限时仍在运行，`sync` 模式（默认）下的 `spawn_agents` 和 `send_agent_message` 就会返回智能体 id。所有摘要随后作为一条批次通知到达。
+
 你不能在子智能体卡片中输入。要延续已结束的子智能体，请让父智能体去做。
 
 按 **停止** 时，Spinney 终止该节点的整个子智能体子树。它把待投递的通知写入该节点的历史。被终止的子智能体绝不会自行恢复。
@@ -287,7 +289,7 @@ Spinney 绝不发送卡片没有声明的级别。卡片不提供的级别会回
 
 后台终端在回合继续的同时保持一条长命令。智能体通过带 `timeout_behavior` 的 `exec_command` 启动一个后台终端。
 
-不带 `timeout_behavior` 的 `exec_command` 调用，其默认超时取自 `spinney.commandTimeout`（600 秒），且 Spinney 会把模型的 `timeout` 限制在 `spinney.commandTimeoutMax`（1800 秒）以内。命令达到超时时间时仍在运行，就会被转入后台：结果会写明该超时时间、新的后台 id 和目录，并说明命令会继续运行。`timeout_behavior` 为 `"stop"` 的调用则改为在超时处终止命令。
+任何操作占用一个回合的时间都不会超过 `spinney.commandMaxForegroundDuration`（300 秒，即 5 分钟）。`exec_command` 的 `timeout` 是命令的全部预算：前台时间加后台时间，没有上限。`timeout` 长于该上限时，不会启动任何东西，调用先被拒绝，除非它同时传入 `timeout_behavior` `"move_to_background"` 或 `"start_in_background"`。`timeout_behavior` 的默认值又是 `"stop"`，所以命令达到上限时仍在运行，Spinney 就终止它。使用后台模式时，命令达到上限就会离开本回合：Spinney 把它转入后台并返回它的 id，它的剩余预算就是该任务的预算。预算用尽时，Spinney 终止该任务。后台模式不传 `timeout` 时，该任务没有截止时间。`join_background` 同样不得让一个回合超过该上限：只要该任务的剩余预算还多于该上限，或者根本没有截止时间，join 就会被拒绝，并告知智能体结束本回合，完成通知随后才会到达。`check_background_terminal` 和 `kill_background` 仍然可用。
 
 智能体不会自己把进程放到后台，例如用 `&` 或 `Start-Process`。Spinney 无法跟踪这样的进程，你也不能从卡片上终止它。
 
@@ -402,8 +404,7 @@ Spinney 不重试这些失败：
 | `spinney.foldToolCalls` | `true` | 默认折叠工作日志中的工具调用卡片。正在运行的调用保持展开。 |
 | `spinney.foldWork` | `true` | 默认在回合完成时把工作日志折叠成单行标题；你点击过的标题会保持你留下的状态。 |
 | `spinney.promptSections` | `{}` | 额外的提示词片段，以菜单中的名称为键。与自带片段同名的名称会替换其文本。 |
-| `spinney.commandTimeout` | `600` | 命令的默认超时时间，单位为秒。工具调用未传入 `timeout` 时使用它。命令达到该时间时仍在运行，就会被转入后台。工具调用传入 `timeout_behavior` `"stop"` 时，改为在超时处终止。 |
-| `spinney.commandTimeoutMax` | `1800` | 命令超时的绝对上限，单位为秒。无论模型传入多大的 `timeout`，Spinney 都会把它限制在该上限内。1800 即 30 分钟。 |
+| `spinney.commandMaxForegroundDuration` | `300` | 任何操作占用一个回合的最长时间，单位为秒。300 即 5 分钟。命令达到该上限时仍在运行，就会离开本回合：Spinney 把它转入后台，并以它自己 `timeout` 的剩余部分作为它的预算。`timeout` 长于该上限的命令必须显式请求后台模式。 |
 | `spinney.maxInlineToolOutput` | `32768` | 工具结果的大小上限，单位为字节。更大的结果会写入文件。`0` 关闭该上限。 |
 | `spinney.maxConcurrentSubagents` | `15` | 同时可以运行多少个第 1 层子智能体。多出的任务等待。 |
 | `spinney.maxLevel2Subagents` | `2` | 一个子智能体可以启动多少个子节点。 |
@@ -529,13 +530,15 @@ Spinney 在未打开任何文件夹的窗口中也能工作。
 
 Spinney 为每个窗口保留一份诊断日志。其中只有耗时、计数与路径——不含你输入的内容，也不含 API 密钥。
 
-日志的每一行都以时间戳结尾，例如 ` | at=2026-09-21T04:14:48.123Z`。日志还会在命令开始时写一行、命令运行期间每 30 秒写一行心跳，并在命令结束时写一行。因此，卡住的命令事后能在日志中看到。
+日志的每一行都以时间戳结尾，例如 ` | at=2026-09-21T04:14:48.123Z`。日志还会在命令开始时写一行、命令运行期间每 30 秒写一行心跳，并在命令结束时写一行。因此，卡住的命令事后能在日志中看到。日志也会记录后台任务的预算：Spinney 登记该任务时写一行（`bg register … budget=…`），预算用尽时再写一行（`bg expire …`）。
 
 | 步骤 | 做法 |
 |---|---|
 | 1 | 复现问题。 |
 | 2 | 运行 `Spinney: 打开诊断日志`，然后点 **在资源管理器中显示**。 |
 | 3 | 把那一份文件发给支持你的人。 |
+
+从输出面板复制的文字不是同一份文件：它没有文件头那一行，而该行会写明构建、进程与窗口的启动时间。
 
 把 `spinney.diagnostics.log` 设为 `false` 可以停掉它。
 

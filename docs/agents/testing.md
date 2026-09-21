@@ -12,7 +12,7 @@ gitignored, so a leftover is harmless). Before a release, confirm `npm run compi
 `npm run vscode:prepublish` — on a push to `main`, on a `v*` tag, on a pull request and on
 demand, so a red workflow and a red gate are the same thing instead of two lists that drift.
 
-Twelve build-time guards are the exception, all run by `vscode:prepublish` so a
+Thirteen build-time guards are the exception, all run by `vscode:prepublish` so a
 regression fails *packaging* instead of the user's session:
 
 - `npm run check:models` (`tools/check-models.js`) — the model configuration:
@@ -123,9 +123,9 @@ regression fails *packaging* instead of the user's session:
   which is how to prove it still catches what it is for. See
   `docs/agents/user-manual.md`.
 - `npm run check:cwd` (`tools/exec-cwd-acceptance.js`) — the **working directory and
-  path base** (`docs/agents/tools.md`), and the first of the four acceptance drivers
-  that make up the gate (with `check:shell` / `check:kill` / `check:timeout` below,
-  which drive the same compiled tools): the contract lives in the *compiled* tools, so
+  path base** (`docs/agents/tools.md`), and the first of the five acceptance drivers
+  that make up the gate (with `check:shell` / `check:kill` / `check:timeout` /
+  `check:budget` below, which drive the same compiled tools): the contract lives in the *compiled* tools, so
   it stubs `vscode` (a
   `Module._load` hook), drives `ToolRegistry.execute` against a real shell, and
   asserts that `resolvePath` maps the Git-Bash form `/d/Repos/x` onto `D:\Repos\x` on
@@ -178,40 +178,80 @@ regression fails *packaging* instead of the user's session:
   `bg kill id=… pid=… outcome=… ms=…` diagnostics line, a confirmed one stays quiet.
   Needs `out/` and is portable — the POSIX and Windows halves exercise the same public
   API. Part of `vscode:prepublish`.
-- `npm run check:timeout` (`tools/exec-timeout-acceptance.js`) — the new **default
-  `timeout_behavior`** and the timeout ceiling, the two rules that decide what happens
-  to work the agent can no longer see. With background access, a command that outlives
-  `timeout` and passes no `timeout_behavior` is **moved to the background**: the result
-  leads with `[command moved to background: id 7]`, names `check_background_terminal(7)`,
-  says the command was still running and that nothing was killed, and the job is
-  registered with the hub under the **owner of the turn** — one `hub.register`, under
-  the node that spawned it, because a job registered under the wrong owner renders in
-  the wrong branch and its completion notice is delivered to nobody. The regression it
-  prevents is losing a 40-minute build to a timeout that used to kill it, which is the
-  failure the agent cannot undo. Without background access — a bare `ToolRegistry`,
-  exactly what `exec-cwd-acceptance.js` constructs — the same call must behave as it
-  always did: kill at the timeout, report `timed out`, register nothing, and never
-  throw `Background terminals are not available` (the default is derived from what the
-  session can actually do, not assumed). An explicit `"stop"` still kills even where a
-  background terminal was available. And `timeout` is clamped to
-  `spinney.commandTimeoutMax`: the settings stub keys the two settings separately
-  (`commandTimeoutMax` → 2, `commandTimeout` → 600), because the clamp is only
-  observable if the two keys can differ, so asking for 9999 s on a 3 s command must
-  come back after ~2 s and *say* 2000 ms. Needs `out/` (`npm run compile` first) and is
-  portable by construction: the "slow" command is `process.execPath -e …`, so it needs
-  no `sleep`, no shell builtin and no PATH lookup. Part of `vscode:prepublish`.
+- `npm run check:timeout` (`tools/exec-timeout-acceptance.js`, **47 checks**) — the
+  **foreground limit** `spinney.commandMaxForegroundDuration` (300 s) and the
+  `exec_command` budget model it rules: `timeout` is the command's **total** budget —
+  foreground plus background — with **no ceiling**, the limit caps only the
+  **foreground slice** (`min(timeout, limit)`), and the default `timeout_behavior` is
+  `stop` again. It pins, in order: (1) a fast command stays a plain foreground call
+  (`[exit 0 in …]`, nothing registered anywhere); (2) a `timeout` at or below the
+  limit, with no behavior or an explicit `"stop"`, is killed at that timeout even
+  where a background terminal was available (the budget is spent, so promoting it
+  would be "kill it immediately" in disguise); (3) **rule R2** — a `timeout` *above*
+  the limit with no behavior, or with `"stop"`, is **refused before the spawn** by
+  `timeoutTooLongError`, with the message naming both numbers and saying
+  `Nothing was started.`, and with neither a process nor a background job created
+  (a returned value would be a silent clamp); (4) `timeout` above the limit **with**
+  `"move_to_background"` is promoted at the **limit**, not at `timeout`, and the job
+  carries only the **remaining** budget `timeout − limit` — the message names both
+  numbers, `hub.register` happens exactly once under the **owner of the turn** (a job
+  registered under the wrong owner renders in the wrong branch and its notice reaches
+  nobody), and a `timeout` that fits inside the limit is *not* promoted at all;
+  (5) a background behavior with `timeout` omitted registers a job with **no
+  deadline** (`hub.register` gets no budget) and the message names no budget in ms;
+  (6) there is **no ceiling** — `timeout: 99999` with `start_in_background` is
+  accepted and the whole 99999 s travels to the background as that job's budget;
+  (7) a session without background access — a bare `ToolRegistry`, exactly what
+  `exec-cwd-acceptance.js` constructs — still kills at the timeout, reports
+  `timed out`, registers nothing and never throws `Background terminals are not
+  available`; and (8) the tool description keeps the two rules a sub-agent reads
+  there (never background the command yourself, use `cwd` instead of a
+  `cd <dir> && …` prefix), gains the limit sentence, and no longer contains the
+  deleted `spinney.commandTimeout` / `spinney.commandTimeoutMax` at all. The settings
+  stub answers **keyed by name** (`commandMaxForegroundDuration` → 1), because the
+  limit is only observable when the key can be wrong: a stub that answers every key
+  with the same value would hide a leftover `commandTimeout` read, and 1 s keeps the
+  whole matrix at a few seconds instead of five minutes. Needs `out/` (`npm run
+  compile` first) and is portable by construction: the "slow" command is
+  `process.execPath -e …`, so it needs no `sleep`, no shell builtin and no PATH
+  lookup. Part of `vscode:prepublish`.
+- `npm run check:budget` (`tools/bg-budget-acceptance.js`, **28 checks**) — the
+  **background budget** contract, the half of "a turn may not be held forever" the
+  foreground could not fix: once a job left the foreground it ran until the end of
+  time, and `join_background` would block a turn for as long as it took. It stubs
+  `vscode` and the settings **keyed by name**
+  (`commandMaxForegroundDuration` → 1) and drives the compiled
+  `out/tools/background.js` plus the real `join_background` tool over a fake hub. It
+  pins: a job registered with a 500 ms budget is **killed at roughly its deadline**
+  (not left to run its 8 s command), its `killReason` is `'timeout'`, it reads as
+  `'finished'`, `onFinish` fires exactly once and `remainingBudgetMs(task)` is **0**
+  afterwards; a job registered with **no** budget is left alone a second later with
+  `remainingBudgetMs` **`null`** (no deadline, not "0 left"), and an outside kill is
+  attributed to a non-`'timeout'` reason; `remainingBudgetMs` on a live budgeted job
+  is positive and **counts down**; and `join_background`'s gate — a live job with
+  more budget left than a turn may wait is **refused** (the result says
+  `has <…> of its <…> budget left` and `this join was refused`, tells the agent to
+  `End your turn`, names `kill_background(<id>)`, is an instruction rather than an
+  `Error:` line, and comes back at once instead of waiting on the job it refused), a
+  live job with **no deadline** is refused too (`has no deadline` — otherwise an
+  unbudgeted job could hold a turn for hours, which is the whole bug), a live job
+  with 800 ms left is **allowed** and the join resolves when the budget ends it, and
+  an already-finished job keeps today's wording. Every await is bounded: a case that
+  never settles fails the run instead of hanging it. Needs `out/` and is portable by
+  construction (the "slow" command is `process.execPath -e …`). Part of
+  `vscode:prepublish`.
 
-All three of those need `out/` (`npm run compile` first), for the same reason
+All four of those need `out/` (`npm run compile` first), for the same reason
 `check:signals` does — they drive compiled tools — and they are wired into
 `vscode:prepublish` immediately **after `check:cwd`**, whose subject they continue
 (`check:cwd` is the working directory and path base, `check:shell` the argv the shell
 hands on, `check:kill` the end of a command, `check:timeout` what happens when it does
-not end).
+not end, `check:budget` what happens once the work has left the turn).
 
-`tools/exec-cwd-acceptance.js` and the three scripts listed after it above
-(`shell-argv-acceptance.js` / `exec-kill-acceptance.js` / `exec-timeout-acceptance.js`)
-are the four windowless acceptance runs that *are* guards. The rest —
-`tools/rollover-acceptance.js` first — need neither a window nor a provider and are
+`tools/exec-cwd-acceptance.js` and the four scripts listed after it above
+(`shell-argv-acceptance.js` / `exec-kill-acceptance.js` / `exec-timeout-acceptance.js` /
+`bg-budget-acceptance.js`) are the five windowless acceptance runs that *are* guards.
+The rest — `tools/rollover-acceptance.js` first — need neither a window nor a provider and are
 dev-only, **not** in `vscode:prepublish`. The guards that only
 reach pure modules cannot see the risky half of a context rollover, which lives in
 `SessionRuntime`: it stubs the `vscode` module (a `Module._load`
@@ -269,6 +309,52 @@ one does not fail — it just is not covered), and a webview that starts using a
 API the stub lacks needs that API added to the stub. An explicit script path
 (`node tools/check-webview.js <file>`) runs it against a mutated copy — that is
 how to prove the guard still catches what it is for.
+
+**Open issue — a panel that painted once and then never again.** The guard exists
+because a reference to a deleted identifier inside a webview callback is *silent* in
+the real UI: the handler throws, nothing reports it, and the UI keeps whatever it had
+(that is how the Thinking-effort dropdown once stuck on "none"). A customer log shows
+the same silence on the webview's own wire: a panel was found painted once and then
+never repainted. A `new-session` switch painted an **empty shell** (`op#44 … painted`,
+`dom=41`) and for the next **1759 lines** of the log the deltas kept arriving
+(`webview-handler … message=delta`) while **zero** `post-tree` / `post-path` /
+`webview-paint` / `webview-frames` for that session followed — the host was **not**
+blocked, the webview side simply stopped repainting. The next step is that
+discriminating experiment: re-select that tab with diagnostics on. Posts appearing with
+**no** paint means the webview side aborted (the ` | at=` stamp on each line is what
+puts the two sides on one clock); nothing posted means the host side. Once it is
+understood, `check:webview.js` should assert a paint after a repaint, so a silently
+dead webview stops being invisible to packaging. See the same issue in
+`invariants/streaming-perf.md`.
+
+## Windowed checks (the bounded wait, and what no guard can see)
+
+The windowless runs above cannot see a **bounded wait** — and one of those waits has no
+windowless coverage at all: `spawn_agents` / `send_agent_message` in `sync` mode
+escape at `spinney.commandMaxForegroundDuration` through a `Promise.race` in
+`SessionRuntime`, and the batch is then delivered by the *async* notice path
+(`deliverBatchWhenSettled` / `deliverResumeAsync`) — a live window is the only place
+that path exists. How to verify it, with the diagnostics log on:
+
+1. Set a small limit (`spinney.commandMaxForegroundDuration` a few seconds, say 10)
+   and drive `POST /session/start {title, prompt}` through the control plane with a
+   prompt that spawns **one slow sub-agent** in `sync` mode (an `instruction` whose
+   work outlives the limit — a slow build, or an `exec_command` with a long
+   `timeout`).
+2. Read that tool's result. It must be the **escape** shape, not the summaries:
+   `escaped: true`, `waitedMs` equal to the limit, `ids` (the spawned node) and
+   `done` / `running` split at the escape, and the `note` that says the batch is still
+   running. A result that carries summaries means the wait was not bounded; a hang
+   means the race never happened. (`send_agent_message`'s resume is the same contract
+   with `id` instead of `ids`.)
+3. Then wait for the batch. The summary must arrive **later, as one batch notice** —
+   the notice, not the tool result, is the only delivery on that path (the
+   "delivered exactly once" invariant), so a notice that never lands is a lost
+   summary. Each finished sub-agent must still carry its `stats` and `transcript`, and
+   its sidecar card must settle in the UI.
+
+What only the window can add: no guard drives a node worker, a webview, or the
+control plane, so this one is repeated by hand when the bounded-wait code changes.
 
 ## Live settings check (recipe, not a tracked script)
 
