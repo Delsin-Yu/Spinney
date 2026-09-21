@@ -182,6 +182,74 @@ const ROLLOVER_ANSWER_CAP = 1000;
 const ROLLOVER_SETTLE_TIMEOUT_MS = 2000;
 
 /**
+ * Fallback when `spinney.commandMaxForegroundDuration` is absent or not a positive
+ * number: the 5 minutes the setting ships with.
+ */
+const DEFAULT_COMMAND_MAX_FOREGROUND_DURATION_SEC = 300;
+
+/**
+ * **Nothing may hold a turn longer than this** — `spinney.commandMaxForegroundDuration`
+ * in seconds, read live so an edited setting applies to the next call without a
+ * reload. The chat-side half of the rule: a sub-agent batch (`spawn_agents`) or a
+ * resume (`send_agent_message`) that is still running when the budget runs out stops
+ * holding the turn — the tool returns the ids and the summaries arrive later as a
+ * completion notice.
+ *
+ * This is a deliberate **local** copy of `commandMaxForegroundDurationSec()` in
+ * `src/tools/execCommand.ts` (the command-side half): importing that one would make
+ * the chat layer depend on the tools layer for a single number — a cycle across the
+ * seam — so the same small read is repeated here, under the same name, rather than
+ * shared. Keep the two in step.
+ */
+function commandMaxForegroundDurationSec(): number {
+  const configured = vscode.workspace.getConfiguration('spinney').get<number>('commandMaxForegroundDuration');
+  return typeof configured === 'number' && Number.isFinite(configured) && configured > 0
+    ? configured
+    : DEFAULT_COMMAND_MAX_FOREGROUND_DURATION_SEC;
+}
+
+/**
+ * Resolve after `ms` — the timer half of a bounded wait (`Promise.race` against the
+ * work). Unref'd: a wait that nobody needs any more (the work finished first) must
+ * not keep the extension host — or a finished test run — alive for its remainder.
+ */
+function delay(ms: number): Promise<void> {
+  return new Promise<void>((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    (timer as unknown as { unref?: () => void }).unref?.();
+  });
+}
+
+/**
+ * What a tool call that ran out of budget says instead of the summaries (the exact
+ * text the escape result carries as `note`). One sentence of fact plus one
+ * instruction: a model handed nothing but ids would otherwise keep waiting for the
+ * batch — precisely the turn the budget exists to end.
+ */
+function batchEscapeNote(limitMs: number): string {
+  return (
+    `The batch is still running after ${limitMs / 1000} s; it is now delivered as a batch notice. ` +
+    'End your turn: the notice carries every summary when the last one finishes.'
+  );
+}
+
+/**
+ * True when a finished background job was ended by the **budget**
+ * (`spinney.commandMaxForegroundDuration`) rather than by the user or by its own exit.
+ * That is the one ending whose completion notice has to name the budget: the command
+ * was promoted to the background so the turn could end, so "was killed by the user"
+ * would blame the wrong cause and hide the reason the work stopped.
+ *
+ * `killReason` is stamped by the tools layer (`src/tools/background.ts`, which owns the
+ * command side of the same rule) and travels on the task the hub hands this runtime; a
+ * task with no reason — or with `user` / `stop` / `rollover` — keeps the pre-existing
+ * wording (see `buildBackgroundSignal`).
+ */
+function isBudgetKill(task: BackgroundTask): boolean {
+  return task.killReason === 'timeout';
+}
+
+/**
  * The resume text of a rollover: the single `role:'user'` message the new window
  * stores, i.e. everything it sends besides the synthesized system prompt
  * (§5/§6 of `docs/agents/invariants/context-rollover.md`).
@@ -3282,7 +3350,7 @@ export class SessionRuntime {
   }
 
   /** Shared resume path for `send_agent_message` / `send_readonly_agent_message`. */
-  private resumeSubAgent(
+  private async resumeSubAgent(
     session: AgentSession,
     node: TreeNode,
     message: string,
@@ -3323,25 +3391,56 @@ export class SessionRuntime {
       void this.runSubAgent(job, signal).then((r) => this.deliverResumeAsync(node, r), () => {});
       return Promise.resolve(JSON.stringify({ resumed: true, id: node.id, async: true }));
     }
-    return this.runSubAgent(job, signal).then((r) => {
-      // Sync resume: the resumed output is the tool result, so the caller is
-      // informed by construction — settle the card (D1).
-      if (!node.delivered) {
-        node.delivered = true;
-        this.persistTurn();
-        this.postTree();
-      }
+    // `sync` is **bounded** exactly like `spawn_agents`: the resume is awaited at most
+    // `spinney.commandMaxForegroundDuration`, and a target that is still running when
+    // the budget runs out stops holding the turn — the result is delivered later
+    // through the same batch-notice path `async` uses (`deliverResumeAsync`).
+    //
+    // INVARIANT — delivered **exactly once**: the tool result is the only delivery on
+    // the normal path (it settles the card below, D1), the notice is the only delivery
+    // on the escape path (`settleSignals` settles the card when it lands). So the
+    // escape must not set `node.delivered`, or the notice would render as an
+    // already-delivered batch and the summary would never reach the model.
+    const task = this.runSubAgent(job, signal);
+    let finished = false;
+    const all = task.then((r) => {
+      finished = true;
+      return r;
+    });
+    const limitMs = commandMaxForegroundDurationSec() * 1000;
+    const settled = await Promise.race([all.then(() => null), delay(limitMs).then(() => 'timeout' as const)]);
+    if (settled === 'timeout') {
+      void all.then((r) => this.deliverResumeAsync(node, r), () => {});
       return JSON.stringify({
         resumed: true,
+        async: true,
+        escaped: true,
+        waitedMs: limitMs,
         id: node.id,
-        ok: r.ok,
-        summary: r.summary,
-        model: r.model,
-        modelName: r.modelName,
-        durationMs: r.durationMs,
-        transcript: node.agentTranscript,
-        stats: summarizeTranscript(node.messages),
+        done: finished ? [node.id] : [],
+        running: finished ? [] : [node.id],
+        note: batchEscapeNote(limitMs),
+        transcriptDir: this.host.transcriptDir(session.id),
       });
+    }
+    const r = await all;
+    // Sync resume: the resumed output is the tool result, so the caller is
+    // informed by construction — settle the card (D1).
+    if (!node.delivered) {
+      node.delivered = true;
+      this.persistTurn();
+      this.postTree();
+    }
+    return JSON.stringify({
+      resumed: true,
+      id: node.id,
+      ok: r.ok,
+      summary: r.summary,
+      model: r.model,
+      modelName: r.modelName,
+      durationMs: r.durationMs,
+      transcript: node.agentTranscript,
+      stats: summarizeTranscript(node.messages),
     });
   }
 
@@ -3456,20 +3555,26 @@ export class SessionRuntime {
     }
     this.postTree();
 
-    if (mode === 'async') {
-      const tasks = jobs.map((job) => {
-        const run = () => this.runSubAgent(job, signal);
-        return (childDepth === 1 ? this.subAgentPool.withSlot(run) : run()).then((result) => ({ job, result }));
+    // One promise per job, built **once**: the array feeds the bounded wait below and —
+    // when that wait escapes — the delivery callback, because a promise may be awaited
+    // twice but the work it wraps may not (a second `map` would run every sub-agent a
+    // second time). `doneFlags` is what the escape result reports as `done`/`running`:
+    // it is set by the job's own resolution, so it is exact when the timer wins the race
+    // (microtasks run before the timer callback, so a job that had settled shows up).
+    const doneFlags = jobs.map(() => false);
+    const tasks = jobs.map((job, index) => {
+      const run = () => this.runSubAgent(job, signal);
+      return (childDepth === 1 ? this.subAgentPool.withSlot(run) : run()).then((result) => {
+        doneFlags[index] = true;
+        return { job, result };
       });
+    });
+
+    if (mode === 'async') {
       // Notify the parent once the whole batch settles, so it reacts a single time
       // (`onAsyncBatchDone` handles a main-agent parent and a sub-agent parent the
       // same way now — the batch belongs to `parent`, whoever it is).
-      void Promise.allSettled(tasks).then((settled) => {
-        const list = settled.map((s, i) =>
-          s.status === 'fulfilled' ? s.value : { job: jobs[i], result: { ok: false, summary: 'cancelled', durationMs: 0 } },
-        );
-        this.onAsyncBatchDone(parent, list.map((l) => ({ ...l.result, node: l.job.node })), Date.now() - batchStartedAt);
-      });
+      this.deliverBatchWhenSettled(parent, jobs, tasks, batchStartedAt);
       return JSON.stringify({
         spawned: jobs.length,
         async: true,
@@ -3478,32 +3583,84 @@ export class SessionRuntime {
       });
     }
 
-    const runAll = async () => {
-      const results = await Promise.all(
-        jobs.map((job) => (childDepth === 1 ? this.subAgentPool.withSlot(() => this.runSubAgent(job, signal)) : this.runSubAgent(job, signal))),
-      );
-      // Sync mode: the summaries are the tool result, so the caller is informed by
-      // construction — no notice will follow. Settle their cards (D1).
-      for (const job of jobs) {
-        if (!job.node.delivered) {
-          job.node.delivered = true;
-        }
+    // `sync` is **bounded**: the batch runs exactly as before, but the turn is not held
+    // for it. `Promise.race` gives up at `spinney.commandMaxForegroundDuration` and the
+    // batch is then delivered by the *async* path — one batch notice when the last job
+    // finishes — instead of by this tool result.
+    //
+    // INVARIANT — the batch is delivered **exactly once**: on the normal path the tool
+    // result is the only delivery (it settles the cards below, D1) and no notice is ever
+    // queued; on the escape path the batch notice is the only delivery (it settles the
+    // cards when it lands, `settleSignals`). That is why the escape branch must not
+    // touch `job.node.delivered`: marking it here would make the notice render as an
+    // already-delivered batch and the summaries would never reach the model.
+    const limitMs = commandMaxForegroundDurationSec() * 1000;
+    const all = Promise.allSettled(tasks);
+    const settled = await Promise.race([all.then(() => null), delay(limitMs).then(() => 'timeout' as const)]);
+    if (settled === 'timeout') {
+      this.deliverBatchWhenSettled(parent, jobs, tasks, batchStartedAt);
+      return JSON.stringify({
+        spawned: jobs.length,
+        async: true,
+        escaped: true,
+        waitedMs: limitMs,
+        ids: jobs.map((j) => j.node.id),
+        // Which jobs the budget actually caught (see `doneFlags`).
+        done: jobs.filter((_, i) => doneFlags[i]).map((j) => j.node.id),
+        running: jobs.filter((_, i) => !doneFlags[i]).map((j) => j.node.id),
+        note: batchEscapeNote(limitMs),
+        transcriptDir: this.host.transcriptDir(session.id),
+      });
+    }
+
+    const results = (await all).map((s, i) =>
+      s.status === 'fulfilled' ? s.value.result : { ok: false, summary: 'cancelled', durationMs: 0 },
+    );
+    // Sync mode: the summaries are the tool result, so the caller is informed by
+    // construction — no notice will follow. Settle their cards (D1).
+    for (const job of jobs) {
+      if (!job.node.delivered) {
+        job.node.delivered = true;
       }
-      this.persistTurn();
-      this.postTree();
-      return {
-        results: results.map((r, i) => ({
-          agentNodeId: jobs[i].node.id,
-          transcript: jobs[i].node.agentTranscript,
-          stats: summarizeTranscript(jobs[i].node.messages),
-          ...r,
-        })),
-        // The whole batch: one number for "how long did asking for N sub-agents take",
-        // which the per-agent `durationMs` cannot answer when they ran in parallel.
-        durationMs: Date.now() - batchStartedAt,
-      };
-    };
-    return JSON.stringify(await runAll());
+    }
+    this.persistTurn();
+    this.postTree();
+    return JSON.stringify({
+      results: results.map((r, i) => ({
+        agentNodeId: jobs[i].node.id,
+        transcript: jobs[i].node.agentTranscript,
+        stats: summarizeTranscript(jobs[i].node.messages),
+        ...r,
+      })),
+      // The whole batch: one number for "how long did asking for N sub-agents take",
+      // which the per-agent `durationMs` cannot answer when they ran in parallel.
+      durationMs: Date.now() - batchStartedAt,
+    });
+  }
+
+  /**
+   * The **one** delivery path for a sub-agent batch that settles after the tool call
+   * which started it has already returned: `async` mode's only path, and the path a
+   * timed-out `sync` batch escapes onto. It builds the settled entries (a job that
+   * rejected counts as `cancelled`) and hands them to `onAsyncBatchDone`, which queues
+   * a single batch signal for the parent node — injected at that turn's next tool
+   * boundary, or delivered as an injected turn once it is idle (`queueSubAgentSignal`).
+   *
+   * `tasks` is the caller's own array, never rebuilt: awaiting a promise twice is free,
+   * running the sub-agents twice is not.
+   */
+  private deliverBatchWhenSettled(
+    parent: TreeNode,
+    jobs: SubAgentJob[],
+    tasks: ReadonlyArray<Promise<{ job: SubAgentJob; result: SubAgentRunResult }>>,
+    batchStartedAt: number,
+  ): void {
+    void Promise.allSettled(tasks).then((settled) => {
+      const list = settled.map((s, i) =>
+        s.status === 'fulfilled' ? s.value : { job: jobs[i], result: { ok: false, summary: 'cancelled', durationMs: 0 } },
+      );
+      this.onAsyncBatchDone(parent, list.map((l) => ({ ...l.result, node: l.job.node })), Date.now() - batchStartedAt);
+    });
   }
 
   /** Run one sub-agent to completion and resolve its result. When `resume` is set,
@@ -4113,11 +4270,21 @@ export class SessionRuntime {
     // How long the job ran. `finishedAt` is set by the registry's `complete()`, which
     // every ending goes through (natural exit, kill, session teardown).
     const took = formatDuration((task.finishedAt ?? Date.now()) - task.startedAt);
-    const outcome = task.killed
-      ? 'was killed by the user'
-      : `finished with exit code ${task.exitCode ?? 'unknown'}`;
+    // A job the **budget** ended is not the same news as one the user killed: the
+    // command was promoted to the background to keep the turn within
+    // `spinney.commandMaxForegroundDuration`, so what the reader has to learn is that
+    // the budget it was given ran out — not that somebody stopped its work. The
+    // verdict replaces the whole clause (which is why the sentence is assembled from
+    // `verdict` below rather than from `outcome` + `after …`): "was killed after 30m 0s
+    // — its 30m 0s budget ran out after 30m 0s" would say the same thing three times.
+    const budgetKilled = isBudgetKill(task);
+    const verdict = budgetKilled
+      ? `was killed after ${took} — its ${formatDuration(commandMaxForegroundDurationSec() * 1000)} budget ran out`
+      : task.killed
+        ? `was killed by the user after ${took}`
+        : `finished with exit code ${task.exitCode ?? 'unknown'} after ${took}`;
     const output = this.truncateField(task.handle.getOutput().trim(), 1200);
-    const text = `Background command \`${cmd}\` (id ${task.id}) ${outcome} after ${took}.${output ? `\nOutput:\n${output}` : ''}`;
+    const text = `Background command \`${cmd}\` (id ${task.id}) ${verdict}.${output ? `\nOutput:\n${output}` : ''}`;
     // The card's status text is the compact token form shown next to the `#id` — not
     // the English sentence above, which belongs to the agent. The webview renders this
     // verbatim (it never re-translates a payload the host built), so it stays

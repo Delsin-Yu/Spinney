@@ -9,40 +9,30 @@ import { CommandHandle, OUTPUT_CAP, spawnShellCommand, type KillOutcome } from '
 import { getAgentRoot, limitInline, resolvePath } from './index';
 import { getShell } from './shell';
 
-/** Fallback when `spinney.commandTimeout` is absent or not a positive number. */
-const DEFAULT_COMMAND_TIMEOUT_SEC = 600;
+/** Fallback when `spinney.commandMaxForegroundDuration` is absent or not a positive number. */
+export const DEFAULT_COMMAND_MAX_FOREGROUND_SEC = 300;
 
 /**
- * The effective default timeout for `exec_command`, read live so a settings
- * change applies to the next command instead of needing a window reload. A tool
- * call that passes an explicit `timeout` always wins over this.
+ * How long anything may hold a turn, in seconds — read live, so a settings change
+ * applies to the next call instead of needing a window reload.
+ *
+ * It is the single knob of the `exec_command` budget model: it caps the foreground
+ * slice (`min(timeout, limit)`, i.e. how long this call may hold the turn) and it is
+ * the number rule R2 is checked against ({@link timeoutTooLongError}). Exported
+ * because `join_background` gates on the same limit (`src/tools/backgroundTools.ts`).
  */
-function defaultCommandTimeoutSec(): number {
-  const configured = vscode.workspace.getConfiguration('spinney').get<number>('commandTimeout');
+export function commandMaxForegroundDurationSec(): number {
+  const configured = vscode.workspace.getConfiguration('spinney').get<number>('commandMaxForegroundDuration');
   return typeof configured === 'number' && Number.isFinite(configured) && configured > 0
     ? configured
-    : DEFAULT_COMMAND_TIMEOUT_SEC;
-}
-
-/**
- * Ceiling for `exec_command`'s `timeout`, applied to the model's value **and** to
- * the `commandTimeout` setting. Without it a model that picks `timeout: 99999` (or
- * a workspace where the setting was fat-fingered to an hour) blocks the turn for
- * as long as it likes; with it the command is promoted to the background at the
- * ceiling instead (see the default `timeout_behavior`), so nothing is lost.
- */
-const DEFAULT_COMMAND_TIMEOUT_MAX_SEC = 1800;
-
-/** Fallback when `spinney.commandTimeoutMax` is absent or not a positive number. */
-function commandTimeoutMaxSec(): number {
-  const configured = vscode.workspace.getConfiguration('spinney').get<number>('commandTimeoutMax');
-  return typeof configured === 'number' && Number.isFinite(configured) && configured > 0
-    ? configured
-    : DEFAULT_COMMAND_TIMEOUT_MAX_SEC;
+    : DEFAULT_COMMAND_MAX_FOREGROUND_SEC;
 }
 
 /** The accepted `timeout_behavior` values, in the order the error message names them. */
 const TIMEOUT_BEHAVIORS = ['stop', 'move_to_background', 'start_in_background'] as const;
+
+/** One of {@link TIMEOUT_BEHAVIORS}. */
+type TimeoutBehavior = (typeof TIMEOUT_BEHAVIORS)[number];
 
 /**
  * Heartbeat period for a foreground command. Slow enough never to matter, often
@@ -51,12 +41,35 @@ const TIMEOUT_BEHAVIORS = ['stop', 'move_to_background', 'start_in_background'] 
 const COMMAND_HEARTBEAT_MS = 30_000;
 
 /**
+ * Rule R2: a `timeout` longer than the limit may not hold the turn, so it is refused
+ * **before anything is spawned** unless the call explicitly asked for a background
+ * behavior. The message has to be actionable on its own — the model that hit it
+ * either wanted a long job (then it must say which kind of background job) or wanted
+ * a short one (then it must lower the number) — and it must say that nothing was
+ * started, or the model will look for an output that does not exist.
+ */
+function timeoutTooLongError(timeoutSec: number, limitSec: number): Error {
+  return new Error(
+    `timeout ${timeoutSec} s is longer than the ${limitSec} s a turn may hold ` +
+      `(spinney.commandMaxForegroundDuration). A command that may run that long must not hold the turn: ` +
+      `pass timeout_behavior "move_to_background" (${limitSec} s in the foreground, the rest of its ` +
+      `${timeoutSec} s budget in the background) or "start_in_background" (the whole ${timeoutSec} s in ` +
+      `the background), or pass a timeout of ${limitSec} s or less. Nothing was started.`,
+  );
+}
+
+/**
  * `pid=1234`, or `pid=none` before the spawn produced one (a spawn failure, or a
  * shell that has not been created yet). Every `exec …` diagnostics line carries it
  * so a log can be lined up with the OS process it talks about.
  */
 function pidField(handle: CommandHandle): string {
   return `pid=${handle.child.pid ?? 'none'}`;
+}
+
+/** `1500s`, `0s`, or `none` for a budget that does not exist — the `budget=` field. */
+function budgetField(ms: number | undefined): string {
+  return ms === undefined ? 'none' : `${ms / 1000}s`;
 }
 
 /** Keep a diagnostic timer (the still-running heartbeat) from holding the host open. */
@@ -89,13 +102,89 @@ function assertUsableCwd(cwd: string, requested: string | null): void {
 }
 
 /**
+ * The result of a promotion — a message the agent has to be able to act on without
+ * another look, because the command is now only visible through its id: which id,
+ * where it ran, how long it held the turn, and what is left of its budget.
+ *
+ * The first line is frozen (acceptance scripts and the docs quote it byte for byte);
+ * the rest differs in exactly one place: a job with **no deadline** (`move_to_background`
+ * with `timeout` omitted) says so instead of naming a budget, so no stray `ms` is
+ * ever printed without a number.
+ *
+ * `budgetMs` is the *call's* budget — the number the agent asked for — and not the
+ * rest the hub is handed at this moment: "the rest of its 1800 s budget" is the
+ * phrasing rule R2 and this message share (see {@link timeoutTooLongError}), and the
+ * background job's own deadline is what `join_background`/`check_background_terminal`
+ * report live. The two only differ by the foreground slice that was just spent.
+ *
+ * The join line states the gate `join_background` enforces: waiting on a job that
+ * still has more of its budget left than a turn may hold is refused, so the agent
+ * must end its turn and let the completion notice come back instead of blocking.
+ */
+function promotionMessage(
+  id: number,
+  foregroundMs: number,
+  dur: string,
+  budgetMs: number | undefined,
+  limitSec: number,
+  command: string,
+  cwd: string,
+  output: string,
+): string {
+  const what =
+    budgetMs === undefined
+      ? `The command was still running after ${foregroundMs} ms (${dur}) in ${cwd}, so it was moved to ` +
+        `the background with no deadline instead of a budget.`
+      : `The command was still running after ${foregroundMs} ms (${dur}) in ${cwd}, so it was moved to ` +
+        `the background with the rest of its ${budgetMs} ms budget; it will be killed when that budget ` +
+        `runs out.`;
+  const soFar = output.trim();
+  return (
+    `[command moved to background: id ${id}]\n` +
+    `${what} Nothing was killed by the move and it keeps running.\n` +
+    `Command: ${command}\n` +
+    `Working directory: ${cwd}\n` +
+    `check_background_terminal(${id}) looks at it, kill_background(${id}) stops it. Do not join it unless ` +
+    `less than ${limitSec} s of its budget is left: end your turn and the completion notice for id ${id} ` +
+    `will reach you.` +
+    (soFar ? `\nOutput so far:\n${soFar}` : '')
+  );
+}
+
+/** Everything {@link runForeground} needs; grouped because the call shape has no other reader. */
+interface ForegroundRun {
+  handle: CommandHandle;
+  command: string;
+  /** Captured just before the spawn; every elapsed number is measured from it. */
+  startedAt: number;
+  cwd: string;
+  /** How long this call may hold the turn (ms) — the timer fires here. */
+  foregroundMs: number;
+  /**
+   * The call's budget (ms); `undefined` = the job this call hands over has no
+   * deadline. Quoted by the promotion message, not what the hub is registered with
+   * (see {@link promotionMessage}).
+   */
+  budgetMs: number | undefined;
+  /** `spinney.commandMaxForegroundDuration`, in seconds (the join caveat quotes it). */
+  limitSec: number;
+  signal: AbortSignal | undefined;
+  /** Register the still-running command with the hub; `null` = kill it at the slice. */
+  promote: (() => number) | null;
+}
+
+/**
  * Run a command in the foreground and resolve with a human-readable result
- * (mirroring the original exec_command contract). When `moveOnTimeout` is set
- * and the command is still running at `timeoutMs`, it is promoted to a background
- * terminal via `promote` (which registers it with the hub under its owning node)
- * instead of being killed, and the resolved message names the background id, the
- * timeout that promoted it and the directory it is still running in — the agent
- * has to be able to keep managing a command the harness did not wait for.
+ * (mirroring the original exec_command contract).
+ *
+ * "Foreground" is a **slice** of the call's budget, not the whole of it: the timer
+ * fires at `foregroundMs`, and what happens there is this call's decision — with a
+ * `promote` closure the command is handed to the background hub (registered under
+ * its owning node with the rest of its budget as the job's own deadline) and the
+ * result is the promotion message; without one its tree is killed and the result is
+ * the ordinary `[command timed out after …]` line. A timeout at or below the limit
+ * never reaches the promotion: it is spent exactly when the slice ends (matrix
+ * row 5).
  *
  * Every result leads with an elapsed-time line (`[exit 0 in 3.4s · cwd …]`, ...)
  * computed from `startedAt` (captured just before the process was spawned). It is
@@ -106,21 +195,10 @@ function assertUsableCwd(cwd: string, requested: string | null): void {
  *
  * Diagnostics (`[perf] exec …`) bracket the call: `exec end` here, `exec start` in
  * the caller, a 30 s `exec still-running` heartbeat while it runs, and `exec kill`
- * once a kill issued here has actually landed. `timeoutNote` is appended to the
- * two messages that name a timeout; it is empty unless the requested timeout was
- * clamped (see `commandTimeoutMaxSec`).
+ * once a kill issued here has actually landed.
  */
-function runForeground(
-  handle: CommandHandle,
-  command: string,
-  startedAt: number,
-  cwd: string,
-  timeoutMs: number,
-  timeoutNote: string,
-  signal: AbortSignal | undefined,
-  moveOnTimeout: boolean,
-  promote: (() => number) | null,
-): Promise<string> {
+function runForeground(run: ForegroundRun): Promise<string> {
+  const { handle, command, startedAt, cwd, foregroundMs, budgetMs, limitSec, signal, promote } = run;
   return new Promise((resolve) => {
     let settled = false;
     let timer: NodeJS.Timeout | undefined;
@@ -184,7 +262,10 @@ function runForeground(
         // itself: name both, or the message points at neither.
         msg = `[command failed to start after ${dur}: ${message ?? 'unknown error'} (shell ${getShell().file})${at}]\n${out}`.trim();
       } else if (reason === 'timeout') {
-        msg = `[command timed out after ${timeoutMs} ms${timeoutNote} (ran ${dur})${at}]\n${out}`.trim();
+        // The number named is the slice this call was allowed to hold the turn for
+        // (`min(timeout, limit)`), which is what actually elapsed — the call's whole
+        // budget is only reachable through a background job (see `exec start`).
+        msg = `[command timed out after ${foregroundMs} ms (ran ${dur})${at}]\n${out}`.trim();
       } else if (handle.isTruncated()) {
         msg = `[command output exceeded ${OUTPUT_CAP} bytes; truncated after ${dur}${at}]\n${out}`.trim();
       } else if (code !== 0) {
@@ -216,7 +297,7 @@ function runForeground(
 
     timer = setTimeout(() => {
       if (settled) return;
-      if (moveOnTimeout && promote) {
+      if (promote) {
         settled = true;
         cleanup();
         const id = promote();
@@ -225,26 +306,18 @@ function runForeground(
         // nor `timeout` is true, because the command is still running and now
         // belongs to the background hub (whose own card and notice take over).
         perf(`exec end ${pidField(handle)} outcome=promoted code=none ms=${Date.now() - startedAt}`);
-        // How long it ran in the foreground before the promotion (i.e. ~timeoutMs,
-        // plus time the shell took to report the promotion), useful when deciding
+        // How long it ran in the foreground before the promotion (i.e. ~foregroundMs,
+        // plus the time the shell took to report the promotion), useful when deciding
         // whether to keep waiting on it via join_background.
         const dur = formatDuration(Date.now() - startedAt);
-        const soFar = handle.getOutput().trim();
-        const out = soFar ? `\nOutput so far:\n${soFar}` : '';
         resolve(
-          `[command moved to background: id ${id}]\n` +
-            `The command was still running after ${timeoutMs} ms (${dur}) in ${cwd}${timeoutNote}, so it was ` +
-            `moved to the background. Nothing was killed and it keeps running.\n` +
-            `Command: ${command}\n` +
-            `Working directory: ${cwd}\n` +
-            `Use check_background_terminal(${id}) to look at it, join_background(${id}) to wait for it, or ` +
-            `kill_background(${id}) to stop it.${out}`,
+          promotionMessage(id, foregroundMs, dur, budgetMs, limitSec, command, cwd, handle.getOutput()),
         );
         return;
       }
       killAndLog();
       finish('timeout');
-    }, timeoutMs);
+    }, foregroundMs);
 
     if (signal) {
       abortHandler = () => {
@@ -267,7 +340,7 @@ export function makeExecCommandTool(getAccess: () => BackgroundAccess | null): A
       function: {
         name: 'exec_command',
         description:
-          'Run a shell command and return its combined stdout/stderr; the first line of the result names the directory the command ran in. Use for builds, tests, git, npm, etc. Every command starts in the harness root (the workspace folder, or the harness scratch folder when no folder is open), which is the default cwd — pass cwd (relative to the harness root, or an absolute path) to run somewhere else, instead of prefixing the command with "cd <dir> && ". Never put the command in the background yourself ("&", "nohup", "disown", "Start-Process"): a process the harness did not spawn cannot be tracked, joined or stopped — use timeout_behavior for work that must outlive the call. By default (no timeout_behavior) the command runs in the foreground and, if it is still running when timeout is reached, it is moved to the background and the result gives you its id: nothing is killed and it keeps running, so check it with check_background_terminal(id), wait for it with join_background(id), or stop it with kill_background(id). timeout_behavior "stop" kills it at the timeout instead, "start_in_background" launches it in the background immediately and returns its id without waiting, and "move_to_background" is the same behaviour as the default, stated explicitly. timeout is in seconds (defaults to the spinney.commandTimeout setting, 600 = 10 minutes unless changed) and is clamped to the spinney.commandTimeoutMax ceiling (1800 seconds unless changed). Commands run through the detected shell (currently ' +
+          'Run a shell command and return its combined stdout/stderr; the first line of the result names the directory the command ran in. Use for builds, tests, git, npm, etc. Every command starts in the harness root (the workspace folder, or the harness scratch folder when no folder is open), which is the default cwd — pass cwd (relative to the harness root, or an absolute path) to run somewhere else, instead of prefixing the command with "cd <dir> && ". Never put the command in the background yourself ("&", "nohup", "disown", "Start-Process"): a process the harness did not spawn cannot be tracked, joined or stopped. Nothing may hold a turn for longer than spinney.commandMaxForegroundDuration (300 seconds, i.e. 5 minutes, unless changed), and the default timeout_behavior is "stop": a command still running when its foreground time is up is killed, and you get its output so far. Long work must say so — a timeout longer than that limit has to ask for a background mode: pass it with timeout_behavior "move_to_background" (it runs in the foreground up to the limit, then moves to the background with the rest of its budget as that job\'s own deadline and its id comes back in the result; it is killed when that budget runs out) or "start_in_background" (the whole budget runs in the background from the start and its id comes back immediately); with no timeout_behavior, or with "stop", a timeout that long is refused before anything is started. timeout itself is the command\'s total budget in seconds — foreground plus background, with no ceiling — and a background behavior that omits it gives the job no deadline at all. Do not join_background a job that has more of its budget left than a turn may wait: end your turn and the completion notice will reach you. Commands run through the detected shell (currently ' +
           getShell().label +
           ') and in that shell syntax (bash-style for bash/sh, PowerShell syntax otherwise).',
         parameters: {
@@ -282,13 +355,13 @@ export function makeExecCommandTool(getAccess: () => BackgroundAccess | null): A
             timeout: {
               type: 'number',
               description:
-                'Timeout in seconds (defaults to spinney.commandTimeout, 600 = 10 minutes unless changed; clamped to the spinney.commandTimeoutMax ceiling, 1800 seconds unless changed).',
+                'The command\'s total budget in seconds — foreground plus background — with no ceiling. Omitted: a foreground call may hold the turn up to spinney.commandMaxForegroundDuration (300 unless changed) and is then killed; a background call gets no deadline at all and runs until it finishes. A value longer than that limit is refused unless timeout_behavior is "move_to_background" (the rest of the budget runs in the background) or "start_in_background" (the whole budget runs in the background).',
             },
             timeout_behavior: {
               type: 'string',
               enum: ['stop', 'move_to_background', 'start_in_background'],
               description:
-                'What to do at the timeout: omit it (or "move_to_background") to move the still-running command to the background and get its id — nothing is killed; "stop" to kill it; "start_in_background" to launch it in the background immediately.',
+                'What happens when the command is still running at its foreground deadline (the timeout, capped at spinney.commandMaxForegroundDuration): omit it or use "stop" to kill the command there and get its output so far; "move_to_background" to move it to the background at that deadline with the rest of its timeout as its budget and get its id (it is killed when that budget runs out; needs a timeout longer than the limit); "start_in_background" to launch it in the background immediately and get its id without waiting.',
             },
           },
           required: ['command'],
@@ -303,21 +376,6 @@ export function makeExecCommandTool(getAccess: () => BackgroundAccess | null): A
       const cwdArg = args.cwd ? String(args.cwd) : null;
       const cwd = cwdArg ? resolvePath(cwdArg) : getAgentRoot();
       assertUsableCwd(cwd, cwdArg);
-      // The clamp applies to the model's timeout and to the `commandTimeout` default
-      // alike: the ceiling exists to bound how long a tool call can hold the turn,
-      // and a setting that ignores it would not bound anything.
-      const requestedSec =
-        typeof args.timeout === 'number' && Number.isFinite(args.timeout) ? args.timeout : defaultCommandTimeoutSec();
-      const maxSec = commandTimeoutMaxSec();
-      const timeoutSec = Math.min(Math.max(requestedSec, 1), maxSec);
-      const timeoutMs = timeoutSec * 1000;
-      // Name the effective seconds wherever the clamp changed the request: a model
-      // that asked for 9999 s and reads "timed out after 2000 ms" otherwise learns
-      // that `timeout` is ignored (the very belief the ceiling is meant to avoid).
-      const timeoutNote =
-        timeoutSec === requestedSec
-          ? ''
-          : ` (the requested timeout ${requestedSec}s was clamped to ${timeoutSec}s; spinney.commandTimeoutMax=${maxSec}s)`;
       const explicit =
         args.timeout_behavior === undefined || args.timeout_behavior === null ? null : String(args.timeout_behavior);
       if (explicit !== null && !(TIMEOUT_BEHAVIORS as readonly string[]).includes(explicit)) {
@@ -325,27 +383,72 @@ export function makeExecCommandTool(getAccess: () => BackgroundAccess | null): A
           `Invalid timeout_behavior "${explicit}". Use "stop", "move_to_background", or "start_in_background".`,
         );
       }
+      // The default is `stop` again: a still-running command is killed at its
+      // foreground deadline instead of being quietly promoted, because a promotion
+      // is only meaningful when the call asked for one (and R2 says a budget longer
+      // than the limit has to be asked for anyway).
+      const behavior: TimeoutBehavior = (explicit ?? 'stop') as TimeoutBehavior;
+      const backgroundBehavior = behavior !== 'stop';
+      const limitSec = commandMaxForegroundDurationSec();
+      const limitMs = limitSec * 1000;
+      // The call's timeout, in seconds. Absent — and, defensively, non-finite or
+      // non-positive — means the call did not ask for a budget of its own.
+      const timeoutSec =
+        typeof args.timeout === 'number' && Number.isFinite(args.timeout) && args.timeout > 0 ? args.timeout : null;
+      // Rule R2, before the spawn: a `timeout` that would hold the turn longer than
+      // anything may must ask for a background behavior explicitly.
+      if (timeoutSec !== null && timeoutSec > limitSec && !backgroundBehavior) {
+        throw timeoutTooLongError(timeoutSec, limitSec);
+      }
       const access = getAccess();
       const owner = access?.currentOwner() ?? null;
       const canBackground = !!(access && owner);
-      // The default is to move a still-running command to the background rather than
-      // kill it: the work is usually worth keeping, and losing it at an arbitrary
-      // timeout is the failure the agent cannot undo. Without background access
-      // (a bare `ToolRegistry`, e.g. the acceptance drivers) the only truthful
-      // behaviour left is the old one — kill at the timeout.
-      const behavior = explicit ?? (canBackground ? 'move_to_background' : 'stop');
-      if (explicit !== null && explicit !== 'stop' && !canBackground) {
+      if (backgroundBehavior && !canBackground) {
         throw new Error('Background terminals are not available in this session.');
       }
+      // The foreground slice: what this call may hold the turn for. `start_in_background`
+      // holds it for nothing (the job is registered before any waiting); everything
+      // else is capped by the limit, which is what makes R2's refusal coherent.
+      const foregroundMs =
+        behavior === 'start_in_background'
+          ? 0
+          : timeoutSec === null
+            ? limitMs
+            : Math.min(timeoutSec * 1000, limitMs);
+      // The call's budget, in ms: the `timeout` it asked for, or the limit it falls
+      // back to when it asked for none — and `undefined` for a background behavior
+      // with no `timeout` at all, which is a job with no deadline.
+      const budgetMs = timeoutSec !== null ? timeoutSec * 1000 : backgroundBehavior ? undefined : limitMs;
+      // What the hub is handed when the job leaves the foreground: the rest of that
+      // budget after the slice — the whole of it for `start_in_background` (which has
+      // no slice), `timeout − limit` for a promotion. The hub measures the job's
+      // deadline from the registration it performs now, so it must be given the rest,
+      // never the whole budget a second time. This is also the number the promotion
+      // message quotes as "the rest of its <ms> budget", so the text and the deadline
+      // the hub will enforce are the same number.
+      const jobBudgetMs = budgetMs === undefined ? undefined : budgetMs - foregroundMs;
+      // Promote only when there is something left to hand over: with `timeout ≤ limit`
+      // the budget is spent exactly when the slice ends, so the command is killed at
+      // its timeout instead of being promoted into a job that may not run at all.
+      const willPromote =
+        behavior === 'move_to_background' && (timeoutSec === null || timeoutSec > limitSec);
+      // A command that becomes a background job must keep draining its pipes (the hub
+      // owns it from then on), so it is never killed on a truncation flood; one this
+      // call will kill — the default `stop`, or a `move_to_background` whose budget is
+      // spent at the slice — is, so a runaway output cannot balloon memory while it
+      // holds the turn.
+      const killOnTruncate = behavior !== 'start_in_background' && !willPromote;
       const startedAt = Date.now();
-      const handle = spawnShellCommand(command, cwd, { killOnTruncate: behavior === 'stop' });
+      const handle = spawnShellCommand(command, cwd, { killOnTruncate });
       perf(
-        `exec start ${pidField(handle)} timeout=${timeoutSec}s behavior=${behavior} cwd=${cwd} cmd=${redactCommand(command)}`,
+        `exec start ${pidField(handle)} timeout=${foregroundMs / 1000}s budget=${budgetField(budgetMs)} ` +
+          `behavior=${behavior} cwd=${cwd} cmd=${redactCommand(command)}`,
       );
       // A promoted job is registered under the node whose turn spawned it, so it
-      // renders in that node's dock and its completion notice returns to that
-      // branch even if the user has moved the view elsewhere meanwhile.
-      const promote = access && owner ? () => access.hub.register(owner, handle, command, cwd) : null;
+      // renders in that node's dock and its completion notice returns to that branch
+      // even if the user has moved the view elsewhere meanwhile.
+      const promote =
+        access && owner ? () => access.hub.register(owner, handle, command, cwd, jobBudgetMs) : null;
 
       if (behavior === 'start_in_background') {
         const id = promote!();
@@ -353,22 +456,24 @@ export function makeExecCommandTool(getAccess: () => BackgroundAccess | null): A
           `[command started in background: id ${id}]\n` +
           `Command: ${command}\n` +
           `Working directory: ${cwd}\n` +
-          `Use check_background_terminal(${id}), join_background(${id}), or kill_background(${id}) to manage it.`
+          `check_background_terminal(${id}) looks at it and kill_background(${id}) stops it. Do not join it ` +
+          `unless less than ${limitSec} s of its budget is left (a job with no deadline cannot be joined at ` +
+          `all): end your turn and the completion notice for id ${id} will reach you.`
         );
       }
 
       return limitInline(
-        await runForeground(
+        await runForeground({
           handle,
           command,
           startedAt,
           cwd,
-          timeoutMs,
-          timeoutNote,
+          foregroundMs,
+          budgetMs: jobBudgetMs,
+          limitSec,
           signal,
-          behavior === 'move_to_background',
-          promote,
-        ),
+          promote: willPromote ? promote : null,
+        }),
         'exec_command',
       );
     },

@@ -376,16 +376,10 @@
       {
         "title": "%spinney.config.tools.title%",
         "properties": {
-          "spinney.commandTimeout": {
+          "spinney.commandMaxForegroundDuration": {
             "type": "number",
-            "default": 600,
-            "description": "%spinney.commandTimeout.description%",
-            "scope": "window"
-          },
-          "spinney.commandTimeoutMax": {
-            "type": "number",
-            "default": 1800,
-            "description": "%spinney.commandTimeoutMax.description%",
+            "default": 300,
+            "description": "%spinney.commandMaxForegroundDuration.description%",
             "scope": "window"
           },
           "spinney.maxInlineToolOutput": {
@@ -492,9 +486,10 @@
     "check:shell": "node tools/shell-argv-acceptance.js",
     "check:kill": "node tools/exec-kill-acceptance.js",
     "check:timeout": "node tools/exec-timeout-acceptance.js",
+    "check:budget": "node tools/bg-budget-acceptance.js",
     "sim": "node tools/sim/run.mjs",
     "sim:selftest": "node tools/sim/run.mjs --selftest",
-    "vscode:prepublish": "npm run compile && npm run sync:l10n && npm run check:models && npm run check:webview && npm run check:modeltree && npm run check:signals && npm run check:l10n && npm run check:rollover && npm run check:grid && npm run check:docs && npm run check:cwd && npm run check:shell && npm run check:kill && npm run check:timeout"
+    "vscode:prepublish": "npm run compile && npm run sync:l10n && npm run check:models && npm run check:webview && npm run check:modeltree && npm run check:signals && npm run check:l10n && npm run check:rollover && npm run check:grid && npm run check:docs && npm run check:cwd && npm run check:shell && npm run check:kill && npm run check:timeout && npm run check:budget"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

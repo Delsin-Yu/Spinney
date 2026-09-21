@@ -95,10 +95,17 @@ export class BackgroundHub {
    * Register a spawned command as a background terminal and return its
    * session-local id. The id is minted here (never in the registry) so it is
    * unique across every node of the session.
+   *
+   * `timeoutMs`, when set, is the job's **budget** — it is forwarded unchanged to
+   * the registry, which arms the deadline that kills the job (see
+   * {@link BackgroundRegistry.register}). The completion notice is always wanted
+   * here: the caller that owns the outcome (`exec_command`) reports it in its own
+   * tool result, and the hub's notice is what tells the agent about a job that
+   * ends later, on its own or at its deadline.
    */
-  register(owner: BackgroundOwner, handle: CommandHandle, command: string, cwd: string, notifyAgent = true): number {
+  register(owner: BackgroundOwner, handle: CommandHandle, command: string, cwd: string, timeoutMs?: number): number {
     const id = this.mintId(owner.sessionId);
-    this.registryFor(owner).register(handle, command, cwd, notifyAgent, id);
+    this.registryFor(owner).register(handle, command, cwd, true, id, timeoutMs);
     this.ownerIndex(owner.sessionId).set(id, owner);
     const task = this.findRegistry(owner.sessionId, owner.nodeId)?.get(id);
     if (task) {

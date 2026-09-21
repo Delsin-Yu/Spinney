@@ -20,7 +20,7 @@
  *   4. `BackgroundRegistry.kill` keeps its synchronous transition (the task reads
  *      as finished immediately, so Stop and the card stay instant) and fires the
  *      confirmation detached: a kill that is not confirmed sets `killUnconfirmed`
- *      and writes one `bg kill id=… pid=… outcome=… ms=…` diagnostics line, while a
+ *      and writes one `bg kill id=… pid=… reason=… outcome=… ms=…` diagnostics line, while a
  *      confirmed one sets nothing and stays quiet.
  *
  * A handle with no pid (`'no-pid'`) is not constructible through the public API, so
@@ -204,7 +204,7 @@ async function killAndMeasure(label, handle) {
   check('the unconfirmed outcome is passed through', fakeOutcome === 'no-exit', String(fakeOutcome));
   check('an unconfirmed kill raises killUnconfirmed', fakeTask.killUnconfirmed === true, String(fakeTask.killUnconfirmed));
   const line = perfLines.find((l) => l.includes('bg kill')) || '';
-  check('one diagnostics line names the outcome and elapsed ms', /bg kill id=3 pid=4242 outcome=no-exit ms=\d+/.test(line), line || '(no line)');
+  check('one diagnostics line names the outcome and elapsed ms', /bg kill id=3 pid=4242 reason=\w+ outcome=no-exit ms=\d+/.test(line), line || '(no line)');
 
   console.log('');
   if (problems.length) {
