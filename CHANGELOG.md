@@ -5,53 +5,13 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.0] - 2026-09-22
 
 ### Added
 
 - **`Spinney: Reload Chat Webview`** rebuilds the chat tab from the session state when the tab
   shows a stale frame. The conversation and the running turn are untouched.
 - **A stalled webview is measured and reported automatically.** No user action is needed.
-
-### Changed
-
-- A conversation is **frozen on the setup it started with**. The system prompt and the tool
-  schemas are rendered once, when a chain starts, and stored with it, so a send never rewrites a
-  prefix the provider has already cached: a reload, a settings edit or an extension update no
-  longer re-bills the whole context. Changing the model card, the thinking level or the reply
-  language does not change what a send uses — the composer marks Send and asks: **Continue with
-  current setup** (the pick is discarded, the dropdowns go back) or **Continue with latest
-  setup**, which copies the tree into a tree beside the current one, re-materialises its images
-  for the new card and leaves the old tree's cache intact. Dismissing the question sends nothing.
-- The composer shows both identities when they differ (`Sending with:` / `New setup:`) and offers
-  a **new-setup entry** when the harness side moved (the shipped prompt, the workspace AGENTS.md,
-  the tool set or the endpoint).
-- A session is a **forest**: the trees of one session are drawn side by side, and each is
-  interactive.
-- `⧉ Continue in a new window` is offered from **90 %** of the model card's context window, on any
-  conversational tip, instead of waiting for the provider to refuse the request. It asks which
-  setup the new node should start with — a new context is empty, so the latest setup costs nothing
-  there.
-- Messages are persisted **verbatim** (the 64 KiB per-message clip is gone from the stored copy)
-  and the change digest is exact inside them, so what a reload restores is what was sent.
-- **One window owns a workspace's sessions.** A second window on the same folder can read them,
-  and every change — send, continue, new/delete/rename session, clear — is refused with one
-  sentence, with the composer's Send disabled and that sentence as its title.
-
-### Removed
-
-- The in-place system-prompt rewrite and the three "the prompt cache may be missed" warnings:
-  there is no silent prefix change left to warn about.
-- Image blocks are no longer rewritten at send time (`messagesForCurrentModel`): an image is
-  materialised once, when an epoch is created, and a provider-rejected image is repaired in the
-  history instead of being hidden on every later request.
-- The Memento is a migration source only; a window that cannot take the workspace lock no longer
-  falls back to writing it.
-
-## [0.1.0] - 2026-09-21
-
-### Added
-
 - Elapsed time on the cards that do work: a background job, a sub-agent run and a tool call each
   show how long they take while they run, and keep the number after they end. The chip ticks in the
   panel itself, so a quiet command still shows a moving number.
@@ -85,30 +45,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`tools/bg-budget-acceptance.js` — a job killed at its own deadline, an unbudgeted job left
   alone, and the join that is refused rather than held).
 
-### Fixed
-
-- A `cwd` that cannot be used is no longer reported as a missing shell. `exec_command` checks the
-  directory **before** it spawns and answers `the working directory "x" → <resolved> does not
-  exist / is not a directory. Pass cwd relative to the harness root (…), or omit cwd to run in the
-  root.` Previously the spawn failed and Node blamed the shell (`spawn …\bash.exe ENOENT`), which
-  taught the agent that the `cwd` argument was broken.
-- A Git-Bash style path is understood on Windows: `/d/Repos/x` now means `D:\Repos\x` in every
-  tool, instead of being read as a path on the current drive (`D:\d\Repos\x`).
-- A Windows command no longer loses its arguments to the shell. Git Bash rewrote anything that
-  looked like a POSIX path before a native program saw it: `taskkill /PID 67188 /T /F` arrived as
-  `C:/Program Files/Git/PID …` and was rejected with `invalid argument/option`, so killing a stuck
-  process silently did not work (and the `//F` escape that used to work no longer did either).
-  The shell is now started with `MSYS_NO_PATHCONV=1`, so a native tool receives the argument as
-  written.
-- A kill that could not be confirmed is no longer reported as a clean kill. `kill`/`killAll` and
-  `exec_command`'s timeout and Stop paths wait for the process to really exit (Windows
-  `taskkill /PID … /T /F`, then the child's `exit`; POSIX `SIGTERM` and then `SIGKILL`), and an
-  outcome other than an exit is flagged: `Killed background terminal 3 after 3.4s, but the process
-  tree did not report an exit (command: …).` The state transition stays instantaneous, so Stop and
-  the card do not wait for the confirmation.
-
 ### Changed
 
+- A conversation is **frozen on the setup it started with**. The system prompt and the tool
+  schemas are rendered once, when a chain starts, and stored with it, so a send never rewrites a
+  prefix the provider has already cached: a reload, a settings edit or an extension update no
+  longer re-bills the whole context. Changing the model card, the thinking level or the reply
+  language does not change what a send uses — the composer marks Send and asks: **Continue with
+  current setup** (the pick is discarded, the dropdowns go back) or **Continue with latest
+  setup**, which copies the tree into a tree beside the current one, re-materialises its images
+  for the new card and leaves the old tree's cache intact. Dismissing the question sends nothing.
+- The composer shows both identities when they differ (`Sending with:` / `New setup:`) and offers
+  a **new-setup entry** when the harness side moved (the shipped prompt, the workspace AGENTS.md,
+  the tool set or the endpoint).
+- A session is a **forest**: the trees of one session are drawn side by side, and each is
+  interactive.
+- `⧉ Continue in a new window` is offered from **90 %** of the model card's context window, on any
+  conversational tip, instead of waiting for the provider to refuse the request. It asks which
+  setup the new node should start with — a new context is empty, so the latest setup costs nothing
+  there.
+- Messages are persisted **verbatim** (the 64 KiB per-message clip is gone from the stored copy)
+  and the change digest is exact inside them, so what a reload restores is what was sent.
+- **One window owns a workspace's sessions.** A second window on the same folder can read them,
+  and every change — send, continue, new/delete/rename session, clear — is refused with one
+  sentence, with the composer's Send disabled and that sentence as its title.
 - Tool results carry the duration in one locale-free format (`420ms`, `3.4s`, `42s`, `3m 12s`,
   `1h 3m`). Any call that took at least a second is marked with `[tool 3.4s]`; the JSON results of
   `spawn_agents`, `spawn_readonly_agents`, `send_agent_message` and `send_readonly_agent_message`
@@ -140,6 +100,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   own either — an editor addon, a test bridge, a build server. Its children are outside the
   spawned tree, so Stop cannot reach them and their output is never reported (this is the shape a
   customer hit: a test bridge's headless runner outlived its editor for two days).
+
+### Removed
+
+- The in-place system-prompt rewrite and the three "the prompt cache may be missed" warnings:
+  there is no silent prefix change left to warn about.
+- Image blocks are no longer rewritten at send time (`messagesForCurrentModel`): an image is
+  materialised once, when an epoch is created, and a provider-rejected image is repaired in the
+  history instead of being hidden on every later request.
+- The Memento is a migration source only; a window that cannot take the workspace lock no longer
+  falls back to writing it.
+
+### Fixed
+
+- A `cwd` that cannot be used is no longer reported as a missing shell. `exec_command` checks the
+  directory **before** it spawns and answers `the working directory "x" → <resolved> does not
+  exist / is not a directory. Pass cwd relative to the harness root (…), or omit cwd to run in the
+  root.` Previously the spawn failed and Node blamed the shell (`spawn …\bash.exe ENOENT`), which
+  taught the agent that the `cwd` argument was broken.
+- A Git-Bash style path is understood on Windows: `/d/Repos/x` now means `D:\Repos\x` in every
+  tool, instead of being read as a path on the current drive (`D:\d\Repos\x`).
+- A Windows command no longer loses its arguments to the shell. Git Bash rewrote anything that
+  looked like a POSIX path before a native program saw it: `taskkill /PID 67188 /T /F` arrived as
+  `C:/Program Files/Git/PID …` and was rejected with `invalid argument/option`, so killing a stuck
+  process silently did not work (and the `//F` escape that used to work no longer did either).
+  The shell is now started with `MSYS_NO_PATHCONV=1`, so a native tool receives the argument as
+  written.
+- A kill that could not be confirmed is no longer reported as a clean kill. `kill`/`killAll` and
+  `exec_command`'s timeout and Stop paths wait for the process to really exit (Windows
+  `taskkill /PID … /T /F`, then the child's `exit`; POSIX `SIGTERM` and then `SIGKILL`), and an
+  outcome other than an exit is flagged: `Killed background terminal 3 after 3.4s, but the process
+  tree did not report an exit (command: …).` The state transition stays instantaneous, so Stop and
+  the card do not wait for the confirmation.
 
 ## [0.0.3] - 2026-09-18
 
