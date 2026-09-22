@@ -305,5 +305,6 @@
   "Continue with the latest setup (forks this tree and sends there)": "使用最新設定繼續（分叉此樹並在該處傳送）",
   "Sending with: {0}": "傳送時使用：{0}",
   "New setup: {0}": "新設定：{0}",
-  "Send will ask before using the old setup (the one this node froze)": "傳送前會先詢問是否使用舊設定（此節點凍結的那一個）"
+  "Send will ask before using the old setup (the one this node froze)": "傳送前會先詢問是否使用舊設定（此節點凍結的那一個）",
+  "Spinney: no chat tab is open for this window.": "Spinney：此視窗沒有開啟的聊天分頁。"
 }

@@ -294,24 +294,195 @@ Two probes catch what a single op cannot express:
   a harness needs to assert on these lines; the output channel stays the primary sink
   and a failing tee never loses a line from it.
 
-### Open: a webview that paints once and then never repaints
+### Open: a webview that stops painting
 
-A panel that paints once and never again is invisible to the op trace above unless
-someone correlates the last `op#N … painted` for its subject with the end of the file:
-an op **ends** on the webview's `perfDiag paint` report, so a webview that stops
-repainting leaves no `webview-paint`, no `webview-frames` and no further `op#N` line at
-all — the trace simply goes quiet while `webview-handler … message=delta` lines keep
-arriving, which is exactly what a customer log showed (`op#44 … painted`, `dom=41` — an
-**empty shell**, painted after a `new-session` switch — and then 1759 more lines of
-deltas with **zero** `post-tree` / `post-path` / `webview-paint` / `webview-frames` for
-that session, the host *not* blocked). Reading that quiet as "the session went idle" is
-the trap, and it is why the ` | at=` stamp (already shipped in this build,
-`ChatViewProvider.stampLine`) matters: without it the header's `started` is the only
-time in the file, and the last painted op cannot be placed relative to the deltas that
-followed it. The discriminating experiment is to re-select that tab with diagnostics
-on — posts appearing with **no** paint means the webview side aborted the burst, and
-`tools/check-webview.js` should then assert a paint after a repaint, so a silently dead
-probe cannot ship. Same issue recorded next to that guard in `testing.md`.
+The symptom is real — a customer's screenshot shows a tab whose conversation stopped
+changing while its turn was still running — but the reading this section used to carry is
+not: that customer log does **not** prove a webview that "painted once and then never
+repainted". Three independent reasons, each one a property of our own instrumentation
+rather than a guess about that file:
+
+1. **`post-tree` / `post-path` only exist inside a traced op.** Both are written by
+   `opPayload`, which returns immediately when no ambient op is open (`src/perf.ts`), and
+   an op is only open around a panel open, a repaint or a checkout — never around a
+   streaming turn. That log holds 14 `post-tree` lines in 21642, every one of them inside
+   an op block, so "zero `post-tree` for that session" after the switch is simply the
+   normal shape of a tab that is already up: it proves nothing about whether the host
+   posted, because the host posts deltas there, not trees.
+2. **A routed message for a node with no card is thrown away silently.** `routeTo` looks
+   up the card of the node the message names and returns without a word when there is
+   none (`if (!itemsEl) return;`, `media/main.js`). A delta that arrived for a node the
+   webview never built a card for is therefore indistinguishable — on *both* sides of the
+   wire — from a delta that was never sent, so "the deltas kept arriving while nothing was
+   painted" cannot be read out of that file at all.
+3. **The big gaps in it are suspend artifacts, not freezes.** `webview-frames
+   … worst=30431785` (8.45 h), `worst=466604` and `55554` sit next to `stream-flush …
+   window=29951350ms` (11.9 h; 3.2 h and 1.2 h appear the same way), while the host's own
+   lag watch around them reported only `lag blocked 342ms`. Two measurements of one pause
+   of hours, in two processes, next to a host that was 342 ms late: that is a renderer
+   that was **not running** — page hidden, window minimized, display off, machine asleep.
+   The frame watch cannot report it as anything else, because it computes the gap when its
+   callback finally runs and evaluates the hidden check *at that moment*, i.e. after the
+   page is visible again; only the reporting is suppressed while it is hidden. **Read no
+   `webview-frames worst=` of minutes or hours, and no `stream-flush window=` of the same
+   size, as a stall** — the `suspend=` / `resume gap=` pair in the section below is what
+   makes that split explicit from now on.
+
+The open question stands: a tab **can** stop painting, and the customer's screenshot is
+what keeps it real. What was missing is evidence only the webview itself can produce,
+because the host cannot see inside it: the op trace goes quiet on a repaint that never
+happens, and a delta posted to a tab with no card for its node is dropped without a
+record. The instrumentation below is that evidence — a frame sampler inside the tab, a
+probe the host can send when the tab goes stale, and one non-destructive nudge — and it is
+what a re-report of this defect will be read against. The ` | at=` stamp (already shipped,
+`ChatViewProvider.stampLine`) still matters for exactly this reason: without it the
+header's `started` is the only time in the file, and the last painted op cannot be placed
+relative to the deltas that followed it. `tools/check-webview.js` grows the matching
+assertion — a repaint must come back as a paint report, and the new probes must **answer**
+(the probe reply, its frame, the nudge frame, and a drop for a message routed to a node
+that does not exist) — so a silently dead probe fails packaging instead of shipping
+silently; that intent, and this issue, are recorded next to each other in `testing.md`.
+
+### The tab stopped painting: the frame sampler, the probe, and one nudge
+
+Everything above measures a repaint that **happened**: an op ends on the webview's paint
+report, so a tab that stops drawing looks like a session that went idle, and (reason 2
+above) a delta dropped for a missing card is silent on both sides. The lines below are the
+other half — the webview saying what *it* is doing, on every tab, whether or not anything
+was asked of it.
+
+**The sampler is one frame per second, and only while the tab can be seen.** A frame loop
+posts a line a second while the document is visible and nothing at all while it is hidden
+(a hidden page is throttled to about that rate anyway, and an unwatched tab has no user to
+disappoint), so the sampler itself can never be the traffic it reports on: it is one
+`requestAnimationFrame` callback per tick, never a continuous loop, so it cannot keep the
+window from idling either. Stale is defined as a **3 s** gap in a *visible* tab: three ticks
+that did not happen while somebody was looking, which no throttling can explain.
+
+- `webview-stall state=stale ms=… frames=… hiddenMs=…` — the renderer stopped producing
+  frames for at least 3 s in a visible tab. `frames=` is what the sampler did produce in
+  that gap and `hiddenMs=` how much of the gap was spent hidden, which is what separates a
+  real stall from a tab that was hidden across the boundary.
+- `webview-stall state=recovered ms=… via=self|nudge|probe` — the frames came back, and
+  **what brought them back**: `self` (nothing was done, the renderer resumed on its own —
+  the suspend case), `nudge` (the ladder's one nudge) or `probe` (the host asked).
+- `webview-visibility state=hidden|visible ms=…` — the page's own visibility changes, so a
+  gap can be attributed to a hidden tab without having to read the host's side for it.
+- `webview-resize w=… h=… dpr=… canvas=…` — a resize is where a canvas-backed view can
+  lose its drawing surface, and `canvas=` is the size the surface actually has as the
+  webview reads it: a resize that leaves it without a size is a document that can no
+  longer paint whatever its cards say. Like the sampler, it is the webview describing its
+  own surface instead of its work.
+
+**The probe is how the host finds out which failure it is looking at.** The host asks on
+its own at two moments: after **3 s** of staleness in a tab that is both `visible` and
+`active` (there is a user in front of it), and when a traced op reaches its 20 s deadline
+(`no webview report` — the existing end of an op nothing reported on, which is the same
+defect seen from the host's side). It has to ask at all because nothing on the host's side
+can tell a script that is dead from a script that runs and draws nothing — and that
+discrimination is the whole purpose of the probe.
+
+- `webview-probe-request session=… probe#N` — the host asked; `N` is the probe's number
+  for that tab, and it is what the reply and the two failures below are named by.
+- `webview-probe session=… id=N msgs=… drops=… frames=… lastFrame=… dom=… cards=…
+  canvas=… wrap=… inner=… dpr=… hiddenMs=… readyState=…` — the webview's own state,
+  posted back in answer to that request: how many host messages it has handled
+  (`msgs`) and how many it dropped (`drops`, the counter below), what the sampler saw
+  (`frames`, and `lastFrame=` ms since the last frame it produced), the DOM and card
+  counts it holds, the canvas's size against the wrapper's and the window's (`canvas=` /
+  `wrap=` / `inner=`) at this `dpr=`, how long it has been hidden, and its `readyState`.
+- `webview-probe-frame session=… id=N ms=…` — a frame was produced *after* the reply,
+  which is the proof that the tab was drawing and not merely running.
+- `webview-probe-dead … (no reply in 3000ms)` — the reply itself never arrived.
+- `webview-probe-noframe … (no frame in 1000ms)` — the reply arrived, the frame did not.
+
+**That pair is the whole point of the probe: it separates the script from the
+compositor.** `webview-probe-dead` means the webview's script is not running at all — the
+document never answered, so nothing inside it can be trusted (a crashed renderer, a
+document whose boot threw, a message that never got through) — while
+`webview-probe-noframe` means the script *is* running and its own state is readable, but
+the compositor produced no frame: the DOM is intact and the surface is not, which is a
+paint problem and never a logic one. The reply's numbers then say which part of the
+surface: `hiddenMs` (nothing to paint), `canvas=` / `wrap=` (a surface with no size),
+`lastFrame` / `frames` (the loop running without frames, `frames` being the running total
+that stops growing), `drops` (messages that found no card). That discrimination is exactly what the old reading of the customer log could not
+make.
+
+**`webview-drop node=… n=1`** is written the first time a routed message finds no card
+for its node — the silent `return` in `routeTo`, and the one place where "the deltas never
+arrived" and "the deltas were thrown away" can be told apart. It is written once per node
+(`n=1`; a second drop for the same node does not repeat the line, or a broken route would
+flood the log), and the probe reply carries the running total as `drops=`, which is what
+turns one drop into a rate.
+
+**`post-failed session=… type=…`** is the host's own half of the same question: a
+`postMessage` to that tab was **rejected**, so the document is not there at all and nothing
+the host sends can ever be shown. It used to be swallowed (`the webview was torn down
+mid-flight; nothing to do`), which left "the host is posting into a document that is gone"
+exactly as invisible as the drops it was feeding. It is written once per session, per
+message type and minute, because a turn streaming into a dead document fails hundreds of
+messages in a row and the first one carries all of the news.
+
+**The ladder stops where it stops on purpose:** stale → probe → **one** nudge:
+
+- `nudge session=… probe#N reason=stale` — the host re-applies the existing transform and
+  re-runs the layout for that tab.
+- `webview-nudge-frame …` — a frame followed it, i.e. the nudge was enough.
+- `nudge-still-stale session=… probe#N` — it was not.
+- `webview-stale-unresolved session=… ms=… ladder=r0,r1` — the end of the ladder: rung 0
+  is the probe, rung 1 the nudge, and `ladder=` names the rungs that were climbed, so
+  "nothing further was tried" is in the line itself.
+
+**Nothing above the nudge is automatic**, and that is a rule rather than a missing
+feature: a silent repair hides the defect — the tab paints again, the user never learns
+why it stopped, and the log they would have sent never gets sent, so the next report is
+about a defect we have already damaged the evidence for. The one automatic move is allowed
+because it is **non-destructive**: it re-applies the transform that is already in effect
+and re-runs the layout, so it never moves the camera and cannot change what the user sees
+beyond repainting it, and the `webview-nudge-frame` / `nudge-still-stale` pair is what
+tells us whether it was a **cure** (frames returned) or a **cover** (the tab is drawing
+again and nothing we did explains why — which is itself the evidence we want).
+
+**The user's escape hatch is a reload of the document, never of the session.** `Spinney:
+Reload Chat Webview` rebuilds the webview document from the same HTML renderer the tab was
+created with, and the fresh script's `ready` drives the host's usual repaint — the session,
+its runtime and a running turn are all untouched, because the view is the only thing that
+was broken. That is also its price: the new document starts empty, so the scroll position
+and the cards the user had expanded are gone, which is exactly why the nudge is tried
+first and why this is the user's move rather than an automatic one. It marks itself in the
+log as `[panel] webview reload session=…`, so "I reloaded it and it came back" is a dated
+line rather than a memory. A document that says `ready` a **second** time — a renderer
+crash VS Code recovered from, or the reload above — writes `webview-reloaded session=…`:
+the two lines are deliberately distinct, because `webview-reloaded` alone is the defect (or
+a reload) reporting itself, while `[panel] webview reload` is what says a user asked for it.
+
+**A slept machine can never be misread as a freeze again.** Both sides now name a long gap
+for what it is: the host's lag watch writes `resume gap=<ms>` when a tick arrives that
+late, and the `webview-frames` line carries `suspend=<ms>`, non-zero only for a gap of at
+least **30 s** (that threshold is what keeps an ordinary hitch from being renamed a
+suspend, so the field sits on every `webview-frames` line and reads `0` for the ordinary
+case) — both describing the same event from the two processes. The `resume gap=` line is
+deliberately counted nowhere: it does not reach the lag watch's worst value and does not
+open a stall report of its own, so a sleep can neither inflate the one number that says how
+bad the host's blocking was nor hide a real stall that merely sat next to it — the ticks
+around it are still reported normally. A suspend is expected on both sides and produces no
+stall reading; a gap in the sampler that is *not* a suspend is what `webview-stall` is for.
+
+**The two sides also agree on the view state**, which is what decides whether a stall
+matters at all: `[panel] session=… visible=… active=…` is written once when the tab is
+wired and then on **every change** (never per tick — and once at wiring, because a
+listener that only fired on change would leave "is this the tab the user is looking at?"
+unanswered until the next click, which is exactly the moment a stale tab gets noticed),
+and `[perf] window active=…` follows the window's own focus. A hidden tab in a background
+window is allowed to be stale; a tab that is `visible` and `active` is not, and that is the
+condition the automatic probe tests.
+
+**What it costs:** a healthy tab writes *nothing* — the sampler reports only a gap of 3 s
+or more, the visibility and resize lines are written on change, and a probe only exists
+because the tab is already stale. The sampler runs at one frame per second and stops while
+hidden, and a stall that is still in flight repeats at most once every 10 s, so even a tab
+that froze for an hour adds a bounded handful of lines. The per-session volume stays in the
+low hundreds of lines a day, the same order as the op trace it can be read next to.
 
 ### Sending the log to someone else: the diagnostics log
 
@@ -386,7 +557,16 @@ The lines that make such a report diagnosable, in the order they appear:
   work counters. **A clean run produces this and no `lag blocked` line at all**, which is
   exactly why it exists: without it a good log would contain no evidence that the storm ran.
 - `[perf] lag blocked <ms> | ctx: … | heap=…` — the stall, when there is one, with what was
-  in flight and the heap.
+  in flight and the heap. A `resume gap=<ms>` line next to it is the other reading of the
+  same gap: the host's own tick arrived that late, i.e. the machine was suspended rather
+  than the loop blocked.
+- `webview-stall …` / `webview-visibility …` / `webview-resize …` / `webview-probe* …` /
+  `webview-drop …` / `webview-frames … suspend=` / `post-failed …` — the **webview's** half
+  of a stall (`post-failed` being the host's own line about a webview that is not there),
+  posted back to the host and therefore in the same file: the frame sampler, a probe and
+  its answer, a routed message that found no card, and the suspend split. They are the only
+  lines that can say a tab stopped painting at all (see the section above), and the ` | at=`
+  stamp is what places them on the host's clock.
 - `[store] …` and `load-sessions … source=store|memento` — where the content lives and
   whether a migration/adoption happened.
 - `[perf] persist-queued … via=store` / `persist-done …` — the write path.

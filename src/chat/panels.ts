@@ -35,6 +35,21 @@ export interface PanelManagerOptions {
   onMessage: (panel: ChatPanel, message: unknown) => void;
   /** A panel became the focused/visible tab. */
   onFocusChange: (sessionId: string) => void;
+  /**
+   * A panel's view state: once when the tab is wired, then on every
+   * `onDidChangeViewState` (see `ChatPanel`). Diagnostics only — the consumer decides
+   * whether a stall matters (a hidden tab is allowed to be stale) and may probe what the
+   * tab is painting; nothing here changes what the panel does.
+   */
+  onViewState?: (sessionId: string, state: { visible: boolean; active: boolean }) => void;
+  /**
+   * A message to a panel could not be delivered: the webview document is gone, so the tab
+   * can never show what the host sends it (`ChatPanelWiring.onPostFailed`). Diagnostics
+   * only — the consumer decides whether to write a line (a `postMessage` that fails while
+   * a tab is being torn down is expected, one that fails on a tab the user is looking at is
+   * the defect).
+   */
+  onPostFailed?: (sessionId: string, type: string) => void;
   /** A panel was closed (by the user or `close`); the session still exists. */
   onClosed: (sessionId: string) => void;
 }
@@ -43,6 +58,11 @@ export class PanelManager {
   private readonly panels = new Map<string, ChatPanel>();
   /** The last tab brought to the foreground; `null` until a panel reports active. */
   private focusedId: string | null = null;
+  /**
+   * The view state already reported, per session, so that a change is one report
+   * (see `reportViewState`).
+   */
+  private readonly viewStates = new Map<string, { visible: boolean; active: boolean }>();
 
   constructor(private readonly opts: PanelManagerOptions) {}
 
@@ -74,6 +94,8 @@ export class PanelManager {
           getHtml: (webview) => this.opts.getHtml(webview),
           onMessage: (message) => this.opts.onMessage(created, message),
           onDispose: () => this.onPanelDisposed(created),
+          onViewState: (state) => this.reportViewState(sessionId, state),
+          onPostFailed: (type) => this.opts.onPostFailed?.(sessionId, type),
         }),
       `session=${sessionId}`,
     );
@@ -126,6 +148,8 @@ export class PanelManager {
           getHtml: (webview) => this.opts.getHtml(webview),
           onMessage: (message) => this.opts.onMessage(adopted, message),
           onDispose: () => this.onPanelDisposed(adopted),
+          onViewState: (state) => this.reportViewState(sessionId, state),
+          onPostFailed: (type) => this.opts.onPostFailed?.(sessionId, type),
         }),
       `session=${sessionId}`,
     );
@@ -198,7 +222,44 @@ export class PanelManager {
         this.focusedId = panel.sessionId;
         this.opts.onFocusChange(panel.sessionId);
       }
+      // One listener, two jobs: the focus bookkeeping above and the view-state report
+      // the "stopped painting" diagnostic needs. Both answers come from the same event,
+      // so a second listener would only duplicate the work — and a hidden tab is
+      // *visible=false* without ever becoming the focused one, which is precisely the
+      // case the focus callback cannot express.
+      this.reportViewState(panel.sessionId, {
+        visible: panel.panel.visible,
+        active: panel.panel.active,
+      });
     });
+  }
+
+  /**
+   * Hand one view state to the provider's diagnostic hook — at most once per state.
+   *
+   * The same change arrives here from **two** wiring points: the panel's own listener,
+   * which is also what supplies the very first state (at construction, before the panel is
+   * registered here), and `wire()`'s listener beside the focus bookkeeping. Both are
+   * wanted — the panel must be able to report by itself, and the manager's report belongs
+   * with the bookkeeping it already owns — but the log is read as "once when the tab is
+   * wired, then once per change", so an identical repeat is dropped rather than written
+   * twice: a consumer that arms something per transition would otherwise arm it twice.
+   *
+   * Diagnostics only, so a throwing consumer is swallowed: this runs inside a panel's
+   * event listener (and, via the panel, inside its constructor), where a diagnostic must
+   * never cost the tab its focus bookkeeping.
+   */
+  private reportViewState(sessionId: string, state: { visible: boolean; active: boolean }): void {
+    const previous = this.viewStates.get(sessionId);
+    if (previous && previous.visible === state.visible && previous.active === state.active) {
+      return;
+    }
+    this.viewStates.set(sessionId, state);
+    try {
+      this.opts.onViewState?.(sessionId, state);
+    } catch {
+      /* diagnostics only: a consumer bug is never a reason to break the panel */
+    }
   }
 
   private onPanelDisposed(panel: ChatPanel): void {
@@ -207,6 +268,10 @@ export class PanelManager {
     if (this.panels.get(panel.sessionId) === panel) {
       this.panels.delete(panel.sessionId);
     }
+    // The view state is keyed by session, so the state of a tab that is gone has to go
+    // with it: a tab reopened later starts from its own first report instead of
+    // matching the one the previous document happened to leave behind.
+    this.viewStates.delete(panel.sessionId);
     if (this.focusedId === panel.sessionId && !this.panels.has(panel.sessionId)) {
       this.focusedId = null;
     }

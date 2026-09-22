@@ -166,10 +166,56 @@
     'delta', 'thinkingDelta', 'toolCallDelta', 'toolEnd', 'agentStart', 'backgroundNotice',
   ]);
 
+  // ---- The tab that stopped painting ------------------------------------------
+  // A webview can be *alive* — taking messages, appending to its DOM, ticking its own
+  // clocks — while the compositor stops producing frames: the tab then shows a
+  // picture that no longer follows the conversation. None of the probes above can say
+  // so: `paint` is only posted right after a traced burst, the frame watch only runs
+  // while a switch or a stream is in flight, and `webview-handler` proves the *script*
+  // is running, which is precisely the state that looks healthy from the host while
+  // the user stares at a frozen screen. So the question that separates "frozen" from
+  // "idle" is answered here, and it is answered about a VISIBLE tab only: is this
+  // document still producing frames? Three seconds without one is the only honest
+  // definition of "the screen is frozen".
+  //
+  // Cost, and why this cannot keep the window from idling: one frame per second — a
+  // single `requestAnimationFrame` callback per tick, never a continuous loop — and
+  // only while the document is visible. Hiding the tab clears the interval outright
+  // and nothing at all is reported while it is hidden (a hidden tab is *supposed* to
+  // stop painting, and the browser throttles it to ~1 fps). A healthy visible tab
+  // posts nothing either: a `stall` only goes out after STALE_MS without a frame.
+  const FRAME_SAMPLE_MS = 1000;
+  /** No frame for this long in a visible tab is a stall: the screen is frozen. */
+  const STALE_MS = 3000;
+  /** While a stall lasts, remind the host at most this often — a frozen tab keeps saying so. */
+  const STALE_REPEAT_MS = 10000;
+  /**
+   * A gap of at least this much is a suspend, not a stutter: the machine slept, the
+   * window was suspended, the display went off. It is counted separately, in the
+   * `suspend=` field of the frames report (`armFrameWatch`), because an overnight
+   * sleep otherwise reports `worst=30431785` and reads like an eight-hour freeze.
+   */
+  const SUSPEND_MS = 30000;
+  /** At most one `resize` report per this window, however fast the wrap is dragged. */
+  const RESIZE_REPORT_MS = 500;
+
   let perfPending = null;   // the traced repaint burst currently being measured
   let perfMarkdown = { ms: 0, calls: 0 };
   let perfLayoutMs = 0;
   let frameWatch = null;
+
+  // The stall sampler's own state: what it has seen, when it last saw a frame, and the
+  // stall episode in flight (all read by the `probe` reply and the `stall` reports).
+  let perfMessages = 0;              // host messages handled since this document loaded
+  let frameCount = 0;                // frames the sampler observed
+  let lastFrameAt = perfNow();       // when the last frame was observed
+  let frameTimer = null;             // the 1 Hz sampler's interval; null while hidden
+  let staleSince = null;             // when the stall in flight began (the last frame seen)
+  let staleReportedAt = 0;           // when the last `stale` report went out (0 = none yet)
+  let staleVia = null;               // 'probe' / 'nudge' seen during that stall, else null
+  let hiddenSince = null;            // set while the document is hidden
+  let hiddenMs = 0;                  // hidden time already accumulated
+  let visibilitySince = perfNow();   // when the current visibility state began
 
   function perfNow() {
     return typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
@@ -254,7 +300,7 @@
       frameWatch.until = Math.max(frameWatch.until, perfNow() + ms);
       return;
     }
-    const watch = { phase, until: perfNow() + ms, worst: 0, frames: 0, last: perfNow() };
+    const watch = { phase, until: perfNow() + ms, worst: 0, frames: 0, suspend: 0, last: perfNow() };
     frameWatch = watch;
     const step = () => {
       if (frameWatch !== watch) return;
@@ -264,11 +310,23 @@
       watch.frames++;
       // A hidden window is throttled to ~1 fps, which is not a stutter anyone sees.
       const hidden = typeof document !== 'undefined' && document.hidden;
-      if (gap >= STALL_MS && !hidden) watch.worst = Math.max(watch.worst, gap);
+      if (gap >= STALL_MS && !hidden) {
+        // Half a minute is not a stutter, it is the tab going away (sleep, suspend,
+        // display off): folding it into `worst` is what made a slept machine report
+        // `worst=30431785` and read as an eight-hour freeze. It is kept, separately,
+        // because it also explains a burst that reported no frames at all.
+        if (gap >= SUSPEND_MS) watch.suspend += gap;
+        else watch.worst = Math.max(watch.worst, gap);
+      }
       if (now >= watch.until) {
         frameWatch = null;
-        if (watch.worst > 0) {
-          perfPost('frames', { phase: watch.phase, worst: Math.round(watch.worst), frames: watch.frames });
+        if (watch.worst > 0 || watch.suspend > 0) {
+          perfPost('frames', {
+            phase: watch.phase,
+            worst: Math.round(watch.worst),
+            frames: watch.frames,
+            suspend: Math.round(watch.suspend),
+          });
         }
         return;
       }
@@ -279,6 +337,11 @@
 
   /** Measure one message the host sent; called from the single message listener. */
   function perfAfterMessage(msg, ms) {
+    // Counted before anything else, and whatever the message looks like: this counter
+    // is what tells a stalled tab's *messages* apart from its frames ("alive but not
+    // painting" is exactly messages arriving with `lastFrame` growing), so it must not
+    // depend on the shape of the message that arrived.
+    perfMessages++;
     if (!msg || typeof msg !== 'object') return;
     try {
       if (msg.traceId !== undefined && msg.traceId !== null) {
@@ -291,6 +354,309 @@
       /* a probe must never break the UI */
     }
   }
+
+  // ---- The frame sampler (the probe behind `stall`) ----------------------------
+  /** Is the document hidden? `visibilityState` when the host has it, else `hidden`. */
+  function perfHidden() {
+    const doc = typeof document !== 'undefined' ? document : null;
+    if (!doc) return false;
+    if (typeof doc.visibilityState === 'string') return doc.visibilityState !== 'visible';
+    return doc.hidden === true;
+  }
+
+  /**
+   * Milliseconds this document has spent hidden, the stretch in progress included: a
+   * probe is read *while* a tab is hidden, and reporting only the finished stretches
+   * would freeze the number exactly then.
+   */
+  function perfHiddenMs() {
+    return Math.round(hiddenMs + (hiddenSince != null ? perfNow() - hiddenSince : 0));
+  }
+
+  /**
+   * One 1 Hz sample of the visible tab: ask for a frame, then judge the gap. The
+   * callback is what proves the compositor still produces frames; the gap is what
+   * proves it does not — a callback of an earlier tick that never arrived *is* the
+   * missing frame, so the judgement is made here, not in the callback.
+   */
+  function perfSampleFrame() {
+    if (perfHidden()) return;   // never stale while hidden (the sampler is stopped there anyway)
+    requestAnimationFrame(perfMarkFrame);
+    const gap = perfNow() - lastFrameAt;
+    if (gap < STALE_MS) return;
+    // The stall began at the last frame we saw, not at this tick: that timestamp is
+    // what the episode's total length is measured from on recovery.
+    if (staleSince == null) {
+      staleSince = lastFrameAt;
+      staleReportedAt = 0;
+    }
+    if (staleReportedAt > 0 && perfNow() - staleReportedAt < STALE_REPEAT_MS) return;
+    staleReportedAt = perfNow();
+    perfPost('stall', { state: 'stale', ms: Math.round(gap), frames: frameCount, hiddenMs: perfHiddenMs() });
+  }
+
+  /** One observed frame: count it, and close a stall episode when there was one. */
+  function perfMarkFrame() {
+    if (perfHidden()) return;
+    frameCount++;
+    const now = perfNow();
+    lastFrameAt = now;
+    if (staleSince == null) return;
+    // Frames are back, so the episode is over — and this is the only place it can be
+    // reported. `via` says whether one of the host's probes was what brought them
+    // back: the probe/nudge pair is a cure only if a `recovered via=nudge` line says so.
+    perfPost('stall', {
+      state: 'recovered',
+      ms: Math.round(now - staleSince),
+      frames: frameCount,
+      hiddenMs: perfHiddenMs(),
+      via: staleVia || 'self',
+    });
+    staleSince = null;
+    staleReportedAt = 0;
+    staleVia = null;
+  }
+
+  function perfStartSampler() {
+    if (frameTimer != null || perfHidden()) return;
+    frameTimer = setInterval(perfSampleFrame, FRAME_SAMPLE_MS);
+  }
+
+  function perfStopSampler() {
+    if (frameTimer == null) return;
+    clearInterval(frameTimer);
+    frameTimer = null;
+  }
+
+  /**
+   * The document's visibility changed: report how long the *previous* state lasted,
+   * then move the sampler with it. The hidden stretch is accumulated (`hiddenMs`) for
+   * the probe reply, and the period itself is never staleness: the compositor is
+   * supposed to stop there, and a stall that spanned it would report a gap nobody
+   * could have painted through.
+   */
+  function perfNoteVisibility() {
+    try {
+      const hidden = perfHidden();
+      const now = perfNow();
+      perfPost('visibility', { state: hidden ? 'hidden' : 'visible', ms: Math.round(now - visibilitySince) });
+      visibilitySince = now;
+      if (hidden) {
+        perfStopSampler();
+        if (hiddenSince == null) hiddenSince = now;
+        // The episode in flight ends here *without* a `recovered`: frames did not come
+        // back, the tab went away, and calling that a recovery would be a lie that
+        // leaves via= on the next episode's report.
+        lastFrameAt = now;
+        staleSince = null;
+        staleReportedAt = 0;
+        staleVia = null;
+        return;
+      }
+      hiddenMs += hiddenSince != null ? now - hiddenSince : 0;
+      hiddenSince = null;
+      lastFrameAt = now;
+      // Three frames, not one: a resumed document needs more than a single callback
+      // before it is really painting again. If none of the three ever arrives, the gap
+      // rule catches it within STALE_MS — which is exactly the case of a resume that
+      // stays frozen.
+      requestAnimationFrame(perfMarkFrame);
+      requestAnimationFrame(perfMarkFrame);
+      requestAnimationFrame(perfMarkFrame);
+      perfStartSampler();
+    } catch (err) {
+      /* a probe must never break the UI */
+    }
+  }
+
+  /**
+   * `probe`: answer with this document's counters *now*, then with the frame that
+   * follows them. The two answers are what tell the three ways a quiet tab can fail
+   * apart — the script is dead (neither arrives), the script runs but nothing reaches
+   * the screen (`probe-frame` is the one that never comes), or both are fine and the
+   * freeze is elsewhere. The counters go out immediately, before the frame is asked
+   * for, because they are the half the host can still use from a tab that will never
+   * paint again.
+   */
+  function perfOnProbe(msg) {
+    try {
+      const t0 = perfNow();
+      perfNoteEpisode('probe');
+      perfPost('probe', {
+        id: msg.id,
+        msgs: perfMessages,
+        drops: perfDrops,
+        frames: frameCount,
+        lastFrame: Math.round(perfNow() - lastFrameAt),
+        dom: perfDomCount(),
+        cards: Object.keys(nodeEls).length,
+        canvas: perfCanvasBox(),
+        wrap: perfBox(treeWrap),
+        inner: perfInnerBox(),
+        dpr: perfDpr(),
+        hiddenMs: perfHiddenMs(),
+        readyState: document.readyState,
+      });
+      requestAnimationFrame(() => {
+        try {
+          perfPost('probe-frame', { id: msg.id, ms: Math.round(perfNow() - t0) });
+        } catch (err) {
+          /* a probe must never break the UI */
+        }
+      });
+    } catch (err) {
+      /* a probe must never break the UI */
+    }
+  }
+
+  /**
+   * `nudge`: the host's one cheap, non-destructive repair attempt — re-apply the
+   * canvas transform and re-run the layout, i.e. hand the compositor the same picture
+   * with its styles invalidated. It deliberately does nothing else: no camera move
+   * (`keepActiveInView` / `panToNode`), no scroll, no card repaint — on a healthy tab
+   * the user cannot tell it happened, which is what makes it safe to send
+   * automatically. The frame that follows is the answer to "did that cure it"; when it
+   * never arrives the host reports that and stops escalating.
+   */
+  function perfOnNudge(msg) {
+    try {
+      const t0 = perfNow();
+      perfNoteEpisode('nudge');
+      applyTransform();
+      relayout();
+      requestAnimationFrame(() => {
+        try {
+          perfPost('nudge-frame', { id: msg.id, ms: Math.round(perfNow() - t0) });
+        } catch (err) {
+          /* a probe must never break the UI */
+        }
+      });
+    } catch (err) {
+      /* a probe must never break the UI */
+    }
+  }
+
+  /** Note which of the host's probes was seen while a stall was in flight (`via`). */
+  function perfNoteEpisode(how) {
+    if (staleSince == null) return;
+    // A nudge outranks a probe whatever the order was: the nudge is the one that is
+    // *meant* to bring the frames back, so "recovered via nudge" is the answer that
+    // says the cure worked.
+    if (how === 'nudge') staleVia = 'nudge';
+    else if (!staleVia) staleVia = 'probe';
+  }
+
+  /** `"800px"` -> `800`; anything unparsable (a canvas never sized) -> `0`. */
+  function perfPx(value) {
+    const n = parseInt(value, 10);
+    return Number.isFinite(n) ? n : 0;
+  }
+
+  /**
+   * The tree canvas' own box, read from its *style* rather than from the DOM: a canvas
+   * whose style still says 800x600 while its wrapper measures 1200x900 is exactly the
+   * stale-layout evidence the probe is after, and the measured box would hide it.
+   */
+  function perfCanvasBox() {
+    try {
+      return perfPx(treeCanvas.style.width) + 'x' + perfPx(treeCanvas.style.height);
+    } catch (err) {
+      return '0x0';
+    }
+  }
+
+  /** One element's measured box as `<w>x<h>`, for a report that must never throw. */
+  function perfBox(el) {
+    try {
+      const rect = el.getBoundingClientRect();
+      return Math.round(rect.width) + 'x' + Math.round(rect.height);
+    } catch (err) {
+      return '0x0';
+    }
+  }
+
+  /** The window's own box — what the document thinks it was given to paint in. */
+  function perfInnerBox() {
+    try {
+      return Math.round(window.innerWidth) + 'x' + Math.round(window.innerHeight);
+    } catch (err) {
+      return '0x0';
+    }
+  }
+
+  function perfDpr() {
+    return Number(window.devicePixelRatio) || 0;
+  }
+
+  // ---- Messages thrown away for a node with no card ----------------------------
+  // `routeTo` cannot write a routed message into a node the tree does not have, and
+  // the message then disappears: no card, no error, nothing in the log. That is the
+  // same silence the probe above exists to break — a host streaming into a node this
+  // webview never created looks exactly like a host that stopped sending — so every
+  // such message is counted, and the FIRST one per node is reported. One broken node
+  // must not flood the channel with a report per delta of a whole turn; the running
+  // total is what the probe reply carries as `drops`.
+  const perfDropSeen = Object.create(null);   // node id -> its first drop was reported
+  let perfDrops = 0;                          // messages thrown away, in total
+
+  /**
+   * Count one message that had no card to land in. `kind` names the message that was
+   * lost — the streaming call sites pass their own type, everything else stays
+   * `append` — and it is also the *node* of a drop that has no node id at all: the
+   * legacy anonymous bucket, where the kind of the message is the only name the loss
+   * can be reported under. (It cannot ride along as a field called `kind`: `perfPost`
+   * merges its fields *over* `{ type, kind }`, so that name would become the report's
+   * kind and turn the drop into a `webview-delta` line.)
+   */
+  function perfCountDrop(node, kind) {
+    const key = node || kind || 'append';
+    perfDrops++;
+    if (perfDropSeen[key]) return;
+    perfDropSeen[key] = true;
+    perfPost('drop', { node: key, n: 1 });
+  }
+
+  // ---- The tree area's own size (the `resize` report) --------------------------
+  // A wrapper that is resized while the canvas keeps its old box is the second shape a
+  // frozen picture takes: the canvas is what the pan/zoom transform moves, so a wrap
+  // the layout never re-measured leaves the tree parked where it was. The observer
+  // that drives `relayout()` reports the change here; the report is throttled and only
+  // ever sent for a real change, so a dragged window writes one line per half second
+  // and a settled one writes none.
+  let resizeReportAt = 0;
+  let resizeReportedBox = '';   // the last box a report was sent for ('' = no baseline yet)
+
+  function perfReportResize() {
+    try {
+      const rect = treeWrap.getBoundingClientRect();
+      const w = Math.round(rect.width);
+      const h = Math.round(rect.height);
+      const box = w + 'x' + h;
+      // The first measurement of a document is the baseline, not a change: there is
+      // nothing to compare it with, and `wrap=` in the probe reply already carries it.
+      if (resizeReportedBox === '') {
+        resizeReportedBox = box;
+        return;
+      }
+      if (box === resizeReportedBox) return;
+      const now = perfNow();
+      if (now - resizeReportAt < RESIZE_REPORT_MS) return;
+      resizeReportAt = now;
+      resizeReportedBox = box;
+      perfPost('resize', { w, h, dpr: perfDpr(), canvas: perfCanvasBox() });
+    } catch (err) {
+      /* a probe must never break the UI */
+    }
+  }
+
+  // The sampler is started by the document itself, not by a message: a tab that froze
+  // before anyone could ask it anything is exactly the case this exists for. A document
+  // that loads hidden (a restored background tab) samples nothing until it is shown —
+  // but the hidden stretch it starts in is already hidden time, so the clock for it
+  // starts here rather than at the first `visibilitychange`.
+  if (perfHidden()) hiddenSince = perfNow();
+  perfStartSampler();
+  document.addEventListener('visibilitychange', perfNoteVisibility);
 
   /**
    * Apply a changed fold default to the cards already on screen — a settings
@@ -2704,19 +3070,33 @@
   // as it always did. Either way the target card is demoted first (its answer zone
   // gives its run back), and after writing the card's transcript follows to the
   // bottom (respects that card's scroll lock).
-  function routeTo(nodeId, fn) {
+  //
+  // `kind` names the message being routed (`delta`, `thinkingDelta`, `usage`,
+  // `toolCallDelta`, `toolStart`, `toolEnd`, else `append`) and exists for one
+  // reason: a message that finds no card is thrown away here, and the report of that
+  // loss has to say what was lost — see `perfCountDrop`.
+  function routeTo(nodeId, fn, kind) {
     if (!nodeId) {
       // Legacy shape: the callback writes into the view-focus card's zone 2 (that
       // is what `messagesEl` points at), so that card's answer zone has to give its
       // run back before the append lands — same rule as the routed branch below.
       const focus = treeActiveId ? nodeEls[treeActiveId] : null;
+      // No focus card either: the append lands in `messagesEl === null` and every
+      // `add*` helper returns on its first line — the same silent loss the routed
+      // branch counts below, in its one node-less form.
+      if (!focus) perfCountDrop('', kind);
       if (focus) demoteAnswer(focus);
       fn();
       return;
     }
     const card = nodeEls[nodeId];
     const itemsEl = card ? card.querySelector('.node-work') : null;
-    if (!itemsEl) return;
+    if (!itemsEl) {
+      // A node the tree does not have (the host streamed into a card this webview
+      // never created): counted, and reported once per node.
+      perfCountDrop(nodeId, kind);
+      return;
+    }
     // The one choke point every routed append goes through: a card that is showing
     // its answer in zone 3 takes that answer back into the log *first*, so what the
     // callback appends lands after the answer and the run is no longer the tail
@@ -3918,9 +4298,11 @@
     }
   });
 
-  // Reposition on resize so a long chain stays coherent.
+  // Reposition on resize so a long chain stays coherent — and report the new size of
+  // the tree area to the host (throttled, only on a real change), because a wrapper
+  // that changed while the canvas did not is one of the shapes a frozen picture takes.
   if (typeof ResizeObserver !== 'undefined') {
-    new ResizeObserver(() => { relayout(); ensureNodeInView(); }).observe(treeWrap);
+    new ResizeObserver(() => { relayout(); ensureNodeInView(); perfReportResize(); }).observe(treeWrap);
   }
 
   let nodeInViewRaf = null;
@@ -4835,24 +5217,24 @@
         break;
       case 'delta':
         addTpsTokens(msg.text);
-        routeTo(msg.nodeId, () => appendAssistant(msg.text));
+        routeTo(msg.nodeId, () => appendAssistant(msg.text), 'delta');
         break;
       case 'thinkingDelta':
         addTpsTokens(msg.text);
-        routeTo(msg.nodeId, () => appendThinking(msg.text));
+        routeTo(msg.nodeId, () => appendThinking(msg.text), 'thinkingDelta');
         break;
       case 'usage':
-        routeTo(msg.nodeId, () => appendUsage(msg.usage));
+        routeTo(msg.nodeId, () => appendUsage(msg.usage), 'usage');
         break;
       case 'toolCallDelta':
         addTpsTokens((msg.name || '') + (msg.args || ''));
-        routeTo(msg.nodeId, () => appendLiveTool(msg.index, msg.id, msg.name, msg.args));
+        routeTo(msg.nodeId, () => appendLiveTool(msg.index, msg.id, msg.name, msg.args), 'toolCallDelta');
         break;
       case 'toolStart':
-        routeTo(msg.nodeId, () => { finalizeStreamingAnswer(); finalizeLiveTool(msg.index, msg.id, msg.name, msg.args, msg.startedAt, null); });
+        routeTo(msg.nodeId, () => { finalizeStreamingAnswer(); finalizeLiveTool(msg.index, msg.id, msg.name, msg.args, msg.startedAt, null); }, 'toolStart');
         break;
       case 'toolEnd':
-        routeTo(msg.nodeId, () => updateTool(msg.id, msg.content, msg.ms));
+        routeTo(msg.nodeId, () => updateTool(msg.id, msg.content, msg.ms), 'toolEnd');
         break;
       case 'agentStart':
         onAgentStart(msg);
@@ -4882,6 +5264,16 @@
           if (c) demoteAnswer(c);
           addNotice(msg.kind, msg.text);
         }
+        break;
+      // The stall probes ("the tab stopped painting", see that block at the top): the
+      // host asks a quiet tab what it has counted (`probe`) and then asks it to prove
+      // it can still take a frame (`nudge`). Both are diagnostics: they answer with a
+      // `perfDiag` report and change nothing the user can see.
+      case 'probe':
+        perfOnProbe(msg);
+        break;
+      case 'nudge':
+        perfOnNudge(msg);
         break;
       case 'reset':
         clearLiveTools();

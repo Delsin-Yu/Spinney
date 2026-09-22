@@ -305,5 +305,6 @@
   "Continue with the latest setup (forks this tree and sends there)": "使用最新设置继续（分叉此树并在那里发送）",
   "Sending with: {0}": "发送时使用：{0}",
   "New setup: {0}": "新设置：{0}",
-  "Send will ask before using the old setup (the one this node froze)": "发送前会先询问是否使用旧设置（此节点冻结的那个）"
+  "Send will ask before using the old setup (the one this node froze)": "发送前会先询问是否使用旧设置（此节点冻结的那个）",
+  "Spinney: no chat tab is open for this window.": "Spinney：此窗口没有打开的聊天标签页。"
 }

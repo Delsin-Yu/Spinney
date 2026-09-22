@@ -17,7 +17,11 @@
 //       composer's Send/Stop pair are checked explicitly, plus the P2 background
 //       docks (each job has to end up in the card of the node that owns it) and the
 //       three zones of a turn card, whose third zone is a *move* of the work log's
-//       tail and never a copy (see the bottom of this file).
+//       tail and never a copy (see the bottom of this file), and
+//   (c) the diagnostics probes still speak — a `probe` / `nudge` the host sends comes
+//       back as a `perfDiag` report (counters, a frame, and a `kind:'drop'` for a
+//       routed message that found no card), so a tab that stopped painting can never
+//       be mistaken for an idle one (the deferred check at the bottom of this file).
 // The session-epoch shapes are checked the same way, each in its own block: the
 // forest (`rootIds` — the roots side by side, every one of them a live checkout
 // target, the composer on the checked-out node's tree), the host's context state
@@ -57,6 +61,15 @@ const notes = [];
  * here when the provider gains one.
  */
 const NODE_ID = 'smoke-node';
+/**
+ * A node id that no `tree` message in this file ever declares. The routed `delta`
+ * below aims at it, which is the fixture for the drop counter: `routeTo` used to
+ * return silently when it found no card for a node id, so the message vanished with
+ * no trace anywhere. The deferred check at the bottom of this file asserts both
+ * halves of the fix (the `kind:'drop'` report and the probe's own counter) against
+ * this same string.
+ */
+const UNKNOWN_NODE_ID = 'unknown-node-for-drop-test';
 const TURN_MESSAGES = [
   // A traced repaint: the host tags the burst of a session switch with the op id
   // the webview has to report back (see media/main.js's perf probes — the
@@ -182,6 +195,13 @@ const TURN_MESSAGES = [
   { type: 'toolStart', nodeId: NODE_ID, index: 0, id: 'smoke-tool', name: 'read_file', args: '{"path":"a"}', startedAt: Date.now() - 250 },
   { type: 'toolEnd', nodeId: NODE_ID, id: 'smoke-tool', content: 'ok', ms: 420 },
   { type: 'delta', nodeId: NODE_ID, text: 'smoke answer' },
+  // The drop counter's fixture, next to the routed streaming messages it belongs
+  // with: this `delta` names a node id no `tree` ever declared, so there is no card
+  // to route it to. That used to be a silent early return — the message simply
+  // ceased to exist, in the webview and in the log — and the `kind:'drop'` report it
+  // has to post now is asserted at the bottom of this file ("a message thrown away
+  // for a missing card can never be silent again").
+  { type: 'delta', nodeId: UNKNOWN_NODE_ID, text: 'x' },
   { type: 'thinkingDelta', nodeId: NODE_ID, text: 'smoke thought' },
   { type: 'usage', nodeId: NODE_ID, usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 } },
   { type: 'agentStart', id: 'smoke-agent', name: 'smoke agent', instruction: 'smoke', model: 'smoke-model', startedAt: Date.now() - 1500 },
@@ -203,6 +223,14 @@ const TURN_MESSAGES = [
   { type: 'done' },
   { type: 'interrupted' },
   { type: 'error', message: 'smoke error' },
+  // The two host -> webview stall probes, last so they see the whole run above: a
+  // `probe` asks the tab for its counters *now* (messages seen, drops, frames, the
+  // canvas/window readout) and a `nudge` asks it to prove it can still take a frame.
+  // Both answer with a `perfDiag` report — the whole point of replaying them, since
+  // the host has nothing else to read a stuck tab through. The reports are asserted
+  // in the deferred step at the bottom of this file.
+  { type: 'probe', id: 1 },
+  { type: 'nudge', id: 2 },
 ];
 
 // --- a DOM just big enough to let the script run ------------------------------
@@ -471,6 +499,14 @@ const document = {
   documentElement: makeElement('html'),
   activeElement: null,
   hidden: false,
+  // Two real DOM properties this stub used to leave `undefined`, both read by the
+  // stall probes: the `probe` report carries `document.readyState` as one of its four
+  // strings (asserted non-empty at the bottom of this file), and the visibility probe
+  // keys off `document.visibilityState` (arithmetic on an `undefined` one would post
+  // `NaN` — a sandbox limitation masquerading as a broken probe). Both values are the
+  // honest ones for a sandbox that is loaded once and never hidden.
+  readyState: 'complete',
+  visibilityState: 'visible',
   execCommand() {},
 };
 
@@ -3323,9 +3359,19 @@ if (contextLabel !== 'ctx 50%') {
  * deciding — a probe is diagnostics, but a probe that silently stopped reporting is
  * still a broken webview, and this is the only place it can be seen without a live
  * host. The delay has to outlast the webview's own coalescing window
- * (`media/main.js` `BURST_QUIET_MS`, 50 ms).
+ * (`media/main.js` `BURST_QUIET_MS`, 50 ms), and it is what the stall probes' frame
+ * answers need too: `probe` / `nudge` report from a `requestAnimationFrame`
+ * callback (the sandbox runs one on a timer), so those reports are due here.
  */
 setTimeout(() => {
+  /** `paint`, `probe#1`, `drop` … — what the probes did post, for the messages below. */
+  const seen = diagnostics.map(
+    (report) => String(report.kind || '?') + (report.id === undefined ? '' : '#' + report.id),
+  );
+  /** The reports of one kind, and of one probe id when the shape carries one. */
+  const reportOf = (kind, id) =>
+    diagnostics.find((report) => report.kind === kind && (id === undefined || report.id === id));
+
   const paint = diagnostics.find((report) => report.kind === 'paint' && report.traceId === 1);
   if (!paint) {
     problems.push(
@@ -3334,9 +3380,86 @@ setTimeout(() => {
     );
   } else if (typeof paint.since !== 'number' || typeof paint.cards !== 'number') {
     problems.push(`the traced repaint reported ${JSON.stringify(paint)}, expected numeric timings`);
-  } else {
-    notes.push(`perf probes: ${diagnostics.length} report(s)`);
   }
+
+  // --- the stall probes ("the tab stopped painting") --------------------------
+  // The host has two questions for a tab that went quiet — `probe` ("what have you
+  // counted?") and `nudge` ("can you still take a frame?") — and the answers are the
+  // only thing that tells a painted-but-frozen tab from an idle one; without them a
+  // dead webview reads as "nothing happened". They are diagnostics, so they are
+  // allowed to be narrow — but not to stop, which is the one failure nothing else
+  // here sees. Every probe of the pair is asserted separately, so a missing handler
+  // cannot hide behind the paint report above.
+  {
+    const probe = reportOf('probe', 1);
+    if (!probe) {
+      problems.push(
+        'a `probe` message posted no `kind: "probe"` report with id 1 — the host reads the tab through it, and a ' +
+          `tab that stopped answering would look idle; posted ${JSON.stringify(diagnostics)}`,
+      );
+    } else {
+      const numbers = ['msgs', 'drops', 'frames', 'lastFrame', 'dom', 'cards', 'hiddenMs'];
+      const notNumbers = numbers.filter((field) => typeof probe[field] !== 'number');
+      if (notNumbers.length > 0) {
+        problems.push(`the probe report's ${notNumbers.join(', ')} (id 1) is not numeric: ${JSON.stringify(probe)}`);
+      }
+      // The four strings are the readout the probe exists for: where the canvas and
+      // its wrapper sit, how large the window is, what document state the tab is in.
+      // All four *are* producible in this sandbox — `readyState` / `visibilityState`
+      // were added to the DOM stub for exactly this (see `document` above) — so an
+      // empty one is a broken probe, not a sandbox limitation being papered over.
+      const strings = ['canvas', 'wrap', 'inner', 'readyState'];
+      const notStrings = strings.filter((field) => typeof probe[field] !== 'string' || probe[field].length === 0);
+      if (notStrings.length > 0) {
+        problems.push(
+          `the probe report's ${notStrings.join(', ')} (id 1) is not a non-empty string: ${JSON.stringify(probe)}`,
+        );
+      }
+      // This run routed one message to a node id no `tree` declared, and the probe
+      // was sent after it: a counter that stayed at 0 would still be "numeric" (the
+      // sentence above) while saying nothing at all.
+      if (typeof probe.drops === 'number' && probe.drops < 1) {
+        problems.push(
+          `the probe report counted ${probe.drops} drop(s) although a message routed to ${UNKNOWN_NODE_ID} was ` +
+            'discarded — the probe counter is not wired to the drop path',
+        );
+      }
+    }
+
+    // The frame half of each probe. Neither can be missed for the sandbox's sake:
+    // `requestAnimationFrame` here is a `setTimeout`, so a probe that asks for a
+    // frame *always* gets one — a missing report means the probe stopped asking.
+    for (const [kind, id, cause] of [
+      ['probe-frame', 1, 'the `probe` message'],
+      ['nudge-frame', 2, 'the `nudge` message'],
+    ]) {
+      const frame = reportOf(kind, id);
+      if (!frame) {
+        problems.push(
+          `${cause} posted no \`kind: "${kind}"\` report with id ${id} — the probe never reached a ` +
+            `requestAnimationFrame callback; posted ${JSON.stringify(diagnostics)}`,
+        );
+      } else if (typeof frame.ms !== 'number') {
+        problems.push(`the ${kind} report (id ${id}) carries no numeric \`ms\`: ${JSON.stringify(frame)}`);
+      }
+    }
+
+    // The drop counter's other half, and the assertion this whole fixture exists for:
+    // the *report* a routed message leaves behind when it finds no card. Before it,
+    // "routeTo found no card for this node" was a silent early return, so the message
+    // could not be traced anywhere — not in the UI, not in the diagnostics log.
+    const drop = diagnostics.find((report) => report.kind === 'drop' && report.node === UNKNOWN_NODE_ID);
+    if (!drop) {
+      problems.push(
+        `no \`kind: "drop"\` report for ${UNKNOWN_NODE_ID} — a routed message with no card to land in was ` +
+          `discarded silently; posted ${JSON.stringify(diagnostics)}`,
+      );
+    } else if (typeof drop.n !== 'number') {
+      problems.push(`the drop report for ${UNKNOWN_NODE_ID} carries no numeric \`n\`: ${JSON.stringify(drop)}`);
+    }
+  }
+
+  notes.push(`perf probes: ${diagnostics.length} report(s): ${seen.join(', ') || 'none'}`);
 
   if (problems.length > 0) {
     console.error('check-webview: the chat webview does not survive the provider\n');

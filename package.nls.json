@@ -55,5 +55,6 @@
   "command.spinney.exportData.title": "Spinney: Export Session Data",
   "command.spinney.importData.title": "Spinney: Import Session Data",
   "spinney.diagnostics.log.description": "Write a diagnostics log for this window (one file per window, in the session data folder; older ones are removed, and a file rotates at 2 MiB). It holds timings, counters and paths — never your conversation and never an API key. Use Spinney: Open Diagnostics Log to find it.",
-  "command.spinney.openDiagnosticsLog.title": "Spinney: Open Diagnostics Log"
+  "command.spinney.openDiagnosticsLog.title": "Spinney: Open Diagnostics Log",
+  "command.spinney.reloadChatWebview.title": "Spinney: Reload Chat Webview"
 }

@@ -137,6 +137,10 @@
       {
         "command": "spinney.openDiagnosticsLog",
         "title": "%command.spinney.openDiagnosticsLog.title%"
+      },
+      {
+        "command": "spinney.reloadChatWebview",
+        "title": "%command.spinney.reloadChatWebview.title%"
       }
     ],
     "menus": {

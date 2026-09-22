@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`Spinney: Reload Chat Webview`** rebuilds the chat tab from the session state when the tab
+  shows a stale frame. The conversation and the running turn are untouched.
+- **A stalled webview is measured and reported automatically.** No user action is needed.
+
 ### Changed
 
 - A conversation is **frozen on the setup it started with**. The system prompt and the tool

@@ -55,5 +55,6 @@
   "command.spinney.exportData.title": "Spinney: 导出会话数据",
   "command.spinney.importData.title": "Spinney: 导入会话数据",
   "spinney.diagnostics.log.description": "为本窗口写诊断日志（每个窗口一个文件，位于会话数据文件夹；更旧的文件会被删除，单个文件到 2 MiB 时轮转）。其中只有耗时、计数与路径——不含你的对话，也不含密钥。用 Spinney: Open Diagnostics Log 找到它。",
-  "command.spinney.openDiagnosticsLog.title": "Spinney: 打开诊断日志"
+  "command.spinney.openDiagnosticsLog.title": "Spinney: 打开诊断日志",
+  "command.spinney.reloadChatWebview.title": "Spinney: 重新加载聊天视图"
 }

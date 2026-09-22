@@ -84,11 +84,13 @@ import { diagnosticsHeader, newestDiagnosticsLog, prepareDiagnosticsLog } from '
 import { nodeDigest } from './persistDigest';
 import {
   beginOp,
+  harnessLog,
   liveOpCount,
   logWebviewReport,
   opMark,
   perf,
   setLagContextProvider,
+  setOpTimeoutHook,
   setPerfSink,
   startLagWatch,
   startRepaintOp,
@@ -123,6 +125,33 @@ const PERSIST_MAX_WAIT_MS = 3000;
  * Only relevant while `SPINNEY_PERF_LOG` is set.
  */
 const PERF_TEE_MAX_BUFFER = 1 << 20;
+/**
+ * The stall diagnostic's own deadlines ("the tab stopped painting", see `onStallReport`). The
+ * numbers are the ones the lines quote (`no reply in 3000ms`, `no frame in 1000ms`), so a
+ * report can be read without the source.
+ */
+const PROBE_REPLY_TIMEOUT_MS = 3000;
+const PROBE_FRAME_TIMEOUT_MS = 1000;
+/** …and how long the nudge's frame gets: it re-applies the transform and re-runs relayout. */
+const NUDGE_FRAME_TIMEOUT_MS = 3000;
+/**
+ * No probe at all for a session within this window of its previous one. The webview's own
+ * stall detector and an op deadline can both ask inside the same second, and two probes would
+ * measure the same moment twice — this is what de-duplicates them.
+ */
+const PROBE_DEDUPE_MS = 10_000;
+/**
+ * The least time between two ladders in one session. A tab that stalls, is nudged and stalls
+ * again is one condition: a second probe run inside the same minute cannot say more than the
+ * first, and the webview's own `stall` line has already recorded it.
+ */
+const LADDER_COOLDOWN_MS = 60_000;
+/**
+ * At most one `post-failed` line per session, per message type, per this window. A turn
+ * streaming into a document that is gone fails hundreds of messages in a row; the first one is
+ * the whole of the news, and the rest would only push the useful lines out of the file.
+ */
+const POST_FAILED_REPORT_MS = 60_000;
 /** One-shot marker for the historical-transcript backfill (see `backfillTranscripts`). */
 const TRANSCRIPT_BACKFILL_KEY = 'spinney.transcriptBackfill';
 const TRANSCRIPT_BACKFILL_VERSION = 'v1';
@@ -194,6 +223,89 @@ function lastAssistantText(node: TreeNode): string {
     }
   }
   return '';
+}
+
+/**
+ * The Spinney output channel with the time stamp attached to every line written through it.
+ *
+ * The stamp has to live on the **channel** and not only on the call sites, because some writers
+ * are not the provider's: `SessionRuntime.logLayoutDiagnostic` writes the `[layout]` dump of a
+ * webview report through `RuntimeHost.output` with a bare `appendLine`. A report whose layout
+ * evidence carries no time while every line around it does is exactly the hole the stamp exists
+ * to close. `stampLine` is idempotent, so the call sites that already stamp their own line (the
+ * perf sink, `outputLog`) keep working unchanged.
+ */
+class StampedOutputChannel implements vscode.OutputChannel {
+  constructor(
+    private readonly inner: vscode.OutputChannel,
+    private readonly stamp: (line: string) => string,
+  ) {}
+
+  get name(): string {
+    return this.inner.name;
+  }
+
+  /** A partial line is left alone: its stamp belongs to the line it finishes. */
+  append(value: string): void {
+    this.inner.append(value);
+  }
+
+  appendLine(value: string): void {
+    this.inner.appendLine(this.stamp(value));
+  }
+
+  replace(value: string): void {
+    this.inner.replace(value);
+  }
+
+  clear(): void {
+    this.inner.clear();
+  }
+
+  show(preserveFocus?: boolean): void;
+  show(column?: vscode.ViewColumn, preserveFocus?: boolean): void;
+  show(columnOrPreserveFocus?: vscode.ViewColumn | boolean, preserveFocus?: boolean): void {
+    if (typeof columnOrPreserveFocus === 'boolean') {
+      this.inner.show(columnOrPreserveFocus);
+    } else {
+      this.inner.show(columnOrPreserveFocus, preserveFocus);
+    }
+  }
+
+  hide(): void {
+    this.inner.hide();
+  }
+
+  dispose(): void {
+    this.inner.dispose();
+  }
+}
+
+/**
+ * One "the tab stopped painting" episode, per session: from the webview's first `stale` report
+ * until it reports `recovered` (or the tab goes away). Its presence is what keeps the ladder to
+ * **one per episode** — a `stale` repeated every 10 s is the same frozen screen, not ten
+ * instructions — and `startedAt` is the `ms=<episode ms>` of the unresolved line.
+ */
+interface StallEpisode {
+  /** When the webview first said `stale` (the frame gap itself is in its own line). */
+  startedAt: number;
+}
+
+/**
+ * A probe the host is still waiting on, by probe id — the id the webview echoes back in its
+ * `probe`, `probe-frame` and `nudge-frame` reports. The whole ladder (probe → its frame → one
+ * nudge → its frame) is this record's `stage`, with the deadline of the stage currently awaited
+ * in `timer`: one record per probe, so no stage can leave a timer behind.
+ */
+interface ProbeWait {
+  readonly sessionId: string;
+  /** The episode this probe investigates, or `null` for an op-deadline probe (it has none). */
+  readonly episode: StallEpisode | null;
+  /** Which report moves this probe on: the probe's reply, its frame, or the nudge's frame. */
+  stage: 'reply' | 'probe-frame' | 'nudge-frame';
+  /** The deadline of `stage`; cleared before the stage moves on, and by `dispose`. */
+  timer: ReturnType<typeof setTimeout>;
 }
 
 /**
@@ -351,6 +463,33 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   /** Stopper for the host event-loop lag watch (diagnostics only). */
   private stopLagWatch: (() => void) | null = null;
   /**
+   * The last reported view state per session, so `[panel] session=… visible=… active=…` is
+   * written for the initial report and for every change and never twice for the same pair: VS
+   * Code re-reports the pair on every tab switch, and a file someone has to read by hand is the
+   * one place repetition costs. A tab that is on screen is the precondition of every stall
+   * investigation (see `onStallReport`), so "was it even visible when it froze?" is a question a
+   * report has to answer.
+   */
+  private readonly viewStates = new Map<string, { visible: boolean; active: boolean }>();
+  /**
+   * When each session's last failed delivery was reported, keyed by session and message type
+   * (`POST_FAILED_REPORT_MS`). A dead document fails every message of a streaming turn, so the
+   * reporting window is what keeps one defect from filling the file.
+   */
+  private readonly postFailedAt = new Map<string, number>();
+  /** The window-focus listener (diagnostics only); disposed with the provider. */
+  private windowStateSub: vscode.Disposable | null = null;
+  /** The stall episode in flight per session, from `stale` until `recovered` (see `StallEpisode`). */
+  private readonly stallEpisodes = new Map<string, StallEpisode>();
+  /** The probes still being waited on, by probe id (see `ProbeWait`). */
+  private readonly probeWaits = new Map<number, ProbeWait>();
+  /** Monotonic probe ids: every line carries the id its report will quote back. */
+  private probeSeq = 0;
+  /** When each session's last probe went out (the `PROBE_DEDUPE_MS` window). */
+  private readonly lastProbeAt = new Map<string, number>();
+  /** When each session's last ladder started (the `LADDER_COOLDOWN_MS` window). */
+  private readonly lastLadderAt = new Map<string, number>();
+  /**
    * Dev-only tee of the perf lines (see `openPerfTee`): non-null only when
    * `SPINNEY_PERF_LOG` named a file at construction. The output channel stays the
    * primary sink — this is a copy for the simulation harness (`tools/sim/run.mjs`),
@@ -398,7 +537,13 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   ) {
     this.mediaVersion = Date.now().toString(36);
     this.readOwnVersion(extensionUri);
-    this.output = vscode.window.createOutputChannel('Spinney');
+    // The channel stamps what it is handed, not the other way round: the writers the provider
+    // does not own (the `[layout]` dump of a webview report, which `SessionRuntime` writes
+    // through `RuntimeHost.output`) write bare lines, and layout evidence without a time is
+    // worth nothing next to the stall report it belongs to (see `StampedOutputChannel`).
+    this.output = new StampedOutputChannel(vscode.window.createOutputChannel('Spinney'), (line) =>
+      this.stampLine(line),
+    );
     this.openPerfTee();
     // The output channel is the primary sink; the tee only copies what is already
     // written there (dev-only, and off unless `SPINNEY_PERF_LOG` names a file).
@@ -410,7 +555,10 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     // Which display language the UI is in, and whether a catalog was found for it
     // (see src/i18n.ts): a non-English window without one simply stays English, and
     // this line is the only way to tell that apart from "nothing to translate".
-    this.output.appendLine(l10nDiagnostics(this.extensionUri));
+    // Stamped at the site *and* by the channel: this is the anchor every later line is read
+    // against ("when did this window start?"), and the two stamps cannot disagree —
+    // `stampLine` is idempotent, so the line carries the first one and only the first one.
+    this.output.appendLine(this.stampLine(l10nDiagnostics(this.extensionUri)));
     // The host's own event loop is watched from here on: a stall in the extension
     // host (persist, a tree rebuild) shows up as a late timer, which no `perf()`
     // line can report while it is blocked.
@@ -418,6 +566,16 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     // …and what is most likely to have blocked it is appended to that same line: an
     // O(1) readout of the persistence machinery (see `hostContext`).
     setLagContextProvider(() => this.hostContext());
+    // An op whose own deadline passes with no `webview report` is the other half of "the tab
+    // stopped painting": the perf layer knows that operation never came back and asks this
+    // just before it ends the op, so the probe below leaves evidence where there was silence.
+    setOpTimeoutHook((_label, subject) => this.onOpDeadline(subject));
+    // The window's own focus, because a tab in an unfocused window is painted on a different
+    // clock than one in front of the user: "was the window even focused?" has to be answerable
+    // from the file. The event only fires on a change, so no de-dupe is needed here.
+    this.windowStateSub = vscode.window.onDidChangeWindowState((state) => {
+      perf(`window active=${state.focused}`);
+    });
     // Keep the workspace lock alive: a heartbeat that stops is how a *live* window is
     // told apart from a killed one, and letting it lapse would hand the files to a second
     // window while this one is still writing them.
@@ -472,6 +630,12 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       onMessage: (panel, message) => this.handlePanelMessage(panel, message),
       onFocusChange: (sessionId) => this.onPanelFocus(sessionId),
       onClosed: (sessionId) => this.onPanelClosed(sessionId),
+      // The tab's own visible/active pair: half of what a stall report means, and the
+      // precondition of acting on one (see `onStallReport`).
+      onViewState: (sessionId, state) => this.onPanelViewState(sessionId, state),
+      // A delivery that failed is the other half of "the tab is not painting": the document
+      // is not there at all (see `onPostFailed`).
+      onPostFailed: (sessionId, type) => this.onPostFailed(sessionId, type),
     });
     this.loadSessions();
     // The two context lines come after the sessions are in, so they can name the store
@@ -2020,7 +2184,10 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    * their `#` shape — they are written straight to the stream by `openPerfTee`.
    */
   private stampLine(line: string): string {
-    return `${line} | at=${new Date().toISOString()}`;
+    // Idempotent: a line may pass through here twice — the perf sink and `outputLog` stamp
+    // before writing, and the channel stamps whatever it is handed (`StampedOutputChannel`) —
+    // and two timestamps on one line would be a bug of its own.
+    return line.includes(' | at=') ? line : `${line} | at=${new Date().toISOString()}`;
   }
 
   /** Append one perf line to the dev-only tee (see `openPerfTee`); never blocks. */
@@ -2930,6 +3097,323 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   private onPanelClosed(sessionId: string): void {
     // Closing a tab does NOT delete the session (its runtime keeps running).
     this.output.appendLine(`[panel] closed chat tab for session ${sessionId}`);
+    // The tab's own bookkeeping goes with the tab: a tab reopened later has to report its view
+    // state as the initial one, and a stall episode cannot outlive the document that was
+    // painting. A probe already in flight is deliberately left alone: "no reply in 3000ms" is
+    // precisely what a torn-down webview answers, and that is the evidence, not a leftover.
+    this.viewStates.delete(sessionId);
+    this.stallEpisodes.delete(sessionId);
+    // The delivery-failure window is keyed by session *and* message type, so it is dropped by
+    // prefix: a tab reopened later starts with a clean slate instead of inheriting the minute a
+    // previous document was silent for.
+    for (const key of [...this.postFailedAt.keys()]) {
+      if (key.startsWith(`${sessionId}\u0000`)) {
+        this.postFailedAt.delete(key);
+      }
+    }
+  }
+
+  // ---- View state, and "the tab stopped painting" (webview stalls) ----
+
+  /**
+   * `onViewState` (`PanelManager`): record a tab's visible/active pair and write
+   * `[panel] session=<id> visible=<bool> active=<bool>` for the **initial** report and for every
+   * change, never for a repeat. VS Code re-reports the same pair on every tab switch, and a
+   * diagnostics file somebody has to read by hand is the one place repetition costs real time.
+   */
+  private onPanelViewState(sessionId: string, state: { visible: boolean; active: boolean }): void {
+    const before = this.viewStates.get(sessionId);
+    this.viewStates.set(sessionId, state);
+    if (before && before.visible === state.visible && before.active === state.active) {
+      return;
+    }
+    // Through the perf sink rather than the channel alone: "was the tab even on screen when it
+    // froze?" is a question the *file* someone sends has to answer, and only the sink reaches it.
+    harnessLog(`[panel] session=${sessionId} visible=${state.visible} active=${state.active}`);
+  }
+
+  /**
+   * A `postMessage` to a chat tab was rejected: the webview document is gone, so that tab can
+   * never show what the host sends it (`ChatPanel.send`). The rejection used to be swallowed, and
+   * "the host is posting into a document that is not there" is the first of the two shapes a tab
+   * that stopped painting takes — the second, a document that is there and paints nothing, is what
+   * the stall report and the probe are for.
+   *
+   * Once per session, per message type and minute (see {@link POST_FAILED_REPORT_MS}): a turn
+   * streaming into a dead document fails hundreds of messages in a row, and the first one carries
+   * all of the news.
+   */
+  private onPostFailed(sessionId: string, type: string): void {
+    const key = `${sessionId}\u0000${type}`;
+    const now = Date.now();
+    if (now - (this.postFailedAt.get(key) ?? 0) < POST_FAILED_REPORT_MS) {
+      return;
+    }
+    this.postFailedAt.set(key, now);
+    perf(`post-failed session=${sessionId} type=${type}`);
+  }
+
+  /**
+   * The host's half of the stall diagnostic, called for every `perfDiag` report *after*
+   * `logWebviewReport` wrote that report's own line. Only the reports the host has to **act**
+   * on are read here; everything else in the webview's diagnostics is already logged and needs
+   * no reaction.
+   *
+   * Wrapped, because this is bookkeeping sitting next to a live message handler: one bad report
+   * must never break a turn, a switch or the UI.
+   */
+  private onPerfDiag(sessionId: string, report: Record<string, unknown>): void {
+    try {
+      const kind = typeof report.kind === 'string' ? report.kind : '';
+      if (kind === 'stall') {
+        this.onStallReport(sessionId, report);
+        return;
+      }
+      if (kind === 'visibility') {
+        // A document that goes hidden ends its stall episode **without** a `recovered` (a
+        // hidden tab is supposed to stop painting, so there is nothing to recover from), which
+        // means the host has to end it here too: kept, this session would count as "already
+        // investigated" for the rest of the window and no later stall in it would ever be
+        // probed. The probe gate (`visible && active`) already refuses to act on a hidden tab.
+        if (report.state === 'hidden') {
+          this.endStallEpisode(sessionId);
+        }
+        return;
+      }
+      const id = Number(report.id);
+      if (!Number.isFinite(id) || id <= 0) {
+        return;
+      }
+      if (kind === 'probe') {
+        this.onProbeReply(id);
+      } else if (kind === 'probe-frame') {
+        this.onProbeFrame(id);
+      } else if (kind === 'nudge-frame') {
+        this.onNudgeFrame(id);
+      }
+    } catch (err) {
+      perf(`probe-bookkeeping-error ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * The webview reported that a tab stopped painting (`stall`). It wrote its own automatic line
+   * through `logWebviewReport`, so this is the host's reaction only — never a second line.
+   *
+   * A `stale` report is acted on **only** when that session's tab is `visible && active`: VS
+   * Code stops animation frames and timers in a tab nobody is looking at, so a hidden tab that
+   * is not painting is expected, and investigating it would only produce noise. A `recovered`
+   * report clears the episode (and whatever the ladder was still waiting for).
+   *
+   * WHY the ladder stops where it does: a frozen tab must stay **visible**. Silently repairing
+   * it — a forced re-raster, a full `postAllState`, an automatic document reload — hides the
+   * defect: the user stops reporting it and walks away thinking the extension is unstable. The
+   * nudge is allowed because it is a legitimate cure with no state loss (it only re-applies the
+   * existing transform and re-runs relayout, and never moves the camera); everything above it is
+   * the user's call, through `Spinney: Reload Chat Webview`.
+   */
+  private onStallReport(sessionId: string, report: Record<string, unknown>): void {
+    const state = typeof report.state === 'string' ? report.state : '';
+    if (state === 'recovered') {
+      this.endStallEpisode(sessionId);
+      return;
+    }
+    if (state !== 'stale' || this.disposed) {
+      return;
+    }
+    const panel = this.panels.get(sessionId);
+    if (!panel || !panel.visible() || !panel.active()) {
+      return; // a tab nobody is looking at is allowed to not paint
+    }
+    if (this.stallEpisodes.has(sessionId)) {
+      return; // one ladder per episode: a re-reported `stale` is the same frozen screen
+    }
+    const now = Date.now();
+    const episode: StallEpisode = { startedAt: now };
+    this.stallEpisodes.set(sessionId, episode);
+    // The episode is recorded before the guards below, because "this episode has already been
+    // looked at" has to hold for the whole of it: the webview re-sends a `stale` every 10 s
+    // while the screen stays frozen, and a repeat must not restart the investigation.
+    //
+    // Two ladders in one session stay a minute apart: a tab that stalls, is nudged and stalls
+    // again is one condition, and a second probe run inside that minute cannot say more than
+    // the first. Only a ladder that really went out starts that clock.
+    if (now - (this.lastLadderAt.get(sessionId) ?? 0) < LADDER_COOLDOWN_MS) {
+      return;
+    }
+    // Rung 0: the probe. Its reply, its frame and the nudge's frame continue the ladder in
+    // `onProbeReply` / `onProbeFrame` / `onNudgeFrame` below; `0` means the probe guards
+    // refused it (no tab, or one probe in the last 10 s), so no ladder ran and none to cool down.
+    if (this.requestProbe(sessionId, episode) === 0) {
+      return;
+    }
+    this.lastLadderAt.set(sessionId, now);
+  }
+
+  /**
+   * Rung 0 of the ladder, and the whole of the op-deadline probe: ask this session's webview
+   * what it is doing (`ChatPanel.probe`), which it answers with a `probe` report (its counters
+   * and surface readout) and then a `probe-frame` report, both carrying the id. `episode` says
+   * which of the two callers this is: a ladder's probe continues into the nudge, while an
+   * op-deadline probe stops at the answer — for a cold switch that never reported a paint, the
+   * logged reply *is* the evidence, and there is no frame to repair.
+   *
+   * Returns the probe id, or 0 when the guards refused the probe: no tab, a tab nobody is
+   * looking at, or a probe already sent for this session within {@link PROBE_DEDUPE_MS} (the
+   * de-dupe that keeps the webview's own stall detector and an op deadline from measuring the
+   * same second twice).
+   */
+  private requestProbe(sessionId: string, episode: StallEpisode | null): number {
+    const panel = this.panels.get(sessionId);
+    if (!panel || !panel.visible() || !panel.active()) {
+      return 0;
+    }
+    const now = Date.now();
+    if (now - (this.lastProbeAt.get(sessionId) ?? 0) < PROBE_DEDUPE_MS) {
+      return 0;
+    }
+    const probeId = ++this.probeSeq;
+    this.lastProbeAt.set(sessionId, now);
+    this.probeWaits.set(probeId, {
+      sessionId,
+      episode,
+      stage: 'reply',
+      timer: this.armDiagnosticTimer(PROBE_REPLY_TIMEOUT_MS, () => {
+        this.probeWaits.delete(probeId);
+        perf(
+          `webview-probe-dead session=${sessionId} probe#${probeId} ` +
+            `(no reply in ${PROBE_REPLY_TIMEOUT_MS}ms)`,
+        );
+      }),
+    });
+    // The evidence line first, then the ask: a line written after the call is a line that is
+    // missing when the call throws, which is exactly the case this diagnostic exists for.
+    perf(`webview-probe-request session=${sessionId} probe#${probeId}`);
+    panel.probe(probeId);
+    return probeId;
+  }
+
+  /** The webview answered a probe: the ladder moves on to the frame that answer promised. */
+  private onProbeReply(id: number): void {
+    const wait = this.probeWaits.get(id);
+    if (!wait || wait.stage !== 'reply') {
+      return; // a reply to a probe that was already resolved (or timed out)
+    }
+    clearTimeout(wait.timer);
+    if (!wait.episode) {
+      this.probeWaits.delete(id); // op-deadline probe: the reply that was just logged is all of it
+      return;
+    }
+    // The reply alone proves nothing about the screen: a script can still run its counters while
+    // nothing reaches the surface. The frame is what separates "the tab can paint" from "the tab
+    // is alive but its surface is gone", and only the first one is worth nudging.
+    wait.stage = 'probe-frame';
+    wait.timer = this.armDiagnosticTimer(PROBE_FRAME_TIMEOUT_MS, () => {
+      this.probeWaits.delete(id);
+      perf(
+        `webview-probe-noframe session=${wait.sessionId} probe#${id} ` +
+          `(no frame in ${PROBE_FRAME_TIMEOUT_MS}ms)`,
+      );
+    });
+  }
+
+  /**
+   * The probe's frame arrived: the tab can still take a frame, and the one repair the host makes
+   * on its own is the nudge. Exactly one per episode — the ladder never goes above rung 1, and
+   * the reason it cannot is in `onStallReport`.
+   */
+  private onProbeFrame(id: number): void {
+    const wait = this.probeWaits.get(id);
+    if (!wait || wait.stage !== 'probe-frame') {
+      return;
+    }
+    clearTimeout(wait.timer);
+    const { sessionId, episode } = wait;
+    if (!episode) {
+      this.probeWaits.delete(id);
+      return;
+    }
+    const panel = this.panels.get(sessionId);
+    if (!panel) {
+      this.probeWaits.delete(id); // the tab went away mid-ladder: nothing is left to repair
+      return;
+    }
+    wait.stage = 'nudge-frame';
+    perf(`nudge session=${sessionId} probe#${id} reason=stale`);
+    panel.nudge(id);
+    wait.timer = this.armDiagnosticTimer(NUDGE_FRAME_TIMEOUT_MS, () => {
+      this.probeWaits.delete(id);
+      // The repair did not take. Say it in two parts — the repair that failed, and the stall
+      // that is now the user's to report — and then **stop**: no reload, no repaint, no
+      // escalation. The broken screen stays on purpose (see `onStallReport`).
+      perf(`nudge-still-stale session=${sessionId} probe#${id}`);
+      perf(
+        `webview-stale-unresolved session=${sessionId} probe#${id} ` +
+          `ms=${Date.now() - episode.startedAt} ladder=r0,r1`,
+      );
+    });
+  }
+
+  /**
+   * The nudge painted: the repair worked, and the ladder is finished. The episode stays open
+   * until the webview reports `recovered` (or goes hidden), so a `stale` it repeats in the same
+   * episode cannot start a second ladder.
+   */
+  private onNudgeFrame(id: number): void {
+    const wait = this.probeWaits.get(id);
+    if (!wait || wait.stage !== 'nudge-frame') {
+      return;
+    }
+    clearTimeout(wait.timer);
+    this.probeWaits.delete(id);
+  }
+
+  /**
+   * End a session's stall episode, and with it the ladder's pending deadlines: every one of them
+   * would write a line about a stall that is over. An op-deadline probe is deliberately left
+   * running — its reply is evidence about an *operation*, not about this stall, and the webview
+   * answering late is news either way.
+   */
+  private endStallEpisode(sessionId: string): void {
+    this.stallEpisodes.delete(sessionId);
+    for (const [id, wait] of [...this.probeWaits]) {
+      if (wait.episode && wait.sessionId === sessionId) {
+        clearTimeout(wait.timer);
+        this.probeWaits.delete(id);
+      }
+    }
+  }
+
+  /**
+   * One diagnostic deadline. `.unref()` where the host has it, so a pending ladder is never a
+   * reason for the extension host to stay alive; `dispose` clears whatever is still pending.
+   */
+  private armDiagnosticTimer(ms: number, fn: () => void): ReturnType<typeof setTimeout> {
+    const timer = setTimeout(fn, ms);
+    timer.unref?.();
+    return timer;
+  }
+
+  /**
+   * An op's deadline passed with no `webview report`: an operation the user was waiting for
+   * never produced a frame. Ask that session's tab what it is doing, so the log says what the
+   * webview was busy with instead of only that nothing came back — this is the evidence a cold
+   * switch that never reported a paint leaves behind, and the reason the hook exists at all.
+   *
+   * The same probe-request path as a ladder's first rung, with the same
+   * {@link PROBE_DEDUPE_MS} de-dupe, so a stall that trips an op deadline as well is still one
+   * probe. An op without a `subject` is one that is not about a session's tab, and there is
+   * nothing to ask about it.
+   */
+  private onOpDeadline(subject?: string): void {
+    if (!subject || this.disposed) {
+      return;
+    }
+    try {
+      this.requestProbe(subject, null);
+    } catch (err) {
+      perf(`probe-bookkeeping-error ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   /** Route a message to the panel's session's runtime. */
@@ -3033,6 +3517,30 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     const content = this.systemPrompt();
     const doc = await vscode.workspace.openTextDocument({ content, language: 'markdown' });
     await vscode.window.showTextDocument(doc, { preview: false });
+  }
+
+  /**
+   * `Spinney: Reload Chat Webview` — rebuild the **active** session's tab from scratch. This is
+   * the user's own escalation after a stall: the host deliberately leaves a broken screen
+   * visible instead of repairing it behind the user's back (see `onStallReport`), so the one
+   * repair with a price — a fresh document, which loses the scroll position and the expanded
+   * cards — is a command the user asks for while looking at the frozen tab.
+   *
+   * The session, its runtime and a running turn are untouched: only the view is rebuilt, and the
+   * fresh script posts `ready`, which drives the usual repaint.
+   */
+  reloadActiveChatWebview(): void {
+    const sessionId = this.activeSessionId;
+    const panel = this.panels.get(sessionId);
+    if (!panel) {
+      // No tab is open for the active session: an information message, not an error — the user
+      // may well have closed the tab that was stuck.
+      void vscode.window.showInformationMessage(vscode.l10n.t('Spinney: no chat tab is open for this window.'));
+      return;
+    }
+    // No line of its own: `ChatPanel.reload` writes `[panel] webview reload session=…`, and the
+    // command is the only caller — a second line would say the same thing twice.
+    panel.reload();
   }
 
   /**
@@ -3948,6 +4456,10 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     // session runtime just to log a line.
     if (message?.type === 'perfDiag') {
       logWebviewReport(`session=${session.id}`, message);
+      // …and the reports the host has to *act* on (a stall, a probe answer) are read from
+      // the same message: the line above is written here, so the reaction must not write it
+      // a second time.
+      this.onPerfDiag(session.id, message);
       return;
     }
     if (message?.type === 'ready') {
@@ -4136,6 +4648,20 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     }
     setPerfSink(null);
     setLagContextProvider(null);
+    setOpTimeoutHook(null);
+    // No diagnostic deadline may outlive the provider: a ladder's timer would write a line
+    // about a window that is gone. With them go the per-session maps that state belongs to.
+    for (const wait of this.probeWaits.values()) {
+      clearTimeout(wait.timer);
+    }
+    this.probeWaits.clear();
+    this.stallEpisodes.clear();
+    this.viewStates.clear();
+    this.postFailedAt.clear();
+    this.lastProbeAt.clear();
+    this.lastLadderAt.clear();
+    this.windowStateSub?.dispose();
+    this.windowStateSub = null;
     for (const rt of this.runtimes.values()) {
       rt.dispose();
     }

@@ -125,6 +125,10 @@ export function activate(context: vscode.ExtensionContext): void {
     // way a rename or a new machine recovers it (see invariants/session-persistence.md).
     vscode.commands.registerCommand('spinney.exportData', () => chatProvider?.exportSessionData()),
     vscode.commands.registerCommand('spinney.openDiagnosticsLog', () => chatProvider?.openDiagnosticsLog()),
+    // The user's own escalation when a tab stopped painting: the host deliberately leaves a
+    // broken screen visible and repairs nothing on its own (see `ChatViewProvider.onStallReport`),
+    // so rebuilding the document is a command the user runs while looking at it.
+    vscode.commands.registerCommand('spinney.reloadChatWebview', () => chatProvider?.reloadActiveChatWebview()),
     vscode.commands.registerCommand('spinney.importData', () => chatProvider?.importSessionData()),
     vscode.commands.registerCommand('spinney.openSession', (arg) => {
       const id = toSessionId(arg);

@@ -310,22 +310,38 @@ API the stub lacks needs that API added to the stub. An explicit script path
 (`node tools/check-webview.js <file>`) runs it against a mutated copy — that is
 how to prove the guard still catches what it is for.
 
-**Open issue — a panel that painted once and then never again.** The guard exists
-because a reference to a deleted identifier inside a webview callback is *silent* in
-the real UI: the handler throws, nothing reports it, and the UI keeps whatever it had
-(that is how the Thinking-effort dropdown once stuck on "none"). A customer log shows
-the same silence on the webview's own wire: a panel was found painted once and then
-never repainted. A `new-session` switch painted an **empty shell** (`op#44 … painted`,
-`dom=41`) and for the next **1759 lines** of the log the deltas kept arriving
-(`webview-handler … message=delta`) while **zero** `post-tree` / `post-path` /
-`webview-paint` / `webview-frames` for that session followed — the host was **not**
-blocked, the webview side simply stopped repainting. The next step is that
-discriminating experiment: re-select that tab with diagnostics on. Posts appearing with
-**no** paint means the webview side aborted (the ` | at=` stamp on each line is what
-puts the two sides on one clock); nothing posted means the host side. Once it is
-understood, `check:webview.js` should assert a paint after a repaint, so a silently
-dead webview stops being invisible to packaging. See the same issue in
-`invariants/streaming-perf.md`.
+**Open issue — a panel that stops painting, on evidence that is still missing.** The guard
+exists because a reference to a deleted identifier inside a webview callback is *that* kind
+of failure: a **silent** one — the handler throws, nothing reports it, and the UI keeps
+whatever it had (that is how the Thinking-effort dropdown once stuck on "none"). A
+customer's screenshot shows the same silence at the level of a whole tab: a panel whose
+conversation stopped updating while its turn ran on. The reading this section used to carry
+— that the customer log *proves* a panel "painted once and then never repainted" — does
+**not** hold, and for three reasons that live in our own code rather than in that file:
+
+- `post-tree` / `post-path` are written by `opPayload` only while an op is open
+  (`src/perf.ts`), and no op is open around a streaming turn; the log holds 14 of them in
+  21642 lines, all inside op blocks, so their absence after a switch proves nothing about
+  whether the host posted (it posts deltas there, not trees).
+- A routed message for a node with no card is dropped **without a word** (`routeTo`,
+  `if (!itemsEl) return;`, `media/main.js`), so "the deltas arrived while nothing was
+  painted" cannot be told apart from "the deltas were thrown away" on either side.
+- The hours-long `webview-frames worst=` / `stream-flush window=` values in that file are
+  **suspend / hidden artifacts**, not freezes: the host's own lag watch beside them reports
+  `lag blocked 342ms`, and the frame watch has to name the whole gap because it evaluates
+  the hidden check when its callback finally runs, i.e. after the page is visible again.
+
+The open question itself stands — a tab **can** stop painting, and that screenshot is what
+keeps it real — but it now waits on evidence a log of that shape cannot carry, which is
+exactly what the frame sampler, the probe and the one-nudge ladder in
+`invariants/streaming-perf.md` were added for; a re-report is read against those lines, and
+the ` | at=` stamp on each one is what puts the two sides on one clock.
+
+The guard takes those probes up with it: `check:webview.js` now asserts that they
+**answer** — the probe reply to a request, the frame that follows it, the nudge frame, and
+a drop for a message routed to a node that does not exist — so a silently dead probe fails
+packaging instead of shipping, exactly as a dead paint report already does. See the same
+issue, and the ladder, in `invariants/streaming-perf.md`.
 
 ## Windowed checks (the bounded wait, and what no guard can see)
 

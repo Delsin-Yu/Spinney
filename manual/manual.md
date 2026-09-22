@@ -140,6 +140,14 @@ Press `Escape`, or click the close button, to dismiss the question. A dismissed 
 
 A session can hold several trees. Spinney places the new tree beside the current one. The view shows the trees side by side, moves to the new tree, and each tree stays interactive. Check out a node of the tree that you want to continue, then send.
 
+### 3.5 Reload the chat webview
+
+A chat tab can show an old picture of the conversation. For example, a card stops changing, or only one part of the tree shows. The conversation is correct, and a running turn continues.
+
+Run **`Spinney: Reload Chat Webview`** to build the tab again from the state of the session. Use the command when the tab shows a frozen picture, or when a card does not change.
+
+The command does not change the conversation. It does not stop a running turn. With no chat tab open, Spinney answers `Spinney: no chat tab is open for this window.`
+
 ## 4. Branches
 
 ### 4.1 Branch from a turn
@@ -478,6 +486,7 @@ Every command lives in the Command Palette under `Spinney: `.
 | `Spinney: Clear API Key` | Erases a stored API key. |
 | `Spinney: Show System Prompt` | Opens the exact prompt that the model receives. |
 | `Spinney: Show User Manual` | Opens this manual in an editor tab. |
+| `Spinney: Reload Chat Webview` | Builds the chat tab again from the state of the session. |
 
 Spinney adds no default keyboard shortcut.
 

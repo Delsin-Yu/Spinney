@@ -99,6 +99,36 @@ function unrefTimer(timer: ReturnType<typeof setTimeout>): void {
   (timer as unknown as { unref?: () => void }).unref?.();
 }
 
+let opTimeoutHook: ((label: string, subject?: string) => void) | null = null;
+
+/**
+ * Register the hook an op's **own deadline** calls, right before it ends with
+ * `no webview report`.
+ *
+ * That deadline is the only moment the host *knows* a webview-facing operation never
+ * reported back — the tab went quiet and no paint report is coming — and it is exactly
+ * the moment a caller wants to probe that tab ("did the document die, or is it only the
+ * frame that stopped?"). Nothing is asked of the hook while an op is healthy, and the
+ * hook receives the op's `label` and `subject` so it can decide which operations it
+ * cares about.
+ *
+ * Diagnostics only, in both directions: the hook itself must post or measure and never
+ * change what the UI does, and a throwing hook is caught here so it can never keep the op
+ * from ending (or hide the `end` line that says the op failed).
+ */
+export function setOpTimeoutHook(fn: ((label: string, subject?: string) => void) | null): void {
+  opTimeoutHook = fn;
+}
+
+/** Ask the timeout hook about one failed op; a throwing hook is swallowed. */
+function notifyOpTimeout(label: string, subject: string | undefined): void {
+  try {
+    opTimeoutHook?.(label, subject);
+  } catch {
+    /* a probe bug is not allowed to cost the op its own ending */
+  }
+}
+
 class Op implements PerfOp {
   private done = false;
   private timer: ReturnType<typeof setTimeout> | null;
@@ -111,7 +141,12 @@ class Op implements PerfOp {
     readonly subject: string | undefined,
     timeoutMs: number,
   ) {
-    this.timer = setTimeout(() => this.end('no webview report'), timeoutMs);
+    this.timer = setTimeout(() => {
+      // The hook is asked *before* the end call: it may want to probe the tab that just
+      // went quiet, and the `end` line is the record of that failure either way.
+      notifyOpTimeout(this.label, this.subject);
+      this.end('no webview report');
+    }, timeoutMs);
     unrefTimer(this.timer);
   }
 
@@ -469,6 +504,17 @@ function lagContextText(): string {
 }
 
 /**
+ * The lag above which the host's timer is not late because the host was **blocked**.
+ *
+ * The JS thread cannot be busy for half a minute and then deliver one tick: a gap this
+ * large is the machine going to sleep (or the window being suspended) and the timers
+ * resuming when it wakes. Reporting it as a blocked loop produced
+ * `lag blocked 30431789ms` overnight, which reads as an eight-hour freeze in the very
+ * line a reader uses to decide whether the host is the problem.
+ */
+const RESUME_GAP_MS = 30_000;
+
+/**
  * Watch the host's own event loop. A timer that fires late means the extension
  * host was blocked — a `persist` write, a tree rebuild, a large stringify — and
  * that stall is what the user feels as a stutter. One line per stall burst, so a
@@ -503,6 +549,15 @@ export function startLagWatch(intervalMs = 250, thresholdMs = 120): () => void {
     }
     wasWorking = working;
     if (lag > thresholdMs) {
+      if (lag >= RESUME_GAP_MS) {
+        // Not a stall: name the resume for what it is and count it nowhere. It must not
+        // reach `worst` (that number is the one line that says how bad the host's own
+        // blocking was) and it must not open a burst of its own — the ticks around it
+        // are still reported normally, so a real stall that merely happened to sit next
+        // to a sleep keeps its own `lag blocked` line.
+        perf(`resume gap=${lag} (host timer late — the machine slept or the window was suspended)`);
+        return;
+      }
       stalls++;
       worst = Math.max(worst, lag);
       lastStall = now;
