@@ -53,22 +53,28 @@ export function pathMessages(session: AgentSession, nodeId: string | null): Chat
 }
 ```
 
-So a branch's flat API history is `[system, ...messages from the context base
-down to the node]` — **not** `[system, ...path nodes' messages]`. That is the
+So a branch's flat API history is `[epoch.prompt, ...messages from the context base
+down to the node]` — **not** `[...path nodes' messages]`. That is the
 whole semantic delta; `chat-tree.md` states it too.
 
 Everything downstream inherits it for free, because `SessionRuntime.buildPath()`
-is `sanitizeMessages([system, ...pathMessages(...)])` and every run records its
+is `sanitizeMessages([epochForNode(...)?.prompt ?? systemPromptFor(node),
+...pathMessages(...)])` — the frozen envelope first, a live render only for a chain
+that has none (`system-prompt.md`) — and every run records its
 basis from that same array inside the same block (`prefixLen` / `prefixTail` in
 `beginTurn` / `beginInjectedTurn`). Nothing else may compute a history prefix.
 
 Two side effects worth knowing (both wanted):
 
-- `activeSessionHasImages()` now asks about the messages that are actually sent.
+- The old `activeSessionHasImages()` probe is **gone** with the send-time image
+  hiding: nothing asks "does the sent prefix carry images?" any more. An image is
+  judged where it is created — the composer's `isVisionCard(sendCard)` guard and the
+  card's `vision.transport` (`vision-images.md`).
 - The `persist-queued … msgs=N` diagnostic (prefixed `[perf]`, *not* `[persist]`) now
   reports the sent prefix's size: `persistNow()` counts
   `pathMessages(session, session.activeNodeId).length`, not the active node's own
-  `messages.length` (`src/chat/ChatViewProvider.ts` ~:1072-1088).
+  `messages.length` (`src/chat/ChatViewProvider.ts`, the `counts` line in
+  `persistNow`).
 
 `contextBaseId` participates in `pathIds`, so it decides which nodes' messages are
 *sent*; it never moves a card.
@@ -94,7 +100,7 @@ contextBaseId?: string;
   stays fully usable (`▶ Continue` there, or a plain send) until it overflows
   again.
 
-## 3. Trigger: the provider's 400, never a local guess
+## 3. Trigger: the provider's 400, or the user at 90%
 
 ```ts
 // src/agent/models.ts — the module that owns every context-window fact
@@ -117,40 +123,82 @@ node.status === 'error' && parseContextLengthError(lastFailureText(node)) !== un
 card, so the judgement survives a reload and the model is told exactly what the
 user can read there.
 
-**`usage.prompt_tokens` is never a trigger.** It is the *previous* request's
-number, and `model-capabilities.md` records how it lied once already (header read
-`ctx 65%` while the request carried ~1.28 M tokens). It stays a readout.
+`SessionRuntime.contextState(node)` combines that hard trigger with a second,
+**user-initiated** entry: the newest `usage.prompt_tokens` *on that node's own
+chain* (`chainPromptTokens`) reaching `NEAR_CONTEXT_RATIO` (0.9) of the window of
+the card the chain sends with (`chainCard`: the chain's epoch card, else the live
+resolution). It is the same three-valued answer the host ships to the webview
+(`'ok' | 'near' | 'full'`, `contextPercent` for the tooltip) — never re-derived in
+the webview:
 
-The host computes the flag once and ships it as `contextFull: boolean` in the
-`tree` node payload and in every `nodeUpdate` patch, so the webview never has to
-re-derive a model fact from error text.
+- `full` — the provider refused the request (the `nodeContextFull` predicate above);
+- `near` — that chain's latest prompt usage is **≥ 90 %** of the card's window;
+- `ok` — otherwise, including a node with no usage yet.
 
-## 4. The button
+**`usage.prompt_tokens` is still never a *machine* trigger.** It stays a readout
+(and `model-capabilities.md` records how it lied once already — header read
+`ctx 65%` while the request carried ~1.28 M tokens); the 90 % entry does not start
+anything on its own, it only makes the `⧉` button appear, and the user's click is
+what opens the window (§4, §11).
+
+The host computes the state once and ships it in the `tree` node payload and in
+every `nodeUpdate` patch, so the webview never has to re-derive a model fact from
+error text. `nodeStatePatch` still carries the older `contextFull: boolean`
+alongside, but `media/main.js` reads `context` / `contextPct` only.
+
+## 4. The button, and the two setups it offers
 
 One button per card, one class (`node-continue`), one meaning at a time. The
-rollover variant adds `node-rollover` and `data-action="rollover"`.
+rollover variants add `node-rollover` (`node-near` too for the suggestion) and
+`data-action="rollover"`.
 
 | node state | button |
 | --- | --- |
-| `error` + `contextFull` | `⧉ Continue in a new window` → posts `{ type: 'rolloverTurn', id }` |
+| `error` + context `full` | `⧉ Continue in a new window` → posts `{ type: 'rolloverTurn', id }` |
+| context `near` (≥ 90 %), any terminal status | the same `⧉`, as a **suggestion**: the `node-near` class softens it and the title carries the percentage (`Context is {0}% full - continue in a new window`) |
 | `error` (any other failure) | `↻ Retry` (unchanged) |
 | `interrupted` | `▶ Continue` (unchanged) |
 
-Show rules are the existing ones, unchanged: a tip of its branch (no
-conversational child), not a sidecar, not currently running. The host re-checks the
-same three (`canRollover`, the gate the modal and the turn start share), so a replayed
-click cannot open a second window from one card. Retry is *replaced*
-rather than offered beside the new button, because the retried request is the
-same oversized one and is guaranteed to fail again.
+Show rules: the existing ones — a tip of its branch (no conversational child), not
+a sidecar, not currently running. The `near` variant is the one addition: because
+it hangs off the context state and not off a failure, it also appears on a `done`
+tip (exactly the long conversation that just finished above 90 %). The host
+re-checks the same rules in `SessionRuntime.canRollover` (the gate the modal and
+the turn start share: `contextState(node) !== 'ok'` plus the tip/sidecar/running
+checks), so a replayed click cannot open a second window from one card. Retry is
+*replaced* rather than offered beside the new button, because the retried request
+is the same oversized one and is guaranteed to fail again.
 
-`applyNodeUpdate` merges the new flag (`contextFull`) into `treeNodes[id]` before
-it re-syncs the button — a turn that ends after the tree was drawn arrives as a
-`nodeUpdate`, so both entry points must carry it. For the same reason the host
+`applyNodeUpdate` merges `context` and `contextPct` into `treeNodes[id]` before it
+re-syncs the button — a turn that ends after the tree was drawn arrives as a
+`nodeUpdate`, so both entry points must carry them, and the button is one element
+whose class list and `dataset.action` are re-synced (a card that goes Retry →
+rollover and back must read the action at click time). For the same reason the host
 routes every `nodeUpdate` through one helper (`nodeStatePatch(node)`) instead of
 hand-built payloads drifting apart.
 
 Host entry point: `ChatViewProvider.handlePanelMessage` → `rolloverTurn` →
-`SessionRuntime.rolloverContext(nodeId)`.
+`SessionRuntime.canRollover(id)` (a node that turns out not to be near/full at all
+still falls back to the in-place `continueFrom`) → `rolloverWithSetup(rt, id)`.
+
+`rolloverWithSetup` asks **which setup** the new window should start with
+(`askSetups('rollover')`: `Continue with current setup` is the default/Enter
+action, `Continue with latest setup` the alternative), gates the kills when the
+node still owns work (§7), and then calls
+`SessionRuntime.rolloverContext(id, choice)`:
+
+- `'current'` — the new node **inherits the parent's epoch**: same prompt bytes,
+  same tool schemas, same provider facts. Nothing is re-rendered. (A chain with *no*
+  envelope at all — a pre-epoch branch that `adoptLegacyEpoch` did not adopt, since
+  that pass only covers the checked-out chain — freezes one from the node's own
+  resolved card and level, which is the only case in which `'current'` renders
+  anything.)
+- `'latest'` — the new node **freezes the live setup** (`freshEpoch`), the same
+  configuration a fork would freeze.
+
+Both are free here — a new context has no cached prefix to lose — which is exactly
+why the choice can be offered at this entry point at all. Dismissing the dialog
+changes nothing.
 
 ## 5. What the new node is
 
@@ -158,12 +206,15 @@ Host entry point: `ChatViewProvider.handlePanelMessage` → `rolloverTurn` →
 conversation reads continuously and the dashed edge marks the window break. What
 changes is only the message prefix.
 
-**Creation:** `beginTurn(title, { parentId: P, freshContext: true })`. The
-`freshContext` option must set `node.contextBaseId = node.id` **after**
+**Creation:** `beginTurn(title, { parentId: P, freshContext: true, freshEpoch: setup === 'latest' })`.
+The `freshContext` option must set `node.contextBaseId = node.id` **after**
 `createNode()` and **before** `buildPath()`, or the run's basis is still the full
-chain. It also **resets** the parent's pending interruption notice
-(`resetInterruptState()` instead of `transferInterruptTo()`): that notice names a
-tool call in a context the new window cannot see.
+chain. `freshEpoch` decides where the run's **epoch** comes from — the parent's
+(inherited downward) or a new freeze of the live setup; a node with neither
+inherits the parent's, which is the default. It also **resets** the parent's
+pending interruption notice (`resetInterruptState()` instead of
+`transferInterruptTo()`): that notice names a tool call in a context the new window
+cannot see.
 
 **Title:** `vscode.l10n.t('Context window {0}', n)`, where `n` is the number of
 windows on that branch: the session's first window is 1 and every window below it adds
@@ -176,9 +227,12 @@ value cannot claim a window break the host does not perform.
 **Before creating it, the node's leftover work is union-killed** — see §7.
 
 **History:** exactly one stored message, the harness text below, as a `role:'user'`
-message. `buildPath()` prepends the system prompt, so what the model receives is
-`[system, harness text]`. The system prompt is **not** stored on the node, not put
-into the transcript dump and not rendered in the card — the ordinary rule holds.
+message. `buildPath()` prepends the run's **epoch prompt** — the frozen envelope of
+the node this rollover started (inherited or freshly frozen, §4), or a live render
+for a chain without one — so what the model receives is `[epoch.prompt, harness
+text]`. The prompt itself is **not** in the node's `messages`, not put into the
+transcript dump and not rendered in the card: it lives on the node that starts the
+epoch, once per epoch (`docs/agents/invariants/system-prompt.md`).
 
 **Display:** a single `kind:'harness'` item (rendered as the badged block by the
 existing `harnessNote` path), never a fabricated user bubble — the user did not
@@ -193,7 +247,7 @@ Built by `SessionRuntime` (model-facing, therefore **deliberately English**, lik
 ```
 [Harness: context window reset]
 The previous conversation could not be sent to the model any more (the provider refused
-it: the context window is full), so this turn continues in a new, empty window of the
+it: the context window was full), so this turn continues in a new, empty window of the
 same session. Nothing above was carried over: do not claim to remember it.
 
 Previous window: node <prevId> of session <sessionId>.
@@ -219,10 +273,17 @@ transcript first — do not guess.
 
 Rules for building it:
 
+- **The reason is named.** `buildContextRolloverMessage({ reason })` receives
+  `'full'` when the provider refused the request and `'near'` when the user took the
+  90 % entry, and the first paragraph says which: `… could not be sent to the model
+  any more (the provider refused it: the context window was full)` versus `… was
+  stopped before the provider had to refuse it (the context window was nearly used
+  up)`. Telling the model "it was refused" in the second case would be a lie.
 - **The pointer degrades.** If `spinney.saveSessionTranscripts` is off, or the
   file is missing (`rolloverTranscriptOnDisk(prevId)` →
   `fs.existsSync(path.join(host.transcriptDir(sessionId), prevId + '.jsonl'))`, the path
-  builder being `rolloverTranscriptPath`; `src/chat/runtime.ts` ~:2519-2529),
+  builder being `rolloverTranscriptPath`; `src/chat/runtime.ts`, both next to
+  `rolloverContext`),
   the pointer lines are replaced by: *"The previous window's transcript is not
   available on disk; rely on the carried-over text and ask the user when a detail
   is missing."*
@@ -277,19 +338,19 @@ Three things the rollover must add on top of `stopNode`:
 
 | Piece | File |
 | --- | --- |
-| `contextBaseId`, `contextBase()`, the `pathMessages()` cut, `normalizeTreeSession` | `src/chat/tree.ts` |
+| `contextBaseId`, `contextBase()`, `epochForNode()`, the `pathMessages()` cut, `normalizeTreeSession` | `src/chat/tree.ts` |
 | `parseContextLengthError()` | `src/agent/models.ts` |
-| `beginTurn({ freshContext })`, `rolloverContext()`, the harness text, `nodeStatePatch()`, `contextFull`, the kill + settle + flush + re-dump | `src/chat/runtime.ts` |
-| `rolloverTurn` routing, the modal gate, the transcript meta field | `src/chat/ChatViewProvider.ts` |
+| `beginTurn({ freshContext, freshEpoch })`, `rolloverContext()`, `canRollover()`, `contextState()` / `contextPercent()`, `freezeEpoch()`, the harness text, `nodeStatePatch()`, the kill + settle + flush + re-dump | `src/chat/runtime.ts` |
+| `rolloverTurn` routing, `askSetups()`, `rolloverWithSetup()`, the kill modal, the transcript meta field | `src/chat/ChatViewProvider.ts` |
 | `SessionTranscriptInput` / meta `contextBaseId` | `src/chat/transcript.ts` |
-| Button variant, `applyNodeUpdate` flag merge, dashed edge, `CTX` badge | `media/main.js` |
-| `.edge-context`, `.node-rollover`, `.node-ctx-badge` | `media/style.css` |
-| The seven strings (§9) | `l10n/bundle.l10n.zh-Hans.json`, `l10n/bundle.l10n.zh-Hant.json` |
+| Button variant, `applyNodeUpdate` state merge, dashed edge, `CTX` badge | `media/main.js` |
+| `.edge-context`, `.node-rollover`, `.node-near`, `.node-ctx-badge` | `media/style.css` |
+| The strings of §9 | `l10n/bundle.l10n.zh-Hans.json`, `l10n/bundle.l10n.zh-Hant.json` |
 | The pure-function guard | `tools/check-context-rollover.js` (`npm run check:rollover`) |
 
 ## 9. i18n
 
-Translated (both catalogs, exactly these keys):
+Translated (both catalogs, the source literals in the code):
 
 | Where | English source |
 | --- | --- |
@@ -297,9 +358,20 @@ Translated (both catalogs, exactly these keys):
 | host | `Work is still running in this window.` |
 | host | `{0} piece(s) of work are still running here (background terminals and sub-agents). Continuing in a new window stops them; what they produced stays in the transcript.` |
 | host | `Continue and stop them` |
+| host | `Continue with current setup` |
+| host | `Continue with latest setup` |
+| host | `Continue with a new setup?` |
+| host | `A new context window starts empty, so the latest setup costs nothing here. Continuing with the current setup keeps this conversation on the setup it was frozen with.` |
+| host | `Could not continue in a new context here — wait for the running turn to finish and try again.` |
 | webview | `⧉ Continue in a new window` |
 | webview | `Ask the harness to continue this turn in a new, empty context window (the current one is full)` |
+| webview | `Context is {0}% full - continue in a new window` (the `near` variant's title) |
 | webview | `This node starts a new context window; the branch above it is not sent to the model any more` |
+
+**Both catalogs carry these keys** (checked by `npm run check:l10n`, which fails
+packaging when a source literal is missing from a shipped catalog), and the five
+entries the epoch change retired — the three "… the prompt cache may be missed."
+notices and the two image-hiding notices — are deleted with them.
 
 Deliberately untranslated (the existing rules, see `i18n.md`): the harness resume
 text (model-facing and shown verbatim in its block), the `CTX` badge (compact dock
@@ -310,18 +382,20 @@ token), and the `[config]` / `[perf]` diagnostics.
 - `npm run compile`.
 - `npm run check:rollover` — pure node: the prefix is cut at the base, the base is
   inherited by descendants, a `contextBaseId` naming another node has no effect, a
-  rollover node's own path is only its own messages, `pathIds` is unchanged, and
+  rollover node's own path is only its own messages, `pathIds` is unchanged, an epoch
+  is inherited from the nearest ancestor that carries one and a **malformed** envelope
+  is ignored rather than repaired (so the live-render fallback is reached), and
   `parseContextLengthError` reads the real provider text (plus two reworded
   fallbacks and a non-matching error).
 - `npm run check:webview` — the rollover button's label and its `rolloverTurn`
-  click, that a non-overflow failure still shows `↻ Retry`, that the flag arriving
+  click, that a non-overflow failure still shows `↻ Retry`, that the state arriving
   by `nodeUpdate` switches the button, that the `edge-context` class lands on the
   child's connector only, and that the `CTX` badge appears on the window-starting
   card and not on its descendants.
 - `node tools/rollover-acceptance.js` (dev only, after `npm run compile`) — drives
   `rolloverContext()` against the real runtime with the `vscode` module stubbed and an
-  offline client: the new window's first request is `[system, harness]` and carries no
-  ancestor message, the overflowing node's background terminal is killed while another
+  offline client: the new window's first request is `[epoch.prompt, harness]` and carries
+  no ancestor message, the overflowing node's background terminal is killed while another
   node's job is left alone, the kill notice reaches that node's history *and* its
   re-dumped transcript, the message carries the pointer / clipped tail / attachment
   count, and a node that is not context-full falls back to the in-place continue. See
@@ -329,11 +403,15 @@ token), and the `[config]` / `[perf]` diagnostics.
 
 ## 11. Deliberately not done
 
-- **No threshold pre-emption.** A near-full tip has no task to carry, so an early
-  button either burns a request or fabricates a turn. The provider's refusal is
-  the only trigger.
+- **No automatic pre-emption.** Amended when the epoch model landed: there is still
+  no threshold that *starts* anything — nothing rolls over on its own, and nothing
+  is written pre-emptively — but a **user-initiated entry exists from 90 %**: the
+  same `⧉` button appears as a suggestion on a near-full tip
+  (`SessionRuntime.contextState(node) === 'near'`), and the click is what opens the
+  window. Nothing may relax it further: a near-full tip has no task to carry, so an
+  *automatic* rollover there would either burn a request or fabricate a turn.
 - **No automatic rollover.** It costs a request and kills work; it is always the
-  user's click.
+  user's click — including at 90 %, where the button is only a suggestion.
 - **The new node does not adopt the old node's background jobs.** Ownership is
   `(session, node)` by design (`background-terminals.md`); the rollover kills them
   and records them instead.

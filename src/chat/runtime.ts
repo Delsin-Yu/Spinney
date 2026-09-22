@@ -33,16 +33,18 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { Agent } from '../agent/agent';
-import { DEFAULT_REPLY_LANGUAGE } from '../agent/prompt';
+import { DEFAULT_REPLY_LANGUAGE, SYSTEM_PROMPT_TEMPLATE, currentAgentsMd } from '../agent/prompt';
 import { Balance, emptyBalance } from '../agent/balance';
 import { ClientRegistry } from '../agent/clients';
-import { AgentEvent, ChatMessage, ContentPart, ThinkingEffort, Usage } from '../agent/types';
+import { AgentEvent, ChatMessage, ContentPart, ThinkingEffort, ToolDefinition, Usage, detectImageMime } from '../agent/types';
+import { ToolCapabilities, interceptedDefinitions } from '../agent/tools';
 import {
   ModelCard,
   ProviderSpec,
   cardById,
   cardDisplayName,
   cards,
+  contentHash,
   defaultCard,
   effortsFor,
   isVisionCard,
@@ -55,7 +57,13 @@ import {
 import {
   AgentSession,
   DisplayItem,
+  Epoch,
+  ImageSource,
+  ImageSourceEntry,
   TreeNode,
+  branchIds,
+  contextBase,
+  epochForNode,
   TurnStatus,
   UserAttachment,
   attachNode,
@@ -81,6 +89,26 @@ import { opPayload, opTag, perf, startRepaintOp, timedSync } from '../perf';
 
 /** Cap tool output stored/shown in the webview so a 16 MiB command dump cannot freeze the UI. */
 export const UI_TOOL_CONTENT_CAP = 32 * 1024;
+
+/**
+ * How full a chain's context has to be before the card offers to continue in a new
+ * node. The provider's own refusal stays the hard trigger; this is where the *choice*
+ * becomes visible — and from 90% it is a free one, because a new node starts an empty
+ * prefix anyway (`docs/agents/plans/session-epoch.md` §4.3).
+ */
+const NEAR_CONTEXT_RATIO = 0.9;
+
+/**
+ * The largest image the materialiser will inline as a `data:` URL. Past this the block
+ * degrades to a placeholder instead: inlining is what the inline transport is worst at,
+ * and the read is synchronous, so it must not stall the extension host.
+ */
+const INLINE_IMAGE_LIMIT_BYTES = 8 * 1024 * 1024;
+
+/** The model-facing replacements the materialiser writes (see `agent.ts` for the twin). */
+const MATERIALISED_NO_VISION = '[image hidden: the current model does not support images]';
+const MATERIALISED_FOREIGN_UPLOAD =
+  '[image hidden: it was uploaded to a provider that this model cannot read from]';
 
 export function clipForUi(text: string, cap = UI_TOOL_CONTENT_CAP): string {
   if (text.length <= cap) {
@@ -269,6 +297,13 @@ function isBudgetKill(task: BackgroundTask): boolean {
 function buildContextRolloverMessage(input: {
   sessionId: string;
   previousNodeId: string;
+  /**
+   * Why a new node was opened: `full` is the provider's refusal (the only authoritative
+   * statement of a full window), `near` is the user taking the 90% entry before the request
+   * is refused. The model is told which one, because "it was refused" would be a lie in the
+   * second case.
+   */
+  reason: 'full' | 'near';
   /** Absolute path of the previous window's dump — the pointer the model is given. */
   transcriptPath: string;
   /** False when that file is not on disk (dump disabled / never written): the pointer degrades. */
@@ -287,8 +322,10 @@ function buildContextRolloverMessage(input: {
   const paragraphs: string[] = [];
   paragraphs.push(
     '[Harness: context window reset]\n' +
-      'The previous conversation could not be sent to the model any more (the provider refused it: the context ' +
-      'window is full), so this turn continues in a new, empty window of the same session. Nothing above was ' +
+      (input.reason === 'full'
+        ? 'The previous conversation could not be sent to the model any more (the provider refused it: the context window was full), '
+        : 'The previous conversation was stopped before the provider had to refuse it (the context window was nearly used up), ') +
+      'so this turn continues in a new, empty window of the same session. Nothing above was ' +
       'carried over: do not claim to remember it.',
   );
   // The display path is not cut (the tree stays connected), so "previous window"
@@ -350,18 +387,13 @@ function buildContextRolloverMessage(input: {
 }
 
 /**
- * Cap a single message's content in the *persisted* copy. The in-memory history
- * keeps the full payload; only what goes into `vscode.Memento` is bounded, so one
- * huge tool result cannot make every `persist()` write tens of MiB.
+ * Messages are persisted **verbatim**. There is deliberately no storage-side
+ * content cap any more: what a node stores has to be byte-identical to what was
+ * sent to the API, or the provider's prefix cache is lost from the truncated
+ * message on after every window reload. The display caps above (`clipForUi` /
+ * `clipDisplayItem`) are a different thing — they shape `displayItems` for the
+ * webview and never touch `messages`.
  */
-export const STORAGE_MESSAGE_CAP = 64 * 1024;
-
-export function clipMessageForStorage(msg: ChatMessage): ChatMessage {
-  if (typeof msg.content === 'string' && msg.content.length > STORAGE_MESSAGE_CAP) {
-    return { ...msg, content: clipForUi(msg.content, STORAGE_MESSAGE_CAP) };
-  }
-  return msg;
-}
 
 /**
  * The shape `ChatViewProvider.getConfig()` returns. Both sides need the type, so
@@ -620,6 +652,12 @@ export interface RuntimeHost {
    * check it: `/reload-window` refuses to run while a turn does.
    */
   isHeld(): boolean;
+  /**
+   * True when another window owns this workspace's session files. Every turn start is
+   * refused, not just the composer's: nothing may be written into a session this window
+   * does not own (`docs/agents/plans/session-epoch.md` §5).
+   */
+  isReadOnly(): boolean;
 }
 
 /** Decode the base64 payload of a `data:<mime>;base64,<data>` URL into bytes. */
@@ -1182,6 +1220,200 @@ export class SessionRuntime {
     return Agent.systemPrompt(cardDisplayName(this.cardForNode(node)), this.effortForNode(node), this.replyLanguage);
   }
 
+  /**
+   * The tool schemas a **live** setup would advertise right now, built without touching
+   * any worker: the drift check compares them against a frozen set, and it runs while
+   * other nodes may be mid-turn, so nothing here may mutate an agent.
+   *
+   * A bare registry is enough because no tool *schema* depends on the wiring (the access
+   * objects gate execution, not the definitions); the one runtime value in the whole set
+   * is `exec_command`'s shell label, which is a process-wide probe.
+   */
+  private liveToolSchemas(card: ModelCard, sidecar: boolean): ToolDefinition[] {
+    const registry = new ToolRegistry();
+    const capabilities: ToolCapabilities = {
+      vision: isVisionCard(card),
+      canSpawn: !sidecar,
+      canSpawnReadOnly: false,
+      canHop: !sidecar,
+    };
+    return [...registry.definitions, ...interceptedDefinitions(capabilities)];
+  }
+
+  /**
+   * Freeze the request envelope a chain starts with: the rendered prompt bytes, the tool
+   * schemas, the endpoint facts and the content hashes the drift check compares.
+   *
+   * Called once per epoch — a session's first node, a rollover node, a fork's root, and
+   * a legacy chain adopted at load — and never again. Re-rendering is exactly what this
+   * mechanism exists to prevent: a prefix that changes behind the model's back can never
+   * be cached again, while one that never changes is billed at the cache price whenever
+   * the entry is alive (`docs/agents/plans/session-epoch.md`).
+   */
+  private freezeEpoch(node: TreeNode, cardId: string, effort: ThinkingEffort): Epoch {
+    const card = this.cardForCardId(cardId);
+    const level = normalizeEffort(card, effort);
+    const provider = providerById(card.providerId);
+    // Seed any existing worker with this card, but never *create* one here: a fork freezes
+    // an envelope per copied node, and building an agent (plus its tool registry) for a node
+    // that may never run would be pure overhead. `beginTurn` builds the one that matters.
+    const worker = this.nodeWorkers.get(node.id);
+    if (worker && !this.runs.has(node.id)) {
+      worker.agent.setCard(card);
+      worker.agent.setThinkingEffort(level);
+    }
+    // The schemas are read from the **live** capability set for this card, never from a pin
+    // an earlier epoch left on that worker: the envelope has to describe what this build
+    // would send, or a re-frozen chain would inherit a tool set that belongs to the epoch
+    // before it.
+    const tools = this.liveToolSchemas(card, isSidecar(node));
+    return {
+      id: newId(),
+      prompt: Agent.systemPrompt(cardDisplayName(card), level, this.replyLanguage),
+      tools,
+      cardId: card.id,
+      effort: level,
+      replyLanguage: this.replyLanguage,
+      providerId: card.providerId,
+      baseUrl: provider?.baseUrl ?? '',
+      wireModel: card.oaiModel,
+      vision: isVisionCard(card),
+      visionTransport: card.vision.transport === 'deepseek' ? 'deepseek' : 'openai',
+      agentsMdHash: contentHash(currentAgentsMd() ?? ''),
+      templateHash: contentHash(SYSTEM_PROMPT_TEMPLATE),
+      toolsetHash: contentHash(JSON.stringify(tools)),
+      frozenAt: Date.now(),
+    };
+  }
+
+  /**
+   * The prompt-token count of the newest turn on **this node's own chain** (0 when it has
+   * none). Deliberately not the session-wide readout: a branch's own history is what its
+   * next request will carry, so that is what "how full is it" has to mean.
+   */
+  private chainPromptTokens(node: TreeNode): number {
+    const ids = pathIds(this.session, node.id);
+    for (let i = ids.length - 1; i >= 0; i--) {
+      const n = this.session.nodes[ids[i]];
+      const usage = n ? nodeUsage(n) : undefined;
+      if (usage && typeof usage.prompt_tokens === 'number' && usage.prompt_tokens > 0) {
+        return usage.prompt_tokens;
+      }
+    }
+    return 0;
+  }
+
+  /** The card a node's chain sends with: its epoch's, else the live resolution. */
+  private chainCard(node: TreeNode): ModelCard {
+    const epoch = epochForNode(this.session, node.id);
+    return epoch ? this.cardForCardId(epoch.cardId) : this.cardForNode(node);
+  }
+
+  /**
+   * How full this node's chain is: `'full'` when the provider refused the request (the
+   * only authoritative statement of a full window), `'near'` from {@link NEAR_CONTEXT_RATIO}
+   * of the card's window, `'ok'` otherwise. Computed once, here, and shipped as data —
+   * the webview never re-derives a model fact.
+   */
+  private contextState(node: TreeNode): 'ok' | 'near' | 'full' {
+    if (nodeContextFull(node)) {
+      return 'full';
+    }
+    const tokens = this.chainPromptTokens(node);
+    const window = this.host.getContextWindow(this.chainCard(node).id);
+    if (tokens <= 0 || !window || window <= 0) {
+      return 'ok';
+    }
+    return tokens / window >= NEAR_CONTEXT_RATIO ? 'near' : 'ok';
+  }
+
+  /** The same measurement as a percentage, for the card's title (0 when unknown). */
+  private contextPercent(node: TreeNode): number {
+    const tokens = this.chainPromptTokens(node);
+    const window = this.host.getContextWindow(this.chainCard(node).id);
+    if (tokens <= 0 || !window || window <= 0) {
+      return 0;
+    }
+    return Math.min(100, Math.round((tokens / window) * 100));
+  }
+
+  /**
+   * The composer's two setups and whether they disagree —
+   * `docs/agents/plans/session-epoch.md` §4.2. `node` is the envelope of the checked-out
+   * node (what a send really uses) and `live` is what a **new** node would freeze right
+   * now. `drift` is `'user'` when the difference comes from a pick the user just made,
+   * `'harness'` when it comes from the shipped prompt, the workspace AGENTS.md, the tool
+   * set or the endpoint, and `false` when a plain send already is the latest setup.
+   *
+   * The webview recomputes none of this: it renders what it is told and posts back the
+   * user's choice. Keeping the judgement here is what makes "default send always uses the
+   * old setup" true by construction instead of by agreement between two code bases.
+   */
+  private setupState(): {
+    node: { cardId: string; cardLabel: string; effort: ThinkingEffort; language: string } | null;
+    live: { cardId: string; cardLabel: string; effort: ThinkingEffort; language: string };
+    drift: false | 'user' | 'harness';
+    reasons: string[];
+  } {
+    const view = this.viewNode();
+    const liveCard = this.card;
+    const liveEffort = this.thinkingEffort;
+    const live = {
+      cardId: liveCard.id,
+      cardLabel: cardDisplayName(liveCard),
+      effort: liveEffort,
+      language: this.replyLanguage,
+    };
+    const epoch = epochForNode(this.session, view?.id ?? null);
+    if (!epoch) {
+      // Nothing frozen to protect: the next send freezes whatever is live now.
+      return { node: null, live, drift: false, reasons: [] };
+    }
+    const node = {
+      cardId: epoch.cardId,
+      cardLabel: cardDisplayName(this.cardForCardId(epoch.cardId)),
+      effort: epoch.effort,
+      language: epoch.replyLanguage,
+    };
+    const reasons: string[] = [];
+    const picked =
+      liveCard.id !== epoch.cardId || liveEffort !== epoch.effort || this.replyLanguage !== epoch.replyLanguage;
+    if (liveCard.id !== epoch.cardId) {
+      reasons.push('model');
+    }
+    if (liveEffort !== epoch.effort) {
+      reasons.push('effort');
+    }
+    if (this.replyLanguage !== epoch.replyLanguage) {
+      reasons.push('language');
+    }
+    // The harness side: the shipped prompt, the workspace's AGENTS.md, the tool set and
+    // the endpoint. All four are content hashes, never version numbers, so a release that
+    // changes none of them is not a change.
+    if (contentHash(SYSTEM_PROMPT_TEMPLATE) !== epoch.templateHash) {
+      reasons.push('prompt');
+    }
+    if (contentHash(currentAgentsMd() ?? '') !== epoch.agentsMdHash) {
+      reasons.push('agents.md');
+    }
+    if (contentHash(JSON.stringify(this.liveToolSchemas(liveCard, view?.kind === 'agent'))) !== epoch.toolsetHash) {
+      reasons.push('tools');
+    }
+    const provider = providerById(liveCard.providerId);
+    if ((provider?.baseUrl ?? '') !== epoch.baseUrl || liveCard.oaiModel !== epoch.wireModel) {
+      reasons.push('provider');
+    }
+    // How an image travels is part of a setup too: a card that cannot read what this
+    // chain's history carries is a real difference, not a cosmetic one.
+    if (isVisionCard(liveCard) !== epoch.vision || liveCard.vision.transport !== epoch.visionTransport) {
+      reasons.push('images');
+    }
+    if (reasons.length === 0) {
+      return { node, live, drift: false, reasons };
+    }
+    return { node, live, drift: picked ? 'user' : 'harness', reasons };
+  }
+
   /** Tear down: kill background jobs, abort sub-agents, cancel timers. */
   dispose(): void {
     this.disposed = true;
@@ -1298,12 +1530,6 @@ export class SessionRuntime {
     this.host.persistRuntimeConfig(nextCardId, nextEffort);
     this.postConfig();
     this.postContext();
-    if (this.hasHistory()) {
-      // Only reached when the card differs from the one this node was produced
-      // under: the warning is about the **next request**, never about a
-      // session-wide value that another branch's pick had moved.
-      this.postModelChangeNotice(nextCard);
-    }
     // The id, not the display name: this is a diagnostic line, and the id is what
     // the stored session, the transcripts and the sub-agent nodes all carry.
     this.host.output.appendLine(
@@ -1366,11 +1592,6 @@ export class SessionRuntime {
     this.persistTurn();
     this.postConfig();
     this.postContext();
-    // The notice is only about a request whose card really moved: a seed change is
-    // invisible to a branch that recorded its own card.
-    if (this.model !== beforeCardId && this.hasHistory()) {
-      this.postModelChangeNotice(this.card);
-    }
     this.host.output.appendLine(`[config] model=${next} (settings; the session seed)`);
   }
 
@@ -1424,9 +1645,6 @@ export class SessionRuntime {
     this.persistTurn();
     this.host.persistRuntimeConfig(this.seedCardId, this.seedEffort);
     this.postConfig();
-    if (this.hasHistory()) {
-      this.postEffortChangeNotice(next);
-    }
     this.host.output.appendLine(
       `[config] thinkingEffort=${next} (pending for ${view ? `node ${view.id}` : 'an empty session'})`,
     );
@@ -1436,35 +1654,53 @@ export class SessionRuntime {
    * Adopt a changed `spinney.replyLanguage` setting. `language` is the resolved
    * **name** (`ChatViewProvider.getConfig().replyLanguage`), so the `auto` →
    * display-language step has already happened: re-picking `auto` on a window that
-   * already follows its own language is a no-op, and no notice is posted for it.
-   * Unlike the model and the thinking effort there is no per-session pick to
-   * arbitrate: this session always follows the setting, so the value is replaced
-   * outright and pushed to every node worker. A session that already has history
-   * gets the same cache-miss warning the other two produce — the system prompt it
-   * was built against is no longer the one the next request will send.
+   * already follows its own language is a no-op.
+   *
+   * Nothing already sent is rewritten. Every frozen envelope keeps the language it was
+   * rendered with, and the value below is what the **next new node** will freeze — which
+   * is exactly what the composer reports as the drift between the two setups
+   * (`setupState`). The language is part of a prefix, and a prefix is append-only.
    */
   applyReplyLanguage(language: string): void {
     if (this.busy) {
-      return; // same rule as the model/effort pick: never rewrite a prompt mid-turn
+      return; // never move a setup under a running request
     }
     const next = (language || '').trim() || DEFAULT_REPLY_LANGUAGE;
     if (next === this.replyLanguage) {
       return;
     }
     this.replyLanguage = next;
-    for (const worker of this.nodeWorkers.values()) {
-      worker.agent.setReplyLanguage(next);
+    this.host.output.appendLine(`[config] replyLanguage=${next} (new nodes; frozen chains keep theirs)`);
+    // The two setups may now disagree: repaint the composer's drift marking.
+    this.postConfig();
+  }
+
+  /**
+   * Drop the pending setup and put the session seed back where the checked-out chain's
+   * envelope says it belongs. This is the "Continue with current setup" answer
+   * (`docs/agents/plans/session-epoch.md` §4.2): the pick the user made is *discarded*,
+   * never remembered — the dropdown returns to the frozen values precisely because the
+   * send that follows it must not silently become a different setup.
+   */
+  discardPendingSetup(): void {
+    this.pending = null;
+    const view = this.viewNode();
+    const epoch = epochForNode(this.session, view?.id ?? null);
+    if (!epoch) {
+      this.postConfig();
+      return;
     }
-    if (this.hasHistory()) {
-      this.postNotice(
-        'warning',
-        vscode.l10n.t(
-          'Reply language changed to "{0}". The system prompt changed with it, so the next request may miss the prompt cache and reprocess the full context.',
-          next,
-        ),
-      );
-    }
-    this.host.output.appendLine(`[config] replyLanguage=${next}`);
+    const card = this.cardForCardId(epoch.cardId);
+    this.session.model = epoch.cardId;
+    this.session.effort = epoch.effort;
+    this.session.modelFromSettings = this.host.getConfig().defaultCardId;
+    this.session.effortFromSettings = card.defaultEffort;
+    this.seedCardId = epoch.cardId;
+    this.seedEffort = normalizeEffort(card, epoch.effort);
+    this.persistTurn();
+    this.host.persistRuntimeConfig(this.seedCardId, this.seedEffort);
+    this.postConfig();
+    this.postContext();
   }
 
   /** Push a settings change onto the live sub-agent pool. */
@@ -1487,84 +1723,9 @@ export class SessionRuntime {
     return this.activePathItems().length > 0;
   }
 
-  /** True if the checked-out branch's history carries any image content blocks. */
-  private activeSessionHasImages(): boolean {
-    const session = this.session;
-    return pathMessages(session, session.activeNodeId).some(
-      (m) =>
-        m.role === 'user' &&
-        Array.isArray(m.content) &&
-        m.content.some((p) => p.type === 'image_url' || p.type === 'file'),
-    );
-  }
 
-  /**
-   * True if the checked-out branch's history carries an **uploaded** image block
-   * (`{ type: 'file', file_id }`) — the DeepSeek Files API shape. Its `file_id` is
-   * the issuing provider's private handle, so only a card whose image transport is
-   * `deepseek` can serve it; every other endpoint has never seen that id, and the
-   * request-side rewrite that keeps such a block from being sent there lives in
-   * `Agent.messagesForCurrentModel` (`src/agent/agent.ts`). This is only the
-   * "tell the user" half of that rule.
-   */
-  private activeSessionHasFileBlocks(): boolean {
-    const session = this.session;
-    return pathMessages(session, session.activeNodeId).some(
-      (m) => m.role === 'user' && Array.isArray(m.content) && m.content.some((p) => p.type === 'file'),
-    );
-  }
 
-  /**
-   * The "the next request is built from another card than this branch was produced
-   * under" notice. Callers post it only when that is **really** the case: a pick
-   * that names the card in view never moves the next request, so it never warns
-   * (see `setModel` — a per-session comparison used to warn about exactly that).
-   *
-   * The card the request moves to decides which extra sentence is true:
-   *  - a text-only card hides every image block (the bytes are kept), and
-   *  - a card whose image transport is not `deepseek` cannot serve a file id that
-   *    was uploaded to a DeepSeek endpoint, so the uploaded images of this history
-   *    are hidden too even when the card does accept images.
-   * Both are consequences of the same rewrite (`Agent.messagesForCurrentModel`),
-   * so they are said here, beside the cache warning, rather than being left for the
-   * user to discover in a request that silently lost its images.
-   */
-  private postModelChangeNotice(card: ModelCard): void {
-    let notice = vscode.l10n.t(
-      'Model changed to {0}. Existing conversation history was produced under a different model, so the next request may miss the prompt cache and reprocess the full context.',
-      cardDisplayName(card),
-    );
-    if (!isVisionCard(card) && this.activeSessionHasImages()) {
-      notice +=
-        ' ' +
-        vscode.l10n.t(
-          'Image blocks are hidden for this text-only model (the image data is kept) and will be restored when you switch back to a vision model.',
-        );
-    }
-    if (card.vision.transport !== 'deepseek' && this.activeSessionHasFileBlocks()) {
-      // The same sentence shape as the text-only one, for the other reason an image
-      // can disappear: the images of this history were uploaded to a Files API that
-      // this card's endpoint cannot read from.
-      notice +=
-        ' ' +
-        vscode.l10n.t(
-          'The images in this history were uploaded to a DeepSeek Files API, and this model cannot read an uploaded file id, so those image blocks are hidden too (the image data is kept and will be restored when you switch back to a card that serves DeepSeek uploads).',
-        );
-    }
-    this.postNotice('warning', notice);
-  }
 
-  /** The level half of the same rule: posted only when the next request really
-   * moves to another level than the node in view was produced under. */
-  private postEffortChangeNotice(level: ThinkingEffort): void {
-    this.postNotice(
-      'warning',
-      vscode.l10n.t(
-        'Thinking effort changed to "{0}". This affects the next request; the prompt cache may be missed.',
-        level,
-      ),
-    );
-  }
 
   // ---- Checkout / view focus ----
 
@@ -1597,9 +1758,14 @@ export class SessionRuntime {
    */
   private buildPath(session: AgentSession, nodeId: string | null): ChatMessage[] {
     const node = nodeId ? session.nodes[nodeId] : undefined;
+    // The frozen envelope wins over the live render: that is what makes a prefix
+    // reproducible across a reload, a settings change and an extension update. A chain
+    // with no envelope (one that predates the epoch model) still renders as it always
+    // did, so nothing breaks while a legacy session waits to be adopted (`freezeEpoch`).
+    const epoch = epochForNode(session, nodeId);
     const system: ChatMessage = {
       role: 'system',
-      content: this.systemPromptFor(node),
+      content: epoch ? epoch.prompt : this.systemPromptFor(node),
     };
     // sanitizeMessages returns a derived copy; it is never written back into the
     // nodes, so the stored history keeps its original shape.
@@ -1691,6 +1857,8 @@ export class SessionRuntime {
     title: string;
     usage: Usage | undefined;
     contextFull: boolean;
+    context: 'ok' | 'near' | 'full';
+    contextPct: number;
   } {
     return {
       id: node.id,
@@ -1698,6 +1866,8 @@ export class SessionRuntime {
       title: node.title,
       usage: nodeUsage(node),
       contextFull: nodeContextFull(node),
+      context: this.contextState(node),
+      contextPct: this.contextPercent(node),
     };
   }
 
@@ -1717,7 +1887,16 @@ export class SessionRuntime {
       // refusal is judged once, here, and shipped as a boolean. `contextBaseId` is
       // what it draws the dashed edge and the `CTX` badge from.
       contextFull: nodeContextFull(node),
+      // How full this chain is (`ok` / `near` / `full`) and how much of the card's window
+      // that is: the card's button slot follows `context`, and the `near` variant's title
+      // carries `contextPct`. Both are judged in one place so the host and the webview can
+      // never disagree about when a new node is worth offering.
+      context: this.contextState(node),
+      contextPct: this.contextPercent(node),
       contextBaseId: node.contextBaseId,
+      // The epoch this node starts, when it starts one: it is what a new tree is copied
+      // from and what a diagnostic names.
+      epochId: node.epoch ? node.epoch.id : undefined,
       size: node.customSize ?? null,
       kind: node.kind,
       delivered: node.delivered === true,
@@ -1749,7 +1928,8 @@ export class SessionRuntime {
       type: 'tree',
       activeId: this.activeStreamNodeId(),
       viewId: session.activeNodeId,
-      rootId: session.rootId ?? null,
+      rootId: session.rootIds[0] ?? null,
+      rootIds: session.rootIds.slice(),
       nodes,
       // Only a traced repaint (a switch / a checkout) of *this* session carries the
       // id: the webview measures the burst it belongs to and reports it back.
@@ -1885,6 +2065,9 @@ export class SessionRuntime {
       foldThinking: cfg.foldThinking,
       foldWork: cfg.foldWork,
       snippets: cfg.promptSnippets,
+      // The two setups the composer shows, and whether they disagree: the webview marks
+      // Send (and offers the new-setup entry) from this alone.
+      setup: this.setupState(),
     });
   }
 
@@ -1904,6 +2087,9 @@ export class SessionRuntime {
       status: this.lastStatus,
       runningNodes: this.runningNodes(),
       lockedNodes: this.lockedNodes(),
+      // A read-only window (another window owns this workspace's sessions) says so with
+      // every state post, so the composer can show it instead of failing a send.
+      readOnly: this.host.isReadOnly(),
     });
   }
 
@@ -2053,7 +2239,7 @@ export class SessionRuntime {
    */
   private beginTurn(
     title: string,
-    opts?: { parentId?: string | null; pan?: boolean; freshContext?: boolean },
+    opts?: { parentId?: string | null; pan?: boolean; freshContext?: boolean; freshEpoch?: boolean },
   ): TurnRun | null {
     const session = this.session;
     if (this.host.isHeld()) {
@@ -2062,6 +2248,10 @@ export class SessionRuntime {
       // start has to go through this gate — including the injected ones (background
       // and sub-agent notices), which is exactly the race that killed two reboots.
       // Callers re-queue and the drain retries once the hold expires.
+      return null;
+    }
+    if (this.host.isReadOnly()) {
+      // A read-only window owns nothing: no turn, injected or otherwise, may start here.
       return null;
     }
     const parentId = opts?.parentId !== undefined ? opts.parentId : session.activeNodeId;
@@ -2089,8 +2279,16 @@ export class SessionRuntime {
     // makes the node own the card its history was produced under — so a later resume
     // of *this* node runs where this turn ran, however the dropdown moved since.
     const basis = parentId ? session.nodes[parentId] : undefined;
-    const cardId = this.requestCardId(basis);
-    const effort = this.requestEffort(basis);
+    // A send that continues an existing epoch uses **that** epoch, whatever the dropdown
+    // says: a live pick belongs to the next *new* node (a fork), never to a prefix that
+    // has already been sent. A chain without an epoch — a fresh session, or a legacy one
+    // — resolves the way it always did, and freezes the result below.
+    // `freshEpoch` is the "Continue with Latest setup" answer: this node must freeze the
+    // live configuration instead of inheriting the parent's. A rollover can afford it —
+    // its new context has no cached prefix to lose.
+    const inherited = opts?.freshEpoch ? undefined : epochForNode(session, parentId ?? null);
+    const cardId = opts?.freshEpoch ? this.card.id : inherited ? inherited.cardId : this.requestCardId(basis);
+    const effort = opts?.freshEpoch ? this.thinkingEffort : inherited ? inherited.effort : this.requestEffort(basis);
     node.model = cardId;
     node.effort = effort;
     // A new context window: this node is its own basis, so the run's prefix — built
@@ -2101,10 +2299,11 @@ export class SessionRuntime {
       node.contextBaseId = node.id;
     }
     attachNode(session, node);
-    // The send consumed the pending pick: the card it named is now this node's own
-    // (`node.model`), so the dropdown reaches the same value through the ancestry
-    // chain and a stale override must not survive into the next checkout.
-    if (this.pending && this.pending.nodeId === (parentId ?? null)) {
+    // Only a send that **applied** the pick consumes it: that is the first turn of a
+    // chain, where the dropdown's choice really became `node.model`. A pick made on a
+    // node that already has an epoch is not applied by a send — it is the drift the
+    // composer asks about — so it stays pending until the user answers.
+    if (!inherited && this.pending && this.pending.nodeId === (parentId ?? null)) {
       this.pending = null;
     }
     const worker = this.workerFor(node);
@@ -2115,6 +2314,15 @@ export class SessionRuntime {
     // when its worker happened to be created.
     worker.agent.setCard(this.cardForCardId(cardId));
     worker.agent.setThinkingEffort(effort);
+    // Freeze the envelope this node starts, or pin the worker to the one it inherits: a
+    // chain keeps the tools its own instructions were written against, so a tool added or
+    // removed by a later build cannot change a prefix that is already in the cache.
+    if (inherited) {
+      worker.agent.setToolSchemas(inherited.tools);
+    } else {
+      node.epoch = this.freezeEpoch(node, cardId, effort);
+      worker.agent.setToolSchemas(node.epoch.tools);
+    }
     // The interruption notice only makes sense when this turn continues from the
     // turn that was actually interrupted. P3 keys the pending notice per node, so
     // the new node's agent inherits its parent's notice (delivered once) or clears
@@ -2165,6 +2373,12 @@ export class SessionRuntime {
     if (this.host.isHeld()) {
       // Same gate as `beginTurn`: a held window must not gain a turn, or the
       // reload that is about to happen is refused ("the agent is busy").
+      return null;
+    }
+    if (this.host.isReadOnly()) {
+      // Same gate as `beginTurn`, and it is the one that matters most here: ▶ Continue,
+      // a rollover's first turn and every background / sub-agent notice arrive through
+      // this path, and none of them may write into a session another window owns.
       return null;
     }
     if (this.runs.has(node.id)) {
@@ -2247,6 +2461,7 @@ export class SessionRuntime {
             `${messages.length} messages now; kept ${node.messages.length})`,
         );
       }
+      this.recordUploadSources(node, run);
       node.status = status;
       session.updatedAt = Date.now();
       // Mirror the finished turn to disk so it stays searchable later.
@@ -2354,6 +2569,8 @@ export class SessionRuntime {
     //
     // Image blocks are only allowed in user messages.
     let content: string | ContentPart[];
+    /** Provenance of this turn's own image blocks, written onto the node below (§6). */
+    const sources: ImageSourceEntry[] = [];
     if (attachments.length > 0) {
       const parts: ContentPart[] = [];
       if (userText) {
@@ -2407,6 +2624,20 @@ export class SessionRuntime {
         }
       }
       content = parts;
+      // Remember where each image came from, addressed by its position in the message
+      // this turn stores: a `file_id` is one provider's handle and nothing else in the
+      // history can turn it back into bytes (`docs/agents/plans/session-epoch.md` §6).
+      parts.forEach((part, partIndex) => {
+        if (part.type === 'image_url') {
+          sources.push({ messageIndex: 0, partIndex, source: { kind: 'inline', dataUrl: part.image_url.url } });
+        } else if (part.type === 'file') {
+          sources.push({
+            messageIndex: 0,
+            partIndex,
+            source: { kind: 'upload', providerId: sendCard.providerId, fileId: part.file_id },
+          });
+        }
+      });
     } else {
       content = userText;
     }
@@ -2437,6 +2668,9 @@ export class SessionRuntime {
     const run = this.beginTurn(titleFromPrompt(userText || attachments[0]?.name || ''), { parentId: basis });
     if (!run) {
       return;
+    }
+    if (sources.length > 0) {
+      run.node.imageSources = sources;
     }
     run.items.push({ kind: 'user', text: userText, attachments });
     this.post({ type: 'user', text: userText, attachments });
@@ -2508,11 +2742,27 @@ export class SessionRuntime {
   }
 
   /**
-   * True when this node is a rollover candidate: a conversational node that is not
-   * streaming and whose last turn died on the provider's context-length refusal
-   * (`nodeContextFull`). It is the same predicate the webview's `⧉` button reflects,
-   * and it is public so `ChatViewProvider` can decide whether the kill-confirmation
-   * is needed *before* anything has changed.
+   * True when the checked-out chain's setup and the live one disagree **because the user
+   * just picked a different card / level / language**: the send that follows must ask
+   * before it discards that pick (`docs/agents/plans/session-epoch.md` §4.2). Harness-side
+   * drift is deliberately not part of this — a plain send keeps the frozen setup silently,
+   * which is the whole point of freezing it.
+   */
+  hasUserDrift(): boolean {
+    return this.setupState().drift === 'user';
+  }
+
+  /** True when *anything* differs: what the composer's new-setup entry is offered for. */
+  hasDrift(): boolean {
+    return this.setupState().drift !== false;
+  }
+
+  /**
+   * True when this node offers a context continuation: a conversational node that is not
+   * streaming and whose chain is at least **near** full (`contextState`, so the provider's
+   * refusal and the 90% threshold both qualify). It is the same predicate the webview's `⧉`
+   * button reflects, and it is public so `ChatViewProvider` can decide whether the
+   * kill-confirmation is needed *before* anything has changed.
    */
   canRollover(nodeId: string): boolean {
     const node = this.session.nodes[nodeId];
@@ -2526,7 +2776,41 @@ export class SessionRuntime {
     if (node.children.some((id) => !isSidecar(this.session.nodes[id]))) {
       return false;
     }
-    return nodeContextFull(node);
+    return this.contextState(node) !== 'ok';
+  }
+
+  /**
+   * Adopt the epoch model for a chain that predates it: freeze the setup the next request
+   * would have used onto the node that starts the checked-out chain, and mark the session
+   * `legacy`.
+   *
+   * The old harness never stored a prompt (it re-rendered one per request), so the exact
+   * bytes of a legacy chain's original requests are unrecoverable — this is a one-time
+   * approximation, and one unavoidable miss. What it buys is everything after it: from
+   * then on that chain is frozen like any other, and only a fork changes it
+   * (`docs/agents/plans/session-epoch.md` §7).
+   */
+  adoptLegacyEpoch(): void {
+    const session = this.session;
+    if (session.legacyEpoch) {
+      return;
+    }
+    const viewId = session.activeNodeId ?? session.rootIds[0] ?? null;
+    const ids = pathIds(session, viewId);
+    if (ids.length === 0) {
+      return;
+    }
+    const base = contextBase(session, viewId) ?? ids[0];
+    const baseNode = session.nodes[base];
+    if (!baseNode || baseNode.epoch) {
+      session.legacyEpoch = true;
+      return;
+    }
+    const frozen = this.freezeEpoch(baseNode, this.cardIdForNode(baseNode), this.effortNameForNode(baseNode));
+    baseNode.epoch = { ...frozen, legacy: true };
+    session.legacyEpoch = true;
+    this.host.output.appendLine(`[epoch] adopted legacy chain ${base} (card=${frozen.cardId} effort=${frozen.effort})`);
+    this.persistTurnNow();
   }
 
   /**
@@ -2554,7 +2838,7 @@ export class SessionRuntime {
    * When it returns true the new node is checked out and running, and this node keeps
    * its full history on its stopped line.
    */
-  async rolloverContext(nodeId: string): Promise<boolean> {
+  async rolloverContext(nodeId: string, setup: 'current' | 'latest' = 'current'): Promise<boolean> {
     const node = this.session.nodes[nodeId];
     if (!node || isSidecar(node)) {
       return false;
@@ -2595,6 +2879,7 @@ export class SessionRuntime {
     ).length;
     const windowNo = windows + 2;
     const message = buildContextRolloverMessage({
+      reason: this.contextState(node) === 'full' ? 'full' : 'near',
       sessionId: this.sessionId,
       previousNodeId: node.id,
       transcriptPath: this.rolloverTranscriptPath(node.id),
@@ -2617,6 +2902,10 @@ export class SessionRuntime {
     const run = this.beginTurn(vscode.l10n.t('Context window {0}', windowNo), {
       parentId: nodeId,
       freshContext: true,
+      // "Continue with Latest setup" freezes the live configuration into the new node;
+      // "current" inherits the parent's envelope. Both are free here — a new context has no
+      // cached prefix to lose — which is why the choice can be offered at all.
+      freshEpoch: setup === 'latest',
     });
     if (!run) {
       return false;
@@ -2633,6 +2922,242 @@ export class SessionRuntime {
     this.post({ type: 'nodeUpdate', ...this.nodeStatePatch(run.node) });
     void run.agent.sendUserMessage(message);
     return true;
+  }
+
+  /**
+   * Record, on the node, where this turn's `read_image` uploads came from. A `file_id` is
+   * one provider's private handle, so translating it for another card (a fork) is only
+   * possible while its source is known (`docs/agents/plans/session-epoch.md` §6). Matching
+   * is by id, so a message this turn did not touch simply finds nothing.
+   */
+  private recordUploadSources(node: TreeNode, run: TurnRun): void {
+    const uploads = run.agent.getImageUploads();
+    if (uploads.length === 0) {
+      return;
+    }
+    const known = new Set(
+      (node.imageSources ?? []).map((entry) => (entry.source.kind === 'upload' ? entry.source.fileId : '')),
+    );
+    const next: ImageSourceEntry[] = [];
+    node.messages.forEach((message, messageIndex) => {
+      if (!Array.isArray(message.content)) {
+        return;
+      }
+      message.content.forEach((part, partIndex) => {
+        if (part.type !== 'file' || known.has(part.file_id)) {
+          return;
+        }
+        const upload = uploads.find((u) => u.fileId === part.file_id);
+        if (!upload) {
+          return;
+        }
+        known.add(part.file_id);
+        next.push({
+          messageIndex,
+          partIndex,
+          source: { kind: 'upload', providerId: upload.providerId, fileId: part.file_id, srcPath: upload.path },
+        });
+      });
+    });
+    if (next.length > 0) {
+      node.imageSources = [...(node.imageSources ?? []), ...next];
+    }
+  }
+
+  /**
+   * Re-materialise one node's messages for another card: the images of a copied chain are
+   * written in the wire form the **target** can read, once, at copy time — never again per
+   * request (`docs/agents/plans/session-epoch.md` §6).
+   *
+   * Best effort, deliberately: bytes are recovered when the provenance says where they are
+   * (an inline `data:` URL, or a source file still on disk and small enough to inline), and
+   * the block becomes an ordinary placeholder text part when they are not. A chain is never
+   * left unsendable because of an image.
+   */
+  private materialiseMessages(
+    messages: ChatMessage[],
+    sources: ImageSourceEntry[],
+    card: ModelCard,
+  ): { messages: ChatMessage[]; sources: ImageSourceEntry[] } {
+    const vision = isVisionCard(card);
+    const uploadTransport = card.vision.transport === 'deepseek';
+    const byPart = new Map<string, ImageSource>();
+    for (const entry of sources) {
+      byPart.set(`${entry.messageIndex}:${entry.partIndex}`, entry.source);
+    }
+    const out: ChatMessage[] = [];
+    const outSources: ImageSourceEntry[] = [];
+    let changed = false;
+    messages.forEach((message, messageIndex) => {
+      if (message.role !== 'user' || !Array.isArray(message.content)) {
+        out.push(message);
+        return;
+      }
+      const parts = message.content;
+      if (!parts.some((part) => part.type === 'image_url' || part.type === 'file')) {
+        out.push(message);
+        return;
+      }
+      let moved = false;
+      const nextParts: ContentPart[] = parts.map((part, partIndex) => {
+        if (part.type !== 'image_url' && part.type !== 'file') {
+          return part;
+        }
+        if (!vision) {
+          moved = true;
+          return { type: 'text', text: MATERIALISED_NO_VISION };
+        }
+        if (part.type === 'file') {
+          const source = byPart.get(`${messageIndex}:${partIndex}`);
+          if (uploadTransport && source?.kind === 'upload' && source.providerId === card.providerId) {
+            return part; // the same account can still read its own handle
+          }
+          const dataUrl = this.inlineBytesFor(source);
+          moved = true;
+          return dataUrl
+            ? ({ type: 'image_url', image_url: { url: dataUrl } } as ContentPart)
+            : ({ type: 'text', text: MATERIALISED_FOREIGN_UPLOAD } as ContentPart);
+        }
+        return part;
+      });
+      if (moved) {
+        changed = true;
+        out.push({ ...message, content: nextParts });
+        nextParts.forEach((part, partIndex) => {
+          if (part.type === 'image_url') {
+            outSources.push({ messageIndex, partIndex, source: { kind: 'inline', dataUrl: part.image_url.url } });
+          } else if (part.type === 'file') {
+            const source = byPart.get(`${messageIndex}:${partIndex}`);
+            if (source) {
+              outSources.push({ messageIndex, partIndex, source });
+            }
+          }
+        });
+      } else {
+        out.push(message);
+        for (const entry of sources) {
+          if (entry.messageIndex === messageIndex) {
+            outSources.push(entry);
+          }
+        }
+      }
+    });
+    return { messages: out, sources: changed ? outSources : sources };
+  }
+
+  /** The bytes behind one provenance record, as a `data:` URL, when they are reachable. */
+  private inlineBytesFor(source: ImageSource | undefined): string | undefined {
+    if (!source) {
+      return undefined;
+    }
+    if (source.kind === 'inline') {
+      return source.dataUrl;
+    }
+    if (!source.srcPath) {
+      return undefined;
+    }
+    try {
+      const stat = fs.statSync(source.srcPath);
+      if (!stat.isFile() || stat.size > INLINE_IMAGE_LIMIT_BYTES) {
+        return undefined;
+      }
+      const bytes = fs.readFileSync(source.srcPath);
+      const mime = detectImageMime(bytes);
+      return mime ? `data:${mime};base64,${bytes.toString('base64')}` : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Continue the tree that owns `nodeId` under the **live** setup, as an adjacent tree —
+   * the "Continue with Latest setup" answer (`docs/agents/plans/session-epoch.md` §4.4).
+   *
+   * The whole tree is copied, not just the branch being read: a conversation is a shape the
+   * user navigates, and a fork that dropped its siblings would silently lose them. Every
+   * copy gets a fresh identity, its images are re-materialised for the target card (§6), and
+   * its epoch-starting node freezes a **new** envelope. That is the whole point: the old tree
+   * keeps the bytes — and therefore the provider cache entry — it was built with, so
+   * switching back is a hit instead of a re-bill.
+   */
+  forkTree(nodeId: string): { rootId: string; tipId: string } | null {
+    const session = this.session;
+    const source = session.nodes[nodeId];
+    if (!source || isSidecar(source) || this.runs.size > 0) {
+      // A copy taken while a turn streams would race that run's own slice into the node it
+      // is writing; the composer only offers the fork on an idle session, and a replayed
+      // click is refused here.
+      return null;
+    }
+    const rootPath = pathIds(session, nodeId);
+    const sourceRootId = rootPath[0];
+    if (!sourceRootId || !session.nodes[sourceRootId]) {
+      return null;
+    }
+    // The **whole tree** is copied, not just the node's own subtree: "continue with the
+    // latest setup" continues a conversation, and the conversation is the tree the user is
+    // reading — including the branches they are not standing on.
+    const ids = branchIds(session, sourceRootId);
+    const cardId = this.model;
+    const effort = this.thinkingEffort;
+    const card = this.cardForCardId(cardId);
+    const idMap = new Map<string, string>();
+    for (const id of ids) {
+      idMap.set(id, newId());
+    }
+    for (const id of ids) {
+      const src = session.nodes[id];
+      const copyId = idMap.get(id)!;
+      const materialised = this.materialiseMessages(src.messages, src.imageSources ?? [], card);
+      session.nodes[copyId] = {
+        ...src,
+        id: copyId,
+        parentId: src.parentId ? (idMap.get(src.parentId) ?? null) : null,
+        children: src.children.map((child) => idMap.get(child)).filter((child): child is string => !!child),
+        messages: materialised.messages,
+        imageSources: materialised.sources.length > 0 ? materialised.sources : undefined,
+        // The transcript items are copied, never shared: a live run pushes into its own
+        // node's array, and two trees must not write the same objects.
+        displayItems: src.displayItems.map((item) => ({
+          ...item,
+          attachments: item.attachments ? item.attachments.map((a) => ({ ...a })) : undefined,
+          usage: item.usage ? { ...item.usage } : undefined,
+        })),
+        contextBaseId: src.contextBaseId === src.id ? copyId : undefined,
+        // Re-frozen below for the nodes that own an envelope; a copy must never point at
+        // the old tree's epoch.
+        epoch: undefined,
+        // A copy of a turn that never finished is a record, not a live run.
+        status: src.status === 'running' || src.status === 'pending' ? 'interrupted' : src.status,
+      };
+    }
+    for (const id of ids) {
+      const src = session.nodes[id];
+      const copy = session.nodes[idMap.get(id)!];
+      if (src.epoch || id === sourceRootId) {
+        const frozen = this.freezeEpoch(copy, cardId, effort);
+        copy.epoch = frozen;
+        copy.model = frozen.cardId;
+        copy.effort = frozen.effort;
+      }
+    }
+    const newRootId = idMap.get(sourceRootId)!;
+    session.rootIds = session.rootIds.filter((id) => id !== newRootId);
+    session.rootIds.push(newRootId);
+    session.activeNodeId = idMap.get(nodeId) ?? newRootId;
+    session.updatedAt = Date.now();
+    this.host.output.appendLine(
+      `[epoch] forked ${sourceRootId} -> ${newRootId} nodes=${ids.length} card=${cardId} effort=${effort}`,
+    );
+    this.persistTurnNow();
+    this.postTree();
+    if (session.activeNodeId) {
+      this.post({ type: 'panTo', id: session.activeNodeId });
+    }
+    this.postConfig();
+    this.postContext();
+    this.postState();
+    return { rootId: newRootId, tipId: session.activeNodeId ?? newRootId };
   }
 
   /** Where this node's transcript dump lives (the pointer the new window is given). */
@@ -4585,7 +5110,7 @@ export class SessionRuntime {
     const session = this.session;
     // A cleared conversation keeps its identity but loses the whole tree.
     session.nodes = {};
-    session.rootId = null;
+    session.rootIds = [];
     session.activeNodeId = null;
     session.orphanItems.length = 0;
     session.updatedAt = Date.now();

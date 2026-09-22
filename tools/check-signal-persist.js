@@ -43,7 +43,7 @@ const raw = {
       title: 'persistence round trip',
       createdAt: 1,
       updatedAt: 2,
-      rootId: 'root',
+      rootIds: ['root'],
       activeNodeId: 'bg-done',
       orphanItems: [],
       nodes: {

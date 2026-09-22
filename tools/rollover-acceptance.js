@@ -144,7 +144,7 @@ function makeSession() {
     createdAt: 1,
     updatedAt: 1,
     nodes: {},
-    rootId: null,
+    rootIds: [],
     activeNodeId: null,
     orphanItems: [],
   };

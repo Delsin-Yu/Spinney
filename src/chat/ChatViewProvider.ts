@@ -35,6 +35,7 @@ import {
   messageText,
   newId,
   nodeUsage,
+  normalizeSession,
   pathIds,
   pathMessages,
   sessionEffortPick,
@@ -64,7 +65,6 @@ import {
   SessionRuntime,
   SubAgentJob,
   clipDisplayItem,
-  clipMessageForStorage,
 } from './runtime';
 import { SessionTreeItem } from './SessionsProvider';
 import { ModelTreeController, apiKeySecretName } from './modelTree';
@@ -327,6 +327,12 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   private storeWritable = false;
   /** Another live window owns this workspace's files: we keep writing the Memento. */
   private storeLockedOut = false;
+  /**
+   * True when another window owns this workspace's session files: this window then reads
+   * them and refuses every mutation. One owner, one writer — a session is never steered
+   * from two windows (`docs/agents/plans/session-epoch.md` §5).
+   */
+  private readOnly = false;
   /**
    * The sessions whose content changed since the last write, or `null` for "unknown — write
    * everything". A runtime marks its own session at every persist (it is the only thing a
@@ -975,6 +981,11 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         `session=${session.id} nodes=${Object.keys(session.nodes).length}`,
       );
       this.runtimes.set(session.id, rt);
+      // A chain that predates the epoch model has no frozen envelope: adopt one now, once,
+      // so from here on its bytes are stable (`adoptLegacyEpoch`).
+      if (!this.readOnly) {
+        rt.adoptLegacyEpoch();
+      }
       this.notifyStateChanged();
     }
     return rt;
@@ -985,7 +996,9 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   private loadSessions(): void {
     const t0 = Date.now();
     const legacyRaw = this.storage.get<unknown>(STORAGE_KEY);
-    const fromStore = this.storeWritable && this.store ? this.store.readAllSync() : null;
+    // Reading the store never needs the lock: a window that lost the race still shows the
+    // workspace's sessions, it just cannot write them (see `readOnly`).
+    const fromStore = this.store ? this.store.readAllSync() : null;
     const storeSessions = (fromStore?.sessions ?? []) as AgentSession[];
     // The files win; the Memento row is the fallback (state written before the store
     // existed, or a window that could not take the workspace lock).
@@ -994,9 +1007,12 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     const { activeSessionId, sessions, migrated } = useStore
       ? { activeSessionId: this.readSmall<string>(ACTIVE_SESSION_KEY) ?? '', sessions: storeSessions, migrated: false }
       : migrateState(rawState);
-    // migrateState/normalizeTreeSession already prune every session (drop the
-    // stale system prompt, downgrade a turn that was still running, unlink
-    // dangling children), so the loaded tree is always API-valid on activation.
+    // Both sources have been healed already, and neither branch has to remember: the
+    // store's reader runs `normalizeSession` on the way out (`openStore`'s `normalize`),
+    // and `migrateState` does it for the Memento row. So the heal — drop the stale system
+    // prompt, downgrade a turn that was still running, unlink dangling children, turn a
+    // pre-forest `rootId` into `rootIds` — is exactly once per session, and the loaded
+    // tree is always API-valid on activation.
     this.sessions = sessions;
     // The pre-tree (v1) safety copy belongs on disk, not in the memento: it is
     // ~20 M chars of the blob that nothing ever reads again, and VS Code
@@ -1068,6 +1084,10 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       root,
       workspaceKey: key,
       onLog: (line) => this.output.appendLine(line),
+      // The read boundary heals (`SessionStore`'s own doc says why it is the reader's job):
+      // a session file written by an older build — a pre-forest `rootId`, a chain with no
+      // frozen epoch — is normalized the moment it is read, whichever path read it.
+      normalize: (session) => normalizeSession(session) ?? session,
     });
     perf(() => `store-open root=${store.root} key=${key} candidates=${this.storeCandidates.length}`);
     return store;
@@ -1182,6 +1202,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         holder = result.holder?.owner;
         this.storeWritable = acquired;
         this.storeLockedOut = !acquired;
+        this.readOnly = !acquired;
         perf(
           () =>
             `store-lock ${acquired ? 'acquired' : 'refused'}${tookOver ? ' took-over=true' : ''}` +
@@ -1189,9 +1210,18 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         );
         if (!acquired) {
           this.output.appendLine(
-            '[store] another window owns this workspace\u2019s session files — this window ' +
-              'keeps its sessions in the Memento until that window closes',
+            '[store] another window owns this workspace\u2019s session files — this window is read-only',
           );
+          // Say it where the user is looking, once per session that is open.
+          for (const rt of this.runtimes.values()) {
+            rt.postNotice(
+              'warning',
+              vscode.l10n.t(
+                'Another window owns this workspace\u2019s sessions, so this window is read-only. Close that window (or use it) to continue here.',
+              ),
+            );
+          }
+          this.notifyStateChanged();
         }
         return acquired;
       },
@@ -1617,21 +1647,24 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       }
       return clipped;
     };
-    const clipMsg = (msg: ChatMessage): ChatMessage => {
-      const clipped = clipMessageForStorage(msg);
-      addText(clipped.reasoning_content);
-      if (typeof clipped.content === 'string') {
-        addText(clipped.content);
-      } else if (Array.isArray(clipped.content)) {
-        for (const part of clipped.content as { text?: string; image_url?: { url?: string } }[]) {
+    // Messages are stored **verbatim**: what a node keeps has to be byte-identical
+    // to what was sent to the API, or the provider's prefix cache is lost from the
+    // first truncated message on after every reload. So this hook only accumulates
+    // the size readout and returns the message untouched — there is no message cap.
+    const countMsg = (msg: ChatMessage): ChatMessage => {
+      addText(msg.reasoning_content);
+      if (typeof msg.content === 'string') {
+        addText(msg.content);
+      } else if (Array.isArray(msg.content)) {
+        for (const part of msg.content as { text?: string; image_url?: { url?: string } }[]) {
           addText(part.text);
           addText(part.image_url?.url);
         }
       }
-      for (const call of clipped.tool_calls ?? []) {
+      for (const call of msg.tool_calls ?? []) {
         addText(call.function?.arguments);
       }
-      return clipped;
+      return msg;
     };
     // **Which sessions changed?** A runtime names its own at every persist (see
     // `markSessionDirty`), and nothing marked means "unknown — write everything". That
@@ -1646,7 +1679,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       return {
         ...node,
         displayItems: node.displayItems.map(clipItem),
-        messages: node.messages.map(clipMsg),
+        messages: node.messages.map(countMsg),
       };
     };
     const clipSession = (s: AgentSession): AgentSession => {
@@ -1664,7 +1697,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
               {
                 ...node,
                 displayItems: node.displayItems.map(clipItem),
-                messages: node.messages.map(clipMsg),
+                messages: node.messages.map(countMsg),
               },
             ];
           }),
@@ -1677,6 +1710,12 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     // payload is built only on that path: the store path never walks an unchanged session.
     const tSelect = Date.now();
     const storeWrite = Boolean(this.store && this.storeWritable);
+    if (this.store && !this.storeWritable) {
+      // Read-only window: the store belongs to another window and there is deliberately no
+      // second write path to fall back to, so a queued write is simply dropped.
+      perf(() => 'persist-skipped read-only=true');
+      return;
+    }
     // **Which nodes changed?** One digest per node, compared with what the last write put on
     // disk. A session holds its whole history, so writing it whole on every turn end cost
     // 17.5 MB of `JSON.stringify` and 17.5 MB of writes per *turn* while 99% of it had not
@@ -2091,7 +2130,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       createdAt: Date.now(),
       updatedAt: Date.now(),
       nodes: {},
-      rootId: null,
+      rootIds: [],
       activeNodeId: null,
       orphanItems: [],
     };
@@ -2138,6 +2177,9 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    * tool) and lock it against the automatic namer.
    */
   renameSession(sessionId: string, title: string): { ok: boolean; error?: string; title?: string } {
+    if (this.readOnly) {
+      return { ok: false, error: this.readOnlyNotice() };
+    }
     const session = this.sessions.find((s) => s.id === sessionId);
     if (!session) {
       return { ok: false, error: `no such session: ${sessionId}` };
@@ -2891,6 +2933,11 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   }
 
   /** Route a message to the panel's session's runtime. */
+  /** RuntimeHost: a read-only window refuses every mutation (`dispatchUserMessage`). */
+  isReadOnly(): boolean {
+    return this.readOnly;
+  }
+
   postTo(sessionId: string, message: unknown): void {
     this.panels.get(sessionId)?.post(message);
   }
@@ -3016,6 +3063,10 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   }
 
   newSession(): void {
+    if (this.readOnly) {
+      void vscode.window.showWarningMessage(this.readOnlyNotice());
+      return;
+    }
     const session = this.createSessionInMemory();
     // A new session always gets a fresh tab, so this op waits for the webview's
     // first paint like any other cold switch.
@@ -3091,6 +3142,10 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    * the running agent — and reported afterwards.
    */
   async deleteSessionsInteractive(ids: string[]): Promise<void> {
+    if (this.readOnly) {
+      void vscode.window.showWarningMessage(this.readOnlyNotice());
+      return;
+    }
     const known = ids.filter((id) => this.sessions.some((s) => s.id === id));
     if (known.length === 0) {
       void vscode.window.showInformationMessage(vscode.l10n.t('No sessions are selected.'));
@@ -3203,6 +3258,10 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
 
   /** Clear one session's conversation (the panel that invoked `clear`). */
   clear(sessionId?: string, confirmedKill = false): void {
+    if (this.readOnly) {
+      void vscode.window.showWarningMessage(this.readOnlyNotice());
+      return;
+    }
     const id = sessionId ?? this.activeSessionId;
     const session = this.sessions.find((s) => s.id === id);
     if (!session) {
@@ -3527,7 +3586,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       return { ok: false, error: `no such session: ${opts.sessionId ?? '(active)'}` };
     }
     const rt = this.runtimeFor(session);
-    const nodeId = opts.nodeId ?? session.activeNodeId ?? session.rootId;
+    const nodeId = opts.nodeId ?? session.activeNodeId ?? session.rootIds[0];
     // P3: node-scoped. This refuses only when the *basis node* — the node the new
     // turn would continue from — is itself streaming (the composer's Stop-not-Send
     // rule); a run on another branch of the same session must not block it.
@@ -3593,6 +3652,9 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     returnTo?: boolean;
     returnNodeId?: string;
   }): Promise<ControlResult> {
+    if (this.readOnly) {
+      return { ok: false, error: 'another window owns this workspace\u2019s sessions; this window is read-only' };
+    }
     const prompt = (opts.prompt ?? '').trim();
     if (opts.sessionId) {
       const session = this.sessions.find((s) => s.id === opts.sessionId);
@@ -3602,7 +3664,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       const rt = this.runtimeFor(session);
       // P3: node-scoped — the session may be streaming on another branch while the
       // target node is free. Only a live run on the target node refuses.
-      const targetNode = opts.nodeId ?? session.activeNodeId ?? session.rootId;
+      const targetNode = opts.nodeId ?? session.activeNodeId ?? session.rootIds[0];
       if (targetNode && rt.runningNodes().includes(targetNode)) {
         return { ok: false, error: 'the agent is busy; wait for it to finish first', busy: true };
       }
@@ -3723,10 +3785,6 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
 
   // ---- Webview routing ----
 
-  /**
-   * Send a user message into a runtime. The reboot hold is the one provider-level
-   * gate that must still apply to every webview-originated send.
-   */
   private async dispatchUserMessage(rt: SessionRuntime, text: string, attachments: UserAttachment[]): Promise<void> {
     if (this.isHeld()) {
       rt.postNotice(
@@ -3735,10 +3793,139 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       );
       return;
     }
+    if (this.readOnly) {
+      rt.postNotice('warning', this.readOnlyNotice());
+      return;
+    }
+    // The setup gate: a plain send always uses the checked-out chain's frozen setup, so a
+    // pick made on that chain has to be confirmed before it is discarded. Dismissing the
+    // dialog sends nothing — "default send always uses the old setup" has to be true even
+    // when the user walks away from the question.
+    if (rt.hasUserDrift()) {
+      const choice = await this.askSetups('user');
+      if (!choice) {
+        return;
+      }
+      if (choice === 'current') {
+        rt.discardPendingSetup();
+      } else if (!this.forkFor(rt)) {
+        return;
+      }
+    }
     // A send is the moment a key matters: nudge once (never block — the request
     // itself reports the real error).
     void this.warnMissingApiKey();
     await rt.onUserMessage(text, attachments);
+    // The composer holds the text until this point: a question answered with "No" must not
+    // eat what the user typed (`composerClear`).
+    this.postTo(rt.sessionId, { type: 'composerClear' });
+  }
+
+  /**
+   * The composer's "send with the latest setup" entry: ask, then send into the tree the
+   * answer names. `Continue with current setup` here means "do not fork after all" — the
+   * user asked for the question, not necessarily for the fork.
+   */
+  private async forkAndSend(rt: SessionRuntime, text: string, attachments: UserAttachment[]): Promise<void> {
+    if (this.readOnly) {
+      rt.postNotice('warning', this.readOnlyNotice());
+      return;
+    }
+    const choice = await this.askSetups('user');
+    if (!choice) {
+      return;
+    }
+    if (choice === 'latest') {
+      if (!this.forkFor(rt)) {
+        return;
+      }
+    } else {
+      rt.discardPendingSetup();
+    }
+    await this.dispatchUserMessage(rt, text, attachments);
+  }
+
+  /**
+   * Continue a near-full or refused chain in a **new node**: ask which setup it should
+   * start with, gate the kills when the node still owns work, then start it. Both branches
+   * are free — a new context has no cached prefix to lose — which is exactly why the user
+   * gets the choice here (`docs/agents/plans/session-epoch.md` §4.5).
+   */
+  private async rolloverWithSetup(rt: SessionRuntime, id: string): Promise<void> {
+    if (this.readOnly) {
+      rt.postNotice('warning', this.readOnlyNotice());
+      return;
+    }
+    const choice = await this.askSetups('rollover');
+    if (!choice) {
+      return;
+    }
+    const work = rt.lockedWorkCount(id);
+    if (work > 0) {
+      const ok = await this.confirmKillBackgrounds(
+        vscode.l10n.t('{0} piece(s) of work are still running here (background terminals and sub-agents). Continuing in a new window stops them; what they produced stays in the transcript.', work),
+        vscode.l10n.t('Continue and stop them'),
+        vscode.l10n.t('Work is still running in this window.'),
+      );
+      if (!ok) {
+        return;
+      }
+    }
+    const started = await rt.rolloverContext(id, choice);
+    if (!started) {
+      rt.postNotice(
+        'warning',
+        vscode.l10n.t('Could not continue in a new context here — wait for the running turn to finish and try again.'),
+      );
+    }
+  }
+
+  /** The one read-only sentence, in one place. */
+  private readOnlyNotice(): string {
+    return vscode.l10n.t(
+      'Another window owns this workspace\u2019s sessions, so this window is read-only. Close that window (or use it) to continue here.',
+    );
+  }
+
+  /**
+   * Ask which setup a continuation should use. The first action is the default (Enter) and
+   * is always the conservative one — the setup that is already frozen — because the
+   * alternative starts a new tree; dismissing the dialog changes nothing at all.
+   */
+  private async askSetups(kind: 'user' | 'rollover'): Promise<'current' | 'latest' | null> {
+    const currentLabel = vscode.l10n.t('Continue with current setup');
+    const latestLabel = vscode.l10n.t('Continue with latest setup');
+    const header = vscode.l10n.t('Continue with a new setup?');
+    const detail =
+      kind === 'user'
+        ? vscode.l10n.t(
+            'This conversation is frozen on its own setup, so a plain send always uses it. Continuing with the latest setup copies this tree into a new one; this tree keeps its setup and its prompt cache.',
+          )
+        : vscode.l10n.t(
+            'A new context window starts empty, so the latest setup costs nothing here. Continuing with the current setup keeps this conversation on the setup it was frozen with.',
+          );
+    const pick = await vscode.window.showWarningMessage(header, { modal: true, detail }, currentLabel, latestLabel);
+    if (pick === latestLabel) {
+      return 'latest';
+    }
+    return pick === currentLabel ? 'current' : null;
+  }
+
+  /** Fork the checked-out tree under the live setup; `null` when it cannot be done. */
+  private forkFor(rt: SessionRuntime): boolean {
+    const id = rt.session.activeNodeId;
+    if (!id) {
+      return true; // nothing to copy: the next send freezes the live setup anyway
+    }
+    const forked = rt.forkTree(id);
+    if (!forked) {
+      rt.postNotice(
+        'warning',
+        vscode.l10n.t('Could not start a new setup here — wait for the running turn to finish and try again.'),
+      );
+      return false;
+    }
+    return true;
   }
 
   /**
@@ -3790,6 +3977,10 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         return;
       case 'userMessage':
         return this.dispatchUserMessage(rt, String(message.text ?? ''), message.attachments ?? []);
+      case 'forkTurn':
+        // The composer's new-setup entry: same question as the drift gate, but asked
+        // explicitly, and the answer may be "keep this setup" (then nothing forks).
+        return void this.forkAndSend(rt, String(message.text ?? ''), message.attachments ?? []);
       case 'continueTurn':
         // The ▶ button on a card whose turn was interrupted / failed: the harness
         // writes the message (see `SessionRuntime.continueFrom`), so the reboot
@@ -3811,20 +4002,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
           void rt.continueFrom(id);
           return;
         }
-        const work = rt.lockedWorkCount(id);
-        if (work <= 0) {
-          void rt.rolloverContext(id);
-          return;
-        }
-        void this.confirmKillBackgrounds(
-          vscode.l10n.t('{0} piece(s) of work are still running here (background terminals and sub-agents). Continuing in a new window stops them; what they produced stays in the transcript.', work),
-          vscode.l10n.t('Continue and stop them'),
-          vscode.l10n.t('Work is still running in this window.'),
-        ).then((ok) => {
-          if (ok) {
-            void rt.rolloverContext(id);
-          }
-        });
+        void this.rolloverWithSetup(rt, id);
         return;
       }
       case 'checkout':

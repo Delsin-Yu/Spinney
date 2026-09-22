@@ -76,6 +76,12 @@
   const NODE_W = 320;
   const H_GAP = 48;
   const V_GAP = 72;
+  // The gap between two roots of the forest (§3). Each root is laid out by the
+  // engine on its own and the trees are placed left to right, so the gap is what
+  // makes two trees read as two parallel conversations instead of one wide tree.
+  // (The engine's own layout pads the right edge by 40px, so the visible channel
+  // between the two rightmost/leftmost cards is this plus 40.)
+  const ROOT_GAP = 64;
   // Sub-agent sidecar grid (see media/tree.js): windows are packed into a
   // column-major lattice right of the parent card, at most AGENT_MAX_ROWS rows
   // per column; every further window opens a column to the right.
@@ -90,6 +96,10 @@
   let messagesEl = null;
   const nodeEls = Object.create(null);   // id -> card element
   let treeNodes = Object.create(null);   // id -> { id, parentId, children, title, status, preview }
+  // A session is a FOREST (§3): one entry per tree, in the order the host sends
+  // them. `treeRootId` stays the first one (the focused tree's root in practice),
+  // which is all a single-root host ever needs.
+  let treeRootIds = [];
   let treeRootId = null;
   let treeActiveId = null;
   let activePathSet = new Set();
@@ -2515,10 +2525,13 @@
       if (msg.status) treeNodes[msg.id].status = msg.status;
       if (msg.title) treeNodes[msg.id].title = msg.title;
       // Which variant of the button `syncContinueButton` below has to show depends
-      // on this flag, and a turn that dies on a provider context-length error ends
-      // *after* the tree was drawn — so the patch has to carry the judgement with
-      // it, or the card would keep offering `↻ Retry` for an oversized request.
-      if (typeof msg.contextFull === 'boolean') treeNodes[msg.id].contextFull = msg.contextFull;
+      // on the context state, and a turn that dies on a provider context-length
+      // error ends *after* the tree was drawn — so the patch has to carry the
+      // host's judgement with it, or the card would keep offering `↻ Retry` for an
+      // oversized request. The state is never derived here (§4.3); the percentage
+      // only feeds the `near` variant's tooltip.
+      if (typeof msg.context === 'string') treeNodes[msg.id].context = msg.context;
+      if (typeof msg.contextPct === 'number') treeNodes[msg.id].contextPct = msg.contextPct;
     }
     if (card) syncContinueButton(card, treeNodes[msg.id] || { id: msg.id, status: msg.status, children: [] });
   }
@@ -2531,11 +2544,15 @@
    * so the user never has to type "continue".
    *
    * One button, one meaning at a time — the *variant* follows the node's state:
-   *  - `error` + `contextFull` → rollover: the turn died because the provider
+   *  - `error` + context `full` → rollover: the turn died because the provider
    *    refused an oversized request, which retrying cannot fix, so the harness
    *    opens a new, empty context window and continues there (`rolloverTurn`).
+   *  - context `near` (>= 90% of the card's window) → the same `⧉` entry, but as a
+   *    *suggestion*: the `node-near` class softens it and the tooltip carries the
+   *    percentage, because this one is the user's call, not a failure to repair.
    *  - `error` (any other failure) → `↻ Retry`, in place.
    *  - `interrupted` → `▶ Continue`, in place.
+   * The context state itself is the host's judgement and is never derived here.
    * The element is created once and only its text used to change; a sync now also
    * fixes its class list and `dataset.action`, so a card that goes Retry → rollover
    * (or back) is correct, and the click handler reads the action at click time.
@@ -2544,6 +2561,10 @@
    * sidecar — a sub-agent window or job card has no conversation of its own here),
    * not currently running, and a *tip* of its branch (a node that already has a
    * turn child has been continued; the new failure, if any, shows on that child).
+   * A `full` window is a *failure* mode, so it keeps the old gate — it only ever
+   * arrives on an `error`. The `near` suggestion does not: a long conversation that
+   * just *finished* above 90% is exactly the case it is for, so it shows on a `done`
+   * tip as well.
    */
   function syncContinueButton(card, meta) {
     const id = meta && meta.id;
@@ -2555,19 +2576,29 @@
       const child = treeNodes[c];
       return child && !isSidecarKind(child.kind);
     });
-    const rollover = !!meta && meta.status === 'error' && meta.contextFull === true;
-    const label = rollover
+    // The host's context state (§4.3): `full` — the provider refused an oversized
+    // request; `near` — the latest prompt usage is at least 90% of the card's
+    // window; `ok` — otherwise. `contextPct` only ever reaches the tooltip.
+    const context = meta ? meta.context : undefined;
+    const rollover = !!meta && meta.status === 'error' && context === 'full';
+    // A suggestion, not a repair: it hangs off the context state alone, never off
+    // the status, so a finished tip gets the entry too.
+    const near = !rollover && context === 'near';
+    const pct = meta && typeof meta.contextPct === 'number' ? Math.round(meta.contextPct) : 0;
+    const label = rollover || near
       ? tr('⧉ Continue in a new window')
       : meta && meta.status === 'error'
         ? tr('↻ Retry')
         : tr('▶ Continue');
     const title = rollover
       ? tr('Ask the harness to continue this turn in a new, empty context window (the current one is full)')
-      : meta && meta.status === 'error'
-        ? tr('Ask the harness to retry this turn (it sends the message for you)')
-        : tr('Ask the harness to continue from here (it sends the message for you)');
-    const action = rollover ? 'rollover' : meta && meta.status === 'error' ? 'retry' : 'continue';
-    const show = !!id && terminal && !hasTurnChild && !isSidecarKind(meta.kind) && !runningNodes.has(id);
+      : near
+        ? tr('Context is {0}% full - continue in a new window', pct)
+        : meta && meta.status === 'error'
+          ? tr('Ask the harness to retry this turn (it sends the message for you)')
+          : tr('Ask the harness to continue from here (it sends the message for you)');
+    const action = rollover || near ? 'rollover' : meta && meta.status === 'error' ? 'retry' : 'continue';
+    const show = !!id && (terminal || near) && !hasTurnChild && !isSidecarKind(meta.kind) && !runningNodes.has(id);
     if (!show) {
       if (btn) btn.remove();
       return;
@@ -2575,11 +2606,12 @@
     if (btn) {
       btn.textContent = label;
       btn.title = title;
-      btn.classList.toggle('node-rollover', rollover);
+      btn.classList.toggle('node-rollover', rollover || near);
+      btn.classList.toggle('node-near', near);
       btn.dataset.action = action;
       return;
     }
-    const button = el('button', 'node-continue' + (rollover ? ' node-rollover' : ''), label);
+    const button = el('button', 'node-continue' + (rollover || near ? ' node-rollover' : '') + (near ? ' node-near' : ''), label);
     button.title = title;
     button.dataset.action = action;
     button.addEventListener('click', (ev) => {
@@ -2626,8 +2658,10 @@
       branchBanner.classList.add('hidden');
     }
     // Read-only when the checked-out node is a sub-agent branch (the host additionally
-    // refuses a send into a node that still owns work — Stop is the way out there).
-    const readonly = isAgent;
+    // refuses a send into a node that still owns work — Stop is the way out there), or when
+    // this window does not own the workspace's sessions at all (`readOnly`, set from
+    // `state`): the composer must agree with the host in both cases.
+    const readonly = isAgent || readOnly;
     inputEl.disabled = readonly;
     sendBtn.disabled = readonly;
     attachBtn.disabled = readonly;
@@ -2881,7 +2915,18 @@
       heights[id] = card.offsetHeight || 120;
       widths[id] = card.offsetWidth || NODE_W;
     }
-    const result = window.treeLayout.layoutTree(treeNodes, treeRootId, heights, {
+    // The session is a FOREST (§3): the engine lays out one tree at a time, so each
+    // root gets its own pass and the results are placed left to right, in `rootIds`
+    // order, separated by `ROOT_GAP`. Two trees therefore read as two parallel
+    // conversations — each keeps its own tidy-tree geometry, sidecar grids and
+    // connectors, and every card (focused tree or not) stays interactive: the canvas
+    // click handler turns a click on any card's head into a `checkout`.
+    const roots = treeRootIds.filter((id) => treeNodes[id]);
+    // Neither `rootIds` nor a usable `rootId` (an empty session, or a payload that
+    // names none): fall back to the engine's own answer for a missing root, which is
+    // the degenerate empty canvas this function has always produced.
+    const placed = roots.length > 0 ? roots : [treeRootId];
+    const layoutOpts = {
       nodeW: NODE_W,
       hGap: H_GAP,
       vGap: V_GAP,
@@ -2891,15 +2936,43 @@
       agentColGap: AGENT_COL_GAP,
       agentMaxRows: AGENT_MAX_ROWS,
       agentTopPad: AGENT_TOP_PAD,
-    });
-    layoutCells = result.cells || Object.create(null);
+    };
+    const pos = Object.create(null);
+    const cells = Object.create(null);
     // Stretch the sidecar cells to the heights the layout reserved for them. This
     // can only run *after* `layoutTree` (the heights are the layout's answer) and it
     // must run *after* the measurement above (only a card the layout wants taller
     // than it measured may be stretched). `height` alone is not enough: `.node` caps
     // every card at 1200px, and a clipped card would leave the grid's column short
     // again — the inline `max-height` is what lifts that cap for this one card.
-    const stretch = result.stretch || Object.create(null);
+    const stretch = Object.create(null);
+    let rootX = 0;
+    let canvasW = 0;
+    let canvasH = 0;
+    for (const root of placed) {
+      const result = window.treeLayout.layoutTree(treeNodes, root, heights, layoutOpts);
+      // One root's own coordinate space starts at (0, 0); every root sits on the
+      // same top line, so `y` is never shifted and only the trees' horizontal
+      // extents decide the gap between them.
+      for (const id in result.pos) {
+        pos[id] = { x: result.pos[id].x + rootX, y: result.pos[id].y };
+      }
+      for (const id in result.cells) {
+        const c = result.cells[id];
+        cells[id] = {
+          x: c.x + rootX, y: c.y, w: c.w, h: c.h,
+          col: c.col, row: c.row, index: c.index, count: c.count,
+          busX: c.busX + rootX, chanX: c.chanX + rootX, corrY: c.corrY,
+        };
+      }
+      for (const id in result.stretch) stretch[id] = result.stretch[id];
+      canvasW = Math.max(canvasW, rootX + result.width);
+      canvasH = Math.max(canvasH, result.height);
+      // `result.width` is the tree's own extent plus the engine's right pad, and the
+      // trailing constant is the gap the next root starts after.
+      rootX += result.width + ROOT_GAP;
+    }
+    layoutCells = cells;
     for (const id in stretch) {
       const card = nodeEls[id];
       if (!card) continue;
@@ -2912,13 +2985,13 @@
       card.style.maxHeight = target + 'px';
       layoutStretch[id] = target;
     }
-    treeCanvas.style.width = result.width + 'px';
-    treeCanvas.style.height = result.height + 'px';
-    for (const id in result.pos) {
+    treeCanvas.style.width = canvasW + 'px';
+    treeCanvas.style.height = canvasH + 'px';
+    for (const id in pos) {
       const card = nodeEls[id];
       if (card) {
-        card.style.left = result.pos[id].x + 'px';
-        card.style.top = result.pos[id].y + 'px';
+        card.style.left = pos[id].x + 'px';
+        card.style.top = pos[id].y + 'px';
       }
     }
     drawEdges();
@@ -3106,13 +3179,40 @@
     treeCanvas.style.transform = 'translate(' + pan.x + 'px, ' + pan.y + 'px) scale(' + zoom + ')';
   }
 
+  /**
+   * The roots of the forest a `tree` payload describes, in render order.
+   *
+   * `rootIds` is the shape a forest host sends (§3); `rootId` — always its first
+   * entry — is kept for replay shapes that predate the forest and for a payload
+   * that carries only one tree. A payload that names neither still gets a usable
+   * view: every node without a parent *in this payload* is a root, which is exactly
+   * what the single-tree shapes meant.
+   */
+  function rootIdsOf(tree, nodes) {
+    const ids = [];
+    if (Array.isArray(tree.rootIds)) {
+      for (const id of tree.rootIds) {
+        if (typeof id === 'string' && nodes[id]) ids.push(id);
+      }
+    }
+    if (ids.length === 0 && tree.rootId && nodes[tree.rootId]) ids.push(tree.rootId);
+    if (ids.length === 0) {
+      for (const id in nodes) {
+        const n = nodes[id];
+        if (n && (n.parentId == null || !nodes[n.parentId])) ids.push(id);
+      }
+    }
+    return ids;
+  }
+
   function renderTree(tree) {
     // The cards this menu was opened on are about to be rebuilt / removed, so a
     // menu that stayed up would point at a node the session no longer has.
     closeNodeMenu();
     treeNodes = Object.create(null);
     for (const n of tree.nodes || []) treeNodes[n.id] = n;
-    treeRootId = tree.rootId ?? null;
+    treeRootIds = rootIdsOf(tree, treeNodes);
+    treeRootId = treeRootIds.length > 0 ? treeRootIds[0] : null;
     // The view focus is independent of the stream target (spec §2.2): the tree
     // expands / docks on `viewId`, while `activeId` (the node currently streaming)
     // is only there for hosts that predate the split.
@@ -3882,6 +3982,16 @@
    * whenever `state`, the tree, the focused path or either set changes.
    */
   function updateComposerButtons() {
+    if (readOnly) {
+      // One owner window per workspace: this one may read the sessions, nothing more.
+      stopBtn.classList.add('hidden');
+      sendBtn.classList.remove('hidden');
+      sendBtn.disabled = true;
+      sendBtn.title = READ_ONLY_TITLE;
+      return;
+    }
+    sendBtn.disabled = false;
+    sendBtn.title = '';
     if (focusIsRunning() || focusIsLocked()) {
       stopBtn.classList.remove('hidden');
       sendBtn.classList.add('hidden');
@@ -3896,6 +4006,21 @@
       sendBtn.classList.remove('hidden');
     }
   }
+
+  /**
+   * True while another window owns this workspace's sessions. Held here so the composer can
+   * show it, and checked again in `send()` — a click must never depend on a repaint having
+   * happened.
+   */
+  let readOnly = false;
+  /**
+   * The read-only sentence. Deliberately byte-identical to the host's
+   * `ChatViewProvider.readOnlyNotice()` literal, so the two share one catalogue entry
+   * (`npm run check:l10n` extracts both and would report a near-duplicate as missing).
+   */
+  const READ_ONLY_TITLE = tr(
+    'Another window owns this workspace’s sessions, so this window is read-only. Close that window (or use it) to continue here.',
+  );
 
   // Filled from the provider's `config` message: every **model card** the user
   // configured, its provider's name, and the thinking levels that card offers.
@@ -4252,6 +4377,132 @@
     }
   }
 
+  // ---- The composer's two identities (§4.2) --------------------------------
+  // What a send actually uses is the checked-out node's frozen setup (`setup.node`);
+  // what a *new* node would freeze is the live one (`setup.live`). The host compares
+  // them and says which kind of drift it found — `'user'` (the dropdowns moved) or
+  // `'harness'` (the template / AGENTS.md / tool schemas / provider moved). This side
+  // only shows the two identities and, for harness drift, the one entry point that
+  // drift needs; it never computes drift itself.
+  let SETUP = null;
+  // The two-line identity block, created lazily: it exists only while the user has
+  // drifted, so an untouched session carries no extra DOM.
+  let composerIdent = null;   // { box, sending, live }
+  // The harness-drift entry point, created lazily next to the snippets button.
+  let newSetupBtn = null;
+
+  /**
+   * One identity as a single line: the card, then its effort and reply language.
+   * The three values are the host's data (a card label is the user's own name for a
+   * card), so only the shape around them is translated.
+   */
+  function setupIdentityText(ident) {
+    if (!ident || typeof ident !== 'object') return '';
+    const label = ident.cardLabel || ident.cardId || '';
+    const effort = ident.effort || '';
+    const language = ident.language || '';
+    if (label && effort && language) return tr('{0} · {1} · {2}', label, effort, language);
+    if (label && (effort || language)) return tr('{0} · {1}', label, effort || language);
+    return label;
+  }
+
+  /** The identity block, built on first use and left in the composer afterwards. */
+  function ensureComposerIdent() {
+    if (composerIdent) return composerIdent;
+    const box = el('div', 'composer-ident hidden');
+    box.id = 'composer-ident';
+    const sending = el('div', 'composer-ident-line composer-ident-sending', '');
+    const live = el('div', 'composer-ident-line composer-ident-live', '');
+    box.appendChild(sending);
+    box.appendChild(live);
+    // Above the input row — banner, attachments, identities, row — and inside the
+    // pane, so it pans/zooms with the node the pane is docked on.
+    const row = document.getElementById('composer-row');
+    if (composerEl) {
+      if (row && row.parentElement === composerEl) composerEl.insertBefore(box, row);
+      else composerEl.appendChild(box);
+    }
+    composerIdent = { box, sending, live };
+    return composerIdent;
+  }
+
+  /**
+   * The harness-drift hint: one extra icon button beside the snippets button. Its
+   * click is the user's own "continue with the latest setup" — the host forks the
+   * current tree, freezes the live setup on the new root and sends the composer's
+   * content there (`forkTurn`), so the old tree (and its prompt cache) is untouched.
+   * Built lazily: a session with no harness drift never grows the button.
+   */
+  function ensureNewSetupButton() {
+    if (newSetupBtn) return newSetupBtn;
+    const btn = el('button', 'icon-btn new-setup-btn');
+    btn.id = 'new-setup-btn';
+    btn.type = 'button';
+    // The same `⧉` glyph the card's rollover entry uses, and just as deliberately
+    // untranslated as `CTX` / `×`: a symbol, not a word. The tooltip carries the
+    // explanation and *is* translated.
+    btn.textContent = '⧉';
+    const title = tr('Continue with the latest setup (forks this tree and sends there)');
+    btn.title = title;
+    btn.setAttribute('aria-label', title);
+    btn.addEventListener('click', forkTurn);
+    const controls = document.getElementById('composer-controls');
+    if (controls) {
+      if (snippetsBtn && snippetsBtn.parentElement === controls) controls.insertBefore(btn, snippetsBtn);
+      else controls.insertBefore(btn, controls.firstChild);
+    }
+    newSetupBtn = btn;
+    return btn;
+  }
+
+  /**
+   * Show what the composer is about to send *with*: both identities while the user's
+   * dropdowns have drifted from the checked-out node's frozen setup, and the fork
+   * entry point while the *harness* moved instead (§4.2).
+   *
+   * Send is deliberately never disabled here: a default send keeps the node's setup,
+   * and asking first is the host's modal — the `drift` class only says "this click
+   * will ask".
+   */
+  function renderSetupIdentity() {
+    const setup = SETUP || {};
+    const drift = setup.drift;
+    const userDrift = drift === 'user' && !!setup.node && !!setup.live;
+    if (userDrift) {
+      const ident = ensureComposerIdent();
+      ident.sending.textContent = tr('Sending with: {0}', setupIdentityText(setup.node));
+      ident.live.textContent = tr('New setup: {0}', setupIdentityText(setup.live));
+      ident.box.classList.remove('hidden');
+    } else if (composerIdent) {
+      composerIdent.box.classList.add('hidden');
+    }
+    if (sendBtn) {
+      sendBtn.classList.toggle('drift', userDrift);
+      sendBtn.title = userDrift
+        ? tr('Send will ask before using the old setup (the one this node froze)')
+        : '';
+    }
+    if (drift === 'harness') {
+      ensureNewSetupButton().classList.remove('hidden');
+    } else if (newSetupBtn) {
+      newSetupBtn.classList.add('hidden');
+    }
+  }
+
+  /**
+   * Fork the current tree under the live setup and send the composer's content there
+   * (`#new-setup-btn`, §4.2). The message carries the very same text and attachments
+   * a Send would, and the input is *not* cleared: only the host knows whether it took
+   * the turn, and it says so with `composerClear`.
+   */
+  function forkTurn() {
+    vscode.postMessage({
+      type: 'forkTurn',
+      text: inputEl.value.trim(),
+      attachments: pendingAttachments,
+    });
+  }
+
   // ---- Messaging ----
   function send() {
     const text = inputEl.value.trim();
@@ -4260,13 +4511,13 @@
     // exactly the "start a new concurrent run here" case (spec §1). A node that still
     // owns unfinished work shows Stop instead, so there is no Send to press — the host
     // refuses it too in case a message arrives anyway (`lockedNodes`).
-    if ((!text && pendingAttachments.length === 0) || focusIsRunning() || focusIsLocked()) return;
+    if (readOnly || (!text && pendingAttachments.length === 0) || focusIsRunning() || focusIsLocked()) return;
     setFollow(true);
     vscode.postMessage({ type: 'userMessage', text, attachments: pendingAttachments });
-    pendingAttachments = [];
-    renderPendingAttachments();
-    inputEl.value = '';
-    autoGrow();
+    // The composer is *not* cleared here (§4.4): Send may open the "which setup?"
+    // modal, and a modal answered with No must not have eaten the user's text. The
+    // host clears the box — attachments and all — with `composerClear` once it really
+    // took the message.
   }
 
   // The input never scales with anything, so its height cap is a constant.
@@ -4499,6 +4750,11 @@
           for (const id in nodeEls) autoWorkFold(nodeEls[id]);
         }
         updateImageVisibility();
+        // The two identities of the checked-out node (`setup`, §4.2). Absent on a
+        // replay shape that predates it — then there is no drift to show, which is
+        // exactly the old behaviour.
+        SETUP = msg.setup && typeof msg.setup === 'object' ? msg.setup : null;
+        renderSetupIdentity();
         break;
       }
       case 'state':
@@ -4512,6 +4768,11 @@
         // A host that predates the lock sends no `lockedNodes`: nothing is locked,
         // which reproduces the old behaviour exactly.
         lockedNodes = Array.isArray(msg.lockedNodes) ? new Set(msg.lockedNodes) : new Set();
+        // A window that does not own this workspace's sessions is read-only: the host
+        // refuses every turn there, so the composer says so up front instead of letting a
+        // send fail. A host that predates the flag sends nothing: not read-only.
+        readOnly = msg.readOnly === true;
+        updateComposerButtons();
         setBusy(msg.busy);
         setStatus(msg.status);
         rememberSession(msg.sessionId);
@@ -4543,6 +4804,15 @@
         break;
       case 'user':
         addUserPrompt(msg.text, msg.attachments);
+        break;
+      case 'composerClear':
+        // The host really took the message: only now does the box (and the pending
+        // attachments) go. This is the *only* place the composer empties itself —
+        // `send()` never does, so a modal answered with No cannot eat the text.
+        inputEl.value = '';
+        pendingAttachments = [];
+        renderPendingAttachments();
+        autoGrow();
         break;
       case 'harnessNote':
         // An in-place continue (`SessionRuntime.continueFrom`): the block belongs in
@@ -4620,12 +4890,17 @@
         for (const id in nodeEls) delete nodeEls[id];
         pathNodes = Object.create(null);
         treeNodes = Object.create(null);
+        treeRootIds = [];
         treeRootId = null;
         treeActiveId = null;
         activePathSet = new Set();
         runningNodes = new Set();
         lockedNodes = new Set();
         messagesEl = null;
+        // A new session has no checked-out node, so it has no frozen setup to drift
+        // from either: the identities (and the fork hint) go with the tree.
+        SETUP = null;
+        renderSetupIdentity();
         renderTree({ nodes: [], rootId: null, activeId: null });
         break;
       default:

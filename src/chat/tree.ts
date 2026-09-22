@@ -7,17 +7,22 @@
  * the turn nodes from the checked-out node's **context base** down to it — normally
  * the path from the root, but a node that starts a new context window
  * (`contextBaseId`) cuts every ancestor above it out of the request — see
- * `pathMessages` and `docs/agents/invariants/context-rollover.md`. The system
- * prompt is never stored in a node; it is synthesized on activation
- * (`Agent.systemPrompt`).
+ * `pathMessages` and `docs/agents/plans/session-epoch.md`.
+ *
+ * The system prompt **is** stored now, once per epoch: the node that starts an epoch
+ * carries the rendered bytes (`TreeNode.epoch.prompt`), and every descendant reuses
+ * them verbatim, so the provider's prefix cache survives a reload and a restart. The
+ * old rule - re-synthesize it per request - is what made every activation and every
+ * settings change silently rewrite a prefix that had already been sent.
  *
  * Invariants (also documented in AGENTS.md):
  *  - a non-empty `node.messages` starts with a `user` message;
  *  - a node's `messages` are written once, when its turn ends;
  *  - the assembled path must go through `Agent.sanitizeMessages` before use, and
- *    the sanitized copy must never be written back into the nodes.
+ *    the sanitized copy must never be written back into the nodes;
+ *  - an epoch, once frozen, is never re-rendered.
  */
-import { ChatMessage, ThinkingEffort, Usage } from '../agent/types';
+import { ChatMessage, ThinkingEffort, ToolDefinition, Usage } from '../agent/types';
 
 export type TurnStatus = 'pending' | 'running' | 'done' | 'interrupted' | 'error';
 
@@ -25,6 +30,92 @@ export type TurnStatus = 'pending' | 'running' | 'done' | 'interrupted' | 'error
 export interface UserAttachment {
   dataUrl: string;
   name?: string;
+}
+
+/**
+ * The frozen request envelope of one conversation chain: what a send actually uses.
+ *
+ * It exists so that the bytes sent to the API never change behind the model's back —
+ * the provider's prefix cache only hits while the prefix is byte-identical, and every
+ * in-place rewrite (a re-rendered system prompt, a re-derived tool list, a rewritten
+ * image block) destroys the cached prefix irreversibly.
+ *
+ * Stored on the node that starts the epoch and inherited downward by
+ * {@link epochForNode}; a node that starts a new context (`contextBaseId`) is always
+ * also the node that starts an epoch. The value is validated at read time (a
+ * non-string prompt makes the envelope unusable, and the caller falls back to a live
+ * render), so a stale or foreign value needs no repair pass.
+ */
+export interface Epoch {
+  id: string;
+  /** The rendered system prompt, byte for byte. Never rendered again. */
+  prompt: string;
+  /**
+   * The tool schemas this epoch advertises, in order: a wire model must keep the
+   * tools its instructions were written against. Absent on a legacy epoch (one
+   * adopted at load), whose tools come from the live capability set instead.
+   */
+  tools?: ToolDefinition[];
+  /** The model **card id** the chain runs on (never a wire model name). */
+  cardId: string;
+  effort: ThinkingEffort;
+  /** The reply-language **name** the prompt was rendered with. */
+  replyLanguage: string;
+  /**
+   * Endpoint facts at freeze time. They are what the drift check compares against and
+   * what a diagnostic line reports; the request itself still resolves its provider,
+   * key and base URL through {@link cardId}, so editing a card's endpoint shows up as
+   * drift instead of silently redirecting a frozen chain.
+   */
+  providerId: string;
+  baseUrl: string;
+  wireModel: string;
+  vision: boolean;
+  visionTransport: 'deepseek' | 'openai';
+  /** Content hashes — never version numbers: a build that changes no content is not a change. */
+  agentsMdHash: string;
+  templateHash: string;
+  toolsetHash: string;
+  frozenAt: number;
+  /**
+   * True when this envelope was adopted retroactively when the epoch model landed: an
+   * existing chain had no stored prompt (the old code re-rendered it per request), so
+   * its exact old bytes are gone. Recorded so the freeze is explainable, not so that it
+   * is retried.
+   */
+  legacy?: boolean;
+}
+
+/**
+ * Where an image content block's bytes came from — the record that makes
+ * re-materialisation possible.
+ *
+ * A content part travels to the API, so no provenance field may hide inside it.
+ * Provenance therefore lives beside the messages (`TreeNode.imageSources`), addressed
+ * by position, and it is what lets a new epoch translate a `file_id` into an inline
+ * `data:` URL (or the other way round) instead of dropping the image.
+ */
+export type ImageSource =
+  | {
+      kind: 'upload';
+      /** The provider account that issued {@link fileId}. */
+      providerId: string;
+      fileId: string;
+      /** Where the bytes were read from, when a local file was the origin. */
+      srcPath?: string;
+    }
+  | { kind: 'inline'; dataUrl: string };
+
+/**
+ * One image block's provenance inside a node's `messages`: which message, which
+ * content part, and where the bytes can be found again.
+ */
+export interface ImageSourceEntry {
+  /** Index into the owning node's `messages`. */
+  messageIndex: number;
+  /** Index into that message's `content` parts. */
+  partIndex: number;
+  source: ImageSource;
 }
 
 /** One entry of the UI transcript, persisted so a session restores its view. */
@@ -66,6 +157,18 @@ export interface TreeNode {
    * foreign or unreachable value simply has no effect and needs no migration.
    */
   contextBaseId?: string;
+  /**
+   * This node **starts an epoch**: it carries the frozen request envelope every
+   * descendant sends with (`epochForNode` walks up to the nearest one). Only set on
+   * the node that starts a chain (a session's first turn, a rollover, a fork), and
+   * always together with `contextBaseId === id`.
+   */
+  epoch?: Epoch;
+  /**
+   * Image provenance for this node's own `messages`, addressed by position. Persisted
+   * beside the messages, never inside a content part (see {@link ImageSource}).
+   */
+  imageSources?: ImageSourceEntry[];
   /** API messages this turn contributed. Non-empty ⇒ starts with a user message. */
   messages: ChatMessage[];
   /** UI transcript for this turn. */
@@ -170,12 +273,23 @@ export interface AgentSession {
   createdAt: number;
   updatedAt: number;
   nodes: Record<string, TreeNode>;
-  /** First node (the initial commit); null for an empty session. */
-  rootId: string | null;
+  /**
+   * The session is a **forest**: every tree root, in creation order. A fork appends a
+   * second root instead of rewriting the first, so the tree a user leaves behind keeps
+   * the bytes (and therefore the provider cache entry) it was built with. Empty for an
+   * empty session.
+   */
+  rootIds: string[];
   /** Currently checked-out node = the parent of the next prompt. */
   activeNodeId: string | null;
   /** Transcript entries that belong to no turn (e.g. a notice on an empty session). */
   orphanItems: DisplayItem[];
+  /**
+   * Set when this session's chains were adopted **retroactively** by `SessionRuntime`
+   * (`legacy` epochs): the setup they were built with is gone, so the freeze is a
+   * one-time approximation, not a reproduction (`docs/agents/plans/session-epoch.md` §7).
+   */
+  legacyEpoch?: boolean;
   /**
    * The session's own model / thinking-effort **seed**: the values a session whose
    * nodes have no card of their own starts from. The live model of a conversation
@@ -333,8 +447,8 @@ export function createNode(
 }
 
 /**
- * Link a node into the tree and check it out. Sets `rootId` when this is the
- * first node and appends it to the parent's `children`.
+ * Link a node into the tree and check it out. Registers a new forest root when this
+ * node has no parent and appends it to the parent's `children` otherwise.
  */
 export function attachNode(session: AgentSession, node: TreeNode): void {
   session.nodes[node.id] = node;
@@ -356,16 +470,17 @@ export function attachNode(session: AgentSession, node: TreeNode): void {
     }
   } else {
     // The parent is gone (corrupted or legacy state). Keep the node reachable by
-    // attaching it to the root instead of leaving it orphaned: an unreachable
+    // attaching it under the first root instead of leaving it orphaned: an unreachable
     // node would still become the checkout point and silently blank the history.
     node.parentId = null;
-    if (!session.rootId) {
-      session.rootId = node.id;
-    } else {
-      const root = session.nodes[session.rootId];
-      if (root && root.id !== node.id && !root.children.includes(node.id)) {
-        root.children.push(node.id);
+    const rootId = session.rootIds[0];
+    const root = rootId ? session.nodes[rootId] : undefined;
+    if (!root) {
+      if (!session.rootIds.includes(node.id)) {
+        session.rootIds.unshift(node.id);
       }
+    } else if (root.id !== node.id && !root.children.includes(node.id)) {
+      root.children.push(node.id);
     }
   }
   session.activeNodeId = node.id;
@@ -414,6 +529,44 @@ export function contextBase(session: AgentSession, nodeId: string | null): strin
   for (let i = ids.length - 1; i >= 0; i--) {
     const n = session.nodes[ids[i]];
     if (n && n.contextBaseId === n.id) return n.id;
+  }
+  return undefined;
+}
+
+/**
+ * The frozen envelope a node sends with: the nearest ancestor-or-self that starts an
+ * epoch. `undefined` when no node on the path carries one — a chain that predates the
+ * epoch model, or a node built outside it — and the caller then falls back to the live
+ * rendering, exactly as the harness did before epochs existed.
+ *
+ * Validation is by shape, taken fresh from the data: an envelope whose `prompt` is not
+ * a string is ignored, so a truncated or foreign value can never make a request fail.
+ * The nearest one wins, which is what makes a fork's new root override everything
+ * above it.
+ */
+export function epochForNode(session: AgentSession, nodeId: string | null): Epoch | undefined {
+  const ids = pathIds(session, nodeId);
+  for (let i = ids.length - 1; i >= 0; i--) {
+    const n = session.nodes[ids[i]];
+    if (n && n.epoch && typeof n.epoch.prompt === 'string') {
+      return n.epoch;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * The node that owns the envelope {@link epochForNode} returns — the node a fork
+ * copies from, a diagnostic names, and the webview badges. `undefined` for a chain with
+ * no epoch.
+ */
+export function epochNodeId(session: AgentSession, nodeId: string | null): string | undefined {
+  const ids = pathIds(session, nodeId);
+  for (let i = ids.length - 1; i >= 0; i--) {
+    const n = session.nodes[ids[i]];
+    if (n && n.epoch && typeof n.epoch.prompt === 'string') {
+      return n.id;
+    }
   }
   return undefined;
 }
@@ -527,9 +680,9 @@ export function detachBranch(session: AgentSession, nodeId: string): string[] {
   if (parent) {
     parent.children = parent.children.filter((childId) => !removed.has(childId));
   }
-  if (session.rootId && removed.has(session.rootId)) {
-    // The deleted branch was the whole tree (the root has no parent).
-    session.rootId = null;
+  if (session.rootIds.some((id) => removed.has(id))) {
+    // A deleted subtree swallowed one or more forest roots.
+    session.rootIds = session.rootIds.filter((id) => !removed.has(id));
   }
   if (session.activeNodeId && removed.has(session.activeNodeId)) {
     // Standing on a node we just removed: the next prompt branches from the
@@ -601,15 +754,44 @@ export function pruneSession(session: AgentSession): void {
   for (const node of Object.values(session.nodes)) {
     node.children = node.children.filter((childId) => !!session.nodes[childId]);
   }
-  if (!session.rootId || !session.nodes[session.rootId]) {
-    const roots = Object.values(session.nodes)
-      .filter((n) => !n.parentId || !session.nodes[n.parentId])
-      .sort((a, b) => a.createdAt - b.createdAt);
-    session.rootId = roots[0]?.id ?? null;
+  if (!session.rootIds || !Array.isArray(session.rootIds)) {
+    session.rootIds = [];
+  }
+  session.rootIds = session.rootIds.filter((id) => !!session.nodes[id]);
+  // Re-pick the forest when the stored list no longer describes it — the roots are
+  // simply the nodes nobody claims as a child, oldest first.
+  if (session.rootIds.length === 0) {
+    session.rootIds = computeRootIds(session);
   }
   if (!session.activeNodeId || !session.nodes[session.activeNodeId]) {
-    session.activeNodeId = leafOf(session, session.rootId);
+    session.activeNodeId = leafOf(session, session.rootIds[0] ?? null);
   }
+}
+
+/**
+ * The forest's roots, in creation order: every node nobody claims as a child — or
+ * whose parent is gone. The stored list is a cache of this; recomputing is how it heals.
+ */
+export function computeRootIds(session: AgentSession): string[] {
+  return Object.values(session.nodes)
+    .filter((n) => !n.parentId || !session.nodes[n.parentId])
+    .sort((a, b) => a.createdAt - b.createdAt)
+    .map((n) => n.id);
+}
+
+/**
+ * Heal **one** stored session back to the tree model: an entry of a Memento row, and —
+ * through `SessionStore`'s `normalize` hook — the shape a session file holds. A tree
+ * session is normalized field by field (which is where a pre-forest `rootId` becomes
+ * `rootIds`), a pre-tree flat one is split at its user messages. `null` for anything that
+ * is not an object, so a caller can keep whatever fallback it has.
+ */
+export function normalizeSession(raw: unknown): AgentSession | null {
+  if (!raw || typeof raw !== 'object') {
+    return null;
+  }
+  const entry = raw as AgentSession & LegacySession;
+  return entry.nodes ? normalizeTreeSession(entry) : fromLegacySession(entry);
 }
 
 /**
@@ -632,18 +814,87 @@ export function migrateState(raw: unknown): {
     if (!entry || typeof entry !== 'object') {
       continue;
     }
-    if ((entry as AgentSession).nodes) {
-      sessions.push(normalizeTreeSession(entry as AgentSession));
-    } else {
+    if (!(entry as AgentSession).nodes) {
       migrated = true;
-      sessions.push(fromLegacySession(entry as LegacySession));
+    }
+    const session = normalizeSession(entry);
+    if (session) {
+      sessions.push(session);
     }
   }
   const activeSessionId = typeof state.activeSessionId === 'string' ? state.activeSessionId : '';
   return { activeSessionId, sessions, migrated };
 }
 
-function normalizeTreeSession(raw: AgentSession): AgentSession {
+/**
+ * Read a stored epoch back. An envelope whose `prompt` is not a string is dropped
+ * entirely instead of being repaired: a half-read prompt is worse than none, because
+ * the caller's fallback (a live render) is at least coherent.
+ */
+function normalizeEpoch(raw: unknown): Epoch | undefined {
+  if (!raw || typeof raw !== 'object') {
+    return undefined;
+  }
+  const e = raw as Partial<Epoch>;
+  if (typeof e.prompt !== 'string') {
+    return undefined;
+  }
+  return {
+    id: typeof e.id === 'string' && e.id ? e.id : newId(),
+    prompt: e.prompt,
+    tools: Array.isArray(e.tools) ? (e.tools as ToolDefinition[]) : undefined,
+    cardId: typeof e.cardId === 'string' ? e.cardId : '',
+    effort: asThinkingEffort(e.effort) ?? 'none',
+    replyLanguage: typeof e.replyLanguage === 'string' ? e.replyLanguage : '',
+    providerId: typeof e.providerId === 'string' ? e.providerId : '',
+    baseUrl: typeof e.baseUrl === 'string' ? e.baseUrl : '',
+    wireModel: typeof e.wireModel === 'string' ? e.wireModel : '',
+    vision: e.vision === true,
+    visionTransport: e.visionTransport === 'deepseek' ? 'deepseek' : 'openai',
+    agentsMdHash: typeof e.agentsMdHash === 'string' ? e.agentsMdHash : '',
+    templateHash: typeof e.templateHash === 'string' ? e.templateHash : '',
+    toolsetHash: typeof e.toolsetHash === 'string' ? e.toolsetHash : '',
+    frozenAt: typeof e.frozenAt === 'number' ? e.frozenAt : Date.now(),
+    legacy: e.legacy === true ? true : undefined,
+  };
+}
+
+/** Read a node's image provenance back, dropping anything malformed or unaddressed. */
+function normalizeImageSources(raw: unknown): ImageSourceEntry[] | undefined {
+  if (!Array.isArray(raw)) {
+    return undefined;
+  }
+  const out: ImageSourceEntry[] = [];
+  for (const entry of raw) {
+    if (!entry || typeof entry !== 'object') {
+      continue;
+    }
+    const e = entry as Partial<ImageSourceEntry>;
+    const messageIndex = typeof e.messageIndex === 'number' ? e.messageIndex : -1;
+    const partIndex = typeof e.partIndex === 'number' ? e.partIndex : -1;
+    const s = e.source as ImageSource | undefined;
+    if (messageIndex < 0 || partIndex < 0 || !s || typeof s !== 'object') {
+      continue;
+    }
+    if (s.kind === 'upload' && typeof s.fileId === 'string' && s.fileId) {
+      out.push({
+        messageIndex,
+        partIndex,
+        source: {
+          kind: 'upload',
+          providerId: typeof s.providerId === 'string' ? s.providerId : '',
+          fileId: s.fileId,
+          srcPath: typeof s.srcPath === 'string' ? s.srcPath : undefined,
+        },
+      });
+    } else if (s.kind === 'inline' && typeof s.dataUrl === 'string' && s.dataUrl) {
+      out.push({ messageIndex, partIndex, source: { kind: 'inline', dataUrl: s.dataUrl } });
+    }
+  }
+  return out.length > 0 ? out : undefined;
+}
+
+function normalizeTreeSession(raw: AgentSession & { rootId?: string | null }): AgentSession {
   const session: AgentSession = {
     id: raw.id || newId(),
     title: raw.title || 'New session',
@@ -657,9 +908,14 @@ function normalizeTreeSession(raw: AgentSession): AgentSession {
     createdAt: raw.createdAt || Date.now(),
     updatedAt: raw.updatedAt || Date.now(),
     nodes: {},
-    rootId: raw.rootId ?? null,
+    rootIds: Array.isArray(raw.rootIds)
+      ? raw.rootIds.filter((id) => typeof id === 'string')
+      : raw.rootId
+        ? [raw.rootId]
+        : [],
     activeNodeId: raw.activeNodeId ?? null,
     orphanItems: Array.isArray(raw.orphanItems) ? raw.orphanItems : [],
+    legacyEpoch: raw.legacyEpoch === true ? true : undefined,
   };
   // The session's model/effort **seed** (the last link of the per-node card
   // resolution): absent in every state stored before the seed existed, so an old
@@ -696,6 +952,11 @@ function normalizeTreeSession(raw: AgentSession): AgentSession {
       // loads unchanged (no version bump). A value that is not this node's own id
       // is ignored at read time by `contextBase()`, so it needs no repair here.
       contextBaseId: typeof node.contextBaseId === 'string' ? node.contextBaseId : undefined,
+      // The frozen request envelope: kept verbatim, and validated at read time by
+      // `epochForNode` (an envelope whose prompt is not a string is ignored). Nothing
+      // here re-renders it — that is the whole point of the field.
+      epoch: normalizeEpoch(node.epoch),
+      imageSources: normalizeImageSources(node.imageSources),
       // The card/level this turn ran with: healed exactly like the other optional
       // strings on a node, so a state stored before them loads unchanged (no version
       // bump). A card id that no longer names a card resolves to the default at use
@@ -736,7 +997,7 @@ function fromLegacySession(raw: LegacySession): AgentSession {
     createdAt: raw.createdAt || Date.now(),
     updatedAt: raw.updatedAt || Date.now(),
     nodes: {},
-    rootId: null,
+    rootIds: [],
     activeNodeId: null,
     orphanItems: [],
   };
@@ -765,7 +1026,7 @@ function fromLegacySession(raw: LegacySession): AgentSession {
     if (prev) {
       prev.children.push(node.id);
     } else {
-      session.rootId = node.id;
+      session.rootIds = [node.id];
     }
     prev = node;
     ordered.push(node);

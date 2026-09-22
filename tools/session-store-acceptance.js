@@ -18,6 +18,10 @@
  *      folder to `.trash` and it beats a write still in the queue.
  *   5. **A rename is a non-event**, and the **v1 layout** (one file per session) is converted
  *      without losing anything.
+ *   6. **A stored shape is healed on the way out of the reader** (`normalize`): the load, the
+ *      sidebar's rebuild, the v1→v2 migration and an adoption all repair an old session, so a
+ *      call site that forgets the heal cannot exist. (The `rootId` → `rootIds` rename healed on
+ *      the Memento path only, and every conversation stored before it opened as an empty one.)
  *
  *   npx tsc -p ./ && node tools/session-store-acceptance.js [<outDir>]
  *
@@ -227,6 +231,59 @@ const body = (id, marker, over) => ({
   check('  … and the content survived', legacy.readSessionSync('old1')?.session?.notes === 'legacy');
   check('  … and a second run is a no-op', (await legacy.migrateLegacyLayout()) === 0);
 
+  console.log('\n== the reader heals, so no call site can forget (the `rootId` → `rootIds` lesson) ==');
+  // The store holds no session model: the caller injects the heal, and it runs on **every**
+  // path out of the reader — a plain read, a whole-profile sweep, the list/rebuild, the v1→v2
+  // migration and an adoption. Repairing old sessions is therefore *not* a script over the
+  // files: a root heals itself the moment it is read, and the migration writes healed bytes.
+  const heal = (session, id) => ({
+    ...session,
+    rootIds: Array.isArray(session.rootIds) ? session.rootIds : session.rootId ? [session.rootId] : [],
+    healedFor: id,
+  });
+  const plainRoot = path.join(SANDBOX, 'root-plain');
+  const plain = new SessionStore({ root: plainRoot, workspaceKey: key });
+  await plain.ensureRoot();
+  plain.writeSession('legacy1', body('legacy1', 'stored before the forest'), summary('legacy1'), null);
+  await plain.flush();
+  const asStored = new SessionStore({ root: plainRoot, workspaceKey: key }).readSessionSync('legacy1');
+  check('without the hook a session comes out exactly as stored', !Array.isArray(asStored.session.rootIds));
+  const healing = new SessionStore({ root: plainRoot, workspaceKey: key, normalize: heal });
+  const healed = healing.readSessionSync('legacy1').session;
+  check('with the hook the same bytes come out healed', Array.isArray(healed.rootIds) && healed.rootIds[0] === 'legacy1-n1', JSON.stringify(healed.rootIds));
+  check('  … and the hook is told which session it is healing', healed.healedFor === 'legacy1');
+  check('  … and the nodes came with it', Object.keys(healed.nodes).length === 1);
+  check('a whole-profile read heals every session too', healing.readAllSync().sessions.every((s) => Array.isArray(s.rootIds)));
+  check('a rebuild of the index reads through the same heal', (await healing.rebuildIndex()).sessions.length === 1);
+  check('the write path is untouched: the file still holds what was stored', !Array.isArray(JSON.parse(fs.readFileSync(plain.headerFile('legacy1'), 'utf8')).session.rootIds));
+  check('a heal that throws costs nothing: the session loads as stored', (() => {
+    const broken = new SessionStore({ root: plainRoot, workspaceKey: key, normalize: () => { throw new Error('boom'); } });
+    return broken.readSessionSync('legacy1')?.session?.notes === 'stored before the forest';
+  })());
+  check('a heal that returns nothing keeps the stored session', (() => {
+    const silent = new SessionStore({ root: plainRoot, workspaceKey: key, normalize: () => undefined });
+    return silent.readSessionSync('legacy1')?.session?.notes === 'stored before the forest';
+  })());
+
+  console.log('\n== the v1→v2 migration writes the healed bytes: an old root repairs itself ==');
+  const autoRoot = path.join(SANDBOX, 'root-automigrate');
+  const auto = new SessionStore({ root: autoRoot, workspaceKey: key, normalize: heal });
+  await auto.ensureRoot();
+  fs.writeFileSync(
+    auto.sessionFile('old2'),
+    `${JSON.stringify({ version: 1, kind: 'session', sessionId: 'old2', updatedAt: 222, summary: summary('old2'), session: body('old2', 'from v1') })}\n`,
+  );
+  check('the migration converts the v1 file', (await auto.migrateLegacyLayout()) === 1);
+  check('  … and the v2 header it wrote carries the healed shape', Array.isArray(JSON.parse(fs.readFileSync(auto.headerFile('old2'), 'utf8')).session.rootIds));
+  check('  … and the content is intact', auto.readSessionSync('old2')?.session?.notes === 'from v1');
+  check('an adoption heals through the adopter’s own hook', await (async () => {
+    const target = new SessionStore({ root: path.join(SANDBOX, 'root-adopt-heal'), workspaceKey: key, normalize: heal });
+    await target.ensureRoot();
+    const result = await target.adoptFrom(plainRoot);
+    const back = target.readSessionSync('legacy1');
+    return result.adopted === 1 && Array.isArray(back.session.rootIds) && back.session.healedFor === 'legacy1';
+  })());
+
   console.log('\n== one lock per workspace: live refused, stale taken over ==');
   let clock = 1_000_000;
   const timed = (keyName) => new SessionStore({ root: rootA, workspaceKey: keyName, now: () => clock });
@@ -287,7 +344,8 @@ const body = (id, marker, over) => ({
     'PASS session-store-acceptance: v2 folders with one atomic file per node (only what changed is written), ' +
       'a digest that answers "changed" without missing a field, a rebuildable index, trash instead of unlink, ' +
       'a deletion that beats a queued write, one live lock per workspace, adoption from another root, ' +
-      'the v1 layout converted without loss, and no cross-talk between workspaces',
+      'the v1 layout converted without loss, a stored session healed at the read boundary (a throwing heal ' +
+      'costs nothing), and no cross-talk between workspaces',
   );
 })().catch((err) => {
   console.error(`session-store-acceptance: ${err && err.stack ? err.stack : String(err)}`);

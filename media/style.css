@@ -214,6 +214,50 @@ body {
   width: auto;
 }
 
+/* The harness-drift hint (`#new-setup-btn`): `main.js` creates it lazily, right
+   beside the snippets button, and only while the prompt template / AGENTS.md / tool
+   schemas / provider moved away from the checked-out node's frozen setup. Same icon
+   island as its neighbours, so the row does not shift when it appears. */
+#composer-controls #new-setup-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  font-size: 12px;
+  padding: 0;
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+/* The composer's two identities (§4.2): `Sending with:` (the checked-out node's
+   frozen setup — what a send actually uses) above `New setup:` (what a new node
+   would freeze). Quiet and small: it states a fact, it does not warn — the `drift`
+   mark on the Send button is what says the next click will ask. Both lines ellipsize
+   rather than wrap, so the pane's height never changes with a long model name. */
+.composer-ident {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-family: "Consolas", "Courier New", monospace;
+  font-size: 10px;
+  line-height: 1.35;
+  color: var(--text-dim);
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.composer-ident .composer-ident-line {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The proposal half (what a new node would freeze) is the one the user just changed. */
+.composer-ident .composer-ident-live {
+  color: var(--accent);
+}
+
 #meter-row-readout {
   display: flex;
   align-items: center;
@@ -311,6 +355,23 @@ button.icon-btn {
 
 #send-btn:hover {
   background: var(--accent);
+}
+
+/* The user changed the model / effort / language dropdown, so the next send would
+   use a different setup than the one the checked-out node froze: the host asks
+   first. The button is deliberately NOT disabled — clicking it *is* how the
+   question gets asked — so the mark is a shape (dashed, warning-coloured), not a
+   grey-out. `main.js`'s `renderSetupIdentity` sets the class and the tooltip. */
+#send-btn.drift {
+  background: transparent;
+  border: 1px dashed var(--warn);
+  color: var(--warn);
+}
+
+#send-btn.drift:hover {
+  background: var(--warn);
+  border-color: var(--warn);
+  color: var(--bg);
 }
 
 #stop-btn {
@@ -1512,6 +1573,22 @@ button.icon-btn {
 .node-rollover:hover {
   background: var(--warn);
   border-color: var(--warn);
+  color: var(--bg);
+}
+
+/* The same `⧉` entry, offered as a *suggestion* (§4.3): from 90% of the card's
+   window the user may open a fresh one, but nothing is broken and nothing is
+   forced — so it is dashed and quiet instead of the warning shape the hard
+   trigger (a provider refusal) uses. */
+.node-continue.node-near {
+  color: var(--text);
+  border-color: var(--accent-dim);
+  border-style: dashed;
+}
+
+.node-continue.node-near:hover {
+  background: var(--accent-dim);
+  border-color: var(--accent-dim);
   color: var(--bg);
 }
 

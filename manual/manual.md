@@ -45,11 +45,11 @@ The tree holds one card per turn. A new turn goes below the turn it answers. The
 | Control | What it does |
 |---|---|
 | Input box | Holds your message. `Enter` sends, `Shift+Enter` adds a line. |
-| **Send** | Sends the message and starts a turn. |
+| **Send** | Sends the message and starts a turn. Spinney marks this button when the setup changed (section 3.4). |
 | **Stop** | Ends the turn at the checked-out node. It kills the background terminals and the sub-agents of that node too. Nothing continues. The tooltip is `Stop this turn` or `Stop this node: kill its background tasks and sub-agents (nothing is sent to the model)`. |
 | Prompt snippets | Opens a menu of pre-written instructions. A click inserts the text into the input box. Nothing is sent. Spinney ships `Plan` and `Implement Parallel`. Add your own rows with `spinney.promptSections` (section 11). |
 | **Attach image** | Opens a file picker. You can also paste an image into the input box. See section 9. |
-| Model dropdown | Picks the model card for the next turn of this node. The list groups the cards by provider. |
+| Model dropdown | Picks the model card for a new node. A send that continues this conversation asks first (section 3.4). The list groups the cards by provider. |
 | Gear button | Opens the model-cards page. The tooltip is `Manage model cards…`. |
 | Thinking-effort dropdown | Picks the thinking level. The list is the list of the active card. |
 
@@ -113,6 +113,32 @@ Each answer and each tool card carries its own token line: `tokens {0} (prompt {
 Tool cards hold the call, the arguments, and the result. Each tool card shows how long the call took, and the number stays after the call ends. A `HARNESS` block holds the exact text that the harness sent to the model. The reasoning blocks, the tool cards, and the `HARNESS` blocks sit in the work log. Click a block header to fold or unfold it. `spinney.foldThinking` and `spinney.foldToolCalls` set the resting state of those blocks (section 11).
 
 Codes that stay in English on purpose: `SUB`, `BG`, `CTX`, `HARNESS`, `Delivered`.
+
+### 3.4 The frozen setup and the trees
+
+A conversation is frozen on the setup it started with. The setup holds the model card, the thinking level, the reply language, and the shipped system prompt. A plain send always uses the frozen setup.
+
+A pick of another model card, thinking level, or reply language makes the live setup differ from the frozen one. The composer then shows both setups, one line each:
+
+- `Sending with: {0}`. The setup that a send uses.
+- `New setup: {0}`. The setup that a new node freezes.
+
+The value holds the card, the thinking level, and the reply language. Example: `Sending with: deepseek-flash · medium · English`.
+
+Spinney asks one question before a setup changes. The question is `Continue with current setup` or `Continue with latest setup`. It appears in three cases:
+
+- A change of the model dropdown, the thinking-effort dropdown, or `spinney.replyLanguage` (section 11). Spinney marks the **Send** button. The tooltip is `Send will ask before using the old setup (the one this node froze)`.
+- A change on the harness side: the shipped system prompt, the workspace `AGENTS.md`, the tool set, or the endpoint. Spinney adds a hint entry beside the prompt snippets. The entry carries the `⧉` glyph, and its tooltip is `Continue with the latest setup (forks this tree and sends there)`. A click on it opens the same question.
+- A continue in a new context window (section 10.3). An empty context makes the latest setup free, so Spinney asks there too.
+
+| Answer | What happens |
+|---|---|
+| `Continue with current setup` | The send uses the frozen setup. Spinney discards your pick. The model dropdown and the thinking-effort dropdown show the frozen values again. |
+| `Continue with latest setup` | Spinney copies this tree into a new tree. The new tree starts with the latest setup. The old tree keeps its own setup, and its prompt cache. |
+
+Press `Escape`, or click the close button, to dismiss the question. A dismissed question sends nothing, and Spinney keeps your text in the input box.
+
+A session can hold several trees. Spinney places the new tree beside the current one. The view shows the trees side by side, moves to the new tree, and each tree stays interactive. Check out a node of the tree that you want to continue, then send.
 
 ## 4. Branches
 
@@ -185,6 +211,7 @@ A session keeps its history in the session data folder of the extension, as plai
 |---|---|
 | Window reload, or a restart of VS Code | The sessions and the open tabs come back. |
 | Close a tab | The session stays. Only the tab goes away. A running turn continues. |
+| A second window opens the same folder | One window owns the sessions of a folder. The other window shows the same sessions, and you can browse and read them there. It refuses every change: send, continue, new session, delete, rename, and clear. The message is `Another window owns this workspace’s sessions, so this window is read-only. Close that window (or use it) to continue here.` |
 | Delete a session | Spinney removes the history, deletes the transcript dumps, and kills the background terminals. It refuses while a turn runs. |
 | Delete the last session | Spinney creates a fresh empty one. |
 | Move to another computer | `Spinney: Export Session Data`, then `Spinney: Import Session Data` on the other one. |
@@ -247,9 +274,9 @@ The model and the effort belong to the node, not to the tab:
 2. A follow-up uses the card and the level of the nearest ancestor.
 3. A new session starts on `spinney.model`, or on the built-in `deepseek-flash` card.
 
-A pick in the dropdown is a pending choice for the next send on the checked-out node. That turn consumes it. A checkout forgets it.
+A pick in a dropdown sets the live setup. A new node freezes the live setup. A send that continues a frozen conversation keeps the frozen setup, and it asks first (section 3.4). A checkout drops the pick, and the dropdowns follow the checked-out node.
 
-A model, effort, or reply-language change rewrites the system prompt. Spinney then shows a warning: the next request can miss the prompt cache and reprocess the whole context.
+A model, effort, or reply-language change never rewrites the setup of a frozen conversation. The new value applies to the next new node.
 
 The two dropdowns are disabled while any turn runs in the session.
 
@@ -368,6 +395,7 @@ A finished card can carry one of three buttons. The button depends on the state 
 |---|---|---|
 | `interrupted` | **▶ Continue** | Sends a harness message and resumes the turn in the same card. The partial output stays. |
 | `error` | **↻ Retry** | Sends a harness message and runs the turn again from that node. The partial output of the failed turn is discarded. |
+| `interrupted` or `error`, context at or above 90% | **⧉ Continue in a new window** | Offers a new context window. The tooltip shows the percentage. See section 10.3. |
 | `error`, context full | **⧉ Continue in a new window** | Starts a new context window. See section 10.3. |
 
 The button carries the work. You do not type the instruction yourself.
@@ -376,8 +404,17 @@ The button carries the work. You do not type the instruction yourself.
 
 A context window is full when the provider answers with a context-length error. Spinney does not guess a limit from the `ctx` readout. The card shows a **⚠️** message, and the button becomes **⧉ Continue in a new window**.
 
+Spinney offers this button before a failure too. A card whose turn ended without an answer offers it from about 90% of the `contextWindow` of the card. The tooltip carries the number, for example `Context 93% full - continue in a new window`. This offer is a suggestion, not a repair. Nothing failed yet.
+
+In both cases, Spinney asks which setup the new node must start with (section 3.4):
+
+- `Continue with current setup`. The new node keeps the setup of the conversation above it.
+- `Continue with latest setup`. The new node freezes the latest setup.
+
+Both answers are free here. A new context window starts empty, so it has no cached prefix to lose.
+
 1. Click **⧉ Continue in a new window**. If the node still owns running work, a modal asks first. It names the work that will stop.
-2. Spinney opens a new card below the failed one. The edge is dashed, the title is `Context window {0}`, and the badge is `CTX`.
+2. Spinney opens a new card below that node. The edge is dashed, the title is `Context window {0}`, and the badge is `CTX`.
 
 The new window starts with the system prompt and one harness message. That message holds your last request and the last answer, in a shortened form. Nothing else goes to the model. Attachments cannot cross, so the message names them instead.
 
@@ -399,7 +436,7 @@ All keys start with `spinney.`. Open the Settings UI, or edit `settings.json`.
 | `spinney.model` | `deepseek-flash` | The card id a new session starts on. It is an id, not a model name. |
 | `spinney.providers` | `{}` | The endpoint rows. Edit them on the model-cards page. |
 | `spinney.modelCards` | `{}` | The model rows. Edit them on the model-cards page. |
-| `spinney.replyLanguage` | `auto` | The language of the answers of the agent. `auto` follows the VS Code display language. A change can cost a prompt-cache miss. |
+| `spinney.replyLanguage` | `auto` | The language of the answers of the agent. `auto` follows the VS Code display language. The new value applies to the next new node; a frozen conversation keeps its own language. |
 | `spinney.foldThinking` | `true` | Fold the reasoning blocks of the work log by default. The live block stays open. |
 | `spinney.foldToolCalls` | `true` | Fold the tool-call cards of the work log by default. The running call stays open. |
 | `spinney.foldWork` | `true` | Fold the work log into its one-line header by default when a turn completes; a header that you clicked stays as you left it. |

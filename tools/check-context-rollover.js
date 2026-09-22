@@ -177,7 +177,7 @@ const raw = {
       title: 'rollover persistence',
       createdAt: 1,
       updatedAt: 2,
-      rootId: 'a',
+      rootIds: ['a'],
       activeNodeId: 'g',
       orphanItems: [],
       nodes: {
@@ -211,6 +211,53 @@ ok('casing and whitespace are tolerated', (() => {
   return !!p && p.window === 1048576 && p.requested === 2097152;
 })());
 
+console.log('-- an epoch is inherited, and the nearest one wins --');
+{
+  const mk = (id, parentId, extra) =>
+    Object.assign(
+      {
+        id,
+        parentId,
+        children: [],
+        messages: [],
+        displayItems: [],
+        status: 'done',
+        title: id,
+        createdAt: 1,
+      },
+      extra || {},
+    );
+  const ep = (id) => ({ id, prompt: 'P-' + id, cardId: 'card-' + id, effort: 'medium' });
+  const session = {
+    id: 's',
+    title: 's',
+    nodes: {},
+    rootIds: [],
+    activeNodeId: null,
+    orphanItems: [],
+  };
+  const a = mk('a', null, { epoch: ep('1'), contextBaseId: 'a' });
+  T.attachNode(session, a);
+  const b = mk('b', 'a');
+  T.attachNode(session, b);
+  const c = mk('c', 'b', { epoch: ep('2'), contextBaseId: 'c' });
+  T.attachNode(session, c);
+  const d = mk('d', 'c');
+  T.attachNode(session, d);
+
+  ok('a node that carries an epoch sends with it', T.epochForNode(session, 'a').id === '1');
+  ok('a descendant inherits the nearest one up the chain', T.epochForNode(session, 'b').id === '1');
+  ok('  … and the nearest one wins for everything below it', T.epochForNode(session, 'd').id === '2');
+  ok('an unknown node has no epoch', T.epochForNode(session, 'nope') === undefined);
+  // A malformed envelope is ignored rather than repaired: a half-read prompt is worse than
+  // the caller's live-render fallback.
+  session.nodes['b'].epoch = { id: 'x', prompt: 42 };
+  ok('a malformed envelope is ignored, not repaired', T.epochForNode(session, 'b').id === '1');
+  session.nodes['b'].epoch = undefined;
+  ok('the display path is not cut by an epoch either', T.pathIds(session, 'd').join(',') === 'a,b,c,d');
+  ok('  … while the message prefix starts at the epoch that owns it', T.pathMessages(session, 'd').length === 0);
+}
+
 console.log('-- a reworded provider still rolls over --');
 const rewordedNumbers = '{"error":{"code":"context_length_exceeded","message":"context length 131072 exceeded by requested 150000 tokens"}}';
 const p1 = P(rewordedNumbers);
@@ -233,4 +280,4 @@ if (problems.length) {
   console.log(`FAIL context-rollover: ${problems.length} check(s) failed`);
   process.exit(1);
 }
-console.log('PASS context-rollover: the prefix cuts at the context base (display path unchanged), and only the provider 400 triggers a rollover');
+console.log('PASS context-rollover: the prefix cuts at the context base (display path unchanged), an epoch is inherited from the nearest node that starts one, and only the provider 400 triggers a hard rollover');

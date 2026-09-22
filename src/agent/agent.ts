@@ -15,6 +15,17 @@ import {
   detectImageMime,
 } from './types';
 import { MAX_IMAGE_BYTES, ModelCard, cardDisplayName, isVisionCard, visionCardsLabel } from './models';
+
+/**
+ * The model-facing replacements for an image a request cannot carry. They are stored in the
+ * history, not applied at send time: a block rewritten on the way out would change bytes the
+ * provider has already cached, which is the one thing this harness must never do
+ * (`docs/agents/plans/session-epoch.md` §4.5).
+ */
+const IMAGE_NEEDS_VISION =
+  '[image hidden: the current model does not support images]';
+const IMAGE_FOREIGN_UPLOAD =
+  '[image hidden: it was uploaded to a provider that this model cannot read from]';
 import * as prompt from './prompt';
 import { ToolCapabilities, interceptedDefinitions } from './tools';
 import { formatDuration } from '../duration';
@@ -355,13 +366,21 @@ export class Agent {
   /** Whether `hop_session` is exposed (main agent only). */
   private canHop = false;
   /**
-   * Images the provider rejected as unsupported (by `file_id` / `image_url`).
-   * They are hidden from every request body rather than deleted from the stored
-   * history, mirroring how a non-vision model hides images. Ids are unique per
-   * upload, so keeping them across session switches is harmless and avoids
-   * re-triggering the same 400 on every turn.
+   * The tool schemas of the epoch this agent is sending with, when it has one. Set from
+   * the node's frozen envelope at every turn start; `undefined` means "the live set",
+   * which is what a chain without an epoch (a legacy one, or the first turn that is about
+   * to freeze) sends.
    */
-  private rejectedImageIds = new Set<string>();
+  private frozenTools?: ToolDefinition[];
+
+  /**
+   * Every `read_image` upload this agent made, newest last: the raw material a later
+   * epoch needs to translate a `file_id` into whatever another card can read
+   * (`docs/agents/plans/session-epoch.md` §6). Accumulated for the agent's lifetime —
+   * the message that references an id can be stored long after the upload — and read by
+   * the runtime when it writes a finished turn's provenance.
+   */
+  private readonly imageUploads: { fileId: string; providerId: string; path?: string }[] = [];
 
   constructor(
     private readonly clients: ClientRegistry,
@@ -378,7 +397,6 @@ export class Agent {
    */
   setCard(card: ModelCard): void {
     this.card = card;
-    this.refreshSystemIdentity();
   }
 
   /** The card's id ('' before the first {@link setCard}). */
@@ -394,13 +412,11 @@ export class Agent {
   /** Set the reasoning-effort level for subsequent completions. */
   setThinkingEffort(effort: ThinkingEffort): void {
     this.thinkingEffort = effort;
-    this.refreshSystemIdentity();
   }
 
   /** Set the language the agent replies in (the prompt's `## Language` line). */
   setReplyLanguage(language: string): void {
     this.replyLanguage = language || prompt.DEFAULT_REPLY_LANGUAGE;
-    this.refreshSystemIdentity();
   }
 
   /** Set a provider hook that runs sub-agents for the `spawn_agents` tool. */
@@ -461,20 +477,7 @@ export class Agent {
     this.canSpawnReadOnly = v;
   }
 
-  /**
-   * Rewrite the leading system prompt to the current identity (model + effort +
-   * reply language). The instructions are identical every time, so only the
-   * identity/environment/language lines are updated; the rest of the conversation
-   * history is preserved. Switching is applied in place because it invalidates the
-   * prompt cache anyway and the first message is the most authoritative identity
-   * signal.
-   */
-  private refreshSystemIdentity(): void {
-    if (this.messages[0]?.role === 'system') {
-      this.messages[0].content = prompt.systemPrompt(this.modelLabel, this.thinkingEffort, this.replyLanguage);
-    }
-  }
-
+  /** Start a fresh conversation: the system prompt plus nothing else. */
   reset(): void {
     this.messages = Agent.initialMessages(this.modelLabel, this.thinkingEffort, this.replyLanguage);
     this.pendingImages = [];
@@ -512,7 +515,30 @@ export class Agent {
    * assumes, so the two can never disagree.
    */
   private getTools(): ToolDefinition[] {
+    if (this.frozenTools) {
+      return this.frozenTools;
+    }
     return [...this.tools.definitions, ...interceptedDefinitions(this.toolCapabilities())];
+  }
+
+  /**
+   * The tool schemas this agent would advertise right now. The caller that **freezes**
+   * an epoch records them, so the wire model keeps the tools its own instructions were
+   * written against — a chain must not silently gain or lose a tool inside a prefix it
+   * has already sent (`docs/agents/plans/session-epoch.md`).
+   */
+  getToolSchemas(): ToolDefinition[] {
+    return this.getTools();
+  }
+
+  /**
+   * Pin the advertised schemas to a frozen set (a resuming chain), or `undefined` to go
+   * back to the live capability set. A frozen tool whose implementation no longer exists
+   * is answered by the registry as an ordinary tool error — the chain is never rewritten
+   * to hide it.
+   */
+  setToolSchemas(schemas: ToolDefinition[] | undefined): void {
+    this.frozenTools = schemas && schemas.length > 0 ? schemas : undefined;
   }
 
   /**
@@ -530,64 +556,10 @@ export class Agent {
     return null;
   }
 
-  /**
-   * The message history as it should be sent to the API for the current model.
-   * Image content blocks are rewritten — never deleted — so the request cannot be
-   * refused for carrying something this endpoint does not understand:
-   *
-   *  - a **text-only** card gets a placeholder where the image was,
-   *  - a card that is not `deepseek` gets a placeholder for a `{ type: 'file' }`
-   *    block, because a Files-API id belongs to the provider that issued it: another
-   *    endpoint has never seen it (DeepSeek's `file_id` is a vendor extension, see
-   *    `docs/agents/invariants/model-cards.md`). An `image_url` block travels fine
-   *    everywhere, so a `data:` URL history survives a switch — only uploads do not,
-   *  - an image the provider itself rejected is hidden the same way, for every model.
-   *
-   * The stored history is never modified, so switching the card back restores the
-   * original blocks (a provider-rejected one stays hidden). The replacements are
-   * model-facing text, like the assistant/tool text around them.
-   */
-  private messagesForCurrentModel(): ChatMessage[] {
-    const vision = isVisionCard(this.card);
-    const servesUploads = this.card?.vision.transport === 'deepseek';
-    if (vision && servesUploads && this.rejectedImageIds.size === 0) {
-      return this.messages;
-    }
-    return this.messages.map((m) => {
-      if (m.role !== 'user' || typeof m.content === 'string' || !Array.isArray(m.content)) {
-        return m;
-      }
-      const parts = m.content;
-      if (!parts.some((p) => p.type === 'image_url' || p.type === 'file')) {
-        return m;
-      }
-      let changed = false;
-      const content = parts.map((p): ContentPart => {
-        const id = this.imagePartId(p);
-        if (id === null) {
-          return p;
-        }
-        if (!vision) {
-          changed = true;
-          return { type: 'text', text: '[image hidden: the current model does not support images]' };
-        }
-        if (p.type === 'file' && !servesUploads) {
-          // A Files-API id is the issuing provider's private handle: this endpoint
-          // has never seen it, so the id (and the bytes behind it) cannot travel.
-          changed = true;
-          return {
-            type: 'text',
-            text: '[image hidden: it was uploaded to a provider that this model cannot read from]',
-          };
-        }
-        if (this.rejectedImageIds.has(id)) {
-          changed = true;
-          return { type: 'text', text: '[image removed: the provider rejected it as unsupported]' };
-        }
-        return p;
-      });
-      return changed ? { ...m, content } : m;
-    });
+
+  /** The `read_image` uploads this agent made, for the runtime's provenance record. */
+  getImageUploads(): { fileId: string; providerId: string; path?: string }[] {
+    return this.imageUploads;
   }
 
   /** Replace the conversation history (used when switching sessions). */
@@ -1059,6 +1031,10 @@ export class Agent {
       }
       const uploaded = await this.clients.upload(card as ModelCard, buffer, path.basename(resolved), signal);
       this.pendingImages.push({ kind: 'file', fileId: uploaded.id, path: resolved });
+      // Remember where these bytes came from: a `file_id` is one provider's private
+      // handle, so a later epoch that runs on another card can only translate it if the
+      // source (here: the local file) is still known (`docs/agents/plans/session-epoch.md` §6).
+      this.imageUploads.push({ fileId: uploaded.id, providerId: card?.providerId ?? '', path: resolved });
       return `Loaded image ${resolved} -> ${uploaded.id} (${uploaded.filename}, ${(uploaded.bytes / 1024).toFixed(1)} KiB).`;
     } catch (err) {
       return `Error: image attach failed: ${err instanceof Error ? err.message : String(err)}`;
@@ -1084,7 +1060,7 @@ export class Agent {
       for await (const chunk of this.clients.stream(
         card,
         {
-          messages: this.messagesForCurrentModel(),
+          messages: this.messages,
           tools: this.getTools(),
           signal,
           // The wire model name and the provider come from the card, never from
@@ -1216,12 +1192,20 @@ export class Agent {
   }
 
   /**
-   * Detect a provider "unsupported image" 400 and record the offending
-   * image(s) so `messagesForCurrentModel` hides them on every later request.
-   * DeepSeek names the offending message (`.messages[<n>].image[...]`); when it
-   * does, only that message's images are recorded, otherwise every image in the
-   * history. The stored history is left untouched. Returns true when a new
-   * image was recorded, i.e. when a retry can make progress.
+   * Detect a provider "unsupported image" 400 and **repair the history itself**: the
+   * offending image block becomes its placeholder text part, in the message the turn will
+   * store, and the request is retried.
+   *
+   * This is the one mutation of an already-built history this harness performs, and it is
+   * deliberate: the request that carried the image was refused, so nothing past that point
+   * was ever cached, and the alternative — hiding the block on every later send — would
+   * both rewrite the prefix invisibly and leave the store disagreeing with the wire
+   * (`docs/agents/plans/session-epoch.md` §4.5). The repaired text says exactly what the
+   * model would otherwise be told, so a reader of the transcript sees the same thing.
+   *
+   * DeepSeek names the offending message (`.messages[<n>].image[...]`); when it does, only
+   * that message's images are replaced, otherwise every image in the history. Returns true
+   * when something changed, i.e. when a retry can make progress.
    */
   private markRejectedImages(err: unknown): boolean {
     if (!(err instanceof ApiError) || err.status !== 400) {
@@ -1233,19 +1217,23 @@ export class Agent {
     const match = /messages\[(\d+)\]/.exec(err.message);
     const named = match ? this.messages[Number(match[1])] : undefined;
     const targets: ChatMessage[] = named ? [named] : this.messages;
-    let added = 0;
+    let changed = 0;
     for (const message of targets) {
       if (message.role !== 'user' || !Array.isArray(message.content)) {
         continue;
       }
-      for (const part of message.content) {
-        const id = this.imagePartId(part);
-        if (id !== null && !this.rejectedImageIds.has(id)) {
-          this.rejectedImageIds.add(id);
-          added++;
-        }
+      const parts = message.content;
+      if (!parts.some((part) => this.imagePartId(part) !== null)) {
+        continue;
       }
+      message.content = parts.map((part): ContentPart => {
+        if (this.imagePartId(part) === null) {
+          return part;
+        }
+        changed++;
+        return { type: 'text', text: IMAGE_NEEDS_VISION };
+      });
     }
-    return added > 0;
+    return changed > 0;
   }
 }

@@ -5,18 +5,46 @@
   `rename_session` tool) freezes it, and a rename must never touch `updatedAt`
   (the sidebar sorts by it). Renaming does not change history, branching or the
   prompt in any way.
-- `TreeNode.messages` (non-empty) always starts with a `user` role message; the
-  system prompt is **never** stored in a node (synthesized per activation).
-- A branch's flat API history is `pathMessages(session, nodeId)` = `[system, ...messages
-  from the node's **context base** down to the node]` — **not** `[system, ...path nodes'
-  messages]`, and that cut is the whole semantic delta. The base is `contextBase()`
+- `TreeNode.messages` (non-empty) always starts with a `user` role message; no node
+  ever stores a `system` message. The system prompt is **not** synthesized per
+  activation any more: it is rendered once when a chain starts
+  (`SessionRuntime.freezeEpoch`) and kept on the node that starts the epoch
+  (`node.epoch.prompt`), outside `messages` — see `system-prompt.md`.
+- **A session is a forest** (`AgentSession.rootIds: string[]`, replacing the old
+  `rootId`): every tree root in creation order. A fork **appends** a root instead of
+  rewriting the first (`forkTree`), so the tree the user leaves behind keeps the
+  bytes — and the provider cache entry — it was built with, and the webview lays the
+  roots out side by side. `attachNode` registers a new root when the node has no
+  parent (and, for a node whose parent is gone, keeps it reachable under the first
+  root); `computeRootIds()` re-derives the list as "every node nobody claims as a
+  child, oldest first" and `pruneSession` re-picks it whenever the stored list no
+  longer describes the tree, so a hand-edited or half-written `rootIds` heals.
+- **A node can start an epoch.** `node.epoch` (`Epoch`) is only set on a node that
+  starts a chain — a session's first turn, a rollover node, a fork's copied
+  epoch-owning nodes, and a legacy chain adopted at load — and only there. It does
+  **not** imply a `contextBaseId`: a rollover node carries both (it cuts the prefix),
+  while a session's first turn or a fork's new root carries the epoch alone and
+  inherits its base from the root. A request
+  finds its prompt and its tool schemas through `epochForNode(session, nodeId)`
+  (nearest ancestor-or-self wins, so a fork's new root overrides everything above
+  it) and the node that owns the envelope is `epochNodeId(...)`. Nothing re-renders
+  it, ever; a chain without one renders live
+  (`SessionRuntime.systemPromptFor`).
+- A branch's flat API history, precisely:
+  `SessionRuntime.buildPath` = `sanitizeMessages([epoch.prompt, ...pathMessages(session, nodeId)])`,
+  where `pathMessages` is `[messages from the node's **context base** down to the
+  node]` — **not** `[...path nodes' messages]`, and that cut is the whole semantic
+  delta. The base is `contextBase()`
   (`tree.ts`): the nearest ancestor-or-self whose `contextBaseId` equals its own id.
+  `buildPath` is the only thing that computes a prefix: it prepends
+  `epochForNode(...).prompt` (the live render `systemPromptFor` only for a chain with
+  no envelope) and sanitizes the result.
   `pathIds`, the display path and the transcript meta's `pathIds` are deliberately **not**
   cut — the tree stays connected and the view keeps expanding the whole line — so the two
   must diverge: the display path is a reading aid (which cards to expand, what a card
   describes), the API prefix is what the provider will actually accept. See
-  `context-rollover.md`. `SessionRuntime.buildPath` builds it when a run starts on that node
-  (`beginTurn` / `beginInjectedTurn`) and hands it to `agent.setMessages`. `session.activeNodeId`
+  `context-rollover.md`. `buildPath` runs when a run starts on that node
+  (`beginTurn` / `beginInjectedTurn`) and hands the array to `agent.setMessages`. `session.activeNodeId`
   is only the **view focus** (which branch the tab shows, where the composer docks): it names the
   path the *next* user turn branches from, not the node a live run is writing to. The history must
   go through `Agent.sanitizeMessages` (the sanitized copy is **never** written back into the nodes
@@ -29,7 +57,8 @@
   turn, based on the node it continues) each call `worker.agent.setMessages(buildPath(...))` and
   record `run.prefixLen` / `run.prefixTail` from the result in the same block, so the basis and the
   array cannot drift apart. `prefixLen` is always an index into **`agent.getMessages()`** (which
-  includes the leading system message). `checkoutNode` no longer swaps any history at all — it only
+  includes the leading system message — the frozen epoch prompt, or a live render for a chain with
+  no envelope). `checkoutNode` no longer swaps any history at all — it only
   moves the **view** (each node has its own worker; see the one-agent-per-node bullet) — but a
   node's worker can still be re-based by a *later* run, so an untouched numeric basis would slice
   from the wrong offset and store ancestor history inside the turn's node. That is how one session
@@ -53,9 +82,13 @@
   running sub-agent batch, or a completion notice already queued for that node; the same set
   `lockedNodes()` exposes in `state`, which is why the composer shows Stop for such a node, and
   pressing Stop is the union kill `stopNode` that takes that node's turn, its background
-  terminals and its whole sub-agent subtree), and **every** turn start is additionally gated by
-  `host.isHeld()` (`beginTurn` / `beginInjectedTurn` return `null` while an external controller
-  holds the window for a reload; the callers re-queue). Two *different* nodes of one session may
+  terminals and its whole sub-agent subtree), and **every** turn start is additionally gated by two
+  window-level checks: `host.isHeld()` (`beginTurn` / `beginInjectedTurn` return `null` while an
+  external controller
+  holds the window for a reload; the callers re-queue) and `host.isReadOnly()` (`null` while
+  another window owns this workspace's session data, so a send, a fork, a rollover, ▶ Continue
+  and every injected notice turn are refused alike — `session-persistence.md`). Two *different*
+  nodes of one session may
   stream at once. `isRunning()` = `busy || runs.size > 0`; `runningNodes()` = `runs.keys()`.
 - Who owns the node: `beginTurn` creates a fresh node, so its run **assigns**
   (`node.messages = added`, `run.fresh = true`). `beginInjectedTurn` continues a node that already
@@ -82,8 +115,8 @@
   *and its whole subtree* — sub-agent sidecars included — from `session.nodes`,
   unlinks it from the parent's `children`, and moves `activeNodeId` to the parent
   when the checkout was inside the removed subtree (to `null` when the root went,
-  which leaves a valid empty session: `rootId`/`activeNodeId` null, `orphanItems`
-  kept). It is pure data — `ChatViewProvider.deleteBranch` owns the rest: the matching
+  which leaves a valid empty session: `rootIds` empty, `activeNodeId` null,
+  `orphanItems` kept). It is pure data — `ChatViewProvider.deleteBranch` owns the rest: the matching
   transcript dumps (see transcripts.md), and `SessionRuntime.afterBranchDetach(ids)`
   drops the removed nodes' workers + pending interruption notices + queued child
   notices, kills the background jobs they owned (`hub.removeNode(..., { kill: true })`),
@@ -100,7 +133,17 @@
   would still be the full chain. It is validated at read time (`contextBase()`), so a
   foreign or unreachable value is simply ignored — a stale one has no effect and needs no
   migration or repair pass. It never moves a card; it only decides which ancestors'
-  messages are sent. See `context-rollover.md`.
+  messages are sent. See `context-rollover.md`. The marker is **not** the epoch
+  flag: only a node whose prefix must really be **cut** carries it (`freshContext`,
+  i.e. a rollover, and a fork copies it onto the copied rollover nodes). A
+  session's first turn and a fork's new root freeze an epoch and carry **no**
+  marker at all — the base is then the root, exactly as if the field were absent.
+- `node.epoch` / `node.imageSources` are the other two persisted per-node fields,
+  both written once and never rewritten: the frozen request envelope
+  (see the epoch bullet above and `system-prompt.md`) and the image provenance
+  addressed by `{ messageIndex, partIndex }` (see `vision-images.md`). Both survive
+  a load through `normalizeEpoch` / `normalizeImageSources` — a malformed value is
+  dropped, not repaired.
 - **Stream routing (the load-bearing rule):** every streaming message carries an explicit `nodeId`
   — `delta` / `thinkingDelta` / `usage` / `toolCallDelta` / `toolStart` / `toolEnd` / `done` /
   `interrupted` / `error` — and the webview routes each one to *that* node's card. It must

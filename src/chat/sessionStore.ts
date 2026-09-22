@@ -11,7 +11,7 @@
  *    deleted — undiscoverable) and the first activation under the new id wrote an empty
  *    row over it. That is a real incident this design has to make impossible.
  *
- * So the content lives in files under a **fixed, id-independent** root, with three rules
+ * So the content lives in files under a **fixed, id-independent** root, with four rules
  * that carry the weight:
  *
  *  1. **The index is a cache.** `<key>/index.json` exists to make the sidebar cheap, and
@@ -22,6 +22,10 @@
  *     version is on disk at all times, and a `.tmp`-only leftover is ignored on read.
  *  3. **A deletion moves to `.trash`, it never unlinks.** This is the same rule the v1
  *     state backup follows ("move the data, never discard it").
+ *  4. **The reader heals.** A stored session's shape is repaired on the way **out** of this
+ *     module (`normalize`), never by a caller and never by a script: the load, the sidebar's
+ *     rebuild, the v1→v2 layout migration and an adoption from another root all read through
+ *     this one reader, so no call site can forget.
  *
  * The module is deliberately **vscode-free**: the caller passes the global-storage path
  * and the workspace identity, which keeps the whole thing testable in a plain node script
@@ -139,6 +143,21 @@ export interface StoreOptions {
   now?: () => number;
   /** Where a skipped/corrupt file is reported (the output channel, in practice). */
   onLog?: (line: string) => void;
+  /**
+   * The session model's heal, applied to **every** session this store hands out. This
+   * module deliberately knows nothing about the tree, so the caller supplies the function —
+   * what matters here is *where* it runs. The reader is the only place a stored shape is
+   * ever repaired, because the load, the sidebar's rebuild, the v1→v2 layout migration and
+   * an adoption from another root all read through it: a second call site is a second
+   * chance to forget. That is exactly what the `rootId` → `rootIds` rename cost — the
+   * Memento path healed it, this path did not, and every conversation stored before the
+   * rename opened as an empty session.
+   *
+   * The return value is used when it is object-shaped; a heal that throws (or returns
+   * nothing) is reported and the session is loaded **exactly as stored**, because a repair
+   * must never cost the content.
+   */
+  normalize?: (session: unknown, id: string) => unknown;
 }
 
 /**
@@ -366,6 +385,30 @@ export class SessionStore {
   }
 
   /**
+   * Put one stored session through the caller's heal (`normalize`, see {@link StoreOptions}).
+   * Every path out of the reader goes through this: a plain read, a whole-profile sweep, the
+   * list/rebuild, the v1→v2 migration and an adoption all end up here.
+   */
+  private heal(session: unknown, id: string): unknown {
+    const normalize = this.opts.normalize;
+    if (!normalize) {
+      return session;
+    }
+    try {
+      const healed = normalize(session, id);
+      if (healed && typeof healed === 'object') {
+        return healed;
+      }
+      this.log(`[store] ${id}: the session heal returned nothing — loading it as stored`);
+    } catch (err) {
+      this.log(
+        `[store] ${id}: the session heal failed (${err instanceof Error ? err.message : String(err)}) — loading it as stored`,
+      );
+    }
+    return session;
+  }
+
+  /**
    * Read one session: its header, then each node file it names. A node that cannot be read
    * costs **that node** and is reported, never the session (its `.bak` is next to it).
    *
@@ -394,7 +437,9 @@ export class SessionStore {
         this.log(`[store] ${path.basename(file)}: not a current session file — skipped`);
         return null;
       }
-      return { id, summary: raw.summary, session: raw.session, file };
+      // Healed like every other read: the migration below writes what this returns, so a
+      // root converted by it comes out already in the current session shape.
+      return { id, summary: raw.summary, session: this.heal(raw.session, id), file };
     } catch {
       return null;
     }
@@ -653,7 +698,7 @@ export class SessionStore {
             );
           }
         }
-        return { id, summary: header.summary, session: { ...(header.session as Record<string, unknown>), nodes }, file: dir };
+        return { id, summary: header.summary, session: this.heal({ ...(header.session as Record<string, unknown>), nodes }, id), file: dir };
       }
       this.log(`[store] ${id}: header is not a current session header`);
     } catch {

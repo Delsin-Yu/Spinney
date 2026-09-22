@@ -172,7 +172,7 @@ function makeSession() {
     createdAt: 1,
     updatedAt: 1,
     nodes: {},
-    rootId: null,
+    rootIds: [],
     activeNodeId: null,
     orphanItems: [],
   };
@@ -272,7 +272,9 @@ const nodeCard = (rt, id) => rt.session.nodes[id] && rt.session.nodes[id].model;
     const before = modelNotices().length;
     rt.setModel(OTHER);
     ok('the pick is what the next request would use', rt.model === OTHER, rt.model);
-    ok('  … and it warns, because it really is a change', modelNotices().length === before + 1, JSON.stringify(modelNotices().slice(before)));
+    // No notice and no warning: the pick marks the drift the composer asks about, and a
+    // plain send still uses the chain's frozen setup (`docs/agents/plans/session-epoch.md`).
+    ok('  … and no cache-miss notice is posted any more', modelNotices().length === before, JSON.stringify(modelNotices().slice(before)));
     rt.handleCheckout('after');
     ok('a checkout drops the pending pick', rt.model === DS, rt.model);
     rt.handleCheckout('glm');
@@ -338,17 +340,38 @@ const nodeCard = (rt, id) => rt.session.nodes[id] && rt.session.nodes[id].model;
           m.content.some((p) => p.type === 'text' && /uploaded to a provider that this model cannot read from/.test(p.text)),
       );
 
-    rt.handleCheckout('glm');
-    const onGlm = await send(rt, 'glm sees the history with the upload');
     const kinds = (messages_) =>
       messages_.map((m) => (Array.isArray(m.content) ? m.content.map((p) => p.type).join('+') : typeof m.content));
-    ok('a non-deepseek card never re-sends a DeepSeek upload', !hasUpload(onGlm.messages), kinds(onGlm.messages).join(' | '));
-    ok('  … the image is hidden behind the placeholder instead', hasHidden(onGlm.messages));
+    // Adopt the epoch model for this hand-built (legacy-shaped) session: the chain is frozen
+    // on the card its history was produced under, which is what makes the upload question go
+    // away entirely — a send never changes a card, so an upload never meets an endpoint that
+    // cannot read it. The placeholder now belongs to the **fork** (`materialiseMessages`).
+    rt.adoptLegacyEpoch();
+    ok('the chain is frozen on the card its history was built with', rt.session.nodes['root'].epoch?.cardId === DS, String(rt.session.nodes['root'].epoch?.cardId));
+    rt.handleCheckout('glm');
+    const onGlm = await send(rt, 'the other branch sends the same history');
+    ok('a frozen chain sends with its own card, never the one on screen', onGlm.model === DS, String(onGlm.model));
+    ok('  … so the upload travels to the provider that issued it', hasUpload(onGlm.messages), kinds(onGlm.messages).join(' | '));
+    ok('  … and nothing is hidden or rewritten', !hasHidden(onGlm.messages), kinds(onGlm.messages).join(' | '));
 
-    rt.handleCheckout('root');
-    const onDs = await send(rt, 'deepseek sees the same history');
-    ok('a deepseek card still sends the upload it owns', hasUpload(onDs.messages));
-    ok('  … and shows no placeholder', !hasHidden(onDs.messages));
+    // Forking under the other card is the one path that re-materialises an image.
+    rt.handleCheckout('glm');
+    rt.setModel(GLM);
+    const forked = rt.forkTree('glm');
+    ok('the fork copies the tree under the live setup', !!forked && rt.session.nodes[forked.rootId].epoch?.cardId === GLM, JSON.stringify(forked));
+    const copied = Object.values(rt.session.nodes).filter((n) => n.id !== 'root' && n.epoch?.cardId === GLM);
+    ok('  … and its epoch carries the live card', copied.length > 0, String(copied.length));
+    // With no provenance recorded (this fixture predates it) the bytes are unreachable, so
+    // the copy carries a placeholder instead of an id the target cannot resolve.
+    const placeholder = Object.values(rt.session.nodes).some((n) =>
+      n.messages.some(
+        (m) =>
+          m.role === 'user' &&
+          Array.isArray(m.content) &&
+          m.content.some((p) => p.type === 'text' && /\[image (hidden|removed):/.test(p.text)),
+      ),
+    );
+    ok('  … the copied image becomes a placeholder when its bytes are unreachable', placeholder);
   }
 
   console.log('-- the level is per node too --');
@@ -357,10 +380,14 @@ const nodeCard = (rt, id) => rt.session.nodes[id] && rt.session.nodes[id].model;
     // its card does not offer (the clamp is the card's).
     rt.handleCheckout('after');
     rt.setModel(OTHER);
-    await send(rt, 'run on the two-level card');
+    // The frozen chain wins over the dropdown: the pick is reported as drift, and the send
+    // that follows still runs on the card the chain was built with. Moving a chain to a new
+    // setup is a fork, never a silent re-render (`docs/agents/plans/session-epoch.md` §4.2).
+    ok('a pick on a frozen chain is reported as user drift', rt.hasUserDrift());
+    await send(rt, 'run on the frozen chain');
     const node = rt.session.nodes[rt.session.activeNodeId];
-    ok('the node recorded the card', node.model === OTHER, String(node.model));
-    ok('  … and a level that card offers', M.effortsFor(M.cardById(OTHER)).includes(node.effort), String(node.effort));
+    ok('the node recorded the chain\'s frozen card, not the pick', node.model === DS, String(node.model));
+    ok('  … and a level that card offers', M.effortsFor(M.cardById(DS)).includes(node.effort), String(node.effort));
   }
 
   console.log('');

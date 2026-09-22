@@ -36,7 +36,9 @@ retries a **transient** failure up to `MAX_ATTEMPTS = 10` total attempts
   `model-cards.md`), which sits outside this policy and is never retried either.
 - The Agent's own image-rejection retry (`markRejectedImages`, see
   `vision-images.md`) still works because a 400 is not retriable here: it surfaces
-  immediately and the Agent hides the offending image and re-asks.
+  immediately and the Agent **repairs the history** — the offending image block
+  becomes its placeholder text part in the message about to be stored — and
+  re-asks.
 
 ### 1b. The stall watchdogs (a request that produces nothing is not "thinking")
 
@@ -79,24 +81,34 @@ A turn can end without an answer in two ways: the user pressed Stop
 call failed (`node.status = 'error'`, the turn rolled back). Either way the user
 used to have to type "continue" themselves. Now the card offers a button — and in
 the ordinary cases it resumes **that node in place**: no new card, no visible node
-split. One button, one meaning at a time: the third button state is a failure the
-provider caused by refusing the request as too big, and there the same slot offers
-a rollover instead, whose whole point is a *new* card.
+split. One button, one meaning at a time. Two further states share the slot, and
+both are about the *context*, not about the failure: a provider refusal that no
+retry can fix (the request is too big) offers a rollover instead — whose whole point
+is a *new* card — and a chain that is merely **near** full offers the same entry as
+a suggestion. What that does is `context-rollover.md`.
 
 - **Webview → host**: `{ type: 'continueTurn', id: <nodeId> }`
   (`main.js` `syncContinueButton`). The host routes it straight into
   `SessionRuntime.continueFrom` (`ChatViewProvider.handlePanelMessage`), which is
   the *only* entry point — it keeps the reboot hold (`host.isHeld()`), the
   per-node refusal (`runs.has(nodeId)`) and the "which message does the model
-  get" decision in one place.
-- **Who decides it is a context-length failure**: the host, once, and it ships a
-  boolean — `contextFull` on the `tree` node payload and in every `nodeUpdate`
-  patch, computed from the node's own persisted failure text (`node.status ===
-  'error' && parseContextLengthError(lastFailureText(node)) !== undefined`), so a
-  reload and a live turn agree. The webview therefore never parses an error
-  string, and no second copy of the provider's wording exists in `main.js`. The
-  host entry point is `ChatViewProvider.handlePanelMessage` → `rolloverTurn` →
-  `SessionRuntime.rolloverContext(nodeId)`; what that does is `context-rollover.md`.
+  get" decision in one place. The run itself goes through `beginInjectedTurn`, so
+  the two gates every turn start shares — the hold and a **read-only** window
+  (`host.isReadOnly()`, another window owning this workspace's sessions) — apply
+  here too.
+- **Who decides the context state**: the host, once, and it ships a tri-state —
+  `context: 'ok' | 'near' | 'full'` plus `contextPct` (the rounded percentage, for
+  the `near` variant's title) on the `tree` node payload and in every `nodeUpdate`
+  patch. `full` is computed from the node's own persisted failure text
+  (`node.status === 'error' && parseContextLengthError(lastFailureText(node)) !==
+  undefined`), `near` from the newest prompt usage on that node's chain against the
+  chain card's window, so a reload and a live turn agree. The webview therefore
+  never parses an error string, and no second copy of the provider's wording exists
+  in `main.js`. `nodeStatePatch` still carries the older `contextFull: boolean`
+  beside them, but nothing in the webview reads it.
+  The host entry point is `ChatViewProvider.handlePanelMessage` → `rolloverTurn` →
+  `canRollover` → `rolloverWithSetup` → `SessionRuntime.rolloverContext(nodeId,
+  setup)`.
 - **In place, not a new node**: `continueFrom` uses `beginInjectedTurn(node)` —
   the same mechanism the background / sub-agent completion notices use. The run is
   bound to the existing node (`fresh: false`), its reply is appended to that
@@ -117,22 +129,28 @@ a rollover instead, whose whole point is a *new* card.
     `⚠️ …` item), not from a side table, so it survives a reload and is exactly
     what the user can read there.
 - **Show rules** (`syncContinueButton`, `media/main.js`): a terminal *tip* of a
-  conversational branch — status `interrupted`/`error`, no turn child yet (a node
-  that already has a conversational continuation is not offered again), not
+  conversational branch — no turn child yet (a node that already has a
+  conversational continuation is not offered again), not
   `kind:'agent'`/`'bg'` (sidecars have no conversation of their own in this path),
-  and not currently running. Those rules are unchanged by the rollover variant —
-  only the **label and the action** follow the failure. Three states: `▶ Continue`
-  for an interruption, `↻ Retry` for any other failure, and `⧉ Continue in a new
-  window` when `contextFull` is set — that variant also adds `node-rollover` and
-  `data-action="rollover"`, and its click posts `{ type: 'rolloverTurn', id }`
-  instead of `{ type: 'continueTurn', id }`. Retry is **replaced**, never offered
+  and not currently running. The failure variants additionally need a terminal
+  status: `▶ Continue` for an interruption, `↻ Retry` for any other failure, and
+  `⧉ Continue in a new window` for `context === 'full'` (that variant also adds
+  `node-rollover` and `data-action="rollover"`, and its click posts
+  `{ type: 'rolloverTurn', id }` instead of `{ type: 'continueTurn', id }`). The
+  **`near` suggestion is the one rule that hangs off the context state instead of a
+  failure**: `context === 'near'` shows the same `⧉` (plus the softening `node-near`
+  class and the percentage in the title) on a `done` tip too — the long
+  conversation that just finished above 90 % is exactly its case. Retry is
+  **replaced**, never offered
   beside it: the request it would re-send is the same oversized one, so it is
   guaranteed to fail again, and a second button for one failure would make the
   card claim two possible outcomes where there is one. It is synced from both
   entry points of a status change (`renderTree` and `applyNodeUpdate`) — a turn
   that ends after the tree was drawn arrives as `nodeUpdate`, so both must call it
-  (and `applyNodeUpdate` must merge the flag into `treeNodes[id]` *before* it
-  re-syncs, or that entry point would show the wrong variant).
+  (and `applyNodeUpdate` must merge `context` / `contextPct` into `treeNodes[id]`
+  *before* it re-syncs, or that entry point would show the wrong variant). The
+  button is one reused element whose text, class list and `dataset.action` are
+  re-synced, and the click handler reads the action at click time.
 - **Honest transcript**: the harness text is a `kind:'harness'` display item,
   pushed into the node's own items and rendered inline by `addHarnessNote` as a
   badged (`HARNESS`) block — never a fabricated user bubble, and never the pinned
@@ -141,20 +159,61 @@ a rollover instead, whose whole point is a *new* card.
   routed with `routeTo`, so continuing a node that is *not* the view focus still
   writes into the right card.
 - **Don't break**: `continueFrom` must keep going through `beginInjectedTurn`
-  (hold gate, per-node `runs` gate, `fresh: false` append) rather than `beginTurn`
+  (read-only gate, hold gate, per-node `runs` gate, `fresh: false` append) rather than `beginTurn`
   — for a continue/retry, a new node is exactly the visible split this feature
   exists to avoid. (The rollover is the one variant that *does* want a new card, so it
   goes through `rolloverContext` instead — which still falls back to `continueFrom`
-  when the node turns out not to be context-full, see `context-rollover.md`.) A
+  when the node turns out not to be near/full, see `context-rollover.md`.) A
   `kind:'user'` item would also be wrong: the webview pins only the *first* user
   item of a node, so it would either be dropped on replay or overwrite the user's
   own prompt.
+
+### 2b. The three "prompt cache may be missed" warnings are gone
+
+A card / effort / reply-language pick or change used to rewrite `messages[0]` and
+warn that the next request might miss the prompt cache ("Model changed to {0}…",
+"Thinking effort changed to …", "Reply language changed to …"). All three notices
+are deleted from `src/`, and with them the last reason for such a warning: a pick
+now reaches the **next new node** only (the epoch freeze),
+`SessionRuntime.applyReplyLanguage` merely records the name for later nodes, and a
+chain that has an epoch sends with the epoch's bytes whatever the dropdowns say.
+
+Nothing is silent about this either. The host computes the two setups —
+`SessionRuntime.setupState()`: `node` (the checked-out chain's envelope) and `live`
+(what a new node would freeze today) — and ships them in the `config` message as
+`setup: { node, live, drift: false | 'user' | 'harness', reasons: string[] }`:
+
+- `drift: 'user'` — the **user** just moved a dropdown (`model` / `effort` /
+  `language`). `SessionRuntime.hasUserDrift()` is the gate: a plain send asks first
+  (`ChatViewProvider.dispatchUserMessage` → `askSetups('user')`), the modal's default
+  action is `Continue with current setup` (so Enter or Escape never changes a
+  prefix), and `SessionRuntime.discardPendingSetup()` throws the pick away and puts
+  the dropdown back on the frozen values before the send goes out. The composer shows
+  both identities (`Sending with: …` / `New setup: …`) and marks Send while this is
+  true.
+- `drift: 'harness'` — the shipped prompt template, the workspace AGENTS.md, the tool
+  schema set, the endpoint facts or the vision/setup shape changed under a frozen
+  chain (`reasons` names which: `prompt` / `agents.md` / `tools` / `provider` /
+  `images`). A plain send keeps the frozen setup **silently** — that is the point of
+  freezing it — and the composer offers the extra `Continue with the latest setup`
+  entry (`forkTurn`, §4.4 of the plan) for the user who wants to move on.
+
+The comparison is made from **content hashes** (`Epoch.templateHash` /
+`agentsMdHash` / `toolsetHash`, plus the live endpoint facts), never from a version
+number, so an extension update that changes none of them is not a drift and changes
+no prefix.
+
+**Status:** the new keys (the modal's labels/header/details, `Sending with: {0}` /
+`New setup: {0}`, the fork entry and the read-only notice) are in both shipped
+catalogs — `npm run check:l10n` fails packaging when a source literal is missing
+from one — and the five entries this change retired (the three "… the prompt cache
+may be missed." notices and the two image-hiding notices) are gone from them.
 
 ## Evidence
 
 - `npm run compile`, `npm run check:webview` (the checker asserts the button's
   show rules, the labels, that clicking posts `continueTurn` (and `rolloverTurn`
-  for the context-full variant), that the flag arriving by `nodeUpdate` switches
+  for the context-full variant), that the state arriving by `nodeUpdate` switches
   the variant, and that a harness-authored message is badged).
 - `npm run check:rollover` — the pure-function guard for the window-starting flag,
   the prefix cut and the provider error-text parse (what it proves is listed in

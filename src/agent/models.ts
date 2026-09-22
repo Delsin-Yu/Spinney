@@ -870,3 +870,87 @@ export function parseContextLengthError(text: string): { window?: number; reques
   const window = windowOnly ? tokenCount(windowOnly[1]) : tokenCount(LOOSE_WINDOW.exec(body)?.[1]);
   return { window, requested: tokenCount(REQUESTED_SIZE.exec(body)?.[1]) };
 }
+
+// --- content hashes: "did this configuration change?" --------------------------
+//
+// The pure leaves of the freeze/compare paths (a prompt frozen per session or epoch
+// has to decide whether the configuration it captured still matches the one in
+// force). Two required properties, and they are the whole design:
+//
+//   - **Content hashes, never version numbers.** The digest is a fold over the text
+//     itself, so a build that changes no prompt / tool / AGENTS.md content must not
+//     look like a change, and one that changes any of them must look like one —
+//     without anybody remembering to bump a number.
+//   - **Stable across processes, platforms and runs** of the same build: no
+//     `crypto` (this module is `require`d by the dev scripts in plain node), no
+//     randomness, no timestamps, no path or iteration-order dependence — the same
+//     bytes always fold to the same 16 lowercase hex characters.
+//
+// It is a *change detector*, not a security primitive or a proof of equality: two
+// different texts can in principle collide, and 64 bits of digest make that far
+// less likely than the edit it is asked to notice.
+//
+// The two lanes are the pair `src/chat/persistDigest.ts` uses for the same job
+// (FNV-1a as lane A, a second mixer in lane B so a collision in one alone cannot
+// hide a change). They are not imported from there on purpose: that module is the
+// store's *numeric* fold (it deliberately stops probing a long string after 32
+// characters), while these two fold the **whole** text, byte for byte.
+
+/** The FNV-1a offset basis, which seeds both lanes. */
+const HASH_SEED = 2166136261;
+
+/** Lane A: FNV-1a over the folded units. */
+function hashLaneA(hash: number, code: number): number {
+  return Math.imul(hash ^ code, 16777619) >>> 0;
+}
+
+/** Lane B: a different mixer, so a collision in lane A alone cannot hide a change. */
+function hashLaneB(hash: number, code: number): number {
+  return Math.imul((hash + code) | 0, 2246822519) >>> 0;
+}
+
+/** One 32-bit lane as fixed-width hex, so the two lanes never run together. */
+function hashWord(value: number): string {
+  return (value >>> 0).toString(16).padStart(8, '0');
+}
+
+/** Fold one length (a string's, or a part count) into both lanes. */
+function foldLength(a: number, b: number, length: number): [number, number] {
+  return [hashLaneA(a, length), hashLaneB(b, length)];
+}
+
+/**
+ * The content hash of several strings as **one** value, joined unambiguously: the
+ * part count is folded first and then each part's own length before its characters,
+ * so `["ab", "c"]` and `["a", "bc"]` — and `[]` and `[""]` — hash differently. A
+ * plain concatenation would not distinguish them, which is exactly the bug a
+ * configuration comparison must not have.
+ *
+ * The parts are folded in the order given: this compares two configurations of the
+ * same shape, so it is the caller's fixed order that makes the digest comparable, not
+ * a sort inside here.
+ */
+export function hashParts(parts: readonly string[]): string {
+  const list = parts ?? [];
+  let [a, b] = foldLength(HASH_SEED, HASH_SEED, list.length);
+  for (const part of list) {
+    const text = part ?? '';
+    [a, b] = foldLength(a, b, text.length);
+    for (let i = 0; i < text.length; i++) {
+      const code = text.charCodeAt(i);
+      a = hashLaneA(a, code);
+      b = hashLaneB(b, code);
+    }
+  }
+  return hashWord(a) + hashWord(b);
+}
+
+/**
+ * The content hash of a single string (16 lowercase hex characters) — `hashParts`
+ * with one part, so `contentHash(t)` and `hashParts([t])` agree and a caller never
+ * has to remember which shape it stored. Cheap: one pass over the text, fine for the
+ * few hundred KB a configuration blob can reach.
+ */
+export function contentHash(text: string): string {
+  return hashParts([text ?? '']);
+}

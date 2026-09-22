@@ -18,6 +18,12 @@
 //       docks (each job has to end up in the card of the node that owns it) and the
 //       three zones of a turn card, whose third zone is a *move* of the work log's
 //       tail and never a copy (see the bottom of this file).
+// The session-epoch shapes are checked the same way, each in its own block: the
+// forest (`rootIds` — the roots side by side, every one of them a live checkout
+// target, the composer on the checked-out node's tree), the host's context state
+// (`context` / `contextPct` — the ▶ / ↻ / ⧉ variants, with `near` as the *suggestion*),
+// the composer's two identities + the harness-drift fork hint (`setup`), and the rule
+// that only `composerClear` empties the input (neither Send nor Enter may).
 //
 // The DOM stub resolves a plain `.class` selector against the element's own
 // subtree, so "which card holds this dock" is answerable per card — and it gives a
@@ -64,6 +70,10 @@ const TURN_MESSAGES = [
     viewId: NODE_ID,
     activeId: null,
     rootId: NODE_ID,
+    // A session is a forest (§3): `rootIds` is the list of tree roots and `rootId`
+    // stays its first entry. The forest layout itself is checked in its own block
+    // further down.
+    rootIds: [NODE_ID],
     nodes: [
       {
         id: NODE_ID,
@@ -75,6 +85,8 @@ const TURN_MESSAGES = [
         preview: 'smoke',
         usage: null,
         size: null,
+        // The context state is the host's judgement (never derived here, §4.3).
+        context: 'ok',
       },
     ],
   },
@@ -117,6 +129,15 @@ const TURN_MESSAGES = [
     // answer is showing. Pinned explicitly so every `{ ...config }` fixture below says
     // what it means — see the work-log fold block at the bottom of this file.
     foldWork: true,
+    // The checked-out node's frozen setup versus the live one (§4.2). No drift here:
+    // a fresh session sends with exactly what a new node would freeze. The drifted
+    // shapes are exercised in the composer-identities block further down.
+    setup: {
+      node: { cardId: 'card-text', cardLabel: 'smoke-model', effort: 'medium', language: 'English' },
+      live: { cardId: 'card-text', cardLabel: 'smoke-model', effort: 'medium', language: 'English' },
+      drift: false,
+      reasons: [],
+    },
   },
   { type: 'context', used: 524288, total: 1048576, model: 'smoke-model' },
   { type: 'sessionStats', stats: { totalTokens: 3, cacheHit: 0, cacheMiss: 3, cacheHitRate: 0, cacheKnown: true } },
@@ -165,11 +186,14 @@ const TURN_MESSAGES = [
   { type: 'usage', nodeId: NODE_ID, usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 } },
   { type: 'agentStart', id: 'smoke-agent', name: 'smoke agent', instruction: 'smoke', model: 'smoke-model', startedAt: Date.now() - 1500 },
   { type: 'agentDone', id: 'smoke-agent', status: 'done', summary: 'smoke summary', elapsedMs: 1500 },
-  { type: 'nodeUpdate', id: NODE_ID, status: 'done', title: 'smoke', usage: null },
+  { type: 'nodeUpdate', id: NODE_ID, status: 'done', title: 'smoke', usage: null, context: 'ok' },
   { type: 'panTo', id: NODE_ID },
   // An in-place continue writes an inline harness block into that node's own
   // transcript (see the ▶ section below).
   { type: 'harnessNote', nodeId: NODE_ID, text: 'Continue from where you stopped.' },
+  // The host took the message: this is the *only* message that empties the composer
+  // (§4.4 — `send()` never does, so a modal answered with No cannot eat the text).
+  { type: 'composerClear' },
   // End-of-run messages carry the node that finished, so the webview finalizes
   // *that* card and only releases the scroll lock when it is the focused one.
   { type: 'done', nodeId: NODE_ID },
@@ -866,6 +890,49 @@ if (contextLabel !== 'ctx 50%') {
   expectComposer('once nothing is running', []);
 }
 
+// A window that does not own this workspace's sessions is read-only: the host refuses
+// every turn there, so the composer says so instead of letting a send fail. The flag
+// arrives with `state` (one owner window per workspace), and `send()` checks it again so
+// a click never depends on a repaint having happened.
+{
+  const input = elementById('input');
+  const send = elementById('send-btn');
+  const stop = elementById('stop-btn');
+  const hidden = (element) => element.classList.contains('hidden');
+  const state = (readOnly) =>
+    dispatch({ type: 'state', busy: false, status: '', sessionId: 'smoke-session', runningNodes: [], lockedNodes: [], readOnly });
+
+  state(true);
+  if (hidden(send) || !hidden(stop)) {
+    problems.push('a read-only window hides Send and shows Stop (it must offer neither a stop nor a silent send)');
+  }
+  if (!send.disabled) {
+    problems.push('a read-only window leaves the Send button enabled');
+  }
+  if (!/read-only/.test(String(send.title || ''))) {
+    problems.push(`the read-only Send button carries no reason: ${JSON.stringify(send.title)}`);
+  }
+  // A click must not send anything, even if the flag arrives between a repaint and the click.
+  const before = posted.length;
+  input.value = 'this must not reach the host';
+  if (typeof send._listeners?.click === 'function') {
+    send._listeners.click({ preventDefault() {}, stopPropagation() {} });
+  }
+  if (posted.length !== before) {
+    problems.push('a read-only window sent a message anyway');
+  }
+  input.value = '';
+
+  // The flag clears when the state says so: the same window may own the sessions later.
+  state(false);
+  if (send.disabled) {
+    problems.push('the Send button stayed disabled after the read-only flag cleared');
+  }
+  if (hidden(send)) {
+    problems.push('Send stayed hidden after the read-only flag cleared');
+  }
+}
+
 // A node that is *not* streaming but still owns unfinished work (a running
 // background terminal / async sub-agent batch, or a completion notice about to be
 // injected into it) is "doing something", so the composer offers **Stop** there too —
@@ -902,6 +969,282 @@ if (contextLabel !== 'ctx 50%') {
   }
   if (input.disabled || attach.disabled) {
     problems.push('the composer stays disabled after the node reported no unfinished work');
+  }
+}
+
+// --- The composer's two identities, the Send gate and `composerClear` (§4.2/§4.4)
+// A setup change never rewrites already-sent bytes: the composer shows *both*
+// identities — what this send uses (the checked-out node's frozen setup) and what a
+// new node would freeze — and drift only decides how Send behaves. Three things are
+// checked here that a plain replay cannot show:
+//   (a) an absent `setup` (an old replay shape) hints nothing and never disables Send;
+//   (b) `drift: 'user'` draws the two lines, marks Send with `drift` and leaves it
+//       *enabled* (the host asks with a modal, the button is not the gate), while
+//       `drift: 'harness'` leaves the button alone and shows the extra fork hint;
+//   (c) the composer empties only on `composerClear` — neither the Send button nor
+//       Enter clears it, so a modal answered with No cannot eat the user's text.
+{
+  const R = 'setup-root';
+  const treeNode = { id: R, parentId: null, children: [], title: R, status: 'done', createdAt: 0, preview: R, usage: null, size: null };
+  dispatch({ type: 'reset' });
+  dispatch({ type: 'tree', viewId: R, activeId: null, rootId: R, rootIds: [R], nodes: [treeNode] });
+  dispatch({ type: 'path', ids: [R], nodes: [{ id: R, status: 'done', items: [] }] });
+
+  const base = { ...TURN_MESSAGES.find((m) => m.type === 'config'), model: 'card-text', thinkingEffort: 'medium' };
+  const input = elementById('input');
+  const sendBtn = elementById('send-btn');
+  const controls = elementById('composer-controls');
+  const composer = elementById('composer');
+  const ident = () => findByClass(composer, 'composer-ident');
+  const hintBtn = () => findByClass(controls, 'new-setup-btn');
+  const lineText = (name) => {
+    const box = ident();
+    const line = box ? findByClass(box, name) : null;
+    return String((line || {}).textContent || '');
+  };
+  const hidden = (element) => !!element && element.classList.contains('hidden');
+
+  const nodeIdent = { cardId: 'card-text', cardLabel: 'smoke-model', effort: 'medium', language: 'English' };
+  const liveIdent = { cardId: 'card-vision', cardLabel: 'smoke-vision-model', effort: 'low', language: 'Chinese' };
+
+  // (a) No `setup` at all: the shape a host that predates the epochs still sends.
+  dispatch({ ...base, setup: undefined });
+  if (!hidden(ident()) && ident()) {
+    problems.push('a config without `setup` still shows the two identities');
+  }
+  if (sendBtn.classList.contains('drift')) {
+    problems.push('a config without `setup` leaves the Send button marked as drifted');
+  }
+  if (sendBtn.disabled) {
+    problems.push('a config without `setup` disables Send');
+  }
+
+  // (b1) The user changed the model / effort: both identities, in two lines.
+  dispatch({ ...base, setup: { node: nodeIdent, live: liveIdent, drift: 'user', reasons: ['card'] } });
+  const box = ident();
+  if (!box || hidden(box)) {
+    problems.push('a `setup` with drift "user" shows no two-line identity block in the composer');
+  } else {
+    const wantSending = 'Sending with: smoke-model · medium · English';
+    const wantLive = 'New setup: smoke-vision-model · low · Chinese';
+    if (lineText('composer-ident-sending') !== wantSending) {
+      problems.push(
+        `the "Sending with" line reads ${JSON.stringify(lineText('composer-ident-sending'))}, expected ${JSON.stringify(wantSending)}`,
+      );
+    }
+    if (lineText('composer-ident-live') !== wantLive) {
+      problems.push(
+        `the "New setup" line reads ${JSON.stringify(lineText('composer-ident-live'))}, expected ${JSON.stringify(wantLive)}`,
+      );
+    }
+  }
+  if (!sendBtn.classList.contains('drift')) {
+    problems.push('the Send button carries no `drift` class after the user changed the setup');
+  }
+  if (sendBtn.disabled) {
+    problems.push('the drifted Send button is disabled — it must stay usable (the host asks with a modal, §4.2)');
+  }
+  if (!sendBtn.title) {
+    problems.push('the drifted Send button has no tooltip saying that it will ask first');
+  }
+
+  // The click still posts the same `userMessage` the Enter key does — and the box
+  // keeps its text until the host says it took the message.
+  input.value = 'drifted send';
+  posted.length = 0;
+  const sendClick = sendBtn._listeners && sendBtn._listeners.click;
+  if (typeof sendClick !== 'function') {
+    problems.push('the Send button has no click handler');
+  } else {
+    sendClick();
+    const sentByButton = posted.find((m) => m && m.type === 'userMessage');
+    if (!sentByButton || sentByButton.text !== 'drifted send') {
+      problems.push(`clicking Send while drifted posted ${JSON.stringify(posted)}, expected a \`userMessage\``);
+    }
+    if (String(input.value) !== 'drifted send') {
+      problems.push(`Send cleared the input itself (${JSON.stringify(input.value)}) — only \`composerClear\` may`);
+    }
+  }
+
+  input.value = 'typed with enter';
+  posted.length = 0;
+  const enterKey = input._listeners && input._listeners.keydown;
+  if (typeof enterKey !== 'function') {
+    problems.push('the composer input has no keydown handler (Enter could not send at all)');
+  } else {
+    enterKey({ key: 'Enter', shiftKey: false, preventDefault() {} });
+    const sentByEnter = posted.find((m) => m && m.type === 'userMessage');
+    if (!sentByEnter || sentByEnter.text !== 'typed with enter') {
+      problems.push(`Enter posted ${JSON.stringify(posted)}, expected the same \`userMessage\` the button posts`);
+    }
+    if (String(input.value) !== 'typed with enter') {
+      problems.push('Enter cleared the input itself — only the host may, with `composerClear`');
+    }
+  }
+
+  // `composerClear` is the one message that empties it.
+  dispatch({ type: 'composerClear' });
+  if (String(input.value) !== '') {
+    problems.push(`\`composerClear\` left ${JSON.stringify(input.value)} in the input`);
+  }
+
+  // (b2) The harness drifted instead: no mark on Send, and the extra fork hint.
+  dispatch({ ...base, setup: { node: nodeIdent, live: liveIdent, drift: 'harness', reasons: ['template'] } });
+  if (!hidden(ident()) && ident()) {
+    problems.push('a harness drift shows the user-drift identity block (only `drift: "user"` may)');
+  }
+  if (sendBtn.classList.contains('drift')) {
+    problems.push('a harness drift marks the Send button (the user did not change anything)');
+  }
+  if (sendBtn.title) {
+    problems.push(`a harness drift leaves the drifted tooltip on Send (${JSON.stringify(sendBtn.title)})`);
+  }
+  const hint = hintBtn();
+  if (!hint) {
+    problems.push('a harness drift shows no `#new-setup-btn` hint beside the snippets button');
+  } else {
+    if (hidden(hint)) {
+      problems.push('the harness-drift hint button is hidden although the harness drifted');
+    }
+    if (!hint.title) {
+      problems.push('the harness-drift hint button carries no tooltip explaining what its click does');
+    }
+    input.value = 'fork this';
+    posted.length = 0;
+    const hintClick = hint._listeners && hint._listeners.click;
+    if (typeof hintClick !== 'function') {
+      problems.push('the harness-drift hint button has no click handler');
+    } else {
+      hintClick({ stopPropagation() {} });
+      const forked = posted.find((m) => m && m.type === 'forkTurn');
+      if (!forked) {
+        problems.push(`the harness-drift hint posted ${JSON.stringify(posted)}, expected \`{ type: 'forkTurn' }\``);
+      } else {
+        if (forked.text !== 'fork this') {
+          problems.push(`the hint button forked with ${JSON.stringify(forked.text)}, expected the composer's text`);
+        }
+        if (!Array.isArray(forked.attachments)) {
+          problems.push('the `forkTurn` message carries no attachments array');
+        }
+      }
+      if (String(input.value) !== 'fork this') {
+        problems.push('posting `forkTurn` cleared the input (the host clears it with `composerClear`)');
+      }
+    }
+  }
+
+  // Back to no drift: both affordances go away again (the hint is hidden, so it
+  // cannot fork a tree for no reason).
+  dispatch(base);
+  if (!hidden(ident()) && ident()) {
+    problems.push('the identity block stays visible after the setup stopped drifting');
+  }
+  if (hintBtn() && !hidden(hintBtn())) {
+    problems.push('the harness-drift hint stays visible after the drift went away');
+  }
+  notes.push('composer identities: user drift (two lines, Send still enabled) + harness drift (fork hint)');
+}
+
+// --- The forest: several roots side by side (§3) -------------------------------
+// A session is a forest of trees. Every root is laid out by the engine on its own and
+// the trees are placed left to right with a visible gap, so two trees read as two
+// parallel conversations; pan / zoom / fit span all of them, the composer stays on the
+// checked-out node's tree — and a card of the *other* tree is still a live checkout
+// target.
+{
+  const R1 = 'forest-root-1', A1 = 'forest-node-1a', B1 = 'forest-node-1b';
+  const R2 = 'forest-root-2', A2 = 'forest-node-2a';
+  const treeNode = (id, parentId, children) => ({
+    id, parentId, children, title: id, status: 'done', createdAt: 0, preview: id, usage: null, size: null,
+  });
+  dispatch({ type: 'reset' });
+  dispatch({
+    type: 'tree',
+    // The view focuses a node of the *second* tree: the layout order must follow
+    // `rootIds`, not the focus.
+    viewId: A2,
+    activeId: null,
+    // `rootId` is `rootIds[0]`, exactly as the host sends the pair.
+    rootId: R1,
+    rootIds: [R1, R2],
+    nodes: [
+      treeNode(R1, null, [A1]),
+      treeNode(A1, R1, [B1]),
+      treeNode(B1, A1, []),
+      treeNode(R2, null, [A2]),
+      treeNode(A2, R2, []),
+    ],
+  });
+  dispatch({
+    type: 'path',
+    ids: [R2, A2],
+    nodes: [{ id: R2, status: 'done', items: [] }, { id: A2, status: 'done', items: [] }],
+  });
+
+  const canvas = elementById('tree-canvas');
+  const card = (id) => canvas.children.find((child) => child.dataset && child.dataset.id === id) || null;
+  let missing = false;
+  for (const id of [R1, A1, B1, R2, A2]) {
+    if (!card(id)) {
+      missing = true;
+      problems.push(`no card was rendered for forest node ${id}`);
+    }
+  }
+  if (!missing) {
+    // The stub reports no card geometry, so the webview laid every card out at its
+    // default width (`NODE_W`, 320px) — enough to ask where each tree sits.
+    const left = (id) => parseFloat(card(id).style.left);
+    const treeOneRight = Math.max(left(R1), left(A1), left(B1)) + 320;
+    const treeTwoLeft = Math.min(left(R2), left(A2));
+    if (!(treeTwoLeft - treeOneRight >= 64)) {
+      problems.push(
+        `the second root starts ${Math.round(treeTwoLeft - treeOneRight)}px right of the first tree, ` +
+          'expected the visible gap a forest lays out between two trees',
+      );
+    }
+    // Both roots start on the same line: they are parallel conversations, not a
+    // vertical stack.
+    if (Math.abs(parseFloat(card(R1).style.top) - parseFloat(card(R2).style.top)) > 1) {
+      problems.push('the two roots are not laid out on the same top line (a forest is side by side, not stacked)');
+    }
+    // The composer is docked on the checked-out node's tree (tree 2), never on the
+    // other root.
+    if (elementById('composer').parentElement !== card(A2)) {
+      problems.push('the composer is not docked on the checked-out node of the focused tree in a forest');
+    }
+    // …and the *unfocused* tree is still interactive: a click on its card checks it out.
+    const head = { closest: (sel) => (sel === '.node' ? card(B1) : null) };
+    const target = { closest: (sel) => (sel === '.node-head' ? head : null) };
+    const canvasClick = canvas._listeners && canvas._listeners.click;
+    if (typeof canvasClick !== 'function') {
+      problems.push('the tree canvas has no click handler — no card could be checked out at all');
+    } else {
+      posted.length = 0;
+      canvasClick({ target });
+      const checkout = posted.find((m) => m && m.type === 'checkout');
+      if (!checkout || checkout.id !== B1) {
+        problems.push(
+          `clicking a card of the unfocused tree posted ${JSON.stringify(posted)}, expected { type: 'checkout', id: '${B1}' }`,
+        );
+      }
+    }
+    // Fit spans the whole forest: the canvas covers both trees.
+    const fit = elementById('fit-btn');
+    if (typeof fit._listeners?.click !== 'function') {
+      problems.push('the fit button has no click handler');
+    } else {
+      fit._listeners.click();
+      if (!(parseFloat(canvas.style.width) > treeTwoLeft)) {
+        problems.push('`fit` sees a canvas that does not reach the second tree — the forest is not laid out as a whole');
+      }
+    }
+    // Follow still moves the camera to the checked-out node of the focused tree.
+    const followBtn = elementById('follow-btn');
+    if (typeof followBtn._listeners?.click === 'function') {
+      followBtn._listeners.click();
+      followBtn._listeners.click();
+    }
+    notes.push('forest: two roots side by side, both interactive, composer on the focused tree');
   }
 }
 
@@ -1378,7 +1721,7 @@ if (contextLabel !== 'ctx 50%') {
 // harness to run a turn from that node with a message the harness writes itself,
 // so the user never has to type "continue". It may only appear where continuing
 // makes sense, and it must post the node it belongs to. One failure is special: a
-// provider context-length error (the host ships `contextFull`, contract §3/§4) is
+// provider context-length error (the host ships `context: 'full'`, contract §3/§4) is
 // not retryable, so the button is *replaced* by the rollover variant, which posts
 // `rolloverTurn`. The same fixture carries a window-starting node, whose card wears
 // the `CTX` badge and whose own connector — not its descendants' — is dashed.
@@ -1389,7 +1732,11 @@ if (contextLabel !== 'ctx 50%') {
   const C = 'cont-node-c';       // interrupted, but already continued → no button
   const D = 'cont-node-d';       // the continuation of C (done)
   const F = 'cont-node-f';       // failed on a full context window → ⧉ rollover
-  const G = 'cont-node-g';       // interrupted *and* contextFull → still ▶ Continue
+  const G = 'cont-node-g';       // interrupted *and* context 'full' → still ▶ Continue
+  const NEAR = 'cont-node-near'; // interrupted at 93% → the ⧉ *suggestion* (node-near)
+  const DONE_NEAR = 'cont-node-done-near'; // *finished* at 91% → the suggestion too
+  const DONE_OK = 'cont-node-done-ok';     // finished with room left → no button at all
+  const DONE_FULL = 'cont-node-done-full'; // finished, state 'full' → still nothing (full needs an error)
   const SUB = 'cont-node-sub';   // `kind:'agent'` sidecar, interrupted → no button
   const WIN = 'cont-node-win';   // starts a context window → CTX badge + dashed edge
   const WIN2 = 'cont-node-win2'; // a descendant of WIN → neither of the two
@@ -1414,17 +1761,29 @@ if (contextLabel !== 'ctx 50%') {
     viewId: B,
     activeId: null,
     rootId: R,
+    rootIds: [R],
     nodes: [
-      node(R, null, [A, B, C, F, G, SUB, WIN], 'done'),
+      node(R, null, [A, B, C, F, G, NEAR, DONE_NEAR, DONE_OK, DONE_FULL, SUB, WIN], 'done'),
       node(A, R, [], aStatus),
       node(B, R, [], 'error'),
       node(C, R, [D], 'interrupted'),
       node(D, C, [], 'done'),
-      // `contextFull` arrives on every node (the host computes it once, §3): only a
-      // turn that died on the provider's context-length error carries `true`.
-      node(F, R, [], 'error', undefined, { contextFull: true }),
-      // The flag alone must not roll anything over — `interrupted` keeps ▶ Continue.
-      node(G, R, [], 'interrupted', undefined, { contextFull: true }),
+      // `context` arrives on every node (the host computes it once, §4.3): only a
+      // turn that died on the provider's context-length error carries `full`.
+      node(F, R, [], 'error', undefined, { context: 'full' }),
+      // The state alone must not roll anything over — `interrupted` keeps ▶ Continue.
+      node(G, R, [], 'interrupted', undefined, { context: 'full' }),
+      // At (or above) 90% the same ⧉ entry is offered as a *suggestion*: the label
+      // is the rollover one, the class and the percentage-carrying tooltip are not.
+      node(NEAR, R, [], 'interrupted', undefined, { context: 'near', contextPct: 93 }),
+      // The suggestion does not depend on the status: a *finished* tip above 90% is
+      // exactly the case it is for (the next send would hit the wall), so it shows
+      // there too — while a finished tip with room left stays empty-handed.
+      node(DONE_NEAR, R, [], 'done', undefined, { context: 'near', contextPct: 91 }),
+      node(DONE_OK, R, [], 'done', undefined, { context: 'ok' }),
+      // `full` is a *failure* mode (the provider refused the request), so it keeps
+      // the error gate: the state alone, on a finished tip, is not an entry.
+      node(DONE_FULL, R, [], 'done', undefined, { context: 'full' }),
       node(SUB, R, [], 'interrupted', 'agent'),
       // A window-starting node carries `contextBaseId` (equal to its own id, §2):
       // only *it* may be badged / joined by the dashed edge, its child may not.
@@ -1525,11 +1884,14 @@ if (contextLabel !== 'ctx 50%') {
   const rollover = buttonOf(F);
   if (!rollover || rollover.textContent !== '⧉ Continue in a new window') {
     problems.push(
-      'a node whose turn died on a full context window (error + contextFull) shows no `⧉ Continue in a new window` button',
+      'a node whose turn died on a full context window (error + context "full") shows no `⧉ Continue in a new window` button',
     );
   } else {
     if (!hasClass(rollover, 'node-rollover')) {
       problems.push('the rollover button does not carry the `node-rollover` class the styling and the guard read');
+    }
+    if (hasClass(rollover, 'node-near')) {
+      problems.push('a *full* window is marked as the `near` suggestion — only the 90% entry carries `node-near`');
     }
     if (rollover.dataset.action !== 'rollover') {
       problems.push(
@@ -1564,40 +1926,148 @@ if (contextLabel !== 'ctx 50%') {
     }
   }
 
+  // --- the `near` suggestion (contract §3) --------------------------------------
+  // A window at (or above) 90% gets the same `⧉` entry, but as a *suggestion*: the
+  // `node-near` class softens it and the tooltip carries the percentage the host
+  // sent as `contextPct`. Nothing is forced — this node can still be continued in
+  // place, it is the user who decides.
+  const NEAR_TOOLTIP = 'Context is 93% full - continue in a new window';
+  const near = buttonOf(NEAR);
+  if (!near || near.textContent !== '⧉ Continue in a new window') {
+    problems.push(
+      'a node whose window is 93% full shows no `⧉ Continue in a new window` suggestion (context: "near")',
+    );
+  } else {
+    if (!hasClass(near, 'node-near')) {
+      problems.push('the near-full suggestion does not carry the `node-near` class');
+    }
+    if (near.dataset.action !== 'rollover') {
+      problems.push(
+        `the near-full suggestion carries data-action=${JSON.stringify(near.dataset.action)}, expected 'rollover'`,
+      );
+    }
+    if (near.title !== NEAR_TOOLTIP) {
+      problems.push(
+        `the near-full suggestion's tooltip is ${JSON.stringify(near.title)}, expected ${JSON.stringify(NEAR_TOOLTIP)} ` +
+          '(the host sends the percentage as `contextPct` and the title carries it)',
+      );
+    }
+    const nearClick = near._listeners && near._listeners.click;
+    if (typeof nearClick !== 'function') {
+      problems.push('the near-full suggestion has no click handler');
+    } else {
+      posted.length = 0;
+      nearClick({ stopPropagation() {} });
+      const sent = posted.find((message) => message && message.type === 'rolloverTurn');
+      if (!sent || sent.id !== NEAR) {
+        problems.push(
+          `clicking the suggestion posted ${JSON.stringify(posted)}, expected { type: 'rolloverTurn', id: '${NEAR}' }`,
+        );
+      }
+    }
+  }
+  // The suggestion is the *only* thing the `near` state adds: a plain interrupted
+  // tip keeps ▶ Continue, and `near` on a descendant-free tip never becomes Retry.
+  if (!buttonOf(A) || buttonOf(A).textContent !== '▶ Continue') {
+    problems.push('a node with an `ok` window no longer shows ▶ Continue while a sibling is `near`');
+  }
+
+  // --- the `near` suggestion on a *finished* tip -------------------------------
+  // The entry is a suggestion about the *next* send, so it must not depend on the
+  // status: the common case is a long conversation that just answered (>= 90%), where
+  // the next message would hit the wall. A finished tip with room left stays empty,
+  // and a finished tip whose window is `full` is not an entry either — a provider
+  // refusal is an error, and that gate stays where it is.
+  const doneNear = buttonOf(DONE_NEAR);
+  if (!doneNear || doneNear.textContent !== '⧉ Continue in a new window') {
+    problems.push(
+      'a *finished* node at 91% shows no `⧉ Continue in a new window` suggestion ' +
+        '(the 90% entry must not depend on the status: a done tip is the common case)',
+    );
+  } else {
+    if (!hasClass(doneNear, 'node-near')) {
+      problems.push('the finished node\'s near-full suggestion does not carry the `node-near` class');
+    }
+    if (doneNear.dataset.action !== 'rollover') {
+      problems.push(
+        `the finished node's suggestion carries data-action=${JSON.stringify(doneNear.dataset.action)}, expected 'rollover'`,
+      );
+    }
+    if (doneNear.title !== 'Context is 91% full - continue in a new window') {
+      problems.push(
+        `the finished node's suggestion tooltip is ${JSON.stringify(doneNear.title)}, expected its own percentage`,
+      );
+    }
+  }
+  if (buttonOf(DONE_OK)) {
+    problems.push('a finished node whose window has room left shows a Continue button (there is nothing to continue)');
+  }
+  if (buttonOf(DONE_FULL)) {
+    problems.push(
+      'a finished node carrying context "full" shows the ⧉ entry — `full` is a provider *refusal* (an error), ' +
+        'so it keeps its error gate',
+    );
+  }
+  notes.push('context states: full (hard ⧉), near (suggestion, interrupted and done), ok (▶ / ↻, done = none)');
+
   // The judgement is made by the host and can arrive *after* the tree was drawn
   // (that is exactly how a turn dies on a context-length error), so a `nodeUpdate`
-  // has to carry the flag and re-sync the button on the card it already shows.
-  dispatch({ type: 'nodeUpdate', id: B, status: 'error', title: B, contextFull: true });
+  // has to carry the state and re-sync the button on the card it already shows.
+  dispatch({ type: 'nodeUpdate', id: B, status: 'error', title: B, context: 'full' });
   const switched = buttonOf(B);
   if (
     !switched ||
     switched.textContent !== '⧉ Continue in a new window' ||
     !hasClass(switched, 'node-rollover') ||
+    hasClass(switched, 'node-near') ||
     switched.dataset.action !== 'rollover'
   ) {
-    problems.push('a `nodeUpdate` carrying contextFull: true did not switch a ↻ Retry card to the rollover button');
+    problems.push('a `nodeUpdate` carrying context: "full" did not switch a ↻ Retry card to the rollover button');
   } else {
     posted.length = 0;
     if (typeof switched._listeners?.click === 'function') switched._listeners.click({ stopPropagation() {} });
     const sent = posted.find((message) => message && message.type === 'rolloverTurn');
     if (!sent || sent.id !== B) {
       problems.push(
-        `after the flag arrived by \`nodeUpdate\`, clicking posted ${JSON.stringify(posted)}, expected { type: 'rolloverTurn', id: '${B}' }`,
+        `after the state arrived by \`nodeUpdate\`, clicking posted ${JSON.stringify(posted)}, expected { type: 'rolloverTurn', id: '${B}' }`,
       );
     }
   }
-  // And the flag is not sticky: a later patch that clears it goes back to Retry.
-  dispatch({ type: 'nodeUpdate', id: B, status: 'error', title: B, contextFull: false });
+  // A patch that only *suggests* (90%+) switches to the soft variant, tooltip and
+  // all — the percentage has to travel with the patch, or the title would lie.
+  dispatch({ type: 'nodeUpdate', id: B, status: 'error', title: B, context: 'near', contextPct: 95 });
+  const suggested = buttonOf(B);
+  if (
+    !suggested ||
+    suggested.textContent !== '⧉ Continue in a new window' ||
+    !hasClass(suggested, 'node-near') ||
+    suggested.dataset.action !== 'rollover' ||
+    suggested.title !== 'Context is 95% full - continue in a new window'
+  ) {
+    problems.push(
+      `a \`nodeUpdate\` carrying context: "near" and contextPct: 95 produced ` +
+        `${JSON.stringify(suggested && { text: suggested.textContent, title: suggested.title })}`,
+    );
+  }
+  // And the state is not sticky: a later patch that clears it goes back to Retry.
+  dispatch({ type: 'nodeUpdate', id: B, status: 'error', title: B, context: 'ok' });
   const back = buttonOf(B);
-  if (!back || back.textContent !== '↻ Retry' || hasClass(back, 'node-rollover') || back.dataset.action !== 'retry') {
-    problems.push('a `nodeUpdate` with contextFull: false did not switch the card back to ↻ Retry');
+  if (
+    !back ||
+    back.textContent !== '↻ Retry' ||
+    hasClass(back, 'node-rollover') ||
+    hasClass(back, 'node-near') ||
+    back.dataset.action !== 'retry'
+  ) {
+    problems.push('a `nodeUpdate` with context: "ok" did not switch the card back to ↻ Retry');
   }
 
   // A full window is only a *failure* mode: an interrupted node keeps ▶ Continue
-  // even when the host's flag is set (there is no refused request to roll over).
+  // even when the host's state says the window is full (there is no refused request
+  // to roll over — the 90% suggestion is the one that follows the state alone).
   const interruptedFlagged = buttonOf(G);
   if (!interruptedFlagged || interruptedFlagged.textContent !== '▶ Continue') {
-    problems.push('an interrupted node carrying contextFull: true no longer shows ▶ Continue (only a failed turn rolls over)');
+    problems.push('an interrupted node carrying context: "full" no longer shows ▶ Continue (only a failed turn rolls over)');
   }
 
   // --- the CTX badge and the dashed edge (contract §5) --------------------------

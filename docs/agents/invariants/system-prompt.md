@@ -6,7 +6,11 @@
   written literally, top to bottom, so the file reads as the prompt itself; runtime
   values are `{{placeholder}}` holes. `agent.ts` contains no prompt text — its
   `Agent.systemPrompt` / `Agent.subAgentSystemPrompt` / `Agent.setAgentsMd` are
-  thin wrappers kept for their callers.
+  thin wrappers kept for their callers. `Agent.setAgentsMd` is the render
+  **fallback** snapshot, not the only source: `prompt.currentAgentsMd()` exposes
+  that snapshot's *content*, which is what a caller hashes when it freezes a
+  prompt (`Epoch.agentsMdHash`) without rendering anything
+  (`src/agent/prompt.ts`, `setAgentsMd` / `currentAgentsMd`).
   The one other shipped, model-facing instruction text is
   `SHIPPED_PROMPT_SNIPPETS` in `src/chat/promptSnippets.ts` (the `Plan` /
   `Implement Parallel` snippets). It is **user-turn** text: the composer inserts it
@@ -23,7 +27,12 @@
   `spinney.replyLanguage` by `replyLanguageName` (`auto` → the VS Code display
   language, a tag → its CLDR name), with `DEFAULT_REPLY_LANGUAGE` ('English') as
   the floor when nothing resolves) and
-  `{{agentsMd}}` (the session's snapshot). The
+  `{{agentsMd}}` (the AGENTS.md snapshot in force — the module-global one
+  `setAgentsMd` fixed at activation; `prompt.systemPrompt` takes an optional
+  `agentsMd` argument so a caller *could* pass its own snapshot, but the shipped
+  freeze path passes none, so one snapshot per window is what every epoch renders
+  and hashes. Per-session snapshots are listed in `plans/session-epoch.md` §4.2 and
+  are **not** implemented). The
   sub-agent template adds `{{depth}}`, `{{permissions}}`
   and `{{fanOut}}`; it stays lean — identity + environment + its dispatch line and
   two behaviour lines — and never repeats the main template.
@@ -40,7 +49,12 @@
 - **No tool list in the prompt.** Every tool's schema is sent in the API request's
   `tools` field (`Agent.getTools()` → `src/agent/apiClient.ts` `body.tools`), so
   repeating signatures in the prompt would only be a second copy to drift. There is
-  deliberately no "tool index" placeholder — do not add one.
+  deliberately no "tool index" placeholder — do not add one. The schema set is part
+  of the frozen envelope all the same: the node that starts an epoch records the
+  schemas it advertised (`Epoch.tools`), every descendant pins them
+  (`Agent.setToolSchemas` in `beginTurn`), and a chain whose tool implementation is
+  gone answers the call as an ordinary tool error instead of gaining or losing a
+  schema inside a prefix it has already sent.
 - **Capabilities are one judgement, used twice.** Each intercepted tool declares a
   `requires` tag (`vision` / `spawn` / `spawnReadOnly` / `hop`) in
   `src/agent/tools/*`; `interceptedDefinitions(capabilities)` filters that single
@@ -73,14 +87,48 @@
   prompt will carry) fills the
   main template's `{{language}}` line with a language name; the sub-agent template
   keeps `Answer in English`, because a sub-agent reports to the agent that
-  dispatched it and never to the user. Changing the setting is a prompt change like
-  any other: `SessionRuntime.applyReplyLanguage` rewrites every node worker's
-  `messages[0]` and posts the same cache-miss warning the model/effort switches
-  post. `Spinney: Show System Prompt` renders the session's current value.
-- Session semantics are unchanged: the prompt is synthesized per activation and
-  never stored in a node (`docs/agents/invariants/chat-tree.md`); on a model,
-  effort or reply-language change only `messages[0]` is rewritten
-  (`refreshSystemIdentity`).
-- To read the current prompt, run **`Spinney: Show System Prompt`**: it
-  renders for the active model + effort and the session's `AGENTS.md` snapshot and
-  opens the result in an editor tab.
+  dispatched it and never to the user. A change is a **setup** change, not a
+  rewrite: `SessionRuntime.applyReplyLanguage` records the new name for the nodes
+  frozen from here on and repaints the composer's drift marking
+  (`[config] replyLanguage=… (new nodes; frozen chains keep theirs)`); every chain
+  already frozen keeps the line it was rendered with, no `messages[0]` is touched,
+  and there is no cache-miss notice any more.
+- **The prompt is stored now — once per epoch.** When a chain starts, the node that
+  starts it renders the prompt **once** and keeps the bytes
+  (`TreeNode.epoch.prompt`, `Epoch` in `src/chat/tree.ts`): `SessionRuntime.freezeEpoch`
+  (`src/chat/runtime.ts`) is the only caller of a render on the request path. Every
+  descendant of that node reuses the frozen bytes through `epochForNode(session,
+  nodeId)` — the nearest ancestor-or-self that carries an envelope, the same walk
+  shape as `contextBase()` — and nothing re-renders it: not a reload, not a
+  restart, not a settings change, not a version bump, not a tool that no longer
+  exists.
+  - `Epoch` also carries the endpoint facts (`cardId`, `effort`, `replyLanguage`,
+    `providerId`, `baseUrl`, `wireModel`, `vision`, `visionTransport`), the frozen
+    tool schemas, the content hashes the drift check compares (`templateHash`,
+    `agentsMdHash`, `toolsetHash`) and `frozenAt`. `cardId` is a **card id**, never a
+    wire model name.
+  - The stored envelope is validated by **shape at read time**: `normalizeEpoch`
+    drops one whose `prompt` is not a string, and `epochForNode` ignores it, so a
+    truncated or foreign value can never make a request fail and needs no repair
+    pass.
+  - A chain with **no** envelope — a session loaded before the epoch model landed —
+    still renders live (`buildPath` → `systemPromptFor`), so nothing breaks while it
+    waits to be adopted; `SessionRuntime.adoptLegacyEpoch` freezes one onto the node
+    that starts the checked-out chain at the first load, marks it `legacy: true` and
+    the session `legacyEpoch`, and logs `[epoch] adopted legacy chain …`. That
+    freeze is a one-time approximation (the old bytes are gone), and it is skipped in
+    a read-only window.
+  - The prompt is stored **outside** `messages`, on the node, exactly like
+    `imageSources`: a node's own `messages` still never contain a `system` role
+    message, and `pruneSession` still deletes a stored one
+    (`src/chat/tree.ts`, the `m.role !== 'system'` filter — its comment still says
+    "synthesized per activation", the filter is what counts).
+- To read a prompt, run **`Spinney: Show System Prompt`**
+  (`ChatViewProvider.showSystemPrompt` → `SessionRuntime.systemPromptText`): it
+  renders the **live** setup — the checked-out node's card and level *with any
+  pending dropdown pick*, the current reply language, the AGENTS.md snapshot in
+  force — and opens the result in an editor tab. For a session with no runtime yet it
+  renders the default card + level instead. It therefore shows what a **new** node
+  would freeze, not the bytes a frozen chain is sending. Showing the frozen bytes
+  first, with the live render as a labelled second section, is `plans/session-epoch.md`
+  §12 item 2 and is **not** implemented.

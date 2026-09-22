@@ -1,8 +1,19 @@
 ## Session persistence & config
-- Storage keys: `spinney.state` (v2: `{ version, activeSessionId, sessions }`,
-  each session is a **tree** of `TreeNode`; `STORED_STATE_VERSION = 2` and P4 did not
-  bump it — the new session fields are optional), `spinney.activeSession` (the
-  focused tab's session id, **on its own** — see below),
+- **Where a session really lives: one file per node under the store root** (see
+  "the file-backed store" below). The Memento is a **migration source and a
+  no-store fallback** now, not the content path: `spinney.state` (v2:
+  `{ version, activeSessionId, sessions }`, `STORED_STATE_VERSION = 2`) is read
+  once when no session file exists — state written before the store existed — and
+  written back only when there is no store at all (a test host, a profile with no
+  global storage). `migrateToStore` moves it into the store verifiably and then
+  clears the row. **A window that cannot take the workspace lock never writes it**:
+  no fallback to the content Memento, no degraded mode (see the ownership rule
+  below). The *small* keys are profile state rather than session content and are
+  still written there (the active-session pointer, the model defaults) — they describe
+  which session this profile had open, not what is inside it.
+- Storage keys in the **small** Memento scope (`context.globalState`, or the same
+  object in no-repo mode):
+  `spinney.activeSession` (the focused tab's session id, **on its own** — see below),
   `spinney.runtimeConfig` (the
   **default** `model` + `thinkingEffort` record, used by sessions with no pick),
   `spinney.transcriptBackfill` (the one-time historical-dump marker) and
@@ -63,20 +74,22 @@
   call sites that must not be delayed use `persistNow()`:
   `SessionRuntime.finishTurn` and `runSubAgent`'s finish (a finished turn / a
   sub-agent's whole conversation), `finishDeletions`, `clear` and the branch deletion
-  (each deletes transcript dumps from disk first, so a stale memento would resurrect
-  a conversation whose files are gone), `controlStartSession` and `startFreshSession`
+  (each deletes transcript dumps from disk first, so a write still queued would
+  resurrect a conversation whose files are gone), `controlStartSession` and `startFreshSession`
   (the caller already holds the session id). Hand-off points flush and await:
   `controlWaitForFinish`, `controlReloadWindow`, and `deactivate` →
   `ChatViewProvider.shutdown()`. **A new must-write call site has to opt in
   explicitly** — that is the whole point of the split.
 - `persistNow()` reports `chars≈N` on its `[perf]` lines — a size estimate
   accumulated **inline while the payload is built** (a local `chars` counter and an
-  `addText()` closure inside `persistNow()`, fed by its `clipItem()` / `clipMsg()`
+  `addText()` closure inside `persistNow()`, fed by its `clipItem()` / `countMsg()`
   helpers over every string field of the stored items, messages, titles and `bg*`
-  text; `src/chat/ChatViewProvider.ts` ~:1005-1014 and ~:1088-1092), **not** a
+  text; `src/chat/ChatViewProvider.ts`, `persistNow` right after its `t0`), **not** a
   `JSON.stringify`: serializing 111 M chars inside
   the operation being measured cost more than most of what those `[perf]` lines were
-  about. See `invariants/streaming-perf.md`.
+  about. `countMsg` counts a message's text and image URLs but returns the message
+  **unchanged** — messages are stored verbatim (see below). See
+  `invariants/streaming-perf.md`.
 - Which Memento holds those keys depends on the window (`src/extension.ts`):
   `context.workspaceState` when a workspace folder is open, **`context.globalState`
   when none is** — an empty window's `workspaceState` bucket would make every
@@ -85,7 +98,11 @@
   Consequence: session state is shared by every no-folder window of a profile, so
   drive one at a time.
 - A session is `{ id, title, createdAt, updatedAt, nodes: Record<id, TreeNode>,
-  rootId, activeNodeId, orphanItems }` plus the title bookkeeping
+  rootIds, activeNodeId, orphanItems }` — `rootIds` replaced the old single
+  `rootId` when the forest landed (a stored `rootId` is read back as
+  `rootIds: [rootId]`, and `pruneSession` re-derives the list when it no longer
+  describes the tree) — plus `legacyEpoch` (set when a chain was adopted
+  retroactively, see `system-prompt.md`), the title bookkeeping
   (`titleSource: 'provisional'|'auto'|'manual'`, `titleLocked`, `titleAutoAt`,
   `titleAutoNodes` — see `sessionTitles.ts`) and, since P4, the per-session selection
   (`model`, `effort`, and the `modelFromSettings` / `effortFromSettings` retirement
@@ -127,20 +144,73 @@
 - Streaming items land in the **run's own node** (`TurnRun.items` = `node.displayItems`,
   written only by that run's agent) and are persisted with it, so a view change never
   redirects the stream into another node.
-- `persist()` writes a **clipped copy** of each node's messages
-  (`clipMessageForStorage`, 64 KiB per message content): the in-memory history
-  keeps the full payload, but one huge tool result cannot make every persist write
-  tens of MiB into the memento.
+- **Messages are persisted verbatim.** There is no storage-side content cap any more:
+  `clipMessageForStorage` is gone from the write path, and `persistNow`'s message hook
+  only accumulates the `chars≈N` size readout and returns the message untouched. What a
+  node stores has to be byte-identical to what was sent to the API, or the provider's
+  prefix cache is lost from the first truncated message on after every reload. The
+  **display** caps are a different thing and stay (`clipForUi` /
+  `clipDisplayItem`, the 8 / 32 / 64 KiB budgets on `displayItems`).
+  - The session object is stored with the node's `messages` verbatim, so it now also
+    carries `rootIds` (the forest — a v1 `rootId` is read back as `rootIds: [rootId]`
+    by `normalizeTreeSession`), `legacyEpoch`, and — per node — `epoch` and
+    `imageSources`, plus the seed/selection fields above. All of them are optional
+    fields on the same v2 shape: `STORED_STATE_VERSION` did **not** bump.
+- **Change detection must be exact inside `messages`.** `src/chat/persistDigest.ts`
+  folds every node/header into a numeric digest, and the coverage rule is the point:
+  a long string **inside `messages`** (a prompt, an assistant body, a tool result, a
+  `text` part, an `image_url.url`, a `file_id`) is hashed **whole**, character for
+  character, on the exact path (`foldTextExact`); strings at or below
+  `DIGEST_VALUE_MAX` (512) are folded by value; a long string **outside** `messages`
+  keeps the cheap `length + first/last 32 chars` probe, because those fields are
+  display-only and derived. A length + head/tail probe cannot see a rewrite in the
+  middle of a message, and after a reload a silently older node file would mean a
+  different prefix with no diagnostic — so `messages` gets the real hash and pays the
+  linear read for it. `tools/session-store-acceptance.js` pins this: it perturbs every
+  field of a realistic node and requires the digest to move, so a field added to
+  `TreeNode` fails that guard until it is covered.
 
-### Phase 3: the file-backed store (module landed; the provider still uses the Memento)
+### Phase 3: the file-backed store (wired; the Memento is the migration source)
 
-`src/chat/sessionStore.ts` is the replacement for the one big row, and it is **not wired
-into `ChatViewProvider` yet** — the layout below is what the wiring will read and write.
-Three measured problems drive it: the row is re-serialized and rewritten in full on every
-write (17.2 M chars, multi-second `persist-done`), it costs 100–250 ms of *blocking* host
-work per burst, and it is keyed by the extension id — a rename made every conversation
+`src/chat/sessionStore.ts` is the content path now, and `ChatViewProvider` uses it:
+`persistNow` builds a payload of only the **changed** sessions, hands each to
+`store.writeSession(id, session, summary, dirtyNodes)` and refreshes `index.json`
+(`writePayload`). Three measured problems drove it: the row was re-serialized and
+rewritten in full on every
+write (17.2 M chars, multi-second `persist-done`), it cost 100–250 ms of *blocking* host
+work per burst, and it was keyed by the extension id — a rename made every conversation
 undiscoverable and the first activation under the new id wrote an empty row over it.
 
+- **One owner window per workspace.** The workspace lock (`locks/<key>.lock`, written
+  with the owner id + pid + a heartbeat every `STORE_HEARTBEAT_MS`) is not a
+  fallback trigger, it is the invariant: exactly one window reads **and writes** a
+  workspace's session data. `openStoreLock()` hands the promise to `lockPending`, so
+  the first load and the first write can wait for the answer instead of guessing, and
+  `acquireLock` may take over a **stale** lock (a dead pid, or a heartbeat older than
+  `LOCK_STALE_MS` = 45 s), so a crashed window never locks the workspace out permanently.
+  - The owner: read + write, as before.
+  - **Any other window on the same folder is read-only** (`this.readOnly = !acquired`).
+    It still loads and browses the store — reading needs no lock — and says so in the
+    output channel and with a warning notice in every open session. `persistNow`
+    **drops** a queued write in such a window (`persist-skipped read-only=true`): the
+    Memento write fallback is **gone**, and with it the whole degraded mode.
+    `adoptLegacyEpoch` is skipped too — adopting an epoch is a write.
+  - **Every mutation is refused, and the refusal is one sentence.** The turn starts
+    are gated inside the runtime: `beginTurn` for a new node (send, fork, rollover)
+    and `beginInjectedTurn` for the injected ones — ▶ Continue, the rollover's first
+    turn and every background / sub-agent notice. The provider gates the rest of the
+    surface directly: the composer's send / fork / rollover entry points post the
+    sentence as a notice, `renameSession` returns `{ ok: false, error: readOnlyNotice() }`,
+    `newSession`, `deleteSessionsInteractive` and `clear` show it in a warning box and
+    return without touching anything, and the control plane's `controlStartSession`
+    answers `{ ok: false, error: 'another window owns this workspace’s sessions; this
+    window is read-only' }` — a caller of `POST /session/start` gets a refusal, not a
+    queued job.
+  - **The user sees it before the click.** Every `state` post carries
+    `readOnly: host.isReadOnly()`, and the composer paints it: Stop hidden, Send
+    **disabled** with the host's own sentence as its title (`READ_ONLY_TITLE`, the
+    same catalogue entry as the host's literal). `send()` re-checks the flag, so a
+    click can never depend on a repaint having happened.
 - **A root that survives a rename — but only with discovery.** The store's own root is
   `<globalStorage>/spinney/`: a *fixed* last segment, overridable by the `spinney.dataDir`
   setting (`defaultDataRoot(globalStorage, override)`). That alone is **not** enough, and
@@ -160,6 +230,21 @@ undiscoverable and the first activation under the new id wrote an empty row over
   workspace folder's uri (`workspaceKeyFor`), `no-workspace` when no folder is open. That
   keeps today's "another folder shows other sessions" behaviour while leaving **one root
   to back up**.
+- **A stored session is healed at the read boundary, never by a script.** `SessionStore`
+  takes an optional `normalize(session, id)` hook and **every** path out of the reader goes
+  through it: `readSessionSync` / `readAllSync` / `rebuildIndex`, the **v1→v2 layout
+  migration** (so a converted root is written already in the current shape) and `adoptFrom`
+  (which inherits the hook). The store itself stays tree-agnostic and vscode-free, which is
+  why the caller supplies the function (`ChatViewProvider.openStore` → `normalizeSession` in
+  `tree.ts`) — but the **reader** is where it must run, because every call site reads through
+  it: a second place is a second chance to forget. That is the `rootId` → `rootIds` lesson —
+  the Memento path healed the pre-forest shape and the store path did not, so after the forest
+  landed 43 of 44 files in one workspace came back with `rootIds === undefined`, and
+  `postTree`'s `session.rootIds.slice()` threw *after* the webview had already handled
+  `reset`: every old conversation opened as an empty session. A heal that throws (or returns
+  nothing) is logged and the session is loaded exactly as stored — a repair must never cost
+  the content. `tools/session-store-acceptance.js` pins both halves (with the hook, without
+  it, the migration writing healed bytes, the throwing heal, and the adoption inheriting it).
 - **The index is a cache.** `index.json` holds the sidebar-sized `SessionSummary[]`;
   `rebuildIndex()` reconstructs it from the files alone, so nothing that can be lost
   orphans the content. A corrupt or foreign session file is skipped and reported —
@@ -178,13 +263,15 @@ undiscoverable and the first activation under the new id wrote an empty row over
   the queue working and not a missing measurement.
 - **A deletion moves to `.trash/<ts>/`**, never unlinks (the rule the v1 state backup
   already follows), and it cancels a write still queued for that path first.
-- **One writer per workspace**: `locks/<key>.lock` with a heartbeat; a lock held by a live
-  owner is refused, one whose heartbeat is older than `LOCK_STALE_MS` or whose pid is gone
-  is taken over, so a killed window cannot brick the store. A window that cannot take the
-  lock does **not** fall back to "read-only": it keeps writing the **Memento** (`via=memento`
-  on its `persist-*` lines) and says so in the output channel. That is the one combination
-  that both keeps the user's window working and guarantees no two windows ever write the
-  same session file.
+- **The `via=` readout has exactly two values, and `via=memento` is not a
+  degraded mode any more.** `persist-*` lines report `via=store` whenever a store
+  object exists and this window holds its lock. The only other case is a window that
+  has **no store at all** — `openStore()` returns `null` without `globalStorage`
+  (a test host, a stripped profile) — and that window still writes the whole state
+  into `spinney.state`, exactly as before. A window that *has* a store but could not
+  take the lock is read-only and drops the write instead (the ownership rule above):
+  there is deliberately no third state in which one window writes files while another
+  writes the row.
 - **Discovery and adoption** make a rename a non-event: `SessionStore.discover(candidates)`
   orders the roots that look like ours, and `adoptFrom(otherRoot)` imports another root's
   sessions (existing ids untouched, the source never modified).

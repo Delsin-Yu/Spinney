@@ -29,8 +29,25 @@
 - **Stop**: stops only the run of the focused node (and its own sub-agents). Other runs continue.
 - **Model / thinking effort**: **per node**, resolved through the node's ancestry (its own
   recorded card, else the nearest ancestor's, else the tab's seed). A dropdown pick is a
-  pending choice for the next send on the node in view — a checkout forgets it — and it warns
-  only when that pick really differs from the card the node already uses.
+  pending choice for the node in view — a checkout forgets it — and a pick that names
+  the card that node already resolves to is a **no-op** (no pending state, no notice,
+  nothing persisted; only a `[config] … (card in view; no change)` line). **Inside an
+  epoch the chain sends with the epoch's card and level, not with the pick**: a node
+  whose chain already has a frozen envelope can only change setup by *drift*, i.e. the
+  composer asks and the answer either discards the pick or forks the tree
+  (`context-rollover.md`, `api-retries.md` §2b) — a plain send never rewrites a prefix.
+- **One owner window per workspace.** The workspace lock (`locks/<key>.lock`, in the
+  store root) decides which window may read *and write* a workspace's session data; a
+  window that cannot take it is **read-only**, not a degraded writer: it loads and
+  browses the store, refuses every turn start (`beginTurn` **and** `beginInjectedTurn`
+  check `host.isReadOnly()`, which covers send, fork, rollover, ▶ Continue and every
+  injected notice turn), refuses every other mutation with the same one sentence —
+  the composer entry points as a notice, `renameSession` as `{ ok: false, error }`,
+  `newSession` / `deleteSessionsInteractive` / `clear` as a warning box, and
+  `/session/start` as `{ ok: false }` — and drops any queued write
+  (`persist-skipped read-only=true`). There is no second write path (no Memento
+  fallback). The webview paints it too: `state.readOnly` disables Send (Stop hidden)
+  with the host's sentence as its title, and `send()` re-checks the flag.
 - **Background terminals**: no standalone panel and no dock. A job renders as a `kind:'bg'`
   sidecar card beside the node that spawned it (the same right-hand grid as the sub-agent
   windows), and its completion notice is injected **into that node's own transcript** (a
@@ -44,19 +61,20 @@
 
 ```
 ChatViewProvider (coordinator, 1 per window)
-├─ sessions / persistence (spinney.state)
+├─ sessions / persistence (SessionStore: one folder per session under the store root;
+│    the workspace lock decides owner vs read-only; the Memento row is the migration source)
 ├─ PanelManager: Map<sessionId, ChatPanel>   (one tab per session)
 ├─ titles / transcripts / commands / config / control plane / webview routing
 └─ runtimes: Map<sessionId, SessionRuntime>
 
 SessionRuntime (1 per session)
-├─ session (tree) + activeNodeId = VIEW focus
+├─ session (forest: rootIds) + activeNodeId = VIEW focus
 ├─ runs: Map<nodeId, TurnRun>          (P1: at most one; P3: many)
 ├─ subAgentPool (per-session budget) / runningSubAgents
 ├─ hub: BackgroundHub (one per window; the per-(session,node) registries and the
 │      id → owner index live there) + bgNodes: Map<taskId, cardNodeId> (P2)
 ├─ completion signals: Map<nodeId, SignalNotice[]> (hop returns: RuntimeHost.queueHopReturn)
-└─ model / thinkingEffort (P4)
+└─ model / thinkingEffort (P4; the *frozen* card/level live on the chain's epoch node)
 
 TurnRun (1 per send = 1 new node; an injected completion-signal turn reuses its node, fresh:false)
 ├─ nodeId + the node it appends to (turn basis, independent of the view)
@@ -130,11 +148,11 @@ nodeWorkers: Map<nodeId, { agent: Agent; tools: ToolRegistry }>
 
 | message | shape | notes |
 | --- | --- | --- |
-| `state` | `{ sessionId, busy, status, runningNodes: string[], lockedNodes: string[] }` | `busy` = `isRunning()` (a live run, or an image upload in flight); `runningNodes` = nodes with a live run. Composer shows Stop iff `runningNodes.includes(viewFocusId)` **or** `lockedNodes.includes(viewFocusId)`, and Send otherwise. `lockedNodes` = nodes that still own unfinished work — a running background job / async sub-agent batch, or a notice about to be injected into them. It applies **no run filter**, so a streaming node that also owns a running job is listed in *both* `runningNodes` and `lockedNodes`: Stop there is the union kill (`POST /stop {nodeId}` — turn + jobs + sub-agents, with the notices written back into the node instead of opening a turn). Only the owner is listed — its existing descendants stay usable. |
-| `tree` | `{ activeId, viewId, rootId, nodes[] }` | `activeId` = stream target; `viewId` = view focus. Each node carries `kind` (`'turn' \| 'agent' \| 'bg'`), `delivered` (sidecars only) and, for a `kind:'bg'` card, its terminal snapshot (`bgTaskId` / `bgCommand` / `bgExitCode` / `bgKilled` / `bgElapsedMs` / `bgOutputTail`) so the card re-renders without asking the in-memory hub. A `kind:'agent'` node carries **`itemCount` and no `items`**: its transcript is fetched with `loadAgentItems` when the card is expanded (a session switch used to ship 2.3 MB of sidecar transcripts, and 10 k DOM elements for 8 cards). |
+| `state` | `{ sessionId, busy, status, runningNodes: string[], lockedNodes: string[], readOnly }` | `busy` = `isRunning()` (a live run, or an image upload in flight); `runningNodes` = nodes with a live run. Composer shows Stop iff `runningNodes.includes(viewFocusId)` **or** `lockedNodes.includes(viewFocusId)`, and Send otherwise. `lockedNodes` = nodes that still own unfinished work — a running background job / async sub-agent batch, or a notice about to be injected into them. It applies **no run filter**, so a streaming node that also owns a running job is listed in *both* `runningNodes` and `lockedNodes`: Stop there is the union kill (`POST /stop {nodeId}` — turn + jobs + sub-agents, with the notices written back into the node instead of opening a turn). Only the owner is listed — its existing descendants stay usable. `readOnly` = another window owns this workspace's session files: the composer disables Send (Stop hidden) and titles it with the host's sentence, `send()` re-checks the flag, and the host refuses every turn and every session mutation. |
+| `tree` | `{ activeId, viewId, rootId, rootIds, nodes[] }` | `activeId` = stream target; `viewId` = view focus; `rootIds` = every forest root (the webview lays the trees out side by side), `rootId` kept as the first one. Each node carries `kind` (`'turn' \| 'agent' \| 'bg'`), `delivered` (sidecars only), the context state (`context` / `contextPct` / `contextFull`), `contextBaseId` (dashed edge + `CTX` badge), `epochId` (the envelope this node starts, when it starts one) and, for a `kind:'bg'` card, its terminal snapshot (`bgTaskId` / `bgCommand` / `bgExitCode` / `bgKilled` / `bgElapsedMs` / `bgOutputTail`) so the card re-renders without asking the in-memory hub. A `kind:'agent'` node carries **`itemCount` and no `items`**: its transcript is fetched with `loadAgentItems` when the card is expanded (a session switch used to ship 2.3 MB of sidecar transcripts, and 10 k DOM elements for 8 cards). |
 | `path` | `{ ids, nodes[] }` | the **view** path. Its `nodes[].items` are complete (a checked-out node — including a sidecar — must render immediately). |
 | `agentItems` | `{ id, items }` | answer to `loadAgentItems`: that sub-agent card's transcript (`clipDisplayItem`-ed). |
-| `nodeUpdate` | `{ id, status, title, usage, contextFull }` | the one patch shape (`nodeStatePatch`); `contextFull` picks the card's `⧉ Continue in a new window` / `↻ Retry` variant. |
+| `nodeUpdate` | `{ id, status, title, usage, context, contextPct, contextFull }` | the one patch shape (`nodeStatePatch`); `context` (`ok` \| `near` \| `full`) picks the card's `⧉ Continue in a new window` (hard, or the `near` suggestion) / `↻ Retry` / `▶ Continue` variant, and `contextPct` feeds the `near` title. `contextFull` is kept beside them and is no longer read. |
 | `panTo` | `{ id }` | unchanged (host pans the view, not the stream target). |
 | `delta` / `thinkingDelta` | `{ nodeId, text }` | **`nodeId` now always present.** |
 | `usage` | `{ nodeId, usage }` | idem. |
@@ -144,7 +162,7 @@ nodeWorkers: Map<nodeId, { agent: Agent; tools: ToolRegistry }>
 | `backgrounds` | `{ tasks: Array<Task & { nodeId, cardNodeId, pendingDelivery }> }` | replaces `background`: flat list, each task tagged with its owning node **and** with the `kind:'bg'` card that mirrors it (`cardNodeId`, null when the branch is gone). The webview never reads `cardNodeId`: it keeps the snapshot keyed by `task.id` and re-renders **every** `kind:'bg'` card from that card's own `bgTaskId`; `#bg-panel` and the in-card dock are gone. |
 | `backgroundNotice` | `{ nodeId, item }` | appended inside that node's card as a `.msg.bgnotify` block (`item.kind: 'background' \| 'subagent'` picks the `BG` / `SUB` badge). Injected at a tool boundary of a running turn, so the webview finalizes the streaming answer before it adds the block. |
 | `balance` | `{ providerId, providerName, balance }` | the wallet readout, and the **provider identity travels with the number**. Posted on every refresh — including an *empty* readout (a `none` dialect, or a failed fetch) — so a tab that checks out a node on another provider can never keep showing the previous provider's number. See `invariants/model-cards.md`. |
-| `status`, `notice`, `config`, `context`, `sessionStats`, `user`, `imagePicked`, `harnessNote`, `agentStart`, `agentDone`, `reset` | unchanged | `reset` is per-tab (each tab is its own webview); the three sidecar messages carry their node id (`harnessNote` `{ nodeId, text }`, `agentStart` / `agentDone` `{ id, ... }`) so they land in that card. |
+| `status`, `notice`, `config`, `context`, `sessionStats`, `user`, `imagePicked`, `harnessNote`, `agentStart`, `agentDone`, `reset`, `composerClear` | unchanged shape, one addition | `config` now also carries `setup: { node, live, drift, reasons }` — the two setups the composer's identity line and its drift marking are rendered from (the host computes it, the webview renders it; `api-retries.md` §2b). `reset` is per-tab (each tab is its own webview); the three sidecar messages carry their node id (`harnessNote` `{ nodeId, text }`, `agentStart` / `agentDone` `{ id, ... }`) so they land in that card. `composerClear` is the host telling the composer its text was really taken (a send that opened a modal and was answered with "No" must not eat it). |
 
 ### 3.2 webview → host
 
@@ -155,7 +173,7 @@ nodeWorkers: Map<nodeId, { agent: Agent; tools: ToolRegistry }>
 | `stop` | `{ nodeId? }` | stop that node's run (omit ⇒ every run of this session). |
 | `killBackground` | `{ id }` | resolved in this session (session-local ids). |
 | `loadAgentItems` | `{ id }` | that sub-agent card was expanded and wants its transcript (`tree` sent only `itemCount`); the host answers with `agentItems`. |
-| `continueTurn`, `rolloverTurn`, `deleteBranch`, `setNodeSize`, `killAgent`, `copyNodeId`, `pickImage`, `setModel`, `setThinkingEffort`, `openModelTree`, `openExternal`, `layoutDiagnostic`, `ready` | unchanged | the ▶ button posts `continueTurn` (in-place retry) or `rolloverTurn` (new context window) for `{ id }`. `clear` is **not** posted by `media/main.js` any more; the host still handles it. |
+| `continueTurn`, `rolloverTurn`, `forkTurn`, `deleteBranch`, `setNodeSize`, `killAgent`, `copyNodeId`, `pickImage`, `setModel`, `setThinkingEffort`, `openModelTree`, `openExternal`, `layoutDiagnostic`, `ready` | unchanged | the ▶ button posts `continueTurn` (in-place retry) or `rolloverTurn` (new context window) for `{ id }`; the composer's `#new-setup-btn` posts `forkTurn` `{ text, attachments }` (ask which setup, then fork the tree under the live one and send there — `ChatViewProvider.forkAndSend`). `clear` is **not** posted by `media/main.js` any more; the host still handles it. |
 
 All webview→host messages are handled **in the context of the panel's session**
 (`handlePanelMessage(panel, message)`), never "the active session".

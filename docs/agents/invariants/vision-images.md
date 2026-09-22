@@ -7,9 +7,13 @@
 - A model that is *not* image-capable does **not** return a 400: DeepSeek
   silently replaces the image with an `[Unsupported Image]` text part and answers
   anyway (measured on the vendored base URL — the reply even reasons about the
-  placeholder). That is why the harness hides image blocks itself instead of
-  letting the provider do it — a silent placeholder invites the model to invent
-  what it cannot see.
+  placeholder). That is why the harness never lets an image block reach such a
+  card: a newly attached image is refused at the composer boundary
+  (`onUserMessage`, with a notice naming an image-capable card), `read_image`
+  answers with its own friendly error (`tryReadImage`), and a **copied** history is
+  materialised with a placeholder text part instead (the materialisation bullet
+  below) — a
+  silent placeholder invites the model to invent what it cannot see.
 - **User-attached images** (file picker `pickImage` / clipboard paste) and
   **agent-read images** (`read_image`) both follow the card's `vision.transport`
   (`invariants/model-cards.md`). The `deepseek` dialect uploads to the Files API
@@ -32,34 +36,51 @@
   and the `IEND` terminator are verified, so a truncated/corrupt PNG is rejected
   locally with a reason (`bad CRC in the IDAT chunk`, …) instead of a provider
   400.
-- When the active model is not image-capable, image blocks in the history are
-  **hidden, not removed** (see `messagesForCurrentModel` in `agent.ts`): the
-  stored `messages` keep the original image blocks, but the copy sent to the API
-  replaces each `image_url`/`file` block with a `[image hidden: …]` text part so
-  the request does not 400. Switching back to an image-capable model restores the
-  image blocks automatically. `read_image` returns a similar friendly error, and
-  the provider drops newly attached images with a notice.
-- **An upload cannot cross providers.** A `{ type: 'file', file_id }` block is the
-  *issuing* provider's private handle — another endpoint has never seen that id, so
-  the same hiding rule applies when the card the request runs on is not `deepseek`
-  (`vision.transport !== 'deepseek'`), with its own placeholder
-  (`[image hidden: it was uploaded to a provider that this model cannot read
-  from]`). An `image_url` block has no such problem: a `data:` URL is
-  self-contained, so a history produced under the `openai` dialect is re-sendable
-  anywhere. The harness does not keep the uploaded bytes, so it cannot convert one
-  form into the other after the fact — the fix at the source is the card's
-  `vision.transport`, and the runtime says so in its notice rather than letting the
-  provider answer with a 400.
-- A **provider-rejected image** (a 400 matching `/unsupported image/i`, e.g. a
-  file the local integrity check cannot catch) follows the same hide-not-remove
-  rule: `Agent.markRejectedImages` records the offending `file_id`/`image_url` in
-  `Agent.rejectedImageIds` — only the message DeepSeek names in `.messages[<n>]`,
-  otherwise every image in the history — and `messagesForCurrentModel` replaces
-  it with `[image removed: …]` on every later request;
-  `requestAssistantMessage` retries up to 8 times, emitting a `status` event.
-  The stored history keeps the original block (never mutated), and the id set
-  deliberately survives session switches: ids are unique per upload, so it only
-  prevents repeating the same 400.
+- When the active model is not image-capable, newly attached images are **dropped
+  with a notice** at the composer boundary (`onUserMessage` refuses them before a
+  request is built), and the webview hides thumbnails and refuses to queue a pending
+  attachment. What no longer exists is the **send-time hiding of stored images**:
+  `messagesForCurrentModel` is deleted, and with it the whole "hide, not remove"
+  rule — a stored history is not rewritten on its way out, ever. An image block's
+  wire form is decided **once**, not per request: at attach / `read_image` time for
+  the live turn (see the transport bullet above), and by
+  `SessionRuntime.materialiseMessages` when a chain is **copied** into a new epoch
+  (the bullet below). What the node stores is what the API receives.
+- **Materialisation happens in `forkTree`** (`SessionRuntime.materialiseMessages`,
+  `src/chat/runtime.ts`), never per request. It is the only place an image block's
+  wire form is decided for a copied chain, and it is **best effort**: an image whose
+  bytes cannot be recovered becomes an ordinary placeholder text part
+  (`[image hidden: …]`, the two `MATERIALISED_*` constants in `runtime.ts`) and the
+  fork still succeeds — a chain is never left unsendable because of an image. The
+  matrix it implements:
+
+  | from → to | what happens |
+  | --- | --- |
+  | `deepseek` → the same provider account | the `file_id` is reused as is (the issuing account can still read its own handle) |
+  | `deepseek` → another provider | bytes are recovered (a `data:` URL is already inline, or a local `srcPath` is re-read up to `INLINE_IMAGE_LIMIT_BYTES`, 8 MiB) → an `image_url` part; otherwise the placeholder |
+  | `openai` → anything | an inline `data:` URL is self-contained and is carried over as is |
+  | anything → a non-image-capable card | the placeholder `[image hidden: the current model does not support images]`, with the provenance kept so a later epoch can bring it back |
+
+  Provenance is what makes this possible, and it is **persisted beside the messages**
+  (`TreeNode.imageSources`, addressed by `{ messageIndex, partIndex }`, never inside a
+  content part): the attach path records `{ kind: 'inline', dataUrl }` (the composer's
+  own data URL) or `{ kind: 'upload', providerId, fileId }`, and `read_image` uploads
+  are recorded from `Agent.getImageUploads()` by `SessionRuntime.recordUploadSources`
+  when the turn is stored (with the local source path when there was one). A fork
+  copies the provenance it did not have to change, so a placeholder in a copy can be
+  turned back into an image by the next epoch that can read it.
+- **A provider-rejected image is repaired in the history, once, deliberately.**
+  A 400 matching `/unsupported image/i` that the local integrity check cannot catch
+  is still the Agent's job to detect — `Agent.markRejectedImages` keeps finding *which*
+  images to repair (only the message DeepSeek names in `.messages[<n>]`, otherwise
+  every image in the history) — but its repair is now **persistent**: the offending
+  block is replaced **in the stored message** by the placeholder text
+  (`IMAGE_NEEDS_VISION` in `agent.ts`), so the request that is retried (up to 8 times,
+  with a `status` event) carries the placeholder in the history itself. The
+  provenance entry is kept, so a later epoch can materialise the image again; the
+  retry costs nothing extra, because the refused request cached nothing past that
+  block. `Agent.rejectedImageIds` and the old "hide it on every later request" set are
+  gone with `messagesForCurrentModel`.
 - Uploads are abortable: the attach path (`onUserMessage`) and `read_image`
   (`tryReadImage`) both pass an `AbortSignal` to `uploadFile`, so pressing Stop
   mid-upload rejects with `ApiError('Upload aborted.')` and is treated as an

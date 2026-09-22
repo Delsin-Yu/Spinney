@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- A conversation is **frozen on the setup it started with**. The system prompt and the tool
+  schemas are rendered once, when a chain starts, and stored with it, so a send never rewrites a
+  prefix the provider has already cached: a reload, a settings edit or an extension update no
+  longer re-bills the whole context. Changing the model card, the thinking level or the reply
+  language does not change what a send uses — the composer marks Send and asks: **Continue with
+  current setup** (the pick is discarded, the dropdowns go back) or **Continue with latest
+  setup**, which copies the tree into a tree beside the current one, re-materialises its images
+  for the new card and leaves the old tree's cache intact. Dismissing the question sends nothing.
+- The composer shows both identities when they differ (`Sending with:` / `New setup:`) and offers
+  a **new-setup entry** when the harness side moved (the shipped prompt, the workspace AGENTS.md,
+  the tool set or the endpoint).
+- A session is a **forest**: the trees of one session are drawn side by side, and each is
+  interactive.
+- `⧉ Continue in a new window` is offered from **90 %** of the model card's context window, on any
+  conversational tip, instead of waiting for the provider to refuse the request. It asks which
+  setup the new node should start with — a new context is empty, so the latest setup costs nothing
+  there.
+- Messages are persisted **verbatim** (the 64 KiB per-message clip is gone from the stored copy)
+  and the change digest is exact inside them, so what a reload restores is what was sent.
+- **One window owns a workspace's sessions.** A second window on the same folder can read them,
+  and every change — send, continue, new/delete/rename session, clear — is refused with one
+  sentence, with the composer's Send disabled and that sentence as its title.
+
+### Removed
+
+- The in-place system-prompt rewrite and the three "the prompt cache may be missed" warnings:
+  there is no silent prefix change left to warn about.
+- Image blocks are no longer rewritten at send time (`messagesForCurrentModel`): an image is
+  materialised once, when an epoch is created, and a provider-rejected image is repaired in the
+  history instead of being hidden on every later request.
+- The Memento is a migration source only; a window that cannot take the workspace lock no longer
+  falls back to writing it.
+
 ## [0.1.0] - 2026-09-21
 
 ### Added

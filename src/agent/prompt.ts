@@ -224,12 +224,29 @@ export function renderPromptTemplate(template: string, values: Record<string, st
 /**
  * Snapshot of the workspace AGENTS.md appended to the system prompt. Set once
  * per session by {@link setAgentsMd}; later edits to AGENTS.md do not propagate.
+ *
+ * It is the **fallback** for a render, not the only source: {@link systemPrompt}'s
+ * `agentsMd` argument lets a caller pass its own snapshot without touching this
+ * one (see there — a window-global snapshot cannot describe every session a
+ * window serves).
  */
 let agentsMdSnapshot: string | null = null;
 
 /** Fix the workspace AGENTS.md for the session (null = no AGENTS.md). */
 export function setAgentsMd(content: string | null): void {
   agentsMdSnapshot = content;
+}
+
+/**
+ * The AGENTS.md snapshot in force right now, as the render fallback would use it.
+ *
+ * A caller that freezes a prompt per epoch needs the snapshot's *content* — not to
+ * render with it, but to hash it: the freeze records `agentsMdHash`, and the drift
+ * check compares that hash against this value, so editing the workspace's AGENTS.md
+ * shows up as a change instead of silently rewriting somebody's prefix.
+ */
+export function currentAgentsMd(): string | null {
+  return agentsMdSnapshot;
 }
 
 /** Drop the now-empty trailing AGENTS.md section when there is no snapshot. */
@@ -246,21 +263,33 @@ function stripAgentsMdSection(text: string): string {
  * language. `model` is the card's display name and `effort` a card level, both
  * exactly as {@link identityLines} describes them. `facts` defaults to the live
  * environment so the normal path needs no arguments.
+ *
+ * `agentsMd` selects the workspace AGENTS.md snapshot this render carries:
+ * **omitted** (`undefined`) means the module-global snapshot {@link setAgentsMd}
+ * fixed, which is what every current caller gets; **`null`** renders the prompt with
+ * no AGENTS.md section at all; a string uses *that* snapshot. The third case is what
+ * a caller that freezes one prompt per session/epoch needs: a window can serve several
+ * sessions, each with its own AGENTS.md, so such a caller passes the snapshot it took
+ * for **its** session here instead of rendering whatever the module-global one holds
+ * by the time the render happens. Nothing is remembered: the argument never writes
+ * the module state back.
  */
 export function systemPrompt(
   model = '',
   effort: ThinkingEffort = 'none',
   language: string = DEFAULT_REPLY_LANGUAGE,
   facts: EnvironmentFacts = currentEnvironmentFacts(),
+  agentsMd?: string | null,
 ): string {
-  const agentsMd = (agentsMdSnapshot ?? '').trim();
+  const snapshot = agentsMd === undefined ? agentsMdSnapshot : agentsMd;
+  const body = (snapshot ?? '').trim();
   const text = renderPromptTemplate(SYSTEM_PROMPT_TEMPLATE, {
     identity: identityLines(model, effort).join('\n'),
     environment: environmentSection(facts),
     language: languageLine(language),
-    agentsMd,
+    agentsMd: body,
   });
-  return agentsMd ? text : stripAgentsMdSection(text);
+  return body ? text : stripAgentsMdSection(text);
 }
 
 /**

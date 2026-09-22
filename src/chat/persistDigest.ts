@@ -10,16 +10,32 @@
  * built a string of every field of every node and joined it, which allocated megabytes per
  * write and cost 83 ms of blocked host — more than the payload it was there to avoid.
  *
- * The coverage rule, and its one deliberate compromise:
+ * The coverage rule:
  *
  *  - **Short strings are folded by value** (up to {@link DIGEST_VALUE_MAX}): ids, titles,
  *    statuses, tool names, flags — everything whose content can be rewritten in place.
- *  - **Long strings are folded by length plus their first and last 32 characters.** In this
- *    data model a long string is append-only (streamed text and reasoning grow a character at
- *    a time, tool arguments accumulate, a tool result is written once), so length already
- *    tells; the two probes catch a rewrite at either end without hashing megabytes.
+ *  - **A long string inside `messages` is folded by a real hash** — a 64-bit-ish two-lane
+ *    FNV-style fold over **every** character, in one pass, straight off the string (no copy,
+ *    no allocation). `messages` are persisted **verbatim**, so a rewrite *anywhere* in a long
+ *    prompt, assistant body or tool result has to be seen: a length + head/tail probe cannot
+ *    see a change in the middle of one. This is exact for a string `content` **and** for every
+ *    part of an array `content` (multimodal blocks: `text`, `image_url.url`, `file_id`),
+ *    because everything below a `messages` key is folded on the exact path.
+ *  - **A long string outside `messages` keeps the cheap probe**: length plus its first and
+ *    last 32 characters. Those fields are display-only and derived (a clipped item, a title, a
+ *    status), so they are rewritten head-to-tail whenever their message moves: length already
+ *    tells, and the two probes catch a rewrite at either end without reading megabytes whose
+ *    content the node's message fold has already covered exactly.
  *  - Arrays and objects are walked structurally (counts, then each element), so a pushed
  *    message, a new tool call or a changed scalar are all caught.
+ *
+ * Cost: exactness is linear — the fold reads every character of every long string under
+ * `messages` (once per node per persist; see `dirtyNodesFor`, which walks every node of every
+ * session being written). That is unavoidable: a change in the middle of a string cannot be
+ * seen without looking at the string. What is avoided is the expensive part — no substring, no
+ * join, no `Buffer`/crypto call, no allocation at all: one monomorphic `charCodeAt` loop with
+ * two `Math.imul` per character, so the walk costs bytes read and no GC. Short strings (the
+ * overwhelming majority of the object graph) and everything outside `messages` are unchanged.
  *
  * A *miss* here means a stale node file until that node changes again (and a fresh activation
  * rewrites everything once, because the digest map starts empty), so the coverage is pinned by
@@ -27,9 +43,12 @@
  * requires the digest to move. Add a field to `TreeNode` and that guard tells you to cover it.
  */
 
-/** Strings at or below this length are folded by value; longer ones by length + two probes. */
+/** Strings at or below this length are folded by value; longer ones by a hash or by two probes. */
 export const DIGEST_VALUE_MAX = 512;
-/** How much of a long string's head and tail is folded (32 characters each). */
+/**
+ * How much of a long string's head and tail is folded (32 characters each). Used only outside
+ * `messages`; inside them a long string is hashed whole.
+ */
 const DIGEST_PROBE = 32;
 
 /** Lane A: FNV-1a over the mixed values. */
@@ -42,17 +61,36 @@ function laneB(hash: number, code: number): number {
   return Math.imul((hash + code) | 0, 2246822519) >>> 0;
 }
 
-/** Fold one string: by value when short, by length + head/tail probes when long. */
-function foldText(state: [number, number], text: string): void {
-  const [a, b] = state;
-  let nextA = laneA(a, text.length);
-  let nextB = laneB(b, text.length);
-  if (text.length <= DIGEST_VALUE_MAX) {
-    for (let i = 0; i < text.length; i++) {
-      nextA = laneA(nextA, text.charCodeAt(i));
-      nextB = laneB(nextB, text.charCodeAt(i));
+/**
+ * Fold one long string **exactly**: both lanes are carried over every character, in a single
+ * pass over the string itself. Nothing is copied or allocated — no `slice`, no `substring`, no
+ * `split` — so two equal strings fold identically and any difference moves both lanes.
+ */
+function foldTextExact(state: [number, number], text: string): void {
+  let nextA = laneA(state[0], text.length);
+  let nextB = laneB(state[1], text.length);
+  for (let i = 0; i < text.length; i++) {
+    const code = text.charCodeAt(i);
+    nextA = laneA(nextA, code);
+    nextB = laneB(nextB, code);
+  }
+  state[0] = nextA;
+  state[1] = nextB;
+}
+
+/**
+ * Fold one string: by value when short (that is already exact); otherwise hashed whole on the
+ * exact path, or length + head/tail probes on the cheap path.
+ */
+function foldText(state: [number, number], text: string, exact = false): void {
+  if (text.length > DIGEST_VALUE_MAX) {
+    if (exact) {
+      foldTextExact(state, text);
+      return;
     }
-  } else {
+    const [a, b] = state;
+    let nextA = laneA(a, text.length);
+    let nextB = laneB(b, text.length);
     for (let i = 0; i < DIGEST_PROBE; i++) {
       nextA = laneA(nextA, text.charCodeAt(i));
       nextB = laneB(nextB, text.charCodeAt(i));
@@ -61,6 +99,16 @@ function foldText(state: [number, number], text: string): void {
       nextA = laneA(nextA, text.charCodeAt(i));
       nextB = laneB(nextB, text.charCodeAt(i));
     }
+    state[0] = nextA;
+    state[1] = nextB;
+    return;
+  }
+  const [a, b] = state;
+  let nextA = laneA(a, text.length);
+  let nextB = laneB(b, text.length);
+  for (let i = 0; i < text.length; i++) {
+    nextA = laneA(nextA, text.charCodeAt(i));
+    nextB = laneB(nextB, text.charCodeAt(i));
   }
   state[0] = nextA;
   state[1] = nextB;
@@ -73,23 +121,29 @@ function foldKey(state: [number, number], key: string): void {
   foldText(state, key);
 }
 
-function fold(state: [number, number], key: string, value: unknown): void {
+/**
+ * Fold one field. `exact` says whether we are already inside `messages` — once we are, every
+ * string below is hashed whole however long a path it sits on (a tool call, a content part).
+ */
+function fold(state: [number, number], key: string, value: unknown, exact: boolean): void {
   if (value === undefined) {
     return;
   }
   foldKey(state, key);
+  // Entering `messages` (the array, then each element) turns the exact path on for good.
+  const inMessages = exact || key === 'messages';
   if (typeof value === 'string') {
-    foldText(state, value);
+    foldText(state, value, inMessages);
     return;
   }
   if (value === null || typeof value === 'number' || typeof value === 'boolean') {
-    foldText(state, String(value));
+    foldText(state, String(value), inMessages);
     return;
   }
   if (Array.isArray(value)) {
-    foldText(state, `#${value.length}`);
+    foldText(state, `#${value.length}`, inMessages);
     for (let i = 0; i < value.length; i++) {
-      fold(state, String(i), value[i]);
+      fold(state, String(i), value[i], inMessages);
     }
     return;
   }
@@ -98,9 +152,9 @@ function fold(state: [number, number], key: string, value: unknown): void {
     // Sorted, so two structurally identical values fold identically whatever order their keys
     // happen to be in (a delete + re-add must not look like a change).
     const keys = Object.keys(record).sort();
-    foldText(state, `{${keys.join(',')}}`);
+    foldText(state, `{${keys.join(',')}}`, inMessages);
     for (const child of keys) {
-      fold(state, child, record[child]);
+      fold(state, child, record[child], inMessages);
     }
   }
 }
@@ -112,7 +166,7 @@ function finish(state: [number, number]): string {
 /** A stable digest of one stored node (change detection only — not a cryptographic hash). */
 export function nodeDigest(node: unknown): string {
   const state: [number, number] = [2166136261, 1013904223];
-  fold(state, 'node', node);
+  fold(state, 'node', node, false);
   return finish(state);
 }
 
@@ -127,7 +181,7 @@ export function sessionHeaderDigest(session: unknown): string {
     if (key === 'nodes') {
       continue;
     }
-    fold(state, key, record[key]);
+    fold(state, key, record[key], false);
   }
   return finish(state);
 }
