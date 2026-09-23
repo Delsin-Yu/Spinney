@@ -216,6 +216,16 @@
   let hiddenSince = null;            // set while the document is hidden
   let hiddenMs = 0;                  // hidden time already accumulated
   let visibilitySince = perfNow();   // when the current visibility state began
+  // The **tab's** visibility, which the page itself cannot see: `document.hidden` is about
+  // the window, and a VS Code editor tab in the background is not a hidden document — yet
+  // Chromium stops its frames (and, after minutes of it, freezes the script outright). A
+  // sampler that only knew the page reported "the screen is frozen" every time the user
+  // switched away, and the one moment that matters — coming back to a tab whose surface was
+  // never repainted — looked exactly like that noise. The host owns the fact (`panel.visible`)
+  // and pushes it as the `viewState` message.
+  let tabVisible = true;             // on screen until the host says otherwise
+  let tabHiddenSince = null;         // set while the tab is not on screen
+  let tabHiddenMs = 0;               // off-screen time already accumulated
 
   function perfNow() {
     return typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
@@ -365,6 +375,22 @@
   }
 
   /**
+   * Is this tab on screen at all — the page visible **and** the editor tab in front? The
+   * sampler runs only then, and a `stall` can only be reported then. A tab nobody is looking
+   * at is allowed to stop drawing (that is the engine throttling it, not a defect), so a gap
+   * measured there is not evidence of anything the user saw — and reporting it was drowning
+   * the real case in false alarms.
+   */
+  function perfOnScreen() {
+    return !perfHidden() && tabVisible;
+  }
+
+  /** Milliseconds this tab has spent off screen, the stretch in progress included. */
+  function perfTabHiddenMs() {
+    return Math.round(tabHiddenMs + (tabHiddenSince != null ? perfNow() - tabHiddenSince : 0));
+  }
+
+  /**
    * Milliseconds this document has spent hidden, the stretch in progress included: a
    * probe is read *while* a tab is hidden, and reporting only the finished stretches
    * would freeze the number exactly then.
@@ -380,7 +406,7 @@
    * missing frame, so the judgement is made here, not in the callback.
    */
   function perfSampleFrame() {
-    if (perfHidden()) return;   // never stale while hidden (the sampler is stopped there anyway)
+    if (!perfOnScreen()) return;   // never stale off screen (the sampler is stopped there anyway)
     requestAnimationFrame(perfMarkFrame);
     const gap = perfNow() - lastFrameAt;
     if (gap < STALE_MS) return;
@@ -392,12 +418,26 @@
     }
     if (staleReportedAt > 0 && perfNow() - staleReportedAt < STALE_REPEAT_MS) return;
     staleReportedAt = perfNow();
-    perfPost('stall', { state: 'stale', ms: Math.round(gap), frames: frameCount, hiddenMs: perfHiddenMs() });
+    // `canvas` and `dom` ride along because the surface is what is in doubt here: a stall
+    // in a tab that is on screen, with the tree's own size next to it, is the difference
+    // between a busy renderer and a layer that is too big to be repainted. `tab=` says the
+    // webview's own belief (a report is only written while it is on screen, so a `hidden`
+    // here is a view-state message that arrived late).
+    perfPost('stall', {
+      state: 'stale',
+      ms: Math.round(gap),
+      frames: frameCount,
+      hiddenMs: perfHiddenMs(),
+      tab: tabVisible ? 'visible' : 'hidden',
+      tabHiddenMs: perfTabHiddenMs(),
+      canvas: perfCanvasBox(),
+      dom: perfDomCount(),
+    });
   }
 
   /** One observed frame: count it, and close a stall episode when there was one. */
   function perfMarkFrame() {
-    if (perfHidden()) return;
+    if (!perfOnScreen()) return;
     frameCount++;
     const now = perfNow();
     lastFrameAt = now;
@@ -410,6 +450,8 @@
       ms: Math.round(now - staleSince),
       frames: frameCount,
       hiddenMs: perfHiddenMs(),
+      tab: tabVisible ? 'visible' : 'hidden',
+      tabHiddenMs: perfTabHiddenMs(),
       via: staleVia || 'self',
     });
     staleSince = null;
@@ -418,7 +460,7 @@
   }
 
   function perfStartSampler() {
-    if (frameTimer != null || perfHidden()) return;
+    if (frameTimer != null || !perfOnScreen()) return;
     frameTimer = setInterval(perfSampleFrame, FRAME_SAMPLE_MS);
   }
 
@@ -470,6 +512,47 @@
   }
 
   /**
+   * The host said whether this tab is on screen (`viewState`).
+   *
+   * Going off screen is the same situation as the page being hidden — frames are supposed to
+   * stop, so the episode in flight ends without a `recovered` and the clock for the gap is
+   * reset — with one addition: the time is accumulated in `tabHiddenMs` and reported, which is
+   * what tells a reader of the log that a gap was the user looking elsewhere rather than a
+   * screen that froze on them.
+   *
+   * Coming back is the moment the whole diagnostic exists for. Resetting the frame clock here
+   * is what keeps a return from being reported as a stall of frames that stopped for a reason
+   * nobody should report, and the three frames it asks for are the evidence that drawing
+   * resumed at all.
+   */
+  function perfOnViewState(msg) {
+    try {
+      const visible = msg.visible !== false;
+      if (visible === tabVisible) return;
+      const now = perfNow();
+      tabVisible = visible;
+      if (!visible) {
+        perfStopSampler();
+        if (tabHiddenSince == null) tabHiddenSince = now;
+        lastFrameAt = now;
+        staleSince = null;
+        staleReportedAt = 0;
+        staleVia = null;
+        return;
+      }
+      tabHiddenMs += tabHiddenSince != null ? now - tabHiddenSince : 0;
+      tabHiddenSince = null;
+      lastFrameAt = now;
+      requestAnimationFrame(perfMarkFrame);
+      requestAnimationFrame(perfMarkFrame);
+      requestAnimationFrame(perfMarkFrame);
+      perfStartSampler();
+    } catch (err) {
+      /* a probe must never break the UI */
+    }
+  }
+
+  /**
    * `probe`: answer with this document's counters *now*, then with the frame that
    * follows them. The two answers are what tell the three ways a quiet tab can fail
    * apart — the script is dead (neither arrives), the script runs but nothing reaches
@@ -495,6 +578,7 @@
         inner: perfInnerBox(),
         dpr: perfDpr(),
         hiddenMs: perfHiddenMs(),
+        tabHiddenMs: perfTabHiddenMs(),
         readyState: document.readyState,
       });
       requestAnimationFrame(() => {
@@ -524,6 +608,22 @@
       perfNoteEpisode('nudge');
       applyTransform();
       relayout();
+      if (msg.force) {
+        // The stronger invalidation, for a tab that has just come back to the front with a
+        // surface that was never repainted while it was away: dropping the canvas' own layer
+        // and taking it again is what a stale raster answers to, where re-applying the
+        // transform it already had can be a no-op. Nothing moves on screen (the transform is
+        // re-applied with the same values), which is what keeps it safe to send unasked.
+        treeCanvas.style.willChange = 'transform';
+        requestAnimationFrame(() => {
+          try {
+            treeCanvas.style.willChange = '';
+            applyTransform();
+          } catch (err) {
+            /* diagnostics must never break the UI */
+          }
+        });
+      }
       requestAnimationFrame(() => {
         try {
           perfPost('nudge-frame', { id: msg.id, ms: Math.round(perfNow() - t0) });
@@ -2656,7 +2756,11 @@
     updateWorkHead(card);
 
     nodeEls[id] = card;
+    // The node id on the element itself: the off-screen-skip observer (`cvObserver`) and the
+    // "wake this card before writing into it" hook both hold an element and need its id.
+    card._nodeId = id;
     treeCanvas.appendChild(card);
+    cvObserver?.observe(card);
     return card;
   }
 
@@ -2694,6 +2798,73 @@
     typeof IntersectionObserver === 'function'
       ? new IntersectionObserver(onAgentItemsVisible, { root: null, rootMargin: '200px', threshold: 0 })
       : null;
+
+  // ---- Off-screen cards: the same tree, less to raster ------------------------
+  // `#tree-canvas` is one layer sized to the WHOLE tree — measured in a real session at
+  // `canvas=7928x8278` and `5749x11194`, against a viewport of a few hundred thousand pixels —
+  // and every card in it used to be laid out and rastered whether or not anyone could see it.
+  // That is what a background tab pays for when it comes back to the front (the surface it was
+  // never repainting is exactly the shape a stale corner takes), so a card that is far outside
+  // the viewport is skipped by the engine.
+  //
+  // Two rules keep it honest:
+  //  - the box the card last measured is written into `contain-intrinsic-size` BEFORE it is
+  //    skipped, because `relayout()` reads `offsetHeight` and a skipped card would otherwise
+  //    report a placeholder height into the tidy-tree layout;
+  //  - a card that is live (running), focused, or being dragged is never skipped, and
+  //    `cvWake` un-skips one that is written into.
+  // The margin is deliberately much larger than the viewport so the un-skip happens well
+  // before a card becomes visible: the engine then has the frames it needs to render it.
+  const CV_ROOT_MARGIN = '1000px';
+  const cvObserver =
+    typeof IntersectionObserver === 'function'
+      ? new IntersectionObserver(onCardVisibility, { root: null, rootMargin: CV_ROOT_MARGIN, threshold: 0 })
+      : null;
+  const cvSkipped = new Set();
+
+  function cvMaySkip(card) {
+    const id = card._nodeId;
+    if (!id) return false;
+    if (runningNodes.has(id) || treeActiveId === id) return false;
+    // A card the user is dragging has to keep measuring itself (the wireframe preview and
+    // the commit both read its box).
+    if (resizing && resizing.id === id) return false;
+    return true;
+  }
+
+  /** Render this card again, whatever the observer last decided (see `cvObserver`). */
+  function cvWake(card) {
+    try {
+      if (!card || !cvSkipped.has(card)) return;
+      cvSkipped.delete(card);
+      card.classList.remove('cv-skip');
+      card.style.containIntrinsicSize = '';
+    } catch (err) {
+      /* a layout aid must never break the UI */
+    }
+  }
+
+  function onCardVisibility(entries) {
+    try {
+      for (const entry of entries) {
+        const card = entry.target;
+        if (entry.isIntersecting) {
+          cvWake(card);
+          continue;
+        }
+        if (!cvMaySkip(card)) continue;
+        // Measured while it is still rendered — this is the height the layout will read back.
+        const w = card.offsetWidth || 0;
+        const h = card.offsetHeight || 0;
+        if (!w || !h) continue;
+        card.style.containIntrinsicSize = w + 'px ' + h + 'px';
+        card.classList.add('cv-skip');
+        cvSkipped.add(card);
+      }
+    } catch (err) {
+      /* a layout aid must never break the UI */
+    }
+  }
 
   /** Does this card still want (and may still receive) its transcript? */
   function agentItemsWanted(id) {
@@ -3133,6 +3304,10 @@
       perfCountDrop(nodeId, kind);
       return;
     }
+    // A card that was skipped while it was off screen is rendered again before anything is
+    // appended into it: its own content is about to change, and it must change inside a
+    // subtree the engine is measuring (see `cvObserver`).
+    cvWake(card);
     // The one choke point every routed append goes through: a card that is showing
     // its answer in zone 3 takes that answer back into the log *first*, so what the
     // callback appends lands after the answer and the run is no longer the tail
@@ -5318,6 +5493,11 @@
       case 'nudge':
         perfOnNudge(msg);
         break;
+      // The host saying whether this tab is on screen — the half of visibility the page
+      // itself cannot see (see the sampler block at the top). Diagnostics only.
+      case 'viewState':
+        perfOnViewState(msg);
+        break;
       case 'reset':
         clearLiveTools();
         resetAgentItems();
@@ -5372,6 +5552,10 @@
    * when there is no host card (there is no floating/docked fallback).
    */
   function mountComposer(card) {
+    // The composer must never land inside a card the engine is skipping (a subtree with
+    // `content-visibility: auto` is not measured or rendered), so the host card is woken
+    // before the pane is moved into it.
+    cvWake(card);
     if (composerHost === card) {
       autoGrow();
       return;

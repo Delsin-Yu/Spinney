@@ -359,20 +359,35 @@ disappoint), so the sampler itself can never be the traffic it reports on: it is
 window from idling either. Stale is defined as a **3 s** gap in a *visible* tab: three ticks
 that did not happen while somebody was looking, which no throttling can explain.
 
-- `webview-stall state=stale ms=… frames=… hiddenMs=…` — the renderer stopped producing
-  frames for at least 3 s in a visible tab. `frames=` is what the sampler did produce in
-  that gap and `hiddenMs=` how much of the gap was spent hidden, which is what separates a
-  real stall from a tab that was hidden across the boundary.
+- `webview-stall state=stale ms=… frames=… hiddenMs=… tab=… tabHiddenMs=… canvas=… dom=…`
+  — the renderer stopped producing frames for at least 3 s **in a tab that is on screen**.
+  `frames=` is the sampler's running total (it stops growing), `hiddenMs=` how much of the gap
+  the window spent hidden, `canvas=` / `dom=` the size of what was being drawn (see the layer
+  note below), and `tab=` / `tabHiddenMs=` the same question for the **editor tab**.
 - `webview-stall state=recovered ms=… via=self|nudge|probe` — the frames came back, and
   **what brought them back**: `self` (nothing was done, the renderer resumed on its own —
   the suspend case), `nudge` (the ladder's one nudge) or `probe` (the host asked).
 - `webview-visibility state=hidden|visible ms=…` — the page's own visibility changes, so a
-  gap can be attributed to a hidden tab without having to read the host's side for it.
+  gap can be attributed to a hidden window without having to read the host's side for it.
 - `webview-resize w=… h=… dpr=… canvas=…` — a resize is where a canvas-backed view can
   lose its drawing surface, and `canvas=` is the size the surface actually has as the
   webview reads it: a resize that leaves it without a size is a document that can no
   longer paint whatever its cards say. Like the sampler, it is the webview describing its
   own surface instead of its work.
+
+**The tab is not the page, and the first real logs proved it.** `document.hidden` is about the
+*window*: a chat tab in the background of a visible VS Code window is not a hidden document —
+so the sampler kept counting, the engine stopped drawing it (Chromium throttles, then freezes,
+an off-screen `iframe`), and every switch away produced `stale ms=3972 … 48495` with
+`hiddenMs=0`, plus one more `stale` in the milliseconds after the tab came back. That is noise
+dressed as the very defect the probe exists for, and it buried the real case in five logs of
+use. The host therefore pushes the fact the page cannot see, as `{ type:'viewState', visible,
+active }` (`ChatPanel.reportViewState`), and the sampler treats "my tab is off screen" exactly
+like the page being hidden: it stops, it accumulates `tabHiddenMs`, it ends an episode in flight
+**without** a `recovered` (frames did not come back — the tab went away), and **it resets the
+frame clock on the way back in**, so the one moment that matters is not reported as a stall of
+frames that stopped for a reason nobody should report. A `stall` line afterwards means what it
+says: a tab that was on screen did not draw for three seconds.
 
 **The probe is how the host finds out which failure it is looking at.** The host asks on
 its own at two moments: after **3 s** of staleness in a tab that is both `visible` and
@@ -432,6 +447,41 @@ messages in a row and the first one carries all of the news.
 - `webview-stale-unresolved session=… ms=… ladder=r0,r1` — the end of the ladder: rung 0
   is the probe, rung 1 the nudge, and `ladder=` names the rungs that were climbed, so
   "nothing further was tried" is in the line itself.
+
+**A `recovered` no longer cancels a probe already in flight, and a late answer is a finding.**
+The first five logs of real use contained exactly **zero** completed ladders: a stall
+self-reported `recovered` in the same millisecond the probe went out (the measured freeze read
+`stale ms=174746` followed by `recovered` **12 ms** later), `endStallEpisode` cleared the wait,
+and the probe's own answer — the one piece of evidence about that tab — arrived to nobody. Now
+only the episode ends there; a deadline that passes keeps its wait and writes
+`webview-probe-dead` as before, and the answer that arrives afterwards writes
+`webview-probe-late session=… probe#N ms=…` and **continues the ladder**. That `ms=` is the
+sharpest number this diagnostic has produced so far: a probe answered **257 s** late, next to
+`lastFrame=173988` and `frames=388` over seventy minutes, is what identified a background tab
+whose script the engine had frozen — not a stutter, and not something a 3 s threshold could
+have described on its own. A second, ten-minute deadline forgets a probe that never answers.
+
+**Coming back to a tab is the one nudge the host sends unasked.**
+`nudge session=… probe#N reason=visible hidden=<ms>ms` follows every return to the front after
+at least 3 s off screen, and it carries `force`: it drops the canvas' own layer and takes it
+again (`perfOnNudge`), which is the invalidation a surface that was never repainted answers to
+— a re-applied transform it already had can be a no-op. Nothing moves on screen, so it stays
+inside the rule that the agent repairs nothing silently; what it buys is the experiment. If
+`webview-nudge-frame` follows it, the stale corner is a repaint away; if `nudge-still-stale`
+does, the surface had to be rebuilt, and the next suspect is the layer itself.
+
+**The layer is the next suspect, and the readout for it is now on the stall line.**
+`#tree-canvas` is *one* layer sized to the whole tree — measured in a real session at
+`canvas=7928x8278` and `5749x11194` at `dpr=1.44`, against a viewport of a few hundred thousand
+pixels — and every card in it used to be laid out and rastered whether or not anyone could see
+it. A card that is far outside the viewport is now skipped by the engine
+(`.node.cv-skip { content-visibility: auto }`), with the box it last measured written into
+`contain-intrinsic-size` **first**, because `relayout()` reads `offsetHeight` and a skipped card
+would otherwise feed a placeholder height into the tidy-tree layout. A live card, the focused
+node, a card being dragged and any card something is written into (`cvWake`) are never skipped,
+and the margin is 1000px, so the un-skip happens well before a card becomes visible. Whether
+that is enough to stop the stale corner is what the `canvas=` / `dom=` fields on the next real
+stall will say.
 
 **Nothing above the nudge is automatic**, and that is a rule rather than a missing
 feature: a silent repair hides the defect — the tab paints again, the user never learns

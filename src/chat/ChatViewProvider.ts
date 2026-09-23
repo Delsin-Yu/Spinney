@@ -161,6 +161,21 @@ const LADDER_COOLDOWN_MS = 60_000;
  * the whole of the news, and the rest would only push the useful lines out of the file.
  */
 const POST_FAILED_REPORT_MS = 60_000;
+/**
+ * How long a **late** reply is still worth waiting for. A background tab's script is frozen by
+ * the engine, and the measured case had a probe answered 257 s after it was asked — so a reply
+ * that misses its 3 s deadline is not discarded, it is logged as late and the ladder it belongs
+ * to keeps waiting for it, up to this window, after which the probe is forgotten (the
+ * `webview-probe-dead` line is already on the record).
+ */
+const PROBE_LATE_WINDOW_MS = 10 * 60_000;
+/**
+ * A tab that was off screen at least this long comes back to a surface nothing repainted while
+ * it was away, so coming back is the one moment the host nudges without being asked: the frame
+ * sampler reported "stale" for those returns for months and the nudge is what turns that line
+ * into evidence about the surface (see `onPanelViewState`).
+ */
+const VISIBLE_NUDGE_HIDDEN_MS = 3000;
 /** One-shot marker for the historical-transcript backfill (see `backfillTranscripts`). */
 const TRANSCRIPT_BACKFILL_KEY = 'spinney.transcriptBackfill';
 const TRANSCRIPT_BACKFILL_VERSION = 'v1';
@@ -315,6 +330,13 @@ interface ProbeWait {
   stage: 'reply' | 'probe-frame' | 'nudge-frame';
   /** The deadline of `stage`; cleared before the stage moves on, and by `dispose`. */
   timer: ReturnType<typeof setTimeout>;
+  /** When the probe went out — the `ms=` of a reply that missed its deadline. */
+  readonly requestedAt: number;
+  /**
+   * Its deadline passed with no reply. The wait is kept (a frozen script answers minutes later,
+   * and the answer is the evidence) with a second, much longer deadline behind it.
+   */
+  late?: boolean;
 }
 
 /**
@@ -501,6 +523,8 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   private windowStateSub: vscode.Disposable | null = null;
   /** The stall episode in flight per session, from `stale` until `recovered` (see `StallEpisode`). */
   private readonly stallEpisodes = new Map<string, StallEpisode>();
+  /** When each session's tab last went off screen, for the return nudge (see `onPanelViewState`). */
+  private readonly tabHiddenSince = new Map<string, number>();
   /** The probes still being waited on, by probe id (see `ProbeWait`). */
   private readonly probeWaits = new Map<number, ProbeWait>();
   /** Monotonic probe ids: every line carries the id its report will quote back. */
@@ -3137,6 +3161,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     // precisely what a torn-down webview answers, and that is the evidence, not a leftover.
     this.viewStates.delete(sessionId);
     this.stallEpisodes.delete(sessionId);
+    this.tabHiddenSince.delete(sessionId);
     // The delivery-failure window is keyed by session *and* message type, so it is dropped by
     // prefix: a tab reopened later starts with a clean slate instead of inheriting the minute a
     // previous document was silent for.
@@ -3164,6 +3189,36 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     // Through the perf sink rather than the channel alone: "was the tab even on screen when it
     // froze?" is a question the *file* someone sends has to answer, and only the sink reaches it.
     harnessLog(`[panel] session=${sessionId} visible=${state.visible} active=${state.active}`);
+    const now = Date.now();
+    if (state.visible) {
+      const since = this.tabHiddenSince.get(sessionId);
+      this.tabHiddenSince.delete(sessionId);
+      // Coming back to a tab is the one moment the host nudges without being asked: the surface
+      // was not repainted while the tab was away, a nudge is the only repair that costs no state,
+      // and its answer (`webview-nudge-frame`) is what says whether that surface could be
+      // repainted or had to be rebuilt (see `VISIBLE_NUDGE_HIDDEN_MS`).
+      if (since != null && now - since >= VISIBLE_NUDGE_HIDDEN_MS) {
+        this.nudgeOnReturn(sessionId, now - since);
+      }
+      return;
+    }
+    this.tabHiddenSince.set(sessionId, now);
+  }
+
+  /**
+   * One nudge per return to the front, logged with how long the tab was away. It carries
+   * `force`, because this is the case a re-applied transform is not enough for: the surface was
+   * never repainted while the tab was in the background, and the invalidation that answers a
+   * stale raster is dropping and retaking the canvas' layer (`media/main.js` `perfOnNudge`).
+   */
+  private nudgeOnReturn(sessionId: string, hiddenMs: number): void {
+    const panel = this.panels.get(sessionId);
+    if (!panel) {
+      return;
+    }
+    const id = ++this.probeSeq;
+    perf(`nudge session=${sessionId} probe#${id} reason=visible hidden=${Math.round(hiddenMs)}ms`);
+    panel.nudge(id, { reason: 'visible', force: true });
   }
 
   /**
@@ -3312,12 +3367,26 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       sessionId,
       episode,
       stage: 'reply',
+      requestedAt: now,
       timer: this.armDiagnosticTimer(PROBE_REPLY_TIMEOUT_MS, () => {
-        this.probeWaits.delete(probeId);
+        const w = this.probeWaits.get(probeId);
+        if (!w) {
+          return;
+        }
+        // The wait is **kept**: a tab whose script the engine froze is not gone, and the answer
+        // it gives when it wakes is the whole of the evidence (the measured case answered 257 s
+        // after the request, and that number is what identified the freeze). A second, much
+        // longer deadline forgets the probe, because the `dead` line is already on the record.
+        w.late = true;
         perf(
           `webview-probe-dead session=${sessionId} probe#${probeId} ` +
             `(no reply in ${PROBE_REPLY_TIMEOUT_MS}ms)`,
         );
+        w.timer = this.armDiagnosticTimer(PROBE_LATE_WINDOW_MS, () => {
+          if (this.probeWaits.get(probeId) === w) {
+            this.probeWaits.delete(probeId);
+          }
+        });
       }),
     });
     // The evidence line first, then the ask: a line written after the call is a line that is
@@ -3334,6 +3403,14 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       return; // a reply to a probe that was already resolved (or timed out)
     }
     clearTimeout(wait.timer);
+    if (wait.late) {
+      // The reply missed its deadline and arrived anyway: how much it missed by is the finding
+      // (a tab whose script the engine froze answers in one burst when it wakes — 257 s in the
+      // case that showed this), and the ladder it belongs to goes on.
+      perf(
+        `webview-probe-late session=${wait.sessionId} probe#${id} ms=${Date.now() - wait.requestedAt}`,
+      );
+    }
     if (!wait.episode) {
       this.probeWaits.delete(id); // op-deadline probe: the reply that was just logged is all of it
       return;
@@ -3409,13 +3486,12 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    * answering late is news either way.
    */
   private endStallEpisode(sessionId: string): void {
+    // Only the episode ends here. A probe already in flight for it is deliberately left alone,
+    // deadline and all: a stall that a `recovered` ends in the same millisecond the probe went
+    // out is exactly the case whose answer still says something — the measured 174-second freeze
+    // was reported as `stale ms=174746` with `recovered` 12 ms later, its probe was cancelled on
+    // the spot, and the ladder therefore never ran once in five logs of real use.
     this.stallEpisodes.delete(sessionId);
-    for (const [id, wait] of [...this.probeWaits]) {
-      if (wait.episode && wait.sessionId === sessionId) {
-        clearTimeout(wait.timer);
-        this.probeWaits.delete(id);
-      }
-    }
   }
 
   /**
@@ -4928,6 +5004,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     }
     this.probeWaits.clear();
     this.stallEpisodes.clear();
+    this.tabHiddenSince.clear();
     this.viewStates.clear();
     this.postFailedAt.clear();
     this.lastProbeAt.clear();

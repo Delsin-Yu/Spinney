@@ -211,9 +211,13 @@ export class ChatPanel {
    * document reload ({@link reload}), losing the scroll position and the expanded cards,
    * stays the *user's* move instead of the ladder's. Posted through {@link post}, so the
    * pre-ready hold applies here too.
+   *
+   * `force` escalates it to the invalidation a stale surface answers to: the canvas' own
+   * layer is dropped and taken again (see `perfOnNudge`), which is what the tab that has just
+   * come back to the front needs. `reason` is what the log calls it.
    */
-  nudge(id: number): void {
-    this.post({ type: 'nudge', id });
+  nudge(id: number, opts: { reason?: string; force?: boolean } = {}): void {
+    this.post({ type: 'nudge', id, reason: opts.reason, force: opts.force === true });
   }
 
   /** The webview's script is up: messages are delivered from now on. */
@@ -292,12 +296,23 @@ export class ChatPanel {
    * because a diagnostic did.
    */
   private reportViewState(): void {
+    const state = { visible: this.panel.visible, active: this.panel.active };
+    // The webview is told too, and this is the half of visibility the page cannot see:
+    // `document.hidden` is about the window, while a background editor tab is not a hidden
+    // document — yet the engine stops drawing it, and after minutes of it, freezes its script
+    // outright. Without the fact the frame sampler reads "the user switched away" as "the
+    // screen is frozen", which is exactly the false alarm it drowned its real signal in.
+    try {
+      this.post({ type: 'viewState', visible: state.visible, active: state.active });
+    } catch {
+      /* diagnostics only: a consumer bug is never a reason to break the panel */
+    }
     const onViewState = this.onViewState;
     if (!onViewState) {
       return;
     }
     try {
-      onViewState({ visible: this.panel.visible, active: this.panel.active });
+      onViewState(state);
     } catch {
       /* diagnostics only: a consumer bug is never a reason to break the panel */
     }

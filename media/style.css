@@ -1129,6 +1129,18 @@ button.icon-btn {
   z-index: 3;
 }
 
+/* A card far outside the viewport is skipped by the engine: the tree's raster (and its
+   layout/paint work) then scales with what is on screen instead of with the whole tree,
+   which is what `#tree-canvas` — one layer sized to every card it holds — otherwise turns
+   into. `media/main.js` puts the class on a card only while it is off screen, finished,
+   neither the focused node nor being dragged, and it writes the box the card last measured
+   into `contain-intrinsic-size` FIRST: the layout reads `offsetHeight`, and a skipped card
+   must report the size it had, not a placeholder. `cvWake` takes both back off the moment
+   anything is written into the card. */
+.node.cv-skip {
+  content-visibility: auto;
+}
+
 /* No-node mode: the bare "New session" card that hosts the input (see main.js).
    It lives in the tree canvas, so it pans/zooms with the view like any node; no
    height cap, so the pane can never clip its own Send button. */

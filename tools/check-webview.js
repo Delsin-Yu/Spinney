@@ -229,8 +229,15 @@ const TURN_MESSAGES = [
   // Both answer with a `perfDiag` report — the whole point of replaying them, since
   // the host has nothing else to read a stuck tab through. The reports are asserted
   // in the deferred step at the bottom of this file.
+  // `viewState` is the other half of the same question: whether the *editor tab* is on
+  // screen, which the page itself cannot see (`document.hidden` is about the window) and
+  // the frame sampler needs before it may call a gap a stall. Both directions are
+  // replayed — off screen and back on — so the transition that resets the frame clock
+  // and restarts the sampler is exercised too, and the run ends with the tab on screen.
+  { type: 'viewState', visible: false, active: false },
+  { type: 'viewState', visible: true, active: true },
   { type: 'probe', id: 1 },
-  { type: 'nudge', id: 2 },
+  { type: 'nudge', id: 2, reason: 'visible', force: true },
 ];
 
 // --- a DOM just big enough to let the script run ------------------------------
