@@ -5,6 +5,39 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **`web_search` and `web_fetch`** — a web search that needs no API key and no setting. `web_search`
+  runs a chain of built-in backends in a fixed order (Bing's RSS view, 360, Baidu, Sogou, Bing,
+  Hacker News, StackExchange, GitHub), merges and de-duplicates what answers until it has the
+  requested number of **query-matching** results, ranks by term overlap, and reports which backend
+  answered plus the outcome of every other one. A backend that answers with a captcha, a consent
+  page or a page this build cannot read is classified (`blocked`, `parse-empty`, `rate-limited`,
+  `timeout`, …) and skipped for a while instead of being retried, so the tool learns what the
+  network in front of it allows. `web_fetch` turns one URL into Markdown or text: every redirect hop
+  is re-checked, the page's own charset is honoured (gbk/big5 included), the body is streamed and
+  stops at 2 MB, no JavaScript runs, and private, loopback and link-local addresses are refused.
+  Both tools mark what they return as untrusted data.
+- **`Spinney: Test Web Search Backends`** probes every backend once and opens a table of the
+  outcome, the time and the hit count per backend — the answer to "why did my search come back
+  empty", which is a property of the network rather than of any setting.
+- **Read-only sub-agents can research the web.** They get both tools and still no shell: the
+  network surface is read-only by construction, and the write tool stays hidden from them.
+- A new build guard, `npm run check:websearch` (`tools/websearch-acceptance.js`). Every search
+  parser is asserted against a response saved from the real endpoint
+  (`tools/fixtures/web-backends/`), so an engine that redesigns its result page fails the package
+  instead of silently reporting "no results" — plus the private-address refusals, the gbk path, the
+  relevance bar and the backend cooldown.
+
+### Changed
+
+- A tool's failure to fetch now names the cause. Node leaves a failed `fetch` as `fetch failed` and
+  puts the real reason in `error.cause`, so a `web_fetch` result reads
+  `request failed (fetch failed UND_ERR_CONNECT_TIMEOUT: …)`. An HTML page that yields no readable
+  text is reported as such instead of coming back as an empty success.
+
 ## [0.1.0] - 2026-09-22
 
 ### Added

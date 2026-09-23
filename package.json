@@ -141,6 +141,10 @@
       {
         "command": "spinney.reloadChatWebview",
         "title": "%command.spinney.reloadChatWebview.title%"
+      },
+      {
+        "command": "spinney.testWebSearchBackends",
+        "title": "%command.spinney.testWebSearchBackends.title%"
       }
     ],
     "menus": {
@@ -491,9 +495,10 @@
     "check:kill": "node tools/exec-kill-acceptance.js",
     "check:timeout": "node tools/exec-timeout-acceptance.js",
     "check:budget": "node tools/bg-budget-acceptance.js",
+    "check:websearch": "node tools/websearch-acceptance.js",
     "sim": "node tools/sim/run.mjs",
     "sim:selftest": "node tools/sim/run.mjs --selftest",
-    "vscode:prepublish": "npm run compile && npm run sync:l10n && npm run check:models && npm run check:webview && npm run check:modeltree && npm run check:signals && npm run check:l10n && npm run check:rollover && npm run check:grid && npm run check:docs && npm run check:cwd && npm run check:shell && npm run check:kill && npm run check:timeout && npm run check:budget"
+    "vscode:prepublish": "npm run compile && npm run sync:l10n && npm run check:models && npm run check:webview && npm run check:modeltree && npm run check:signals && npm run check:l10n && npm run check:rollover && npm run check:grid && npm run check:docs && npm run check:cwd && npm run check:shell && npm run check:kill && npm run check:timeout && npm run check:budget && npm run check:websearch"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

@@ -306,5 +306,15 @@
   "Sending with: {0}": "傳送時使用：{0}",
   "New setup: {0}": "新設定：{0}",
   "Send will ask before using the old setup (the one this node froze)": "傳送前會先詢問是否使用舊設定（此節點凍結的那一個）",
-  "Spinney: no chat tab is open for this window.": "Spinney：此視窗沒有開啟的聊天分頁。"
+  "Spinney: no chat tab is open for this window.": "Spinney：此視窗沒有開啟的聊天分頁。",
+  "Testing web search backends…": "正在測試網路搜尋後端…",
+  "Web search backends": "網路搜尋後端",
+  "Query: {0}": "查詢：{0}",
+  "Backend": "後端",
+  "Outcome": "結果",
+  "Time": "耗時",
+  "Hits": "命中",
+  "Notes": "說明",
+  "ok = results parsed · blocked = captcha or verify wall · rate-limited = HTTP 429/403 · timeout = no answer in time · parse-empty = the page loaded but no result could be read (the upstream markup changed) · unexpected = the body was not the format this backend publishes · http-error = the request or its status failed": "ok = 已解析出結果 · blocked = 驗證碼或驗證牆 · rate-limited = HTTP 429/403 · timeout = 逾時無回應 · parse-empty = 頁面已載入但讀不到結果（上游標記結構已改） · unexpected = 回應主體不是該後端公布的格式 · http-error = 請求或其狀態碼失敗",
+  "Nothing needs configuring: web_search tries these in order and skips the ones that recently failed.": "無需任何設定：web_search 會依此順序嘗試，並跳過最近失敗過的後端。"
 }

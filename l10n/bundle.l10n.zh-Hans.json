@@ -306,5 +306,15 @@
   "Sending with: {0}": "发送时使用：{0}",
   "New setup: {0}": "新设置：{0}",
   "Send will ask before using the old setup (the one this node froze)": "发送前会先询问是否使用旧设置（此节点冻结的那个）",
-  "Spinney: no chat tab is open for this window.": "Spinney：此窗口没有打开的聊天标签页。"
+  "Spinney: no chat tab is open for this window.": "Spinney：此窗口没有打开的聊天标签页。",
+  "Testing web search backends…": "正在测试网络搜索后端…",
+  "Web search backends": "网络搜索后端",
+  "Query: {0}": "查询：{0}",
+  "Backend": "后端",
+  "Outcome": "结果",
+  "Time": "耗时",
+  "Hits": "命中",
+  "Notes": "说明",
+  "ok = results parsed · blocked = captcha or verify wall · rate-limited = HTTP 429/403 · timeout = no answer in time · parse-empty = the page loaded but no result could be read (the upstream markup changed) · unexpected = the body was not the format this backend publishes · http-error = the request or its status failed": "ok = 已解析出结果 · blocked = 验证码或验证墙 · rate-limited = HTTP 429/403 · timeout = 超时无响应 · parse-empty = 页面已加载但读不到结果（上游标记结构已改） · unexpected = 返回体不是该后端公布的格式 · http-error = 请求或状态码失败",
+  "Nothing needs configuring: web_search tries these in order and skips the ones that recently failed.": "无需任何配置：web_search 会按此顺序尝试，并跳过最近失败过的后端。"
 }

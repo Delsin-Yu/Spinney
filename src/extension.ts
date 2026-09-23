@@ -6,6 +6,7 @@ import { SessionsProvider } from './chat/SessionsProvider';
 import { ControlServer } from './http/controlServer';
 import { showManual } from './manual';
 import { setHarnessStorageDir } from './tools';
+import { runWebSearchSelfTest } from './tools/webSearchDiagnostics';
 
 let chatProvider: ChatViewProvider | undefined;
 
@@ -129,6 +130,11 @@ export function activate(context: vscode.ExtensionContext): void {
     // broken screen visible and repairs nothing on its own (see `ChatViewProvider.onStallReport`),
     // so rebuilding the document is a command the user runs while looking at it.
     vscode.commands.registerCommand('spinney.reloadChatWebview', () => chatProvider?.reloadActiveChatWebview()),
+    // Reachability of the search backends is a property of *this machine's
+    // network*, not of any setting: the same list is half-dead behind a firewall
+    // and half-dead without it. So the user's interface to that fact is a
+    // measurement, not a configuration form (see `webSearchDiagnostics.ts`).
+    vscode.commands.registerCommand('spinney.testWebSearchBackends', () => void runWebSearchSelfTest()),
     vscode.commands.registerCommand('spinney.importData', () => chatProvider?.importSessionData()),
     vscode.commands.registerCommand('spinney.openSession', (arg) => {
       const id = toSessionId(arg);

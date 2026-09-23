@@ -11,6 +11,8 @@ import { readFileTool } from './readFile';
 import { replaceInFileTool } from './replaceInFile';
 import { searchFilesTool } from './searchFiles';
 import { makeSearchTranscriptsTool } from './searchTranscripts';
+import { webFetchTool } from './webFetch';
+import { webSearchTool } from './webSearch';
 import { writeFileTool } from './writeFile';
 
 /**
@@ -502,6 +504,11 @@ export class ToolRegistry {
       makeCheckBackgroundTool(getAccess),
       makeKillBackgroundTool(getAccess),
       makeJoinBackgroundTool(getAccess),
+      // The two web tools are keyless and configless: their backends live in
+      // `webBackends.ts` and their only state is the cooldown a failed backend
+      // earns (see `docs/agents/web-search.md`).
+      webSearchTool,
+      webFetchTool,
     ]) {
       this.tools.set(tool.definition.function.name, tool);
     }

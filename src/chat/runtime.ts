@@ -3766,7 +3766,11 @@ export class SessionRuntime {
    */
   private subAgentTools(node: TreeNode, write: boolean): ToolRegistry {
     const base = this.workerFor(node).tools;
-    const read = ['read_file', 'list_dir', 'search_files', 'search_transcripts'];
+    // `web_search` / `web_fetch` are read-only in the sense that matters here: they
+    // touch nothing on this machine, so a read-only sub-agent may research (before
+    // them, a read-only sub-agent had no network tool at all — the research tools
+    // are the shell, which a read-only sub-agent correctly does not get).
+    const read = ['read_file', 'list_dir', 'search_files', 'search_transcripts', 'web_search', 'web_fetch'];
     const writeTools = ['write_file', 'replace_in_file', 'exec_command'];
     if (write) {
       return base.subset([...read, ...writeTools]);

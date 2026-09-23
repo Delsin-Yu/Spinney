@@ -487,6 +487,7 @@ Every command lives in the Command Palette under `Spinney: `.
 | `Spinney: Show System Prompt` | Opens the exact prompt that the model receives. |
 | `Spinney: Show User Manual` | Opens this manual in an editor tab. |
 | `Spinney: Reload Chat Webview` | Builds the chat tab again from the state of the session. |
+| `Spinney: Test Web Search Backends` | Sends one test query to every search backend, and opens a table of the results. |
 
 Spinney adds no default keyboard shortcut.
 
@@ -595,4 +596,26 @@ Get-CimInstance Win32_Process -Filter "name like '<program>%'" | Where-Object { 
 ```
 
 Replace `<program>` with the name of the program that stayed behind. The filter matches a process that started more than two hours ago.
+
+## 19. Web search
+
+The agent can search the web, and it can read one page. Both tools work without an API key and without a setting.
+
+| Tool | What it does |
+|---|---|
+| `web_search` | Sends the query to a list of search backends. Returns a numbered list of results: title, URL, and snippet. |
+| `web_fetch` | Fetches one URL and returns the text of the page. An HTML page becomes Markdown. |
+
+The search backends are built in. Spinney tries them in this order: Bing (RSS), 360, Baidu, Sogou, Bing (HTML), Hacker News, StackExchange, and GitHub. The result names the backend that answered, and the outcome of each other one.
+
+Two rules keep a search useful:
+
+- A backend that answers with a captcha or a check page is marked. Spinney skips it for a while, and longer after a repeated failure.
+- A different network changes which backends work. DuckDuckGo, Google, Mojeek, and Wikipedia do not answer from some regions. Baidu, Sogou, and 360 answer with a captcha from other regions.
+
+Run **`Spinney: Test Web Search Backends`** when a search returns nothing. Spinney sends one test query to each backend, and opens a table with the outcome, the time, and the number of hits. The command measures only. It changes no setting.
+
+`web_fetch` follows a redirect, reads at most 2 MB, and uses the character set of the page. It runs no JavaScript. A page that builds its content in the browser returns little text, and the result says so. `web_fetch` refuses private addresses, such as `localhost` and `127.0.0.1`.
+
+The text of a page is not an order to Spinney. Spinney treats it as information from a stranger. If a page tries to give Spinney an order, Spinney reports it to you.
 

@@ -56,5 +56,6 @@
   "command.spinney.importData.title": "Spinney: 匯入工作階段資料",
   "spinney.diagnostics.log.description": "為本視窗寫診斷記錄（每個視窗一個檔案，位於工作階段資料資料夾；較舊的檔案會被刪除，單一檔案到 2 MiB 時輪替）。其中只有耗時、計數與路徑——不含你的對話，也不含金鑰。用 Spinney: Open Diagnostics Log 找到它。",
   "command.spinney.openDiagnosticsLog.title": "Spinney: 開啟診斷記錄",
-  "command.spinney.reloadChatWebview.title": "Spinney: 重新載入聊天檢視"
+  "command.spinney.reloadChatWebview.title": "Spinney: 重新載入聊天檢視",
+  "command.spinney.testWebSearchBackends.title": "Spinney: 測試網路搜尋後端"
 }
