@@ -1,6 +1,10 @@
 .vscode/**
 .vscode-test/**
 tools/**
+# The remote-control side: the relay (C#) and the Android app live here. Neither
+# is part of the extension package — the .vsix ships only the TypeScript host,
+# the webviews and the user manual.
+remote/**
 .spinney/**
 .agent-harness/**
 .github/**
@@ -19,3 +23,6 @@ docs/**
 # URL, so the file is fetched, not packaged.
 assets/**
 *.vsix
+# The collected build artifacts. The extension is packaged *into* this directory, so
+# without this line the previous package would be swept into the next one.
+artifacts/**

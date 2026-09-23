@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Spinney Remote — the Android controller (milestone M3).
+
+  INTERNET is the only permission the app asks for. There is no storage permission and no
+  location: the image picker uses the system photo picker, which hands back one URI without
+  granting access to the gallery.
+
+  `usesCleartextTraffic` is on because a relay is self-hosted and `remote/PROTOCOL.md` §7 says
+  "plain HTTP(S)" — a developer's relay on a LAN is usually `http://`. It is a deliberate,
+  visible choice rather than a hidden fallback: the token never leaves the phone (it is not sent
+  to the relay at all, §3), and every frame is sealed before it is posted.
+
+  `hardwareAccelerated` and the WebView are the session view: the shipped `media/main.js` renders
+  the same tree a VS Code window renders, and it needs a real compositor.
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application
+        android:label="Spinney Remote"
+        android:supportsRtl="true"
+        android:usesCleartextTraffic="true"
+        android:hardwareAccelerated="true"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|density|locale|layoutDirection"
+            android:windowSoftInputMode="adjustResize">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>

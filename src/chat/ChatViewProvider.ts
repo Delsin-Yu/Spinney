@@ -55,7 +55,8 @@ import {
   turnCount,
 } from './sessionTitles';
 import { agentRootInfo, getWorkspaceRoot, resolvePath } from '../tools';
-import { defaultSessionTitle, displayLocale, l10nDiagnostics, webviewL10n } from '../i18n';
+import { defaultSessionTitle, l10nDiagnostics } from '../i18n';
+import { buildChatShell } from './webviewShell';
 import { BackgroundHub } from './backgroundHub';
 import { ChatPanel } from './ChatPanel';
 import { PanelManager } from './panels';
@@ -78,6 +79,14 @@ import {
   writeSessionTranscript,
   writeSubAgentTranscript,
 } from './transcript';
+import {
+  RemoteCommandOutcome,
+  RemoteInputResult,
+  RemoteOrigin,
+  RemoteService,
+  nodeOrigin,
+  writeOriginIntoTranscript,
+} from '../remote/remoteService';
 import { ControlHost, ControlResult, ControlState, WaitForFinishOptions } from '../http/controlServer';
 import { SessionStore, SessionSummary, defaultDataRoot, looksLikeStoreRoot, workspaceKeyFor } from './sessionStore';
 import { diagnosticsHeader, newestDiagnosticsLog, prepareDiagnosticsLog } from './diagnosticsLog';
@@ -359,6 +368,12 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   private readonly clients: ClientRegistry;
   /** The Model Card Tree page: a second editor tab, created on demand. */
   private readonly modelTree: ModelTreeController;
+  /**
+   * The remote publisher of this window (`src/remote/remoteService.ts`), set by
+   * `activate()` once both objects exist. `undefined` in a host that never enables the
+   * feature — and even then it is only reached through `postTo`'s cheap no-op call.
+   */
+  private remoteService?: RemoteService;
   /** Last value `resolveModel` could not place, so the output line is logged once. */
   private lastUnknownModel = '';
   /** Last `storage.update` write; the control plane awaits it before a reboot. */
@@ -401,7 +416,12 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    * and clears this.
    */
   private hopReturn: { originSessionId: string; armedAt: number; returnNodeId?: string } | null = null;
-  /** Cache-busting suffix for media URLs; changes per extension session. */  private readonly mediaVersion: string;
+  /**
+   * Cache-busting suffix for media URLs; changes per extension session. Public because the
+   * replicated session panel (`src/remote/remoteSessionPanel.ts`) renders the same document
+   * and has to bust the same cache.
+   */
+  readonly mediaVersion: string;
   readonly output: vscode.OutputChannel;
   /**
    * The persisted **default** model card/level, used to seed a session that has
@@ -2243,6 +2263,10 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   /** Notify the host (the sidebar) that some state it renders has changed. */
   stateChanged(): void {
     this.notifyStateChanged();
+    // The room's `instances` announcement is what a peer's tree draws, so it follows the
+    // same changes the sidebar does. The service coalesces, and with no room online it
+    // returns immediately (see `RemoteService.onLocalStateChanged`).
+    this.remoteService?.onLocalStateChanged();
   }
 
   /**
@@ -2716,6 +2740,16 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         usage: nodeUsage(node),
       });
       this.output.appendLine(`[transcript] session ${ref.file} lines=${ref.lines} bytes=${ref.bytes}`);
+      // A turn a peer started also records **where it came from**, in the dump's line-1
+      // meta record (`docs/agents/plans/remote-control.md` §13) — never in the message
+      // text: the bytes the provider sees must not change. The writer's meta is a fixed
+      // field list, so the record is completed here once its queued write has landed.
+      const origin = nodeOrigin(node);
+      if (origin) {
+        void flushTranscripts()
+          .then(() => writeOriginIntoTranscript(ref.file, origin))
+          .catch(() => undefined);
+      }
     } catch (err) {
       this.output.appendLine(`[transcript] session write failed for ${node.id}: ${String(err)}`);
     }
@@ -3422,8 +3456,206 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     return this.readOnly;
   }
 
+  /**
+   * The **mirror seam**: every session-facing host→webview message funnels through here
+   * (`SessionRuntime.post` → `RuntimeHost.postTo`), so this is the one place the remote
+   * publisher can be handed exactly what a local tab receives — with no second copy of the
+   * protocol to keep in step (`docs/agents/plans/remote-control.md` §5).
+   *
+   * The local delivery happens **first**, and the mirror is called after it inside a
+   * `try`: a peer, a transport defect or a full mirror queue must never delay, block or
+   * fail the owner's own webview, agent loop or tool call (§7). The call itself is
+   * cheap — the service returns before copying anything unless a room is online *and*
+   * some peer attached to this session.
+   */
   postTo(sessionId: string, message: unknown): void {
     this.panels.get(sessionId)?.post(message);
+    try {
+      this.remoteService?.mirrorLocal(sessionId, message);
+    } catch (err) {
+      // Best effort by contract: the mirror is a copy, never the delivery.
+      this.output.appendLine(`[remote] mirror failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  /**
+   * The remote publisher of this window, set once by `activate()` right after both exist
+   * (`RemoteService` needs this provider as its host). `undefined` until then, and in a
+   * host that never enables the feature it stays a service with nothing to do.
+   */
+  attachRemote(service: RemoteService): void {
+    this.remoteService = service;
+  }
+
+  // ---- Remote publisher host (src/remote/remoteService.ts) ----
+
+  /** Does this window have this session at all? (`attach` to anything else is refused.) */
+  hasSession(sessionId: string): boolean {
+    return this.sessions.some((s) => s.id === sessionId);
+  }
+
+  /**
+   * The `tree` message a local webview would receive for this session — the state an
+   * `attach` is answered with.
+   *
+   * It asks the session's runtime for the message instead of posting it, so answering a
+   * peer never repaints the owner's own tab. A session with no runtime yet gets one, which
+   * is the same lazy materialization opening its tab would do (and which every local path
+   * does on its first message); a session this window does not have answers `null`.
+   */
+  remoteTreeMessage(sessionId: string): unknown | null {
+    const session = this.sessions.find((s) => s.id === sessionId);
+    if (!session || this.disposed) {
+      return null;
+    }
+    return this.runtimeFor(session).treeMessage();
+  }
+
+  /**
+   * Apply one webview→host message a peer submitted (`input`), through the **same** path a
+   * local webview message takes — `handleSessionMessage`, i.e. the one switch that routes
+   * `userMessage`, `stop`, `setModel`, `loadAgentItems` and the rest. There is therefore
+   * no remote-only code path that could behave differently from clicking the same control
+   * in a local tab.
+   *
+   * Refusals are returned as codes (the caller answers `error{code}` per
+   * `remote/PROTOCOL.md` §5) and nothing is dispatched: an unknown session, a malformed
+   * message, and — the important one — a window that lost the workspace lock
+   * (`this.readOnly`), which refuses every remote mutation exactly like a local one.
+   *
+   * Idempotency (a replayed frame after a peer's reconnect) is *not* handled here: it
+   * belongs where the frame id is, in the service's short-lived de-dupe cache.
+   */
+  applyRemoteInput(sessionId: string, message: unknown, origin: RemoteOrigin): RemoteInputResult {
+    if (!this.hasSession(sessionId)) {
+      return 'unknown-session';
+    }
+    if (this.readOnly) {
+      return 'readonly';
+    }
+    const type = (message as { type?: unknown } | null | undefined)?.type;
+    if (typeof type !== 'string' || !type) {
+      return 'bad-message';
+    }
+    this.output.appendLine(
+      `[remote] input ${type} session=${sessionId} from ${origin.deviceName || origin.peerId}`,
+    );
+    // **The one place a remote input deliberately bypasses the owner's dialog.**
+    //
+    // Deleting a branch is irreversible, so locally it always goes through a modal
+    // (`deleteBranchInteractive`). The frozen user-facing contract says the confirmation
+    // belongs where the click happened: a peer clicking the card's 🗑 must NOT pop a modal
+    // on the owner's screen (`docs/agents/plans/remote-control.md` §3 — "anything about
+    // reading and interacting with your own device happens on the surface you are
+    // operating"). So the replica shows the confirm itself and marks this one input
+    // `confirmed: true`; only that marker reaches the non-interactive path.
+    //
+    // An input WITHOUT the marker is not refused — it falls through to the switch below,
+    // where `deleteBranch` still asks the owner (`deleteBranchInteractive`). A peer can
+    // therefore not skip the confirm by leaving the field out, and a local webview is
+    // unaffected because it never sends the field at all.
+    if (type === 'deleteBranch' && (message as { confirmed?: unknown }).confirmed === true) {
+      const nodeId = String((message as { id?: unknown }).id ?? '');
+      this.output.appendLine(
+        `[remote] confirmed deleteBranch session=${sessionId} node=${nodeId} from ${origin.deviceName || origin.peerId}`,
+      );
+      this.deleteBranch(sessionId, nodeId);
+      return 'ok';
+    }
+    void this.handleSessionMessage(sessionId, message, undefined, origin);
+    return 'ok';
+  }
+
+  /**
+   * One control-plane `cmd` from a peer (`remoteService.ts`, `remote/PROTOCOL.md` §5).
+   *
+   * It dispatches to the **same four methods the local HTTP plane answers**
+   * (`controlStartSession` / `controlNavigate` / `controlContinueFrom` / `controlStop`,
+   * `src/http/controlServer.ts`), so a remote command and an HTTP call cannot behave
+   * differently — this method adds no semantics of its own, only the refusal **code** the
+   * wire wants (`unknown-session` / `readonly` / `busy`) in place of an English sentence.
+   * These exist as `cmd` frames at all because the affordances behind them have no webview
+   * message to ride: a message sent from the room tree continues a session that may not be
+   * open in a tab at all, and "create a session on that machine" cannot be expressed by a
+   * composer that is not there.
+   *
+   * `args` is untrusted JSON written by another machine: every field is read through a
+   * type check, and an absent one is `undefined` — exactly what the route's own optional
+   * parameters mean.
+   */
+  async remoteCommand(command: string, args: Record<string, unknown>): Promise<RemoteCommandOutcome> {
+    const str = (value: unknown): string | undefined =>
+      typeof value === 'string' && value ? value : undefined;
+    const sessionId = str(args.sessionId);
+    const nodeId = str(args.nodeId);
+    if (sessionId && !this.hasSession(sessionId)) {
+      return { ok: false, code: 'unknown-session', message: `this window has no session ${sessionId}` };
+    }
+    // A window that lost the workspace lock may not mutate a conversation from anywhere —
+    // `controlStartSession` says so itself; the check is repeated here so the peer learns
+    // the *code* the protocol defines instead of the sentence. `stop` and `navigate` are
+    // deliberately not gated: killing work and moving the view focus write no conversation
+    // bytes, and refusing them would leave a peer unable to stop a run it started.
+    if (this.readOnly && (command === 'session/start' || command === 'continue')) {
+      return {
+        ok: false,
+        code: 'readonly',
+        message: 'another window owns this workspace\u2019s sessions; this window is read-only',
+      };
+    }
+    switch (command) {
+      case 'session/start':
+        return this.remoteOutcome(
+          await this.controlStartSession({
+            sessionId,
+            nodeId,
+            title: str(args.title),
+            prompt: typeof args.prompt === 'string' ? args.prompt : undefined,
+            returnTo: args.returnTo === true,
+            returnNodeId: str(args.returnNodeId),
+          }),
+        );
+      case 'navigate':
+        if (!nodeId) {
+          return { ok: false, code: 'unsupported', message: 'navigate needs a nodeId' };
+        }
+        return this.remoteOutcome(await this.controlNavigate({ sessionId, nodeId }));
+      case 'continue':
+        if (typeof args.message !== 'string' || !args.message.trim()) {
+          return { ok: false, code: 'unsupported', message: 'continue needs a message' };
+        }
+        return this.remoteOutcome(
+          await this.controlContinueFrom({ sessionId, nodeId, message: args.message }),
+        );
+      case 'stop':
+        return this.remoteOutcome(await this.controlStop({ sessionId, nodeId }));
+      default:
+        return { ok: false, code: 'unsupported', message: `unknown command "${command}"` };
+    }
+  }
+
+  /**
+   * A control route's answer, in the two shapes the wire has: a `result` body when it
+   * worked, an `error{code}` when it did not. The route's own sentence (`result.error`) is
+   * passed through as the error message — it is control-plane text, deliberately English
+   * (`docs/agents/invariants/i18n.md`).
+   */
+  private remoteOutcome(result: ControlResult): RemoteCommandOutcome {
+    const body: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(result)) {
+      if (value !== undefined) {
+        body[key] = value;
+      }
+    }
+    if (result.ok) {
+      return { ok: true, body };
+    }
+    return {
+      ok: false,
+      code: result.busy ? 'busy' : 'unsupported',
+      message: result.error ?? 'the command was refused',
+      body,
+    };
   }
 
   /**
@@ -4293,7 +4525,12 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
 
   // ---- Webview routing ----
 
-  private async dispatchUserMessage(rt: SessionRuntime, text: string, attachments: UserAttachment[]): Promise<void> {
+  private async dispatchUserMessage(
+    rt: SessionRuntime,
+    text: string,
+    attachments: UserAttachment[],
+    origin?: RemoteOrigin,
+  ): Promise<void> {
     if (this.isHeld()) {
       rt.postNotice(
         'warning',
@@ -4323,7 +4560,10 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     // A send is the moment a key matters: nudge once (never block — the request
     // itself reports the real error).
     void this.warnMissingApiKey();
-    await rt.onUserMessage(text, attachments);
+    // `origin` is the remote-origin mark of the turn this send starts (`RemoteOrigin`):
+    // the runtime writes it onto the node it creates, and the transcript dump carries it
+    // in its line-1 meta. The message text itself is never touched.
+    await rt.onUserMessage(text, attachments, origin);
     // The composer holds the text until this point: a question answered with "No" must not
     // eat what the user typed (`composerClear`).
     this.postTo(rt.sessionId, { type: 'composerClear' });
@@ -4447,7 +4687,29 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
 
   /** Messages from a panel's webview, resolved in that panel's session. */
   private handlePanelMessage(panel: ChatPanel, message: any): void | Promise<void> {
-    const session = this.sessions.find((s) => s.id === panel.sessionId);
+    return this.handleSessionMessage(panel.sessionId, message, panel);
+  }
+
+  /**
+   * One webview→host message, resolved in `sessionId` — the single routing point both
+   * surfaces reach: a local tab's webview ({@link handlePanelMessage}, with its panel) and
+   * a remote peer's `input` frame (`applyRemoteInput`, called by
+   * `src/remote/remoteService.ts`, without one).
+   *
+   * `panel` is present only for a local tab, because it is about *that tab*: the `ready`
+   * handshake, its held messages and its age are the tab's own business, and a peer may
+   * not submit `ready` anyway (it is not on `ACCEPT_FROM_PEER`).
+   *
+   * `origin` marks a turn a peer started (see `RemoteOrigin`): it is used only where a node
+   * is created, and it never touches the message text that goes to the provider.
+   */
+  private handleSessionMessage(
+    sessionId: string,
+    message: any,
+    panel?: ChatPanel,
+    origin?: RemoteOrigin,
+  ): void | Promise<void> {
+    const session = this.sessions.find((s) => s.id === sessionId);
     if (!session) {
       return;
     }
@@ -4463,6 +4725,9 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       return;
     }
     if (message?.type === 'ready') {
+      if (!panel) {
+        return; // a boot handshake belongs to a tab; no tab, nothing to hand it to
+      }
       // The tab is repainting itself. Open (or join) the op for **this** session
       // before its runtime is built, so `runtime-create` and the repaint marks land
       // on the tab's own operation rather than on whichever other tab is repainting
@@ -4471,24 +4736,31 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     }
     const rt = this.runtimeFor(session);
     switch (message?.type) {
-      case 'ready':
+      case 'ready': {
+        // The guard above already refused a `ready` without a tab; the local name is what
+        // lets the four tab-scoped calls below say what they are for.
+        const tab = panel;
+        if (!tab) {
+          return;
+        }
         // Order matters: the tab is up (release it), then the single full repaint,
         // then whatever was held before it (e.g. deltas of a turn that started while
         // this tab was still loading its scripts). The age says whether a cold
         // switch's cost is ours (host work) or the browser's (loading main.js,
         // markdown-it, tree.js and the layout engine) — nothing else reports that.
-        perf(() => `webview-ready session=${session.id} +${panel.ageMs()}ms`);
-        panel.markReady();
+        perf(() => `webview-ready session=${session.id} +${tab.ageMs()}ms`);
+        tab.markReady();
         rt.postAllState();
-        panel.flushHeld();
+        tab.flushHeld();
         return;
+      }
       case 'loadAgentItems':
         // A sub-agent card was expanded: its transcript was deliberately left out of
         // the `tree` message (see `SessionRuntime.postTree`).
         rt.onAgentItems(String(message.id ?? ''));
         return;
       case 'userMessage':
-        return this.dispatchUserMessage(rt, String(message.text ?? ''), message.attachments ?? []);
+        return this.dispatchUserMessage(rt, String(message.text ?? ''), message.attachments ?? [], origin);
       case 'forkTurn':
         // The composer's new-setup entry: same question as the drift gate, but asked
         // explicitly, and the answer may be "keep this setup" (then nothing forks).
@@ -4677,97 +4949,14 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     this.closePerfTee();
   }
 
+  /**
+   * The chat document. The template itself lives in `webviewShell.ts`, because the
+   * **replicated session panel** (`src/remote/remoteSessionPanel.ts`) opens the very same
+   * document for another window's session: one renderer, two surfaces, and therefore one
+   * shell that cannot drift from itself (see that module's comment, and the two guards
+   * `npm run check:webview` / `node tools/check-remote-assets.js`).
+   */
   private getHtml(webview: vscode.Webview): string {
-    // A cache-busting version suffix so the webview re-fetches media files when
-    // they change (asWebviewUri does not change with file content).
-    const v = this.mediaVersion;
-    const withV = (uri: string) => `${uri}${uri.includes('?') ? '&' : '?'}v=${v}`;
-    const scriptUri = withV(String(webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'main.js'))));
-    const markdownItUri = withV(String(webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'vendor', 'markdown-it', 'markdown-it.min.js'))));
-    const treeUri = withV(String(webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'tree.js'))));
-    // Vendored, pinned tree-layout engine (non-layered-tidy-tree-layout@2.0.2, MIT).
-    // Not an npm dependency — see media/vendor/non-layered-tidy-tree-layout/PROVENANCE.md.
-    const layoutEngineUri = withV(String(webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'vendor', 'non-layered-tidy-tree-layout', 'dist', 'non-layered-tidy-tree-layout.js'))));
-    const styleUri = withV(String(webview.asWebviewUri(vscode.Uri.joinPath(this.extensionUri, 'media', 'style.css'))));
-    const nonce = this.getNonce();
-    // The webview has no `vscode.l10n`, so it gets the whole catalog as one
-    // inline dictionary and looks strings up itself (media/main.js `tr()`). The
-    // shell below is host-rendered and asks `vscode.l10n` directly — the same key,
-    // one catalog file (see src/i18n.ts).
-    const l10n = JSON.stringify(webviewL10n(this.extensionUri)).replace(/</g, '\\u003c');
-
-    return `<!DOCTYPE html>
-<html lang="${displayLocale()}">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; font-src ${webview.cspSource}; img-src ${webview.cspSource} https: data:; script-src 'nonce-${nonce}';" />
-  <link rel="stylesheet" href="${styleUri}" />
-  <title>Spinney</title>
-  <script nonce="${nonce}">window.__spinneyL10n = ${l10n};</script>
-</head>
-<body>
-  <div id="tree-toolbar">
-    <button id="follow-btn" class="active" title="${vscode.l10n.t('Follow the active node')}">⦿</button>
-    <button id="fit-btn" title="${vscode.l10n.t('Fit the tree to view')}">⤢</button>
-  </div>
-  <div id="tree-wrap">
-    <div id="tree-canvas">
-      <svg id="tree-edges"></svg>
-    </div>
-  </div>
-  <div id="composer">
-    <div id="branch-banner" class="hidden"></div>
-    <div id="attachments"></div>
-    <div id="composer-row">
-      <textarea id="input" placeholder="${vscode.l10n.t('Ask the agent… (Enter to send, Shift+Enter for newline)')}" rows="1" spellcheck="false" autocorrect="off" autocapitalize="off" autocomplete="off"></textarea>
-      <div id="composer-controls">
-        <button id="snippets-btn" class="icon-btn" title="${vscode.l10n.t('Prompt snippets')}" aria-label="${vscode.l10n.t('Prompt snippets')}" aria-haspopup="true">
-          <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 11h10M4 16h13"/></svg>
-        </button>
-        <button id="attach-btn" class="icon-btn" title="${vscode.l10n.t('Attach image')}" aria-label="${vscode.l10n.t('Attach image')}">
-          <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
-        </button>
-        <select id="model-select" title="${vscode.l10n.t('Model')}"></select>
-        <button id="models-btn" class="icon-btn" title="${vscode.l10n.t('Manage model cards…')}" aria-label="${vscode.l10n.t('Manage model cards…')}">
-          <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
-        </button>
-        <select id="effort-select" title="${vscode.l10n.t('Thinking effort')}"></select>
-        <div id="actions">
-          <button id="stop-btn" class="hidden">${vscode.l10n.t('Stop')}</button>
-          <button id="send-btn">${vscode.l10n.t('Send')}</button>
-        </div>
-      </div>
-    </div>
-    <div id="meter-row-readout" title="${vscode.l10n.t('Session prompt-cache hit rate + wallet')}">
-      <span id="status-dot" class="dot idle"></span>
-      <span id="status-text"></span>
-      <span id="metrics">
-        <span id="context" title="${vscode.l10n.t('Context window usage')}">
-          <span id="context-label">ctx 0%</span>
-        </span>
-        <span id="stat-balance">bal –</span>
-        <span id="tps-meter" title="${vscode.l10n.t('Token generation rate (realtime estimate)')}">
-          <span id="tps-value">0</span>
-          <span id="tps-unit">tok/s</span>
-        </span>
-      </span>
-    </div>
-  </div>
-  <script nonce="${nonce}" src="${markdownItUri}"></script>
-  <script nonce="${nonce}" src="${layoutEngineUri}"></script>
-  <script nonce="${nonce}" src="${treeUri}"></script>
-  <script nonce="${nonce}" src="${scriptUri}"></script>
-</body>
-</html>`;
-  }
-
-  private getNonce(): string {
-    let text = '';
-    const possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-    for (let i = 0; i < 32; i++) {
-      text += possible.charAt(Math.floor(Math.random() * possible.length));
-    }
-    return text;
+    return buildChatShell(webview, { extensionUri: this.extensionUri, mediaVersion: this.mediaVersion });
   }
 }

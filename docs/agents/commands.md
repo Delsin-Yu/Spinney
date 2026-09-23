@@ -16,21 +16,48 @@ npm run check:rollover                       # guard: the context-rollover contr
 npm run check:grid                           # guard: the Chat Tree sidecar lattice (media/tree.js)
 npm run check:docs                           # guard: the shipped user manual (manual/**) vs the manifest
 npm run check:cwd                            # guard: the working-directory / path-base contract (compiled tools)
-npm run package                              # compile + guards + package (.vsix)  — POSIX
+npm run check:shell                          # guard: the argv a native child really receives under Git Bash
+npm run check:kill                           # guard: the kill-confirmation contract (exited / no-exit / no-pid)
+npm run check:timeout                        # guard: the foreground limit and the background promotion
+npm run check:budget                         # guard: the background job budget (deadline, countdown, join refusals)
+npm run check:websearch                      # guard: the keyless web_search / web_fetch pair
+npm run check:remote                         # guard: the remote mirror transport and the cross-language crypto
+npm run check:relay                          # guard: a real relay on a loopback port driving RelayTransport
+npm run check:remote-surfaces                # guard: the remote-control surfaces (services, routing table, blocklist)
+npm run check:remote-assets                  # guard: the Android copies of the shipped webview assets
+npm run package                              # compile + guards + package (.vsix) + collect   — POSIX
+npm run artifacts                            # collect the built artifacts into artifacts/ (no rebuild)
 powershell -File build-deploy.ps1            # compile + package + install         — Windows
 powershell -File build-deploy.ps1 -NoInstall # compile + package only              — Windows
 ```
 
 `npm run package` and `build-deploy.ps1` are the two side-by-side closing paths.
 `npm run package` is the POSIX entry point: it packages the `.vsix`, runs the
-`vscode:prepublish` gate (compile + `sync:l10n` + the **nine** guards — `check:models`,
+`vscode:prepublish` gate (compile + `sync:l10n` + the **eighteen** guards — `check:models`,
 `check:webview`, `check:modeltree`, `check:signals`, `check:l10n`, `check:rollover`,
-`check:grid`, `check:docs`, `check:cwd`) on the way, and takes the generated l10n aliases off disk
+`check:grid`, `check:docs`, `check:cwd`, `check:shell`, `check:kill`, `check:timeout`,
+`check:budget`, `check:websearch`, `check:remote`, `check:relay`, `check:remote-surfaces`,
+`check:remote-assets`) on the way, and takes the generated l10n aliases off disk
 again once it is done.
-`build-deploy.ps1` is the Windows path, and it also installs the newest `.vsix`
-with `code --install-extension --force`. Use one of them for quick iteration,
-then reload the window. This is the **mandatory last step** of any code change —
-see the "Standard closing procedure" section in `AGENTS.md`.
+`build-deploy.ps1` is the Windows path, and it also installs
+`artifacts/spinney-<version>.vsix` **by that exact path** with
+`code --install-extension --force` (there is no "newest `.vsix`" search any more).
+Use one of them for quick iteration, then reload the window. This is the
+**mandatory last step** of any code change — see the "Standard closing procedure"
+section in `AGENTS.md`.
+
+`artifacts/` is where a build's output is published: `npm run artifacts` collects
+whatever already exists into it — the packaged extension
+(`artifacts/spinney-<version>.vsix`), the cross-compiled relay
+(`artifacts/spinney-<version>-relay-linux-x64`, and beside it the relay's
+`appsettings.json` under its canonical name, because ASP.NET loads that file **by name**
+from the executable's own directory) and the Android debug APK
+(`artifacts/spinney-<version>-debug.apk`). The relay's ~55 MiB `.dbg` symbol file is
+deliberately **not** collected; it stays in the toolchain's publish directory. `npm run package` and
+`build-deploy.ps1` leave their own output there too, and collect it strictly, so a
+missing input fails the run instead of being skipped. The folder is gitignored and
+kept out of the `.vsix`; it is rebuilt on demand, `tools/collect-artifacts.mjs` is the
+only thing that writes it, and nothing in it is hand-edited.
 
 `sync:l10n` / `clean:l10n` are not optional extras. VS Code looks the Chinese catalogs
 up by the region tag *it* reports; the repo only authors the canonical ones; the copies

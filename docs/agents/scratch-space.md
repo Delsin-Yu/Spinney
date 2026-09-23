@@ -23,6 +23,15 @@ above, created on demand). The same rule applies — this location replaces the
 `.spinney/` that a folder would provide, and scratch files still never go to
 `C:\Temp` or the system temp dir. See `docs/agents/no-repo-mode.md`.
 
+**`artifacts/` is the second gitignored directory, and it is not scratch.** It holds
+the **deliverables** of a build — `spinney-<version>.vsix`, the cross-compiled relay with
+its `appsettings.json`, and the Android debug APK — laid out by `tools/collect-artifacts.mjs`, which replaces
+the previous file of a kind instead of accumulating them. A screenshot or a tool
+result that spilled to disk goes to `.spinney/`; a **release candidate** goes to
+`artifacts/`. Nothing in it is hand-edited: it is gitignored, kept out of the `.vsix`
+and rebuilt on demand, exactly like this folder — so nothing tracked may depend on
+either one.
+
 **Want the output to outlive the session?** It must not live here: this folder is
 gitignored, so a `git clean`/fresh clone loses it while a tracked doc keeps
 referring to it. Long-lived research or verification material belongs in a tracked

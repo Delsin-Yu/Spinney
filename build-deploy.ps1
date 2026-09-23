@@ -34,19 +34,29 @@ finally {
   }
 }
 
+# Collect the package into artifacts/, where every build output lives. `--strict` means a
+# run that did not actually produce a package fails here instead of installing yesterday's.
+Write-Host '== Collecting artifacts ==' -ForegroundColor Cyan
+& node tools\collect-artifacts.mjs --vsix --strict
+if ($LASTEXITCODE -ne 0) { throw 'Collecting the packaged extension failed.' }
+$version = (Get-Content (Join-Path $root 'package.json') -Raw | ConvertFrom-Json).version
+# Installed **by exact path**: the old "newest *.vsix in the repository root" heuristic is
+# what let six stale packages pile up there, and it would happily install a file this run
+# did not produce.
+$vsix = Join-Path $root "artifacts\spinney-$version.vsix"
+if (-not (Test-Path $vsix)) { throw "No packaged extension at $vsix." }
+
 if ($NoInstall) {
   Write-Host 'Skipping install (build + package only).' -ForegroundColor Yellow
+  Write-Host 'The package is in artifacts/.' -ForegroundColor Yellow
   exit 0
 }
-
-$vsix = Get-ChildItem -Filter '*.vsix' | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-if (-not $vsix) { throw 'No .vsix file found.' }
 
 $cmd = Get-Command code -ErrorAction SilentlyContinue
 $code = if ($cmd) { $cmd.Source } else { 'code' }
 
-Write-Host "== Installing $($vsix.Name) ==" -ForegroundColor Cyan
-& $code --install-extension $vsix.FullName --force
+Write-Host "== Installing $(Split-Path -Leaf $vsix) ==" -ForegroundColor Cyan
+& $code --install-extension $vsix --force
 if ($LASTEXITCODE -ne 0) { throw 'Install failed.' }
 
 Write-Host 'Done. Reload the VS Code window to activate the changes.' -ForegroundColor Green

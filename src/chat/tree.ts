@@ -23,6 +23,7 @@
  *  - an epoch, once frozen, is never re-rendered.
  */
 import { ChatMessage, ThinkingEffort, ToolDefinition, Usage } from '../agent/types';
+import type { RemoteOrigin } from '../remote/origin';
 
 export type TurnStatus = 'pending' | 'running' | 'done' | 'interrupted' | 'error';
 
@@ -248,6 +249,19 @@ export interface TreeNode {
   bgElapsedMs?: number;
   /** kind === 'bg': last ~800 chars of output, captured at the terminal state. */
   bgOutputTail?: string;
+  /**
+   * The **remote-origin mark**: this turn was started by a peer in a room
+   * (`RemoteOrigin`, `docs/agents/plans/remote-control.md` §13). Written by
+   * `SessionRuntime` when a remote `input` starts a turn, rendered as a badge on the card
+   * (`media/main.js`), and copied into the node's transcript dump's line-1 meta.
+   *
+   * It is node metadata on purpose: the bytes sent to the provider never change, and the
+   * model is not told it is being driven from elsewhere. Optional and additive, so a state
+   * stored before the feature existed loads unchanged (no version bump), and a node without
+   * one is an ordinary local turn. It is carried through `normalizeTreeSession` — without
+   * that it survived only in the transcript dump, and a reload lost the badge.
+   */
+  origin?: RemoteOrigin;
 }
 
 /**
@@ -894,6 +908,25 @@ function normalizeImageSources(raw: unknown): ImageSourceEntry[] | undefined {
   return out.length > 0 ? out : undefined;
 }
 
+/**
+ * The remote-origin mark of a stored node, or `undefined` (§13).
+ *
+ * Validated, not trusted: the row comes from a file on disk, and both the card's badge and
+ * the transcript writer read it without looking again. `deviceName` may be empty (a peer
+ * that never sent a `hello`), `peerId` and `at` may not — a mark with neither says nothing
+ * about anything, so it is dropped rather than rendered as a bare badge.
+ */
+function normalizeOrigin(raw: unknown): RemoteOrigin | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return undefined;
+  }
+  const row = raw as Record<string, unknown>;
+  if (typeof row.peerId !== 'string' || !row.peerId || typeof row.at !== 'number' || !Number.isFinite(row.at)) {
+    return undefined;
+  }
+  return { peerId: row.peerId, deviceName: typeof row.deviceName === 'string' ? row.deviceName : '', at: row.at };
+}
+
 function normalizeTreeSession(raw: AgentSession & { rootId?: string | null }): AgentSession {
   const session: AgentSession = {
     id: raw.id || newId(),
@@ -981,6 +1014,10 @@ function normalizeTreeSession(raw: AgentSession & { rootId?: string | null }): A
     n.bgKilled = typeof node.bgKilled === 'boolean' ? node.bgKilled : undefined;
     n.bgElapsedMs = typeof node.bgElapsedMs === 'number' ? node.bgElapsedMs : undefined;
     n.bgOutputTail = typeof node.bgOutputTail === 'string' ? node.bgOutputTail : undefined;
+    // The remote-origin mark (§13): a turn a peer started keeps its badge across a reload.
+    // Validated here rather than trusted: a stored row is a file on disk, and the renderer
+    // (and the transcript writer) reads `peerId` / `at` without checking them again.
+    n.origin = normalizeOrigin(node.origin);
     session.nodes[id] = n;
   }
   pruneSession(session);

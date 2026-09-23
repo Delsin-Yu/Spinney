@@ -33,6 +33,9 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { Agent } from '../agent/agent';
+// The remote-origin mark of a turn a peer started (`docs/agents/plans/remote-control.md` §13):
+// the node metadata itself is written here, where the node is created.
+import { RemoteOrigin, nodeOrigin, setNodeOrigin } from '../remote/remoteService';
 import { DEFAULT_REPLY_LANGUAGE, SYSTEM_PROMPT_TEMPLATE, currentAgentsMd } from '../agent/prompt';
 import { Balance, emptyBalance } from '../agent/balance';
 import { ClientRegistry } from '../agent/clients';
@@ -1871,8 +1874,28 @@ export class SessionRuntime {
     };
   }
 
-  /** Structural summary of the session tree + the view/stream ids (no items). */
+  /**
+   * Structural summary of the session tree + the view/stream ids (no items).
+   *
+   * The message is built by {@link treeMessage} and posted unchanged, so the *same* object
+   * can also answer a remote peer's `attach` (`ChatViewProvider.remoteTreeMessage`) without
+   * repainting this session's own tab.
+   */
   postTree(): void {
+    const message = this.treeMessage();
+    opPayload('post-tree', message);
+    this.post(message);
+  }
+
+  /**
+   * The `tree` message of this session, built but **not** posted.
+   *
+   * `origin` is on each node row for the reason node metadata is: a turn a remote peer
+   * started is marked where the turn is (`RemoteOrigin`,
+   * `docs/agents/plans/remote-control.md` §13), and the mark is rendered as a badge rather
+   * than written into the conversation — the bytes the provider receives never change.
+   */
+  treeMessage(): Record<string, unknown> {
     const session = this.session;
     const nodes = Object.values(session.nodes).map((node) => ({
       id: node.id,
@@ -1923,8 +1946,10 @@ export class SessionRuntime {
       // sidecar's items made one session's tree 2.3 MB and 10 k DOM elements for 8
       // cards (see docs/agents/invariants/streaming-perf.md).
       itemCount: node.kind === 'agent' ? node.displayItems.length : undefined,
+      // Where a remote-originated turn came from, when it came from the room.
+      origin: nodeOrigin(node),
     }));
-    const message = {
+    return {
       type: 'tree',
       activeId: this.activeStreamNodeId(),
       viewId: session.activeNodeId,
@@ -1935,8 +1960,6 @@ export class SessionRuntime {
       // id: the webview measures the burst it belongs to and reports it back.
       ...opTag(this.sessionId),
     };
-    opPayload('post-tree', message);
-    this.post(message);
   }
 
   /** The checked-out branch's transcript, grouped by node (for the tree view). */
@@ -2489,7 +2512,7 @@ export class SessionRuntime {
 
   // ---- User input / stop / image picker ----
 
-  async onUserMessage(text: string, attachments: UserAttachment[] = []): Promise<void> {
+  async onUserMessage(text: string, attachments: UserAttachment[] = [], origin?: RemoteOrigin): Promise<void> {
     // P3: only the node this turn would continue from must be free — another
     // branch of this session may stream meanwhile. (This mirrors the composer's
     // Stop-not-Send rule; `beginTurn` re-checks the same condition once the basis
@@ -2668,6 +2691,13 @@ export class SessionRuntime {
     const run = this.beginTurn(titleFromPrompt(userText || attachments[0]?.name || ''), { parentId: basis });
     if (!run) {
       return;
+    }
+    // A turn a remote peer started is marked as such **on its node** (§13): the room's
+    // UI can badge the card, and the transcript dump records where the turn came from.
+    // Deliberately not part of `content` below — the bytes the provider receives, and
+    // therefore the prompt cache, must be exactly what a local send would have produced.
+    if (origin) {
+      setNodeOrigin(run.node, origin);
     }
     if (sources.length > 0) {
       run.node.imageSources = sources;

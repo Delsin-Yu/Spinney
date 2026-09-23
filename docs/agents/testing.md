@@ -12,7 +12,7 @@ gitignored, so a leftover is harmless). Before a release, confirm `npm run compi
 `npm run vscode:prepublish` — on a push to `main`, on a `v*` tag, on a pull request and on
 demand, so a red workflow and a red gate are the same thing instead of two lists that drift.
 
-Thirteen build-time guards are the exception, all run by `vscode:prepublish` so a
+Eighteen build-time guards are the exception, all run by `vscode:prepublish` so a
 regression fails *packaging* instead of the user's session:
 
 - `npm run check:models` (`tools/check-models.js`) — the model configuration:
@@ -247,6 +247,97 @@ All four of those need `out/` (`npm run compile` first), for the same reason
 (`check:cwd` is the working directory and path base, `check:shell` the argv the shell
 hands on, `check:kill` the end of a command, `check:timeout` what happens when it does
 not end, `check:budget` what happens once the work has left the turn).
+- `npm run check:remote` (`tools/check-remote.js`) — the remote-control mirror
+  transport's pure core, and with it the **cross-language crypto contract**. That
+  feature exists three times (the TypeScript host here, the C# relay under
+  `remote/server/`, and the Kotlin app under `remote/android/`), and only the first
+  lives in this repository, so what can rot silently is a **derivation** that drifts:
+  three implementations of PBKDF2/HKDF/AES-GCM that all look right and disagree by one
+  byte in a salt, an AAD or a nonce layout. It drives the compiled `out/remote/*.js`
+  and pins: the derivation is deterministic and its room id is exactly **26 base32
+  characters** (it is a URL path segment and the routing credential); a seal/open round
+  trip returns the identical plaintext; a tampered AAD is rejected as *tampering*
+  rather than as a generic failure (the three-way error taxonomy — too large /
+  tampered / replayed — is the contract, and collapsing it hides a broken peer behind a
+  disabled one); the replay window's edges (a duplicate sequence, one at the floor, one
+  below it); an oversized frame is refused **before** it is sealed; slicing a large
+  sealed frame and reassembling it gives back the byte-identical buffer, with an
+  out-of-order slice and an over-cap reassembly both refused; and the two mirror tables
+  are **deny-by-default** — an unknown type is refused, and the types that must never
+  cross (`perfDiag`, `layoutDiagnostic`, `openExternal`, `pickImage`, `copyNodeId`,
+  `setNodeSize`) are refused by name, which is also what keeps a replica from tripping
+  the owner's own painting-recovery ladder. It then validates
+  `remote/vectors/vectors.json` — the committed vectors the Android app will read from
+  M3 on — against that same code, which is what turns "the two implementations agree"
+  into a checked fact instead of a hope. The relay is deliberately not a consumer: it
+  never parses a frame, so it never sees a key. Needs `out/`
+  (`npm run compile` first). Pointing a comparison in the vectors section at a
+  trivially-true value is how to prove it still bites.
+- `npm run check:remote-surfaces` (`tools/remote-surfaces-acceptance.js`) — the
+  remote-control **surfaces** of M2, which the pure guard above cannot reach because they
+  are behaviour rather than tables. It stubs `vscode` and replaces
+  `RelayTransport.prototype` with a recorder, so the *real* `RemoteService` runs its own
+  reconciliation, key derivation, frame routing, de-dupe cache and blocklist with no
+  window and no socket, and pins what cannot fail loudly: the room tree's
+  `room → device → instance → session` hierarchy and the items it draws (a phase, a
+  device name, a workspace folder and model, a session title and state); the
+  **`cmd`/`result` pair**, including that a repeated frame id is answered from the shared
+  idempotency cache and therefore creates **no second session** (the failure this exists
+  for is a duplicated session on somebody else's machine); the four refusals
+  (`unknown-session` / `readonly` / `busy` / `unsupported`) answered as `error{code}`
+  carrying the request's own id; **`kick`** as a local blocklist keyed by
+  `deviceId`+`instanceId` — mirroring stops, the peer's `input`/`cmd` frames are dropped
+  *unanswered*, a `bye` goes out, the peer stays listed so **Unblock** is reachable, and
+  nothing about it revokes anything; the replica surface's
+  `attach`/`mirror`/`input`/`cmd`/`detach` across a reconnect; and the frozen 1:1 routing
+  table of `src/remote/replicaRouting.ts` (the never-forwarded types stay local, the
+  control allow-list is forwarded, the two sets do not overlap, anything unclassified is
+  refused). Needs `out/` (`npm run compile` first).
+- `npm run check:relay` (`tools/relay-acceptance.js`, **103 checks**) — the
+  remote-control **transport**, which is the one layer where a mistake is silent: a
+  dropped frame, a reused nonce, or a blocked extension-host thread all look like
+  nothing at all. It stands up a **real relay** on an ephemeral loopback port
+  (`node:http`, no dependency) and drives the **compiled** `out/remote/relayClient.js`
+  with the real `rooms.ts` / `frames.ts` on both ends, pinning: a clean join and the
+  documented status shape; the app-level `ping` arriving within a heartbeat while the
+  room is quiet; an outbound frame decoded by the stub with the same key, one slice for
+  a small frame and a dozen for a large one; a frame that needs several slices
+  reassembled byte for byte, including **two frames interleaved by `fid`**; the wire
+  line's seven keys in order with `s` in position 3 and genuinely the nonce's last four
+  bytes; one salt per connection read from the envelope, and a frame that does **not**
+  open under a neighbouring salt; a slice whose `s` disagrees with its frame refused as
+  a *framing* error (never mixed in, and never misreported as tampering); a replay, a
+  tampered byte and a malformed line each refused and counted **without taking the
+  connection down**; a `429` retried rather than dropped; **pacing** (ninety frames
+  spread over the time the rate requires, nothing dropped); **backpressure** (a stalled
+  peer fills the queue, `send` still returns in milliseconds, the drops are counted, the
+  event loop stays responsive); a **reconnect** after the stream ends — `backoff` with a
+  `retryAt`, then a new peer id **and a fresh connection salt**, with nothing replayed
+  and a frame dropped while offline never sent later; the silent-stream watchdog firing
+  in 2 × heartbeat rather than waiting out undici's five minutes; a non-2xx join reported
+  as a status and never thrown into the caller; and `stop()` releasing every timer and
+  socket, with `start()` after it joining again. Needs `out/` (`npm run compile` first).
+- `npm run check:remote-assets` (`tools/check-remote-assets.js`, **7 assets**) — the
+  **Android renderer copies**. The phone renders the same `media/main.js` the desktop
+  does, so a drifted copy means the phone runs a second, older renderer and nobody finds
+  out until something is drawn wrong on a device. It pins: every generated asset under
+  `remote/android/app/src/main/assets/**` byte-identical to its `media/**` or `l10n/**`
+  source (sha256, and the failure names both hashes, both byte lengths and the fix
+  command); **no unmanaged file** in those folders at all — a hand-added asset is exactly
+  the second renderer this exists to prevent; and the shell's DOM pairing the host
+  template **both ways** (30 element ids and 7 class attributes, plus every id the
+  shipped `main.js` and `tree.js` look up). It also has to survive the release gate's own
+  ordering: `vscode:prepublish` runs `sync:l10n` *before* this guard, so the four
+  generated reported-tag aliases are on disk when it runs. The rule is a **content** rule
+  and not a list of names — a catalog with no manifest row is fine iff its bytes are a
+  byte-for-byte copy of a catalog that *has* one (which is exactly what a generated alias
+  is, and `sync-l10n-aliases.js` refuses to delete an edited one), anything else is a new
+  authored language and fails until it has a row. Needs no `out/`.
+- `npm run check:websearch` (`tools/websearch-acceptance.js`) — the keyless
+  web-search backends, replayed from the committed response bodies under
+  `tools/fixtures/web-backends/`, so a backend that changes its markup or its
+  captcha wall fails packaging instead of quietly returning nothing to the user.
+  See `docs/agents/web-search.md`.
 
 `tools/exec-cwd-acceptance.js` and the four scripts listed after it above
 (`shell-argv-acceptance.js` / `exec-kill-acceptance.js` / `exec-timeout-acceptance.js` /
@@ -302,6 +393,29 @@ session-title completion answers while the only slot is busy. It also refuses to
 quietly: a run that ends while an `await` is pending (i.e. a deadlock) exits non-zero.
 `node tools/gate-acceptance.js` after `npm run compile`.
 
+`tools/remote-interop.mjs` (`npm run check:interop`) is the **cross-implementation
+acceptance** for remote control, and it is the only thing in this repository that has
+ever made two independent implementations talk to each other. Dev-only, deliberately
+**not** a build guard: it needs `out/` compiled, the C# relay built with `dotnet`, and a
+JVM — three toolchains a packaging run must not require. It starts the **real relay**
+(the JIT dll under `remote/server`), the **real Kotlin peer** (built as a jar by
+`:core:interopJar`, run through `java -cp`), and the **real compiled TypeScript
+transport**, then asserts what nothing else can: both peers join one room; a frame from
+either side arrives at the other **byte for byte** (sha256 equal on both sides), including
+one large enough to need four slices; each side opens the other's frame with the salt it
+read **from the envelope**, while the `fid`-derived salt the transport used to imply
+provably *cannot* open it (this is the proof that the hidden-salt convention, which two
+implementations had each invented differently, would have broken the room); a replay is
+refused on both sides; and a frame re-stamped with a neighbouring salt fails its tag. It
+kills every child it starts (`taskkill /F /T` on Windows, a second reap pass) and never
+calls `process.exit(0)`, so a leaked process would keep the run alive — that is the check
+that nothing was left behind. Two things it taught, both worth remembering: Node refuses
+to `spawn` a `.bat`/`.cmd` without `shell: true`, and the two implementations diagnose a
+bad-salt frame differently (Kotlin verifies the tag first and says `TAMPERED`; the
+TypeScript transport consults the replay window first and says `replay`) — with a *fresh*
+sequence both report `auth`, which is the only version of that assertion that proves
+anything.
+
 What `check:webview` can **not** tell you: anything visual (no CSS, no layout, no
 theme) and anything about the provider's TypeScript side. Maintenance: adding a
 provider message type means adding it to `TURN_MESSAGES` in the script (missing
@@ -344,6 +458,38 @@ packaging instead of shipping, exactly as a dead paint report already does. See 
 issue, and the ladder, in `invariants/streaming-perf.md`.
 
 ## Windowed checks (the bounded wait, and what no guard can see)
+
+`tools/remote-acceptance.mjs` (`npm run check:remote-e2e`) is the third kind of run:
+**windowed acceptance**, dev-only, never in the gate. It launches one throwaway VS Code
+window on a profile of its own (`--user-data-dir` / `--extensions-dir` inside
+`.spinney/`, the developer's profile never touched, the extension under test linked in as
+the repo), attaches it to a room of the **real relay** with the `SPINNEY_REMOTE*` bypass
+variables, and joins the same room from Node on the real compiled transport. It is the
+only run in this repository that proves the feature works in a live window, and everything
+it asserts is read back from the window's **own control plane** rather than from a mirror
+frame the run itself wrote: the window announces itself (`hello` naming the device, the
+instance, the workspace and `deviceId = sha256(machineId + roomId)`), `instances` carries
+its real sessions with their real titles and node counts, `attach` yields a `mirror` frame
+holding that session's own `tree`, an `input` really starts a turn, a replayed frame id
+really does **not** start a second one (`result{ok:true,duplicated:true}` and an unchanged
+node count), `cmd{session/start}` creates a session in the window and `cmd{stop}` stops a
+turn, no mirrored payload carries a perf trace at any depth — with the positive control
+that the local post is longer by exactly the stripped `traceId` — and teardown leaves no
+window and no relay behind, checked by filtering the process list. 44 checks, and it takes
+about 19 s.
+
+Its licence to exist is the defect it found on its first three runs: `RelayTransport` kept
+**one** replay window per receiving connection and applied it to frames from **every**
+sender, while §4 specifies one window per connection *salt* and each sender starts its own
+`seq` at 1 — so in a room of three or more members the later senders' frames were dropped
+as replays and never arrived. (Fixed: `relayClient.ts` now keys the window by the sender
+salt the envelope names, LRU-bounded, and opens a frame **before** advancing its window —
+the salt is public, so advancing first let a keyless relay burn a real sender's window.
+Case 7c of `check:relay` pins all of it, including that a genuine same-sender replay is
+still refused.) Every two-peer test in the repo was green, including a
+103-check transport driver and a cross-implementation run; only a third member could see
+it. That is the argument for this file: a room is not two peers, and a stub is not a
+window.
 
 The windowless runs above cannot see a **bounded wait** — and one of those waits has no
 windowless coverage at all: `spawn_agents` / `send_agent_message` in `sync` mode

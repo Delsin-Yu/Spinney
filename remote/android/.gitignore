@@ -1,0 +1,15 @@
+# Nested ignore rules for the Android skeleton.
+#
+# The repo's ROOT .gitignore does NOT cover any of these (it is a VS Code
+# extension repo), so per the brief they are declared here instead of editing it.
+local.properties
+.gradle/
+build/
+*/build/
+.kotlin/
+captures/
+.externalNativeBuild/
+.cxx/
+*.apk
+*.aab
+*.ap_

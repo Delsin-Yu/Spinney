@@ -8,3 +8,14 @@ media/vendor/** -text
 # about the difference), shell scripts want LF so a checkout on Linux/macOS runs.
 *.ps1 text eol=crlf
 *.sh text eol=lf
+
+# The Android tree carries byte-for-byte copies of the vendored webview runtime
+# (`tools/sync-remote-assets.js` writes them, `check-remote-assets` fails when one
+# drifts). A copy under the default `text` rule comes back CRLF while its `-text`
+# source stays LF, so a fresh clone would ship a renderer that no longer matches its
+# source. The copies get the same rule as the originals.
+remote/android/app/src/main/assets/webview/vendor/** -text
+
+# A CRLF `gradlew` is a broken `gradlew` on Linux and macOS (`/bin/sh^M: bad
+# interpreter`). It has no `.sh` extension, so `*.sh text eol=lf` above cannot reach it.
+remote/android/gradlew text eol=lf

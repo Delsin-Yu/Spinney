@@ -7,7 +7,11 @@
   control-plane host, the HTML shell, the Model Card Tree page controller, and
   webview message routing. It owns the
   `runtimes: Map<sessionId, SessionRuntime>` and a `PanelManager` (tabs); the editor
-  `WebviewPanel` lifecycle is `restorePanel` (serializer) + `postAllState`.
+  `WebviewPanel` lifecycle is `restorePanel` (serializer) + `postAllState`. It is also the
+  remote publisher's host (`src/remote/remoteService.ts`): `postTo` is the single funnel the
+  mirror taps, `handleSessionMessage` is the single routing switch a peer's `input` frame
+  reaches, `applyRemoteInput` is the refusal gate (read-only window, unknown session), and
+  `remoteTreeMessage` answers an `attach` without repainting the local tab.
 - `src/chat/ChatPanel.ts` — a thin wrapper around a `WebviewPanel` (one chat tab).
   It carries its `sessionId`; `PanelManager` keeps one per session. `ChatPanel.create`
   makes a new panel, `ChatPanel.revive` adopts one VS Code restored from serialization
@@ -31,6 +35,10 @@
   async sub-agents) — a `kind:'bg'` card per job (`onBackgroundRegistered`) plus the
   per-node `signals` queue, handed to a running turn at its next tool boundary or
   injected into the idle owning node. Reaches the provider through the narrow `RuntimeHost`.
+  `treeMessage()` builds the `tree` message **without** posting it, which is what lets a
+  remote `attach` be answered with the very message a local tab receives; a turn a peer
+  started carries the `RemoteOrigin` mark on its node (`onUserMessage`'s third argument),
+  which never touches the messages sent to the provider.
   A full context window is continued rather than compressed by `rolloverContext()` (the
   union kill + settle + flush + re-dump, `beginTurn({ freshContext })`, the harness resume
   text and the `contextFull` flag it ships) — see `invariants/context-rollover.md`.
@@ -61,6 +69,21 @@
   `ModelPanel.ts` and replayed by `tools/check-modeltree.js`.
 - `src/chat/SessionsProvider.ts` — the native sidebar `TreeDataProvider` listing
   session titles; it re-reads items from `ChatViewProvider` on every refresh.
+- `src/chat/webviewShell.ts` — the **one** HTML shell of the chat surface
+  (`buildChatShell` + `webviewNonce`), shared by the local chat tab
+  (`ChatViewProvider.getHtml()`) and the replicated session panel
+  (`src/remote/remoteSessionPanel.ts`): same script set and order (the vendored layout
+  engine, markdown-it, `media/tree.js`, `media/main.js`), same CSP nonce, same
+  `window.__spinneyL10n`, same element ids, per-caller `mediaVersion`. Two callers, one
+  template, because `media/main.js` fetches its whole surface by element id and a drifted
+  second shell would freeze the replica with nothing able to say why. Guarded by
+  `npm run check:webview` and `node tools/check-remote-assets.js` (the shell block, which
+  reads this file).
+- `src/chat/imagePick.ts` — `pickImageAttachment`: the one image picker, returning
+  `{ kind: 'picked', dataUrl, name }` / `cancelled` / `failed`. Used by
+  `SessionRuntime.handlePickImage` and by the replicated session panel, where the picker
+  opens on the surface you are operating and the bytes then travel inside `userMessage`
+  (`docs/agents/plans/remote-control.md` §4).
 - `src/chat/tree.ts` — the Chat Tree data model: `TreeNode` / `AgentSession`,
   path assembly (`pathIds` / `pathMessages`), the context basis that cuts the API
   prefix (`TreeNode.contextBaseId` / `contextBase()` — see
@@ -108,6 +131,117 @@
   (`/health`, `/state`, `/wait-for-finish`, `/navigate`, `/continue`, `/stop`,
   `/session/start`, `/reload-window`); token + discovery file, loopback only. See
   "External control plane & the `hvsc` supervisor".
+- `src/remote/rooms.ts` — the remote-control **derivation**: token → `master`
+  (PBKDF2-HMAC-SHA256, 600000 iterations) → the room id, the AEAD key and the MAC
+  key (HKDF-SHA256), plus the room-id validator and the token-strength check the
+  connect dialog maps to one localized sentence. It is synchronous on purpose — the
+  600000 iterations are paid once per room per connection, never on a hot path.
+- `src/remote/frames.ts` — the sealed frame: the logical-frame envelope
+  (`{v,type,id,from,to,body}`), the `v|seq|fid` AAD a receiver can build **before**
+  it decrypts, `sealFrame`/`openFrame` (AES-256-GCM, tag appended), the
+  slice/reassemble pair (one seal per logical frame, then slices of at most 48000
+  base64 characters, hard-capped at 16 MiB reassembled), the 64-wide replay window,
+  and the three-way error taxonomy (too large / tampered / replayed) that keeps a
+  broken peer distinguishable from a hostile one. Pure `node:crypto`, no `vscode`.
+- `src/remote/allowlist.ts` — the mirror's two **deny-by-default** tables
+  (`MIRROR_TO_PEER`, `ACCEPT_FROM_PEER`) and the refused types with their reasons.
+  Deny-by-default is what makes a new host or webview message type fail a guard
+  instead of silently crossing the wire: `perfDiag` / `layoutDiagnostic` reaching the
+  publisher would trip its own painting-recovery ladder, `openExternal` / `pickImage`
+  / `copyNodeId` belong to the surface you are operating, and `setNodeSize` / `panTo`
+  to the surface you are looking at. See `remote/PROTOCOL.md` §6.
+- `src/remote/relayClient.ts` — `RelayTransport`: the one outbound room connection per
+  (window, room). It owns the relay conversation (`join`, the SSE `down` stream, `up` for
+  every frame), sealing/slicing and reassembly, the replay window, the 20 s app-level ping
+  that keeps the stream non-idle, POST pacing, reconnect with backoff, and a **bounded**
+  outbound queue that drops instead of growing — so a peer that cannot keep up can never
+  delay the owner's window. It knows nothing about sessions or webviews; it reports phase
+  and drop counts through `onStatus` and hands decoded frames to `onFrame`.
+- `src/remote/remoteService.ts` — the **publisher**, one per window: one `RelayTransport`
+  per room that says `autoConnect` (and only while `spinney.remote.enabled` is on), the
+  peer registry keyed by `deviceId`+`instanceId` (never by the transient peer id), the
+  `hello`/`instances` presence it announces, the `attach`/`detach` answers, and the two
+  halves of the mirror. `mirrorLocal` is called from the one funnel every host→webview
+  message passes through (`ChatViewProvider.postTo`), filters by `mayMirrorToPeer`, drops
+  the perf `traceId` and forwards **only** for sessions some peer attached to — with no
+  `await` anywhere on that path; `applyRemoteInput` drives the *same* local message path
+  and answers `error{code}` for every refusal, with a short-lived frame-id de-dupe cache so
+  a replayed `input` after a reconnect is not a second submit. It also defines the node's
+  `RemoteOrigin` (`{ peerId, deviceName, at }`) mark, its transcript-meta half
+  (`writeOriginIntoTranscript`) and the window's status-bar item (whose click now reveals
+  the room tree, `spinney.remoteFocus`). `snapshot()` is the read-only
+  rooms→peers→instances→sessions view the room tree draws, and `onDidChange` is what it
+  repaints from (no polling).
+  M2 added the third and fourth things it owns: the **`cmd`/`result` pair** (a control-plane
+  route run by the publisher — `session/start`, `navigate`, `continue`, `stop` — correlated
+  by the frame `id`, refused `error{code}`, and covered by the *same* de-dupe cache `input`
+  uses, so a repeated id after a reconnect cannot create a second session), the **replica
+  side** (`openReplica` / `RemoteReplicaHandle`: `attach` on open, `input`/`cmd` addressed to
+  that peer, `detach` on close, `mirror` frames routed to the surface that asked, and a
+  re-`attach` after a reconnect), and **`kick`/`unblock`** — a *local blocklist* keyed by
+  `deviceId`+`instanceId`, which stops mirroring to that peer, drops its `input`/`cmd` frames
+  unanswered-but-logged and says `bye`, and cannot revoke anything (the peer still holds the
+  token and can reach every other window).
+- `src/remote/replicaRouting.ts` — the **frozen 1:1 table** a replicated session routes by:
+  `REPLICA_LOCAL_MESSAGES` (the types the replica answers itself — the clipboard, the file
+  picker, an external link, the local Model Cards page, the webview's own diagnostics and
+  card geometry, `ready`) and `replicaRoute()`, which reads it and falls through to
+  `mayAcceptFromPeer` (`allowlist.ts`), refusing everything else. Data, not a switch, because
+  a new webview message must be *decided* rather than forwarded by accident;
+  `tools/remote-surfaces-acceptance.js` pins it (and that the two sets never overlap).
+- `src/remote/remoteTreeView.ts` — the **room tree**: `RemoteTreeProvider`, one
+  `TreeDataProvider` over `RemoteService.snapshot()`, drawing `room → device → instance →
+  session` (a room's phase and peer count; a device's name, blocked/live state and version; an
+  instance's workspace folder, model and busy state; a session's title and
+  running/locked/background state). It re-reads on `RemoteService.onDidChange`, never polls,
+  and publishes `spinney.remote.hasRooms` for the two welcome views. The actions beside it are
+  the split made visible: `openRemoteSession` (the replica panel), `sendRemoteMessage` /
+  `stopRemoteSession` / `newRemoteSession` (a `cmd` frame the publisher runs), `kickRemoteDevice`
+  / `unblockRemoteDevice` / `copyRemoteDeviceName` / `setRemoteRoomConnected` (local), and
+  `manageRemoteRoomsFromTree` (M1's editor).
+- `src/remote/remoteSessionPanel.ts` — the **replicated session panel** (view type
+  `spinney.remoteSession`, one tab per `room+deviceId+instanceId+sessionId`, re-opened by
+  focusing the existing tab and recovered through a `WebviewPanelSerializer`): it renders
+  **only** `mirror` frames, with the shared shell (`src/chat/webviewShell.ts`) and therefore
+  the shipped `media/main.js`. It answers the local affordances itself (`pickImage` → this
+  machine's dialog → `imagePicked`; `copyNodeId`; `openExternal`; the local Model Cards page;
+  the diagnostics and card geometry are dropped), forces `readOnly: false` on the `state` it
+  hands its webview (this window's workspace lock is not the publisher's), shows a publisher
+  refusal (`error{code:'readonly'}` included) as a notice, and asks the **`deleteBranch`**
+  confirmation here before submitting the one input marked `confirmed: true` — the one remote
+  input that deliberately bypasses the owner's dialog.
+- `src/remote/origin.ts` — the `RemoteOrigin` type alone (`{ peerId, deviceName, at }`): the
+  mark a remote-originated turn carries on its node (`TreeNode.origin`) and in its transcript
+  dump's line-1 meta. It lives in its own import-free module because `src/chat/tree.ts` needs
+  the type and is loaded by plain node (guards, acceptance runs), while
+  `src/remote/remoteService.ts` is a `vscode`/`node:crypto` module that re-exports it.
+- `src/remote/roomsStore.ts` — the persisted half: `spinney.remote.rooms` (an object keyed
+  by the **local room name**, each row `{ relayUrl, autoConnect }`), the parser with its
+  skip-and-report policy, and the tokens in SecretStorage
+  (`spinney.remote.password.<roomName>`, moved on a rename, never written to a setting).
+  Every write goes through `configuration.update` at the scope the window reads from.
+- `src/remote/roomsCommand.ts` — `Spinney: Manage Remote Rooms` (`spinney.remoteRooms`):
+  the QuickPick over the rooms (each with its live phase and peer count plus Connect /
+  Disconnect / Rename / Set token / Clear token / Remove / Copy room name), the chained
+  input boxes of `Add room…`, and the `tokenIssue`→sentence mapping the pure `rooms.ts`
+  cannot localize itself.
+- `remote/PROTOCOL.md` — the wire contract for remote control: roles, identity, the
+  crypto, the frame types, the two allow-lists, the SSE-down/POST-up transport, the
+  slicing and backpressure rules, the sizing table and the threat model. Three
+  implementations read it (this host, the C# relay, the Android app) and it is the
+  authority when one of them disagrees.
+- `remote/vectors/vectors.json` · `remote/vectors/README.md` —
+  `tools/gen-remote-vectors.mjs` is the generator; the committed vectors are the
+  proof that the TypeScript and Kotlin derivations and seals agree **byte for byte**
+  (the relay holds no key, so it has nothing to agree about). Regenerate with
+  `node tools/gen-remote-vectors.mjs`; a mismatch means one implementation drifted,
+  and `npm run check:remote` is what says so.
+- `remote/server/` — the relay: a C# ASP.NET Core Minimal API, Native AOT, cross
+  compiled to `linux-x64` from any host with the `StuDev.AotAnywhere` MSBuild SDK. A
+  dumb byte pipe (it routes by room id and never parses, decrypts, logs or stores a
+  frame body), with `--selftest` running its whole contract in process and
+  `remote/server/README.md` carrying the flag table and a VPS run-book. Self-hosted
+  only; **not** shipped in the `.vsix` (`.vscodeignore` excludes `remote/**`).
 - `src/manual.ts` — the shipped **user manual**: `manualFileNames()` /
   `canonicalLocale()` (which page a display language picks, through
   `languageTags.ts`) and `showManual()` (`spinney.showManual` reads the page with
@@ -127,6 +261,16 @@
 - `tools/harness-test.mjs` — the control-plane acceptance harness for P1–P4 (suites
   `health`, `sessions`, `concurrency`, `navigation`, `background`, `signals`,
   `branch`, `selftest`). Dev tooling: `.vscodeignore` excludes `tools/**`, so it is never shipped.
+- `tools/remote-interop.mjs` (`npm run check:interop`) — the **cross-implementation
+  acceptance** for remote control: the real relay, the real Kotlin peer (a jar built by
+  `:core:interopJar`) and the real compiled TypeScript transport in one room, proving
+  sealed frames cross byte for byte and that each side opens the other's frame with the
+  salt it read from the envelope, while the `fid`-derived salt provably cannot open it.
+  Dev-only and **not** in the gate: it needs `dotnet` and a JVM. See `testing.md`.
+- `tools/remote-acceptance.mjs` (`npm run check:remote-e2e`) — the **windowed**
+  acceptance for remote control: one throwaway VS Code window (the `tools/sim/run.mjs`
+  recipe) joins a real relay and is driven by a second member. Dev-only and **not** in the
+  gate: it needs a window.
 - `tools/rollover-acceptance.js` · `tools/modeltree-acceptance.js` ·
   `tools/model-switch-acceptance.js` · `tools/gate-acceptance.js` — four of the
   **windowless acceptance drivers** (dev-only, not build guards, not shipped): the
@@ -232,11 +376,15 @@
   `tools/check-modeltree.js` · `tools/check-tree-grid.js` · `tools/check-docs.js` ·
   `tools/exec-cwd-acceptance.js` · `tools/shell-argv-acceptance.js` ·
   `tools/exec-kill-acceptance.js` · `tools/exec-timeout-acceptance.js` ·
-  `tools/bg-budget-acceptance.js` —
+  `tools/bg-budget-acceptance.js` · `tools/check-remote.js` ·
+  `tools/relay-acceptance.js` · `tools/remote-surfaces-acceptance.js` ·
+  `tools/check-remote-assets.js` · `tools/websearch-acceptance.js` —
   the packaging guards
   (`npm run check:models` / `check:webview` / `check:signals` / `check:l10n` /
   `check:rollover` / `check:modeltree` / `check:grid` / `check:docs` / `check:cwd` /
-  `check:shell` / `check:kill` / `check:timeout` / `check:budget`, run
+  `check:shell` / `check:kill` / `check:timeout` / `check:budget` / `check:remote` /
+  `check:relay` / `check:remote-surfaces` / `check:remote-assets` /
+  `check:websearch`, run
   by `vscode:prepublish`):
   model-config drift (the default is the fallback card, `providers` / `modelCards`
   exist as object schemas, no `enum` on `model`, no model id in the code or the
@@ -267,6 +415,18 @@
   deadline, no ceiling on `timeout`), and the background budget (a job killed at its own
   deadline with `killReason:'timeout'`, an unbudgeted job left alone,
   `remainingBudgetMs`, `join_background`'s refusals). See `testing.md`.
+
+  `tools/remote-surfaces-acceptance.js` is the M2 half of that list (and the reason it is a
+  guard rather than scratch): it stubs `vscode` and replaces `RelayTransport.prototype` with
+  a recorder, so the **real** `RemoteService` runs its own reconciliation, key derivation,
+  frame routing, de-dupe cache and blocklist with no window and no socket. It pins the room
+  tree's snapshot, the `cmd`/`result` pair (including that a repeated frame id answers from
+  the cache and creates no second session), the four refusals, `kick` as a local blocklist
+  with `unblock`, the replica surface's `attach`/`mirror`/`input`/`cmd`/`detach` across a
+  reconnect, and the frozen 1:1 routing table of `src/remote/replicaRouting.ts`.
+  `tools/relay-acceptance.js` is its sibling for the transport: a real relay on an ephemeral
+  loopback port driving the compiled `RelayTransport` through join, slicing, replay/tamper
+  refusals, pacing, backpressure and a reconnect with fresh key material.
 - `src/agent/tools/` — one file per intercepted tool (`readImage`, `spawnAgents`,
   `spawnReadonlyAgents`, `sendAgentMessage`, `sendReadonlyAgentMessage`,
   `hopSession`, `listNodes`, `renameSession`) plus `index.ts`, the barrel that
@@ -417,5 +577,23 @@
   had drifted to CRLF.
 - `media/activity.svg` · `media/icon.png` — the Activity Bar entry icon and the
   extension icon (`package.json`: `contributes.viewsContainers.activitybar` / `icon`).
+- `tools/collect-artifacts.mjs` — the one owner of the `artifacts/` layout: it copies a
+  built `.vsix` (`spinney-<version>.vsix`), the cross-compiled relay
+  (`spinney-<version>-relay-linux-x64`) together with its **companion**
+  `appsettings.json` — collected flat under its canonical name, because ASP.NET loads
+  that file by name from the executable's own directory, and reported like a missing
+  input when the binary is present without it — and the Android debug APK
+  (`spinney-<version>-debug.apk`) into the gitignored top-level `artifacts/`, replacing
+  the previous file of a kind instead of letting packages pile up, and prints a name /
+  size / sha256 table. The relay's ~55 MiB `.dbg` symbol file is deliberately not
+  collected (it stays in the toolchain's publish tree, where anyone symbolizing a crash
+  looks). `--vsix` / `--relay` / `--apk` narrow it to one kind (no flag means all three,
+  opportunistically); a missing input is a warning unless `--strict` makes it a
+  failure. `npm run artifacts` collects whatever exists; `npm run package` and
+  `build-deploy.ps1` collect strictly. Dev-only, like the rest of `tools/**`: that
+  folder is excluded from the `.vsix`.
+- `artifacts/` — the gitignored, top-level publish directory `tools/collect-artifacts.mjs`
+  owns (the `.vsix`, the `linux-x64` relay with its `appsettings.json`, and the Android
+  debug APK); never hand-edited, and useless to a fresh clone.
 - `build-deploy.ps1` — compile + package + install helper.
 
