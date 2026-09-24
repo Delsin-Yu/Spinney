@@ -61,8 +61,9 @@ like the prompt does; a tag CLDR cannot name, or any other name typed into
 live right now is always expanded, see `docs/agents/invariants/streaming-perf.md`),
 `foldWork` (default `true`, **window** scope — the work log of a *finished* turn folds
 itself: it folds exactly while zone 3, the answer, is showing, and unfolds while a
-turn runs or when there is no answer. A click on the log's own header hands that card
-to the user for good, and it applies immediately, like the two above — see
+turn runs or when there is no answer. A click on the log's own header — or a *released*
+light on the card's green dot — hands that card to the user for good, and it applies
+immediately, like the two above — see
 `docs/agents/invariants/streaming-perf.md`),
 `promptSections` (object of display name → text, default `{}`: the composer's own
 prompt snippets. The two the extension ships — `Plan` and `Implement Parallel` —

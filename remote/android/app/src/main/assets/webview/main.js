@@ -1025,7 +1025,15 @@
   // reserved below it (the container keeps a bottom margin so the dot sits just
   // under the scrollbar). Live turns start locked (following); finished nodes
   // start unlocked. Click to toggle manual follow.
-  function attachLock(container, host, locked) {
+  //
+  // `card` is the log's own dot (a thinking block passes none). Releasing the light
+  // is the gesture that says *I am reading this card*: it hands the card to the
+  // reader exactly as a click on the work-log header does (`_workTouched`), so the
+  // automatic fold can never hide — or unfold — the log somebody just chose to look
+  // at, and the offsets the zones remember are what put them back where they were.
+  // Re-engaging follow is a scrolling gesture, not a claim on the fold, so it
+  // neither sets the mark nor clears it.
+  function attachLock(container, host, locked, card) {
     const dot = el('div', 'scroll-lock-dot' + (locked === false ? '' : ' locked'));
     const ctrl = createScrollController(container, (isLocked) => {
       dot.classList.toggle('locked', isLocked);
@@ -1035,6 +1043,7 @@
     dot.addEventListener('click', (ev) => {
       ev.stopPropagation();
       ctrl.toggle();
+      if (!ctrl.locked && card) card._workTouched = true;
     });
     host.appendChild(dot);
     return ctrl;
@@ -2093,8 +2102,10 @@
   // The state lives on the card, exactly like the block-level `_userTouched`:
   //   `_workFolded`  — the log is folded right now (mirrored by the card class
   //                    `work-folded`, which the CSS keys off);
-  //   `_workTouched` — a click on the header handed this card to the user, so
-  //                    `autoWorkFold` stops deciding it for good.
+  //   `_workTouched` — this card was handed to the user for good: a click on the
+  //                    header, or a released follow light (`attachLock` — the one
+  //                    gesture that says "I am reading this"), and from then on
+  //                    `autoWorkFold` refreshes the label but never the state.
   // The automatic rule is not a settings default: it is re-evaluated every time a
   // promotion can have flipped `has-answer` (the four hooks below), because the
   // same turn can go answer → more work → answer again.
@@ -2947,8 +2958,10 @@
     card.appendChild(handle);
 
     // Internal transcript scroll + green lock dot. A live turn follows its own
-    // output (locked); a finished node starts unlocked so it scrolls freely.
-    card._itemScroll = attachLock(work, workWrap, meta.status === 'running');
+    // output (locked); a finished node starts unlocked so it scrolls freely. The
+    // card goes with it: releasing that light marks the card as the reader's
+    // (`_workTouched`, see `attachLock`), so nothing folds the log under them.
+    card._itemScroll = attachLock(work, workWrap, meta.status === 'running', card);
 
     // Both zones remember where their reader is (`rememberScroll`): a repaint, the
     // split measurement or a fold/unfold puts them back there — see the memory block

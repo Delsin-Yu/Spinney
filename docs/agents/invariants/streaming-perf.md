@@ -21,7 +21,7 @@
 - Transcript scrolling is **per-card and event-driven**, and a card has exactly
   one scroller: the **work zone** `.node-work`, the middle of the card's three
   zones (see §"The three zones of a card"). It has a `createScrollController`
-  with a green lock dot (`attachLock(container, host, locked)`) and is also the
+  with a green lock dot (`attachLock(container, host, locked, card)`) and is also the
   only zone that windows a long transcript; the answer zone has no controller of
   its own — it opens at its top **once per card** (`_answerOpened`) — so the two zone wrappers
   and the card classes `has-answer` / `work-folded` are what decide the heights. The controller starts locked only
@@ -78,10 +78,15 @@ class `work-folded` marks the folded state. The rule is a function of zone 3, ex
 like the promotion itself: the log folds **exactly while zone 3 is showing**, and
 unfolds while a turn runs or when there is no answer (the two conditions below fail)
 — a card with no answer is a card whose content is *only* the log, so folding it
-would leave a header in place of the card. A **click on the header hands that card to
-the user forever** (`card._workTouched`, the same semantics as a block's
-`_userTouched`): from then on the automatic rule may only refresh the label, never the
-state. The label is `Work log · {0} steps` from the card's tool-card count, or plain
+would leave a header in place of the card. **Two gestures hand that card to the
+user forever** (`card._workTouched`, the same semantics as a block's `_userTouched`): a
+click on the header, and **releasing the follow light** — the click that says "I am
+reading this card", which may not have the log it is looking at folded away. From then
+on the automatic rule may only refresh the label, never the state. Re-engaging follow
+is a scrolling gesture, not a claim on the fold, and neither sets the mark nor clears
+it; a card with the mark keeps its fold until the user changes it, and the offsets the
+zones remember are what put a reader back where they were (§"A repaint never moves a
+scroller"). The label is `Work log · {0} steps` from the card's tool-card count, or plain
 `Work log` when it holds no tool card. `spinney.foldWork` (default `true`, window
 scope) disables the automatic fold; it rides the existing `config` message
 (`postConfig()` reads `cfg.foldWork`) and therefore applies to cards already on

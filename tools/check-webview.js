@@ -2733,16 +2733,17 @@ if (contextLabel !== 'ctx 50%') {
 // inside `.node-work-wrap` and *before* `.node-work`) and the log folds itself to it
 // as soon as zone 3 is showing, so the card reads ask → answer and the log is one
 // click away. The rule is `autoWorkFold`: folded exactly while the card carries
-// `has-answer`, unfolded otherwise; a card whose header the user clicked is theirs
-// for good (`_workTouched`); and the setting that arms it (`spinney.foldWork`, `true`
-// by default) rides the `config` message as `foldWork`, a *changed* value being
-// re-run over every card already on screen.
+// `has-answer`, unfolded otherwise; a card the user took — a header click, or a released
+// follow light (`_workTouched`) — is theirs for good; and the setting that arms it
+// (`spinney.foldWork`, `true` by default) rides the `config` message as `foldWork`, a
+// *changed* value being re-run over every card already on screen.
 //
 // None of it throws when it breaks: the log still renders, the answer is still
 // promoted, the card just lies about what it is showing — which is why it is pinned
 // here. The cases are one rule each: (a) a promoted answer folds the log and a
 // streaming turn does not, (b) a routed append unfolds again and the *next*
-// promotion folds again, (c) a header click owns the card (`_workTouched` wins),
+// promotion folds again, (c) a header click owns the card (`_workTouched` wins — the
+// released light that claims it the same way has its own block further down),
 // (d) `foldWork: false` keeps the log open without touching the promotion, (e) the
 // header's label, (f) a job card's header is hidden, (g) one header per card, in its
 // wrapper, before the log.
@@ -3608,6 +3609,237 @@ if (contextLabel !== 'ctx 50%') {
   }
 
   notes.push('scroll memory: both zones hold through append / repaint / re-render / unfold, a locked log still pins');
+}
+
+// --- The release light claims the card, exactly as the work-log header does -----
+// The green dot under a card's work log is not only a scroll control. Releasing it
+// (locked → unlocked) is the gesture that says *I am reading this card* — the same
+// gesture as a click on `.node-work-head` — so it sets the same mark (`_workTouched`),
+// and `autoWorkFold` stops deciding that card's fold for good: it may refresh the
+// header label, never the fold. Re-engaging follow (unlocked → locked) is a scrolling
+// gesture and no claim on the fold, so it must not set the mark either.
+//
+// Nothing throws when this breaks, which is why it is pinned here beside the fold rule
+// it belongs to: the dot still toggles, the light still looks right, and the only thing
+// that changes is that a card the reader just chose to look at quietly folds itself
+// under them at the next `done` — the failure the header-click case above covers for
+// the other way of claiming a card.
+//
+// The fixture is one tree with three nodes, all three on the path (so a single `config`
+// toggle reaches every card at once):
+//   lock-release — streams, its dot *released* by hand, then `done`;
+//   lock-control — the same shape, its dot never touched: the `done` fold has to be
+//                  visible on it, or "the released card did not fold" says nothing;
+//   lock-engage  — created finished, so its dot starts unlocked and a click *engages*
+//                  follow: that card has to stay automatically decidable.
+// Every card's light comes from its own `status` at creation
+// (`attachLock(work, workWrap, meta.status === 'running')`), so the `viewId` is the
+// finished node and no `state` ever hands a live card its lock. `state` is replayed
+// only for `runningNodes`: a streaming card promotes nothing, so both live cards keep
+// their log unfolded until their own `done` — which is what makes the fold that `done`
+// performs (or refuses) observable on each of them.
+{
+  const R = 'lock-root';
+  const A = 'lock-release';
+  const B = 'lock-control';
+  const C = 'lock-engage';
+  const node = (id, parentId, children, extra) =>
+    Object.assign(
+      { id, parentId, children, title: id, status: 'done', createdAt: 0, preview: id, usage: null, size: null },
+      extra || {},
+    );
+  const cardOf = (id) => {
+    for (const child of elementById('tree-canvas').children) {
+      if (child.dataset && child.dataset.id === id) return child;
+    }
+    return null;
+  };
+  /** The card's fold as the CSS sees it (the flag that mirrors it is checked with it). */
+  const isFolded = (card) => !!card && card.classList.contains('work-folded');
+  /**
+   * The promotion the fold is decided from. `autoWorkFold` folds a card *because* it
+   * shows an answer (`has-answer`), so a card with no promotion can say nothing about
+   * the rule: its log "not folding" is then the streaming default.
+   */
+  const expectHasAnswer = (card, what) => {
+    if (!card || !card.classList.contains('has-answer')) {
+      problems.push(
+        `${what}: the card does not carry \`has-answer\` — nothing was promoted into zone 3, so its log's fold state ` +
+          'is the streaming default and not the automatic rule at all',
+      );
+    }
+  };
+  const expectFold = (card, folded, what) => {
+    if (!card) {
+      problems.push(`${what}: there is no card to look at`);
+      return;
+    }
+    if (isFolded(card) !== folded) {
+      problems.push(
+        `${what}: the log is ${isFolded(card) ? 'folded' : 'unfolded'}, expected ${folded ? 'folded' : 'unfolded'}`,
+      );
+    }
+    if (!!card._workFolded !== folded) {
+      problems.push(`${what}: card._workFolded is ${JSON.stringify(card._workFolded)}, expected ${folded}`);
+    }
+  };
+  /**
+   * The card's own green dot, clicked the way a reader clicks it — through the listener
+   * the webview registered on the element (`_listeners.click`), never by poking its
+   * classes: what the click *does* is the behaviour under test.
+   */
+  const clickDot = (card, what) => {
+    const dot = card ? findByClass(card, 'scroll-lock-dot') : null;
+    const handler = dot && dot._listeners && dot._listeners.click;
+    if (!dot || typeof handler !== 'function') {
+      problems.push(
+        `${what}: the card has no clickable .scroll-lock-dot — the light can be neither released nor engaged`,
+      );
+      return null;
+    }
+    handler({ stopPropagation() {} });
+    return dot;
+  };
+
+  // A `user` item is the pinned ask and a trailing `assistant` run is what every card
+  // here promotes; the tool card is left behind in the log, so the log has something to
+  // fold away and "it did not fold" is a statement about the rule.
+  const items = [
+    { kind: 'user', text: 'the ask' },
+    { kind: 'tool', name: 'read_file', args: '{"path":"a"}', id: 'lock-tool', content: 'ok', status: 'done' },
+    { kind: 'assistant', text: 'the answer' },
+  ];
+
+  dispatch({ type: 'reset' });
+  dispatch({
+    type: 'tree',
+    // The view focus is the *finished* node, so neither live card is the focus and a
+    // `state` can never engage their light: it is the one their own `status` gave them.
+    viewId: C,
+    activeId: null,
+    rootId: R,
+    rootIds: [R],
+    nodes: [
+      node(R, null, [A, B, C]),
+      node(A, R, [], { status: 'running' }),
+      node(B, R, [], { status: 'running' }),
+      node(C, R, [], { status: 'done' }),
+    ],
+  });
+  // Both live cards stream while their stored items render (`runningNodes`), which is
+  // what keeps their logs open: the promotion — and with it the fold — waits for their
+  // own `done` below.
+  dispatch({ type: 'state', busy: true, status: '', sessionId: 'lock-session', runningNodes: [A, B] });
+  dispatch({
+    type: 'path',
+    ids: [A, B, C],
+    nodes: [
+      { id: A, status: 'running', items },
+      { id: B, status: 'running', items },
+      { id: C, status: 'done', items },
+    ],
+  });
+
+  const cardA = cardOf(A);
+  const cardB = cardOf(B);
+  const cardC = cardOf(C);
+  if (!cardA || !cardB || !cardC) {
+    problems.push(
+      `the release-light fixture rendered ${[cardA, cardB, cardC].filter(Boolean).length} of its 3 cards — ` +
+        'every assertion below needs all three of them',
+    );
+  } else {
+    // (a) The release claims the card. A live turn starts with its light engaged (its log
+    // follows its own output), so the click below is a real release — and releasing is the
+    // gesture that says *this card is mine*, exactly as the header click does.
+    const dotA = findByClass(cardA, 'scroll-lock-dot');
+    if (!dotA || !dotA.classList.contains('locked')) {
+      problems.push(
+        'a card created from a `status: running` node did not start with its scroll light engaged — the release ' +
+          'below would not be a release at all',
+      );
+    }
+    expectFold(cardA, false, 'the released card while it is still streaming (no answer yet, so nothing to fold)');
+    const clickedA = clickDot(cardA, 'the released card');
+    if (!clickedA || clickedA.classList.contains('locked')) {
+      problems.push(
+        "clicking a locked card's green dot left the light engaged — the release click did nothing " +
+          '(a `click` listener that is gone looks exactly like this)',
+      );
+    }
+    // `done` ends the stream: the trailing answer is promoted into zone 3 and the
+    // automatic rule gets its say — unless the release already claimed the card.
+    dispatch({ type: 'done', nodeId: A });
+    expectHasAnswer(cardA, 'the released card after `done`');
+    if (cardA._workTouched !== true) {
+      problems.push(
+        "the release click did not mark the card as the reader's (`_workTouched`) — so the automatic fold rule would " +
+          'fold the log under them at the next promotion',
+      );
+    }
+    expectFold(cardA, false, 'the released card after `done` (the release claimed its fold)');
+
+    // (b) The control, without which (a) says nothing: the same shape with a dot nobody
+    // touched folds by itself the moment `done` promotes its answer.
+    const dotB = findByClass(cardB, 'scroll-lock-dot');
+    if (!dotB || !dotB.classList.contains('locked')) {
+      problems.push("the control card's light did not start engaged — it is not the released card's twin");
+    }
+    dispatch({ type: 'done', nodeId: B });
+    expectHasAnswer(cardB, 'the control card after `done`');
+    expectFold(cardB, true, 'the control card after `done` (nobody released its light)');
+
+    // (c) The direction matters. This card was created finished, so its dot starts
+    // unlocked and the click *engages* follow — a scrolling gesture, not a claim: the card
+    // has to stay automatically decidable. The probe is the `config` handler, which re-runs
+    // `autoWorkFold` over every card on screen when `foldWork` *changes*: toggling it off
+    // and on again decides both cards in the same pass — the engaged one folds while it
+    // shows its answer, the released one does not.
+    const dotC = findByClass(cardC, 'scroll-lock-dot');
+    if (!dotC || dotC.classList.contains('locked')) {
+      problems.push(
+        'a card created from a `status: done` node did not start with its light released — the engage below would ' +
+          'not be an engage',
+      );
+    }
+    // Settled before the click: the finished card promoted its answer on the way in, and a
+    // live (unclaimed) fold rule has folded it already. That is the state the `config`
+    // toggle has to move — a card wrongly marked as the reader's would sit unchanged in
+    // *both* directions, which is exactly what the two assertions below catch.
+    expectHasAnswer(cardC, 'the engaged card before its light was clicked');
+    expectFold(cardC, true, 'the engaged card before its light was clicked (the automatic rule folded it)');
+    const clickedC = clickDot(cardC, 'the engaged card');
+    if (!clickedC || !clickedC.classList.contains('locked')) {
+      problems.push("clicking a released card's green dot did not engage follow — the light cannot be turned back on");
+    }
+    if (cardC._workTouched === true) {
+      problems.push(
+        "re-engaging follow marked the card as the reader's (`_workTouched`) — that gesture is a scroll control, not " +
+          'a claim on the fold, and a card wrongly marked this way never folds or unfolds again',
+      );
+    }
+    const baseConfig = TURN_MESSAGES.find((message) => message.type === 'config');
+    if (dispatch({ ...baseConfig, foldWork: false })) {
+      problems.push('a `config` carrying foldWork: false threw — the setting has no handler');
+    }
+    // The engaged card unfolds while its answer is showing: proof that the automatic rule
+    // still decides it (a marked card would have kept its fold).
+    expectFold(cardC, false, 'the engaged card when `foldWork` was switched off (it is still auto-decidable)');
+    expectFold(cardA, false, 'the released card when `foldWork` was switched off');
+    if (dispatch({ ...baseConfig, foldWork: true })) {
+      problems.push('a `config` carrying foldWork: true threw — the setting has no handler');
+    }
+    // …and folds again, while the released card — same message, same pass, an answer of its
+    // own on screen (`has-answer` re-asserted right here) — stays where its reader left it.
+    expectHasAnswer(cardA, 'the released card at the end of the `foldWork` toggle');
+    expectFold(cardC, true, 'the engaged card once `foldWork` was switched back on');
+    expectFold(cardA, false, 'the released card once `foldWork` was switched back on (the release owns its fold)');
+  }
+
+  notes.push(
+    'release light: a released dot claims the card (no fold after `done`), its untouched twin folds, re-engaging ' +
+      'follow stays auto-decidable',
+  );
 }
 
 // --- report ------------------------------------------------------------------

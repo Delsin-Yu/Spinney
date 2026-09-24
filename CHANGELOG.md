@@ -75,6 +75,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ok` while its images filled the request). A new window does not carry attachments, so that is the
   right way out.
 
+### Fixed
+
+- **An unlocked work log is no longer thrown back to the top by every token.** Releasing a card's
+  green light is what a reader does to look at an older tool call while a turn still streams, and
+  every routed append (and every `tree` / `path` repaint) put them back at the top of the log. The
+  split measurement content-sized the log's own wrapper, which stretched the card's one scroller to
+  the height of its own content — no scrollable overflow at all — so the engine clamped its
+  `scrollTop` to 0; a locked card hid it by re-pinning itself to the bottom right after. The
+  measurement now content-sizes the answer zone only, and the log's natural height is read off its
+  own `scrollHeight` when it overflows (off the wrapper, for one read, when it is already showing
+  everything it holds and there is no offset to lose). On top of that both zones remember the offset
+  their reader left and are handed it back after every rebuild, measurement and fold/unfold — never
+  while the light is locked, and never before the card has opened at its newest content. Zone 3 now
+  opens at its top once per card instead of on every repaint, `_needsBottomScroll` is consumed where
+  the log really becomes visible (a `scrollTop` into a `display: none` scroller was thrown away), and
+  the window repaint of a long log corrects its position in both directions. `npm run check:webview`
+  pins the rule and fails against the previous renderer.
+- **Releasing the light hands the card to the reader, its fold included.** The automatic fold hid the
+  work log the moment a turn ended — including the card somebody had just released the light of in
+  order to read it, and for that card switching `spinney.foldWork` off did not bring the log back
+  either. The click that releases the light now sets the same mark a click on the log's own header
+  sets, so the automatic rule may refresh the header's label but never folds or unfolds that card's
+  log again; re-engaging follow is a scrolling gesture and claims nothing. The three manual pages and
+  the `spinney.foldWork` setting description say so.
+
 ## [0.1.0] - 2026-09-22
 
 ### Added
