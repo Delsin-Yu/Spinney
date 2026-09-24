@@ -34,6 +34,12 @@ l10n/bundle.l10n.zh-tw.json
 coverage/
 *.lcov
 
+# Python bytecode of the fixture generators (tools/gen-*-fixtures.py): a cache, never
+# source. The scripts are the source — each fixture they write is committed as a file,
+# and the `.pyc` beside them only records that one of them ran on this machine.
+__pycache__/
+*.pyc
+
 # Local VS Code settings (per-developer: model/effort picks, base URL, scratch keys)
 # — launch.json and tasks.json stay tracked, those describe the project; this file
 # describes one machine.
