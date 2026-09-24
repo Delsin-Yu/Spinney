@@ -1,6 +1,7 @@
 import * as path from 'path';
 import { ChatMessage, StreamChunk, ThinkingEffort, ToolDefinition, UploadedFile, Usage, detectImageMime, imageIntegrityError } from './types';
 import { perf } from '../perf';
+import { clipText, wellFormedDeep } from '../text';
 
 /**
  * Transparent retry policy for one chat-completions request: the initial attempt
@@ -106,7 +107,7 @@ export type RetryReporter = (info: RetryInfo) => void;
 /** Flatten an error body (which may be multi-line JSON/HTML) into one clipped line. */
 function clipReason(reason: string, max = 160): string {
   const oneLine = reason.replace(/\s+/g, ' ').trim();
-  return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine;
+  return oneLine.length > max ? clipText(oneLine, max) : oneLine;
 }
 
 /** Name the attempt count on an error — but only when retries actually happened. */
@@ -280,7 +281,10 @@ export class ApiClient {
       body.temperature = request.temperature;
     }
 
-    const payload = JSON.stringify(body);
+    // `wellFormedDeep` on the whole body — messages plus the card-supplied `model`/`reasoning_effort`/`tools`: an
+    // unpaired surrogate (a clipped emoji half, a paste into a card field) serialises as `\ud83d` and the provider
+    // answers 400 `unexpected end of hex escape`, killing the request. Only the wire copy is normalised (the helper copies), the caller's messages are untouched.
+    const payload = JSON.stringify(wellFormedDeep(body));
     perf(() => `request-json bytes=${payload.length} msgs=${messages.length}`);
 
     // One attempt = open + read. A retry is only transparent while *nothing* has
@@ -602,7 +606,8 @@ export class ApiClient {
     // same first-byte watchdog. The body read itself is not watched: this path is
     // used for short side answers (session titles), whose caller already bounds it
     // with its own abort timer.
-    const { response, watch } = await this.postWithRetry(url, JSON.stringify(body), {
+    // Same rule as `stream`: the whole body — the card-supplied `model` included — is normalised on the wire.
+    const { response, watch } = await this.postWithRetry(url, JSON.stringify(wellFormedDeep(body)), {
       signal: request.signal,
       onRetry: request.onRetry,
     });

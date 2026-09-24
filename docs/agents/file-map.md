@@ -292,13 +292,17 @@
   `BackgroundRegistry.kill` staying synchronous, an unconfirmed kill flagged *and*
   logged), the **foreground limit** `spinney.commandMaxForegroundDuration` (a `timeout`
   above it refused *before the spawn* unless a background `timeout_behavior` asked for
-  one, the promotion at the limit carrying only the `timeout − limit` that is left and
-  one `hub.register` under the owner of the turn, a background behavior with no
-  `timeout` registering a job with no deadline, and no ceiling on `timeout`), and the
+  one — `background_when_timeout` / `start_in_background` / `start_detached`, the
+  default `stop_when_timeout` being the value that is refused — the promotion at the
+  limit carrying only the `timeout − limit` that is left and
+  one `hub.register` under the owner of the turn, a node-scoped value
+  (`background_when_timeout` / `start_in_background`) with no `timeout` refused before the
+  spawn, and no ceiling on `timeout`), and the
   **background budget** (a job killed at its deadline with `killReason:'timeout'`, an
   unbudgeted job left alone, a `remainingBudgetMs` that counts down, and
   `join_background`'s two refusals — more budget left than the limit, or no deadline at
-  all — plus the allowed case). See `testing.md`.
+  all (which the guard registers directly; the only value that can produce such a job
+  now is `start_detached`) — plus the allowed case). See `testing.md`.
 - `tools/migrate-state.mjs` — the one migration this repo carries: an install that
   only ever ran Minimal Agent Harness (`minimal-host.minimal-agent-harness`) moves
   to Spinney (`DE-YU.spinney`) — the memento row key keeps the case the manifest
@@ -334,9 +338,11 @@
   `parseCatalog()` (the object-shape parser with per-field defaults and error rows),
   the accessors everything derives from (`cards`, `cardById`, `resolveCard`,
   `contextWindowFor`, `isVisionCard`, `cardDisplayName`, `effortsFor`,
-  `normalizeEffort`, `visionCardsLabel`), and `parseContextLengthError()` — the
-  reader of the provider's context-length 400, which is what triggers a context
-  rollover. See `invariants/model-cards.md`. It is the **only** place a model id may
+  `normalizeEffort`, `visionCardsLabel`), `parseContextLengthError()` — the
+  reader of the provider's context-length 400 — and `windowFullReason()` — the
+  classifier of a refusal's **kind** (`'tokens'` / `'images'` / `undefined`), which is
+  what triggers a context rollover for either budget (`invariants/context-rollover.md`).
+  See `invariants/model-cards.md`. It is the **only** place a model id may
   appear; `tools/check-models.js` enforces that on every package.
 - `src/agent/clients.ts` — `ClientRegistry`, the one place that turns a card into a
   request: one `ApiClient` per provider (created lazily, re-pointed when the
@@ -378,13 +384,16 @@
   `tools/exec-kill-acceptance.js` · `tools/exec-timeout-acceptance.js` ·
   `tools/bg-budget-acceptance.js` · `tools/check-remote.js` ·
   `tools/relay-acceptance.js` · `tools/remote-surfaces-acceptance.js` ·
-  `tools/check-remote-assets.js` · `tools/websearch-acceptance.js` —
+  `tools/check-remote-assets.js` · `tools/websearch-acceptance.js` ·
+  `tools/check-png.js` · `tools/check-resample.js` · `tools/check-image.js` ·
+  `tools/check-jpeg.js` · `tools/check-unicode.js` —
   the packaging guards
   (`npm run check:models` / `check:webview` / `check:signals` / `check:l10n` /
   `check:rollover` / `check:modeltree` / `check:grid` / `check:docs` / `check:cwd` /
   `check:shell` / `check:kill` / `check:timeout` / `check:budget` / `check:remote` /
   `check:relay` / `check:remote-surfaces` / `check:remote-assets` /
-  `check:websearch`, run
+  `check:websearch` / `check:png` / `check:resample` / `check:image` /
+  `check:jpeg` / `check:unicode`, run
   by `vscode:prepublish`):
   model-config drift (the default is the fallback card, `providers` / `modelCards`
   exist as object schemas, no `enum` on `model`, no model id in the code or the
@@ -411,8 +420,9 @@
   the deadline, a synchronous `BackgroundRegistry.kill`, an unconfirmed kill flagged and
   logged), the foreground limit (`spinney.commandMaxForegroundDuration`: the refusal of a
   `timeout` above it before the spawn without a background `timeout_behavior`, the
-  promotion at the limit with only the remaining budget, a job registered with no
-  deadline, no ceiling on `timeout`), and the background budget (a job killed at its own
+  promotion at the limit with only the remaining budget, a node-scoped value
+  (`background_when_timeout` / `start_in_background`) with no `timeout` refused before the spawn,
+  no ceiling on `timeout`), and the background budget (a job killed at its own
   deadline with `killReason:'timeout'`, an unbudgeted job left alone,
   `remainingBudgetMs`, `join_background`'s refusals). See `testing.md`.
 
@@ -427,12 +437,41 @@
   `tools/relay-acceptance.js` is its sibling for the transport: a real relay on an ephemeral
   loopback port driving the compiled `RelayTransport` through join, slicing, replay/tamper
   refusals, pacing, backpressure and a reconnect with fresh key material.
+  The four image guards in that list (`check:png` / `check:resample` / `check:image` /
+  `check:jpeg`) pin the pre-upload transform's bytes in and bytes out, the PNG codec, the
+  resampler and the JPEG decoder — see `testing.md`.
 - `src/agent/tools/` — one file per intercepted tool (`readImage`, `spawnAgents`,
   `spawnReadonlyAgents`, `sendAgentMessage`, `sendReadonlyAgentMessage`,
   `hopSession`, `listNodes`, `renameSession`) plus `index.ts`, the barrel that
   filters them.
   Each declares its `requires` capability tag, so the advertised tools and the
   prompt's capability wording cannot drift apart.
+- `src/agent/imageTransform.ts` — the **pre-upload transform**: `Rect`,
+  `ImageTransformRecord`, `TransformOutcome`, `IMAGE_TARGET_MAX_SIDE` (1024),
+  `readImageSize` (a synchronous header read: PNG `IHDR`, JPEG `SOFn`), `normalizeRect`
+  and `transformImage`. It exists because the endpoint resizes every image to ~800×800
+  and charges a flat ~384 tokens for it, so the pixels above that are discarded
+  server-side — which makes a client-side downscale a *fix* rather than an
+  optimisation — while the **uploaded** bytes are the request's own, separate budget
+  (`MAX_REQUEST_IMAGE_BYTES` / `INLINE_REQUEST_BODY_BYTES`, tracked by the brake in
+  `read_image`). Pure and `vscode`-free (`node:zlib` only, inside the codecs), and it
+  **never throws for a bad image**: an unreadable or unsupported input comes back as
+  `changed: false` with the input bytes, which keeps the caller's "attach what we have"
+  behaviour and leaves the budget as the backstop.
+- `src/agent/pngCodec.ts` — the PNG half, on `node:zlib` alone: `decodePng` / `encodePng`,
+  8-bit non-interlaced, colour types 0 / 2 / 3 / 4 / 6 and filters 0–4, with adaptive
+  per-row re-filtering on encode (RGBA in, RGBA out). A variant outside that scope is
+  refused with a reason rather than guessed at, and the transform then passes the original
+  bytes through unchanged.
+- `src/agent/imageResample.ts` — `cropResample(src, rect, targetMaxSide)`: the crop and the
+  downscale in one pass, **area-average** on downscale (never nearest — thinning invents
+  aliasing the model then reports as image content), **no** upscale (a crop already inside
+  the target is returned as it is), and the `scale` it applied (1 = crop only), which the
+  record and the result text report.
+- `src/agent/jpegDecode.ts` — `decodeJpeg` (baseline sequential only, RGBA out), split as
+  `src/agent/jpegEntropy.ts` (markers, huffman, coefficients) and
+  `src/agent/jpegReconstruct.ts` (dequant, IDCT, chroma upsampling, colour) behind a frozen
+  seam, so the scope rules live in exactly one place and each half can be read on its own.
 - `src/agent/apiClient.ts` — `ApiClient` (stream SSE over `fetch`,
   `ApiError`), builds `stream: true`, `stream_options.include_usage`,
   `reasoning_effort`. The read loop flushes the `TextDecoder` and parses a final
@@ -489,6 +528,12 @@
   credential that command may have carried. Deliberately dependency-free and
   vscode-free, which is what lets `tools/diagnostics-log-acceptance.js` drive the rules
   from plain node.
+- `src/text.ts` — the shared well-formed-text helpers: the cuts that never
+  split a surrogate pair (`sliceText()` / `clipText()` / `tailText()`) and the
+  repair that replaces an unpaired half with U+FFFD (`wellFormed()` /
+  `wellFormedDeep()`) — used by every clip and at the request boundary.
+  Deliberately dependency-free and vscode-free, which is what lets
+  `tools/check-unicode.js` drive the rules from plain node.
 - `media/main.js` — webview client (tree rendering, pan/zoom, streaming into the
   active node, composer, streaming meter, live tool drafts, drag-to-resize cards,
   background job cards + `.bgnotify` notification blocks).

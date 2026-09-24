@@ -306,6 +306,29 @@ HTTP only: it has no TLS, no auth and no per-IP rate limit of its own.
      process turns an ordinary large send into an OOM kill; give it a gigabyte and it has room
      to be wrong.
 
+   **Updating an existing deployment** is not the same as the first install, in two ways that
+   cost an evening if you meet them for the first time in a hurry:
+
+   - **Never write over the running executable.** `scp` to `/opt/spinney-relay/spinney-relay`
+     fails with `dest open … Failure` while the service runs: writing to a file that is being
+     executed is `ETXTBSY`. Upload beside it and rename, which swaps the directory entry while
+     the running process keeps the old inode, then restart:
+
+     ```
+     scp spinney-relay root@host:/opt/spinney-relay/spinney-relay.new
+     ssh root@host 'cd /opt/spinney-relay && chmod 755 spinney-relay.new && chown spinney:spinney spinney-relay.new \
+       && mv -f spinney-relay.new spinney-relay && systemctl restart spinney-relay'
+     ```
+
+   - **Publish cleanly, and compare hashes to know that you did.** The Native AOT output is
+     byte-reproducible — two forced relinks of one source produce the same sha256 and the same
+     ELF BuildID — so comparing the deployed file's hash with a fresh build is a real test of
+     "is the server current". It is only a real test if the build was clean: an *incremental*
+     `dotnet publish` reuses intermediates and can produce a different binary from the same
+     source, which looks exactly like a stale deployment. Delete
+     `obj/Release/net10.0/linux-x64/native` and the publish directory when the answer matters,
+     and record the artifact's sha when you collect it (`node tools/collect-artifacts.mjs`).
+
    To configure without a file, add `Environment=` lines naming the environment form of the key,
    for example `Environment=Relay__MaxRooms=32` for `Relay:MaxRooms`. Precedence still holds
    there: a flag in `ExecStart` beats an `Environment=` line, which beats the file.

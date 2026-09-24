@@ -20,7 +20,7 @@
  * stay loadable from plain node and therefore cannot localize anything itself.
  */
 import * as vscode from 'vscode';
-import { MIN_DISTINCT_CHARS, MIN_TOKEN_CHARS, TokenIssue, tokenIssue } from './rooms';
+import { MIN_DISTINCT_CHARS, MIN_TOKEN_CHARS, TokenIssue, deriveRoom, tokenIssue } from './rooms';
 import { RemoteService } from './remoteService';
 import { RoomsStore } from './roomsStore';
 
@@ -61,10 +61,35 @@ function tokenProblem(issue: TokenIssue): string {
   }
 }
 
-/** Validate a token the user typed, or `undefined` when it is usable. */
+/** Validate a token the user typed, or `undefined` when it is unusable. */
 function tokenValidation(value: string): string | undefined {
   const issue = tokenIssue((value ?? '').trim());
   return issue ? tokenProblem(issue) : undefined;
+}
+
+/**
+ * The first 8 characters of the room id a token routes to — **the comparable
+ * fingerprint**.
+ *
+ * The room id is derived from the token and from nothing else, and the room *name*
+ * is only a local label, so two devices that both show a room called `home` can sit
+ * in two different rooms with no visible sign of it. This is the value that makes
+ * that checkable by eye: the same eight characters on both screens is the whole
+ * proof, and it is safe to display because the room id is a routing credential, not
+ * a key (`remote/PROTOCOL.md` §2-3).
+ *
+ * `undefined` for a token too short to derive — the phase (`key` / `no token`)
+ * already says that, so there is nothing to add.
+ */
+function roomFingerprint(token: string): string | undefined {
+  if (!token) {
+    return undefined;
+  }
+  try {
+    return deriveRoom(token).roomId.slice(0, 8);
+  } catch {
+    return undefined;
+  }
 }
 
 /** Validate a relay URL: http(s), because that is the only transport this feature has. */
@@ -114,6 +139,10 @@ export async function manageRemoteRooms(ctx: RemoteRoomsContext): Promise<void> 
       const live = snapshot.rooms.find((view) => view.name === room.name);
       const phase = live?.phase ?? 'off';
       const peers = live?.peers.length ?? 0;
+      // The fingerprint goes in `detail` — the second, dimmer line — rather than being
+      // pasted into the description, so that no new *string* is introduced and nothing
+      // new has to be localized.
+      const fingerprint = roomFingerprint(await ctx.store.readToken(room.name));
       items.push({
         mode: 'room',
         name: room.name,
@@ -122,6 +151,7 @@ export async function manageRemoteRooms(ctx: RemoteRoomsContext): Promise<void> 
         description: `${ctx.service.phaseLabel(phase)} · ${
           peers === 1 ? vscode.l10n.t('1 peer') : vscode.l10n.t('{0} peers', peers)
         }`,
+        detail: fingerprint,
       });
     }
     if (!enabled) {

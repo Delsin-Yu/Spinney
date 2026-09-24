@@ -32,7 +32,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { Agent } from '../agent/agent';
+import { Agent, ImageAccounting } from '../agent/agent';
 // The remote-origin mark of a turn a peer started (`docs/agents/plans/remote-control.md` §13):
 // the node metadata itself is written here, where the node is created.
 import { RemoteOrigin, nodeOrigin, setNodeOrigin } from '../remote/remoteService';
@@ -42,6 +42,9 @@ import { ClientRegistry } from '../agent/clients';
 import { AgentEvent, ChatMessage, ContentPart, ThinkingEffort, ToolDefinition, Usage, detectImageMime } from '../agent/types';
 import { ToolCapabilities, interceptedDefinitions } from '../agent/tools';
 import {
+  IMAGE_BUDGET_RATIO,
+  INLINE_REQUEST_BODY_BYTES,
+  MAX_REQUEST_IMAGE_BYTES,
   ModelCard,
   ProviderSpec,
   cardById,
@@ -52,11 +55,14 @@ import {
   effortsFor,
   isVisionCard,
   normalizeEffort,
-  parseContextLengthError,
   providerById,
   resolveCard,
   visionCardsLabel,
+  windowFullReason,
 } from '../agent/models';
+// The transform the image budget is built on (`docs/agents/plans/image-budget.md`): what
+// actually leaves for the provider, so the bytes a request carries are the small ones.
+import { IMAGE_TARGET_MAX_SIDE, ImageTransformRecord, transformImage } from '../agent/imageTransform';
 import {
   AgentSession,
   DisplayItem,
@@ -89,6 +95,7 @@ import { PromptSnippet } from './promptSnippets';
 import { SubAgentPool } from './SubAgentPool';
 import { hasPendingTranscriptWrite, sumUsage, summarizeTranscript } from './transcript';
 import { opPayload, opTag, perf, startRepaintOp, timedSync } from '../perf';
+import { clipText, sliceText, tailText } from '../text';
 
 /** Cap tool output stored/shown in the webview so a 16 MiB command dump cannot freeze the UI. */
 export const UI_TOOL_CONTENT_CAP = 32 * 1024;
@@ -117,7 +124,8 @@ export function clipForUi(text: string, cap = UI_TOOL_CONTENT_CAP): string {
   if (text.length <= cap) {
     return text;
   }
-  return `${text.slice(0, cap)}\n…[truncated ${text.length - cap} chars for UI]`;
+  const kept = sliceText(text, cap);
+  return `${kept}\n…[truncated ${text.length - kept.length} chars for UI]`;
 }
 
 /** Shrink tool cards in the UI transcript; agent `messages` keep the full tool payload. */
@@ -155,7 +163,7 @@ export const CONTINUE_MESSAGE = 'Continue from where you stopped.';
  * verbatim (clipped) rather than paraphrased.
  */
 function buildFailureContinue(error: string): string {
-  const reason = error.replace(/\s+/g, ' ').trim().slice(0, 500);
+  const reason = sliceText(error.replace(/\s+/g, ' ').trim(), 500);
   return (
     '[Harness continue] Your previous request failed before it produced an answer, so its partial output was ' +
     'discarded and nothing from it is in this conversation. Redo the last request now: resume the work it asked ' +
@@ -180,7 +188,7 @@ function lastFailureText(node: TreeNode): string | undefined {
 }
 
 /**
- * True when this node's card is a **context-window overflow**: the turn ended in
+ * True when this node's card is a **full context window**: the turn ended in
  * `error` and the failure text it shows is the provider refusing the request as too
  * big. That 400 is the only authoritative statement that the window is full
  * (`model-capabilities.md`); `usage.prompt_tokens` is a lagging readout of the
@@ -188,13 +196,20 @@ function lastFailureText(node: TreeNode): string | undefined {
  * ~1.28 M tokens — so it is deliberately **not** a trigger. Reading the refusal back
  * off the node's own `⚠️ …` item (`lastFailureText`) is what makes the judgement
  * survive a reload: the card, the button and the model all agree on one text.
+ *
+ * There are **two** such refusals, and `windowFullReason` reads both off the same text:
+ * the token one ("maximum context length …") and the byte one ("Total image size exceeds
+ * the limit …" — `docs/agents/plans/image-budget.md` §2.3). A window can be full by
+ * images while its token readout sits at 30%, and that refusal is the same kind of
+ * statement ("I cannot send this"), so it must offer the same way out. Nothing else — no
+ * threshold, no ratio — may ever qualify a node here.
  */
 function nodeContextFull(node: TreeNode): boolean {
   if (node.status !== 'error') {
     return false;
   }
   const failure = lastFailureText(node);
-  return !!failure && parseContextLengthError(failure) !== undefined;
+  return !!failure && windowFullReason(failure) !== undefined;
 }
 
 /**
@@ -301,12 +316,14 @@ function buildContextRolloverMessage(input: {
   sessionId: string;
   previousNodeId: string;
   /**
-   * Why a new node was opened: `full` is the provider's refusal (the only authoritative
-   * statement of a full window), `near` is the user taking the 90% entry before the request
-   * is refused. The model is told which one, because "it was refused" would be a lie in the
-   * second case.
+   * Why a new node was opened: `full` is the provider's refusal of the **tokens** (the only
+   * authoritative statement of a full window), `images` is its refusal of the **bytes**
+   * (`Total image size exceeds the limit`, `docs/agents/plans/image-budget.md` §2.3), and
+   * `near` is the user taking the 90% entry before the request is refused. The model is told
+   * which one, because "it was refused" would be a lie in the last case — and because the
+   * images have to be named as what was refused when that is what happened.
    */
-  reason: 'full' | 'near';
+  reason: 'full' | 'near' | 'images';
   /** Absolute path of the previous window's dump — the pointer the model is given. */
   transcriptPath: string;
   /** False when that file is not on disk (dump disabled / never written): the pointer degrades. */
@@ -323,13 +340,30 @@ function buildContextRolloverMessage(input: {
   killedSubAgents: Array<{ nodeId: string; transcript?: string }>;
 }): string {
   const paragraphs: string[] = [];
+  // What was refused (or nearly was) is stated *first*, in the provider's own terms: the two
+  // refusals are different statements, and a model told the wrong one redoes the wrong thing
+  // — under `images` especially, where the fix is "do not re-attach these bytes", not "send
+  // less text".
+  const refused =
+    input.reason === 'full'
+      ? 'The previous conversation could not be sent to the model any more (the provider refused it: the context window was full)'
+      : input.reason === 'images'
+        ? 'The previous conversation could not be sent to the model any more: the provider refused the request because of its images (the attachments it carried were over its per-request image size limit)'
+        : 'The previous conversation was stopped before the provider had to refuse it (the context window was nearly used up)';
   paragraphs.push(
     '[Harness: context window reset]\n' +
-      (input.reason === 'full'
-        ? 'The previous conversation could not be sent to the model any more (the provider refused it: the context window was full), '
-        : 'The previous conversation was stopped before the provider had to refuse it (the context window was nearly used up), ') +
-      'so this turn continues in a new, empty window of the same session. Nothing above was ' +
-      'carried over: do not claim to remember it.',
+      `${refused}, so this turn continues in a new, empty window of the same session. ` +
+      // The tail below already counts the attachments; this says what that count means for
+      // the images themselves, because a new window genuinely starts without them (the
+      // rollover carries text only — a `file_id`'s validity across windows is not
+      // guaranteed). A model that assumed its images were still here would answer about
+      // nothing.
+      (input.reason === 'images'
+        ? 'Those images are exactly what the provider refused, and a new window does not carry attachments: ' +
+          'none of them came along, and attaching them again would cost the same bytes again — have them looked ' +
+          'at by a sub-agent and report back in text. '
+        : '') +
+      'Nothing above was carried over: do not claim to remember it.',
   );
   // The display path is not cut (the tree stays connected), so "previous window"
   // names the overflowing node the new one hangs below — not its whole chain.
@@ -345,9 +379,9 @@ function buildContextRolloverMessage(input: {
         'user when a detail is missing.',
   );
   const request =
-    input.request.length > ROLLOVER_REQUEST_CAP ? input.request.slice(0, ROLLOVER_REQUEST_CAP) : input.request;
+    input.request.length > ROLLOVER_REQUEST_CAP ? sliceText(input.request, ROLLOVER_REQUEST_CAP) : input.request;
   const answer =
-    input.answer.length > ROLLOVER_ANSWER_CAP ? input.answer.slice(0, ROLLOVER_ANSWER_CAP) : input.answer;
+    input.answer.length > ROLLOVER_ANSWER_CAP ? sliceText(input.answer, ROLLOVER_ANSWER_CAP) : input.answer;
   const notes = [
     // Clipping is announced: a model that reads a truncated request as the whole
     // request would silently redo only part of the work.
@@ -668,6 +702,25 @@ function dataUrlBytes(dataUrl: string): Buffer {
   const comma = dataUrl.indexOf(',');
   const base64 = comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl;
   return Buffer.from(base64, 'base64');
+}
+
+/**
+ * A byte count for the `[image] …` log lines, at the magnitude the image budget speaks in
+ * (`agent.ts` prints MiB for the same family of sentences). Never shown to a user — these are
+ * `output.appendLine` diagnostics, so they need no l10n entry (`i18n.md`).
+ */
+function imageBytesText(bytes: number): string {
+  return bytes >= 1024 * 1024 ? `${(bytes / (1024 * 1024)).toFixed(1)} MiB` : `${Math.round(bytes / 1024)} KiB`;
+}
+
+/** What one composer attachment is sent as, and what produced it (see `prepareAttachment`). */
+interface PreparedAttachment {
+  /** The bytes to upload (the transform's output when it changed anything). */
+  bytes: Buffer;
+  /** The `data:` URL to inline, exactly as it should ride in the request. */
+  dataUrl: string;
+  /** Present only when the pixels were really rewritten. */
+  transform?: ImageTransformRecord;
 }
 
 /**
@@ -1041,6 +1094,82 @@ export class SessionRuntime {
   }
 
   /**
+   * The nodes whose `imageSources` describe the images the next request of `node`'s chain
+   * would carry: the chain from its **context base** down — exactly the slice
+   * `pathMessages` sends. An image of an older window is not part of a request below it
+   * (`docs/agents/invariants/context-rollover.md`), so it is not in the budget either; the
+   * ids are read live, because a chain and its provenance both grow while the session runs.
+   */
+  private carriedPathIds(node: TreeNode): string[] {
+    const ids = pathIds(this.session, node.id);
+    const base = contextBase(this.session, node.id);
+    const from = base ? ids.indexOf(base) : -1;
+    return from > 0 ? ids.slice(from) : ids;
+  }
+
+  /**
+   * What this runtime knows about the images a request would carry: the bytes behind one
+   * image content part, and the ceiling the chain's transport has.
+   *
+   * `bytesOf` is **id-keyed**, deliberately. Provenance is *addressed* by position
+   * (`messageIndex` / `partIndex`), and positions shift the moment a message is rewritten —
+   * a budget that silently stopped matching would read as "free space" and walk the turn
+   * into the provider's 400. A `file_id` never shifts.
+   *
+   * Nothing is **guessed**, either: a `file_id` with no recorded byte count, and a part that
+   * is not an image at all, come back `undefined`. The consumer (`Agent.imageBytesInUse`)
+   * falls back to its own record of what it uploaded this turn and otherwise counts 0, which
+   * is an honest under-count that the ceiling's `IMAGE_BUDGET_RATIO` margin absorbs; a made-up
+   * number would either refuse a request that would have fit or arrive one image too late.
+   *
+   * `limitBytes` is read at **use** time rather than frozen at construction: the ceiling
+   * belongs to the card the chain sends with, and a card pick between two turns changes the
+   * transport (200 MB referenced vs 48 MiB inline).
+   *
+   * It is installed **on the agent that will send the request** (one view per agent), and
+   * both sides of it resolve live: `ids` walks the chain as provenance grows, and `transport`
+   * reads the card when the ceiling is asked for. A process-wide view would answer one
+   * chain's request with another chain's index — branches, sessions and sub-agents all run in
+   * parallel here.
+   */
+  private imageAccountingFor(
+    /** The nodes whose provenance describes the history the next request carries. */
+    ids: () => string[],
+    /** The transport the card this chain sends with declares. */
+    transport: () => 'deepseek' | 'openai',
+  ): ImageAccounting {
+    const bytesOf = (part: ContentPart): number | undefined => {
+      // An inline image needs no table: the `data:` URL in the part **is** what the request
+      // body carries, so measuring it here is exact by construction — and the transform is
+      // already baked into the URL (`onUserMessage` re-encodes it).
+      if (part.type === 'image_url') {
+        return Buffer.byteLength(part.image_url.url, 'utf8');
+      }
+      if (part.type !== 'file') {
+        return undefined;
+      }
+      // A legacy entry carries no `bytes` (the field is additive, no version bump), and that
+      // is exactly the case that must answer "unknown" rather than a plausible number.
+      for (const id of ids()) {
+        for (const entry of this.session.nodes[id]?.imageSources ?? []) {
+          const source = entry.source;
+          if (source.kind === 'upload' && source.fileId === part.file_id) {
+            return typeof source.bytes === 'number' ? source.bytes : undefined;
+          }
+        }
+      }
+      return undefined;
+    };
+    return {
+      bytesOf,
+      get limitBytes(): number {
+        const ceiling = transport() === 'openai' ? INLINE_REQUEST_BODY_BYTES : MAX_REQUEST_IMAGE_BYTES;
+        return Math.floor(ceiling * IMAGE_BUDGET_RATIO);
+      },
+    };
+  }
+
+  /**
    * The worker for a node, created on first use (P3, §2.3). Its tools register
    * background jobs under **this** node, and its agent's provider hooks all close
    * over the same node, so a `spawn_agents` / `send_agent_message` / `hop_session`
@@ -1086,6 +1215,19 @@ export class SessionRuntime {
       worker = { agent, tools };
       this.nodeWorkers.set(node.id, worker);
     }
+    // The budget accounting `read_image` needs before it may attach anything: which bytes
+    // this chain's next request would already carry, and the ceiling its transport has.
+    // Installed on **every** call, not only when the worker is built: `workerFor` runs at the
+    // start of each of this node's turns, and the view resolves the chain's provenance and
+    // its card live (`carriedPathIds` / `chainCard`), so the moment before a request is
+    // exactly when it has to be current. It is *this agent's* view alone — a sibling branch,
+    // another tab's session and every sub-agent carry their own.
+    worker.agent.setImageAccounting(
+      this.imageAccountingFor(
+        () => this.carriedPathIds(node),
+        () => this.chainCard(node).vision.transport,
+      ),
+    );
     return worker;
   }
 
@@ -1122,7 +1264,14 @@ export class SessionRuntime {
   lockedNodes(): string[] {
     const out = new Set<string>();
     for (const hit of this.hub.listForSession(this.sessionId)) {
-      if (hit.task.status === 'running') {
+      // A **detached** job (fire-and-forget, `BackgroundTask.detached`) owns no lock:
+      // it never delivers a notice, so there is nothing for its owner to wait for —
+      // and holding the composer on Stop for a job that will never report back is
+      // exactly the loop this filter exists to break. Ownership is unchanged: the
+      // card still renders in that node's column, and the job is still killed with
+      // its node's line (`runningBackgroundsForNodes` / `runningBackgroundCount`
+      // deliberately keep counting it — deleting the branch really does kill it).
+      if (hit.task.status === 'running' && hit.task.detached !== true) {
         out.add(hit.owner.nodeId);
       }
     }
@@ -1142,7 +1291,16 @@ export class SessionRuntime {
 
   /** How many unfinished pieces of work `lockedNodes` is counting for one node. */
   lockedWorkCount(nodeId: string): number {
-    let n = this.hub.runningForNode(this.sessionId, nodeId);
+    // The **same filter** as `lockedNodes`, counted per node instead of as a set:
+    // a running detached job is not work this node owes the conversation (no notice
+    // can ever arrive), so the count and the lock must not disagree — the composer
+    // reads the set, and the host's refusal of a send there reads this number.
+    let n = 0;
+    for (const task of this.hub.listForNode(this.sessionId, nodeId)) {
+      if (task.status === 'running' && task.detached !== true) {
+        n += 1;
+      }
+    }
     for (const agentNodeId of this.runningSubAgents.keys()) {
       if (this.session.nodes[agentNodeId]?.parentId === nodeId) {
         n += 1;
@@ -1165,6 +1323,25 @@ export class SessionRuntime {
   /** True while this session owns at least one running background job. */
   hasRunningBackground(): boolean {
     return this.runningBackgroundCount() > 0;
+  }
+
+  /**
+   * True while this session owns a running **node** job — one that locks its node and sends a
+   * completion notice. A `start_detached` (fire-and-forget) job deliberately does not count
+   * here, and that is not cosmetic: the idle gates that call this feed `hop_session`'s refusal,
+   * the session list's `busy` flag, `globallyIdle()` — which the queued session start, the hop
+   * return and the control plane's `POST /wait-for-finish` all wait on — and the reload
+   * refusal. Counting a detached job there would mean a dev server keeps the harness
+   * permanently not-idle, so the supervisor could never reload the window.
+   *
+   * The kill paths still count it: `runningBackgroundCount` is what the delete/clear
+   * confirmations read (a reload or a branch deletion really does kill the process), and
+   * `ControlState.runningBackgrounds` stays a factual readout of what is running.
+   */
+  hasRunningNodeBackground(): boolean {
+    return this.hub
+      .listForSession(this.sessionId)
+      .some((hit) => hit.task.status === 'running' && hit.task.detached !== true);
   }
 
   /** How many background jobs of this session are still running. */
@@ -1338,6 +1515,25 @@ export class SessionRuntime {
       return 0;
     }
     return Math.min(100, Math.round((tokens / window) * 100));
+  }
+
+  /**
+   * Which ceiling the `⧉` rollover is being offered for, as the new window's message has to
+   * state it: the provider's refusal of the **tokens** (`full`), its refusal of the
+   * **bytes** (`images`), or the user taking the 90% entry before anything is refused
+   * (`near`).
+   *
+   * The kind is read from the very text `nodeContextFull` reads, so the button, the card and
+   * the sentence the model gets cannot disagree — and `images` is asked **first**, because
+   * `contextState()` reports both refusals as `'full'` (deliberately: both mean "this request
+   * cannot be sent"). No threshold is involved; the refusal text is the only trigger.
+   */
+  private rolloverReason(node: TreeNode): 'full' | 'near' | 'images' {
+    const failure = node.status === 'error' ? lastFailureText(node) : undefined;
+    if (failure && windowFullReason(failure) === 'images') {
+      return 'images';
+    }
+    return this.contextState(node) === 'full' ? 'full' : 'near';
   }
 
   /**
@@ -1941,6 +2137,13 @@ export class SessionRuntime {
       bgKilled: node.bgKilled,
       bgElapsedMs: node.bgElapsedMs,
       bgOutputTail: node.bgOutputTail,
+      // Whether this job is **detached** (fire-and-forget): it locks no node and never
+      // notifies, so its card wears the `shared` badge. Read from the hub rather than
+      // stored on the node — the flag belongs to the live task, not to the card's
+      // terminal snapshot — so a card restored after a reload (which has no task left
+      // to ask) renders as the plain record it is. `shared` is not a delivery marker:
+      // `delivered` stays the D1 field for "the agent has been told".
+      bgDetached: node.kind === 'bg' && this.backgroundTaskDetached(node.bgTaskId) ? true : undefined,
       // A sub-agent card carries only its **count**: its transcript is fetched when
       // the card is actually expanded (`onAgentItems`), because shipping every
       // sidecar's items made one session's tree 2.3 MB and 10 k DOM elements for 8
@@ -2484,7 +2687,7 @@ export class SessionRuntime {
             `${messages.length} messages now; kept ${node.messages.length})`,
         );
       }
-      this.recordUploadSources(node, run);
+      this.recordUploadSources(node, run.agent);
       node.status = status;
       session.updatedAt = Date.now();
       // Mirror the finished turn to disk so it stays searchable later.
@@ -2511,6 +2714,59 @@ export class SessionRuntime {
   }
 
   // ---- User input / stop / image picker ----
+
+  /**
+   * What one composer attachment is sent as, and what produced it.
+   *
+   * The transform is the point of the whole image budget: the provider caps the bytes a
+   * **request** carries (200 MB referenced, 48 MiB inline) and resizes everything above
+   * ~800 px server-side anyway, so a 10 MiB sheet that leaves here at `IMAGE_TARGET_MAX_SIDE`
+   * loses nothing the model would have seen (`docs/agents/plans/image-budget.md` §1/§2).
+   *
+   * Never throws and never drops an attachment: an image this build cannot transform (an
+   * unsupported variant, an unreadable one — `changed: false`), or one whose format it cannot
+   * even name, is sent **verbatim**, exactly as before this work. The per-request brake in
+   * `read_image` stays the backstop.
+   */
+  private async prepareAttachment(att: UserAttachment): Promise<PreparedAttachment> {
+    const raw = dataUrlBytes(att.dataUrl);
+    const mime = detectImageMime(raw);
+    if (!mime) {
+      // Not a format we can measure, so not one we may re-encode: pass it through untouched
+      // rather than rebuild a `data:` URL from a mime we had to guess.
+      return { bytes: raw, dataUrl: att.dataUrl };
+    }
+    try {
+      const out = await transformImage({ bytes: raw, mime });
+      if (!out.changed) {
+        return { bytes: raw, dataUrl: att.dataUrl };
+      }
+      const bytes = Buffer.from(out.bytes);
+      const dataUrl = `data:${out.mime};base64,${bytes.toString('base64')}`;
+      this.host.output.appendLine(
+        `[image] transformed ${att.name || 'attachment'}: ${imageBytesText(raw.length)} -> ` +
+          `${imageBytesText(bytes.length)}, ${out.sourceWidth}x${out.sourceHeight} -> ${out.width}x${out.height}`,
+      );
+      return {
+        bytes,
+        dataUrl,
+        transform: {
+          rect: out.rect,
+          targetMaxSide: IMAGE_TARGET_MAX_SIDE,
+          sourceWidth: out.sourceWidth,
+          sourceHeight: out.sourceHeight,
+          width: out.width,
+          height: out.height,
+        },
+      };
+    } catch (err) {
+      this.host.output.appendLine(
+        `[image] transform failed for ${att.name || 'attachment'}: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+      return { bytes: raw, dataUrl: att.dataUrl };
+    }
+  }
 
   async onUserMessage(text: string, attachments: UserAttachment[] = [], origin?: RemoteOrigin): Promise<void> {
     // P3: only the node this turn would continue from must be free — another
@@ -2596,12 +2852,20 @@ export class SessionRuntime {
     const sources: ImageSourceEntry[] = [];
     if (attachments.length > 0) {
       const parts: ContentPart[] = [];
+      /** What each image part was actually sent as, by part identity (read back below). */
+      const sent = new Map<ContentPart, PreparedAttachment>();
       if (userText) {
         parts.push({ type: 'text', text: userText });
       }
       if (sendCard.vision.transport === 'openai') {
         for (const att of attachments) {
-          parts.push({ type: 'image_url', image_url: { url: att.dataUrl } });
+          // The transform runs first here too: an inlined attachment's wire cost is its
+          // `data:` URL, so a smaller image is a smaller request body — the 48 MiB inline
+          // ceiling is the one this transport has to fit under.
+          const prepared = await this.prepareAttachment(att);
+          const part: ContentPart = { type: 'image_url', image_url: { url: prepared.dataUrl } };
+          parts.push(part);
+          sent.set(part, prepared);
         }
       } else {
         this.setBusy(true);
@@ -2612,9 +2876,14 @@ export class SessionRuntime {
         const failed: string[] = [];
         for (const att of attachments) {
           try {
-            const bytes = dataUrlBytes(att.dataUrl);
-            const uploaded = await this.clients.upload(sendCard, bytes, att.name || 'image', uploadSignal);
-            parts.push({ type: 'file', file_id: uploaded.id });
+            // Transform before the upload, never after: the bytes that ever reach the
+            // provider are the small ones (`docs/agents/plans/image-budget.md` §2.1), and the
+            // provider's own `Total image size` cap counts exactly these.
+            const prepared = await this.prepareAttachment(att);
+            const uploaded = await this.clients.upload(sendCard, prepared.bytes, att.name || 'image', uploadSignal);
+            const part: ContentPart = { type: 'file', file_id: uploaded.id };
+            parts.push(part);
+            sent.set(part, prepared);
           } catch (err) {
             if (uploadSignal.aborted) {
               // The user pressed Stop during upload: reset and do not send.
@@ -2649,15 +2918,36 @@ export class SessionRuntime {
       content = parts;
       // Remember where each image came from, addressed by its position in the message
       // this turn stores: a `file_id` is one provider's handle and nothing else in the
-      // history can turn it back into bytes (`docs/agents/plans/session-epoch.md` §6).
+      // history can turn it back into bytes (`docs/agents/plans/session-epoch.md` §6). The
+      // bytes and the transform ride along, because they are what the per-request image
+      // budget is computed from and what lets a fork rebuild the **same view** rather than
+      // inlining the raw attachment again (`docs/agents/plans/image-budget.md` §2.4).
       parts.forEach((part, partIndex) => {
+        const prepared = sent.get(part);
         if (part.type === 'image_url') {
-          sources.push({ messageIndex: 0, partIndex, source: { kind: 'inline', dataUrl: part.image_url.url } });
+          sources.push({
+            messageIndex: 0,
+            partIndex,
+            // Inline, the wire cost is the URL itself — the same thing `bytesOf` measures for
+            // a live `image_url` part, so the record and the accounting agree.
+            source: {
+              kind: 'inline',
+              dataUrl: part.image_url.url,
+              bytes: prepared ? Buffer.byteLength(prepared.dataUrl, 'utf8') : undefined,
+              transform: prepared?.transform,
+            },
+          });
         } else if (part.type === 'file') {
           sources.push({
             messageIndex: 0,
             partIndex,
-            source: { kind: 'upload', providerId: sendCard.providerId, fileId: part.file_id },
+            source: {
+              kind: 'upload',
+              providerId: sendCard.providerId,
+              fileId: part.file_id,
+              bytes: prepared?.bytes.length,
+              transform: prepared?.transform,
+            },
           });
         }
       });
@@ -2677,7 +2967,7 @@ export class SessionRuntime {
     // finishes).
     const session = this.session;
     if (isDefaultSessionTitle(session.title) && (userText || attachments.length > 0)) {
-      session.title = (userText || defaultSessionTitle()).slice(0, 40);
+      session.title = sliceText(userText || defaultSessionTitle(), 40);
       session.titleSource = 'provisional';
       this.host.stateChanged();
     }
@@ -2909,7 +3199,7 @@ export class SessionRuntime {
     ).length;
     const windowNo = windows + 2;
     const message = buildContextRolloverMessage({
-      reason: this.contextState(node) === 'full' ? 'full' : 'near',
+      reason: this.rolloverReason(node),
       sessionId: this.sessionId,
       previousNodeId: node.id,
       transcriptPath: this.rolloverTranscriptPath(node.id),
@@ -2919,7 +3209,7 @@ export class SessionRuntime {
       answer: carry.answer,
       killedBackground: killedJobs.map((task) => ({
         id: task.id,
-        command: task.command.length > 80 ? `${task.command.slice(0, 80)}…` : task.command,
+        command: clipText(task.command, 80),
         state: task.killed
           ? 'stopped by the rollover'
           : `finished with exit code ${task.exitCode ?? 'unknown'}`,
@@ -2955,42 +3245,65 @@ export class SessionRuntime {
   }
 
   /**
-   * Record, on the node, where this turn's `read_image` uploads came from. A `file_id` is
-   * one provider's private handle, so translating it for another card (a fork) is only
-   * possible while its source is known (`docs/agents/plans/session-epoch.md` §6). Matching
-   * is by id, so a message this turn did not touch simply finds nothing.
+   * Record, on the node, where this turn's `read_image` uploads came from — and how many
+   * bytes each one costs the request. A `file_id` is one provider's private handle, so
+   * translating it for another card (a fork) is only possible while its source is known
+   * (`docs/agents/plans/session-epoch.md` §6), and the byte count is what makes the chain's
+   * per-request image budget arithmetic over provenance rather than a re-read of every source
+   * file (`docs/agents/plans/image-budget.md` §2.4). Matching is by id, so a message this
+   * turn did not touch simply finds nothing.
+   *
+   * Both callers use it — the main agent's `finishTurn` and a sub-agent's `finish` — so a
+   * resumed sub-agent has provenance too and the accounting stays exact for it.
+   *
+   * Best effort and side-effect-free on failure: the whole record is built before it is
+   * assigned, so a throw (an agent mid-teardown, say) can neither lose the turn's messages
+   * nor leave half the provenance written.
    */
-  private recordUploadSources(node: TreeNode, run: TurnRun): void {
-    const uploads = run.agent.getImageUploads();
-    if (uploads.length === 0) {
-      return;
-    }
-    const known = new Set(
-      (node.imageSources ?? []).map((entry) => (entry.source.kind === 'upload' ? entry.source.fileId : '')),
-    );
-    const next: ImageSourceEntry[] = [];
-    node.messages.forEach((message, messageIndex) => {
-      if (!Array.isArray(message.content)) {
+  private recordUploadSources(node: TreeNode, agent: Agent): void {
+    try {
+      const uploads = agent.getImageUploads();
+      if (uploads.length === 0) {
         return;
       }
-      message.content.forEach((part, partIndex) => {
-        if (part.type !== 'file' || known.has(part.file_id)) {
+      const known = new Set(
+        (node.imageSources ?? []).map((entry) => (entry.source.kind === 'upload' ? entry.source.fileId : '')),
+      );
+      const next: ImageSourceEntry[] = [];
+      node.messages.forEach((message, messageIndex) => {
+        if (!Array.isArray(message.content)) {
           return;
         }
-        const upload = uploads.find((u) => u.fileId === part.file_id);
-        if (!upload) {
-          return;
-        }
-        known.add(part.file_id);
-        next.push({
-          messageIndex,
-          partIndex,
-          source: { kind: 'upload', providerId: upload.providerId, fileId: part.file_id, srcPath: upload.path },
+        message.content.forEach((part, partIndex) => {
+          if (part.type !== 'file' || known.has(part.file_id)) {
+            return;
+          }
+          const upload = uploads.find((u) => u.fileId === part.file_id);
+          if (!upload) {
+            return;
+          }
+          known.add(part.file_id);
+          const source: ImageSource = {
+            kind: 'upload',
+            providerId: upload.providerId,
+            fileId: part.file_id,
+            srcPath: upload.path,
+            // The bytes actually sent, and the transform that produced them: the first is the
+            // budget's input, the second is what lets a fork rebuild this view instead of
+            // inlining the raw source file.
+            bytes: upload.bytes,
+            transform: upload.transform,
+          };
+          next.push({ messageIndex, partIndex, source });
         });
       });
-    });
-    if (next.length > 0) {
-      node.imageSources = [...(node.imageSources ?? []), ...next];
+      if (next.length > 0) {
+        node.imageSources = [...(node.imageSources ?? []), ...next];
+      }
+    } catch (err) {
+      this.host.output.appendLine(
+        `[image] provenance skipped for ${node.id}: ${err instanceof Error ? err.message : String(err)}`,
+      );
     }
   }
 
@@ -3041,6 +3354,18 @@ export class SessionRuntime {
           const source = byPart.get(`${messageIndex}:${partIndex}`);
           if (uploadTransport && source?.kind === 'upload' && source.providerId === card.providerId) {
             return part; // the same account can still read its own handle
+          }
+          // A transformed upload is **not** re-inlined from its raw source file: the chain
+          // that recorded it saw the cropped/downscaled view, so inlining the original would
+          // silently show the copy a *different* image than the one the model answered about —
+          // and it would re-inflate exactly the bytes the transform exists to avoid (a 10 MiB
+          // sheet becomes ~13 MiB of base64). The faithful rebuild replays the recorded
+          // `transform`, which needs the derived bytes; until that cache exists the copy
+          // degrades to the placeholder, the same way an unreachable source already does
+          // (`docs/agents/plans/image-budget.md` §2.4).
+          if (source?.kind === 'upload' && source.transform) {
+            moved = true;
+            return { type: 'text', text: MATERIALISED_FOREIGN_UPLOAD } as ContentPart;
           }
           const dataUrl = this.inlineBytesFor(source);
           moved = true;
@@ -4089,7 +4414,7 @@ export class SessionRuntime {
       // spawned it: a sub-agent inherits its **parent node's** card, never the
       // session's current selection (the draft pass may sit on another branch).
       const subCard = modelCard ?? this.cardForNode(parent);
-      const node = createNode(newId(), parent.id, `Sub-agent: ${instruction.slice(0, 32)}`, 'running');
+      const node = createNode(newId(), parent.id, `Sub-agent: ${sliceText(instruction, 32)}`, 'running');
       node.kind = 'agent';
       node.agentDepth = childDepth;
       node.agentStatus = 'running';
@@ -4276,6 +4601,10 @@ export class SessionRuntime {
         // continue it, even across an extension-host restart.
         if (subAgent) {
           job.node.messages = subAgent.getMessages().filter((m) => m.role !== 'system');
+          // A sub-agent's own `read_image` uploads get the same provenance the main agent's
+          // do, so a resumed sub-agent knows where its images came from and the budget stays
+          // exact across the resume (the node's history is what it starts from).
+          this.recordUploadSources(job.node, subAgent);
           // …and dump the same conversation to disk (JSONL) so the *caller* can
           // read the full tool-call history it cannot see in the summary.
           job.node.agentTranscript = this.host.writeSubAgentTranscript(job, subAgent, status, summary, startedAt);
@@ -4298,6 +4627,18 @@ export class SessionRuntime {
       subAgent = sub;
       sub.setCard(subCard);
       sub.setThinkingEffort(subEffort);
+      // A sub-agent's history is its **own**: it starts empty, or resumes the conversation
+      // stored on its node, and the parent chain's images are never part of its requests. So
+      // its budget is computed from its own node's provenance alone — which is also what
+      // makes a sub-agent the escape hatch for a chain that can no longer carry images. The
+      // view is installed on this agent, so a pool of parallel sub-agents cannot see each
+      // other's histories.
+      sub.setImageAccounting(
+        this.imageAccountingFor(
+          () => [job.node.id],
+          () => subCard.vision.transport,
+        ),
+      );
       // A sub-agent takes its own children's completion signals at its own tool
       // boundary, exactly like the main agent (D3).
       sub.setSignalHandler(() => this.takeSignalsFor(job.node));
@@ -4657,7 +4998,7 @@ export class SessionRuntime {
 
   private toBackgroundInfo(owner: BackgroundOwner, task: BackgroundTask): BackgroundInfo {
     const out = task.handle.getOutput().trim();
-    const outputTail = out.length > 800 ? '…' + out.slice(-800) : out;
+    const outputTail = out.length > 800 ? '…' + tailText(out, 800) : out;
     return {
       id: task.id,
       nodeId: owner.nodeId,
@@ -4774,6 +5115,29 @@ export class SessionRuntime {
       return;
     }
     this.snapshotBackgroundCard(task);
+    if (task.detached === true) {
+      // **The detached branch of the completion notice.** This function is the one
+      // seam where the hub's `onFinish` becomes a notice, and a detached job leaves it
+      // without ever building a `SignalNotice`: nothing is queued for a tool boundary
+      // (`takeSignalsFor`), nothing is injected into an idle owner (`drainSignals`) and
+      // nothing is written back — the agent is *never* told, because a fire-and-forget
+      // job was never the agent's to wait for. It asks instead:
+      // `check_background_terminal`.
+      //
+      // The **card** still settles, exactly as it does for a tool-initiated kill (which
+      // is the other ending no notice follows): the terminal state has just gone onto
+      // the node (`bgExitCode`, `bgKilled`, `bgElapsedMs`, `bgOutputTail`), `delivered`
+      // flips so the card never claims a delivery that can never come, and the snapshot
+      // is repainted for the new status line.
+      //
+      // Explicit even though `BackgroundRegistry.register` already forces
+      // `notifyAgent: false` for a detached task: the rule belongs to the side that
+      // *delivers* notices, so it holds for any task that carries the flag.
+      task.delivered = true;
+      this.settleSignals([this.staleSignalFor(task)]);
+      this.postBackgrounds();
+      return;
+    }
     if (task.notifyAgent !== true) {
       // A tool-initiated kill/join already informed the agent through the tool
       // result, so this signal is never sent: settle the card instead (D1).
@@ -4799,7 +5163,7 @@ export class SessionRuntime {
     // restored record card shows); `finishedAt` is exact, `Date.now()` is only the
     // fallback for a task that somehow finished without going through `complete()`.
     node.bgElapsedMs = Math.max(0, (task.finishedAt ?? Date.now()) - task.startedAt);
-    node.bgOutputTail = out.length > 800 ? `…${out.slice(-800)}` : out;
+    node.bgOutputTail = out.length > 800 ? `…${tailText(out, 800)}` : out;
     node.status = task.killed ? 'interrupted' : 'done';
     this.persistTurn();
     this.postTree();
@@ -4809,6 +5173,20 @@ export class SessionRuntime {
   private bgCardFor(taskId: number): TreeNode | undefined {
     const nodeId = this.bgNodes.get(taskId);
     return nodeId ? this.session.nodes[nodeId] : undefined;
+  }
+
+  /**
+   * True when the job behind a `kind:'bg'` card is still known to the hub and is
+   * **detached** — the one thing `treeMessage` needs to know to badge that card
+   * `shared`. It is a read of the live task, deliberately not a node field: the hub is
+   * in-memory, so a card restored after a reload has no task left to ask, and the
+   * record it renders then must not invent a lock/notice story it can no longer verify.
+   */
+  private backgroundTaskDetached(taskId: number | undefined): boolean {
+    if (taskId == null) {
+      return false;
+    }
+    return this.hub.lookup(this.sessionId, taskId)?.task.detached === true;
   }
 
   /** A signal carrying only the card it settles: used when no notice will be sent. */
@@ -4861,7 +5239,7 @@ export class SessionRuntime {
   }
 
   private truncateField(value: string, limit: number): string {
-    return value.length > limit ? value.slice(0, limit) + '…' : value;
+    return clipText(value, limit);
   }
 
   /** Queue one signal under the node that owns the work and schedule delivery. */

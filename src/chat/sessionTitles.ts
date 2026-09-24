@@ -13,6 +13,7 @@
  * Host by a plain node script (require the compiled `out/chat/sessionTitles.js`).
  */
 import { ChatMessage } from '../agent/types';
+import { clipText, sliceText } from '../text';
 import { AgentSession, TitleSource, TreeNode, isSidecar, messageText } from './tree';
 
 /** Hard cap on a stored title (the sidebar / panel budget). */
@@ -124,7 +125,7 @@ function toolNames(node: TreeNode): string[] {
 /** Collapse to one line and clip (a digest line must stay a single line). */
 function clipLine(text: string, limit: number): string {
   const one = text.replace(/\s+/g, ' ').trim();
-  return one.length > limit ? `${one.slice(0, limit)}…` : one;
+  return one.length > limit ? clipText(one, limit) : one;
 }
 
 /** Main-agent turns in creation order (sidecar cards excluded). */
@@ -167,7 +168,7 @@ export function buildTitleDigest(session: AgentSession, maxChars = 4000): string
       break;
     }
   }
-  return lines.join('\n').slice(0, maxChars);
+  return sliceText(lines.join('\n'), maxChars);
 }
 
 /** Zero-cost fallback title: the first prompt of the session. */
@@ -212,7 +213,7 @@ export function sanitizeTitle(raw: string, fallback: string): string {
   if (!cleaned) {
     return fallback;
   }
-  return cleaned.slice(0, AUTO_TITLE_MAX_CHARS);
+  return sliceText(cleaned, AUTO_TITLE_MAX_CHARS);
 }
 
 /** Messages for naming one session. */

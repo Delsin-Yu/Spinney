@@ -14,6 +14,12 @@
  * stubs the settings **keyed by name** (`commandMaxForegroundDuration` → 1) so the
  * gate below can be observed without waiting five minutes.
  *
+ * The last section goes one layer up: the same stub is enough to build a **real
+ * `SessionRuntime`** over a **real `BackgroundHub`** and drive it windowlessly (the
+ * pattern `tools/model-switch-acceptance.js` uses), which is what makes the lock rule
+ * assertable as behaviour — `lockedNodes()` is the list the composer turns into Stop,
+ * so "is this node locked" is a question only the runtime can answer.
+ *
  * What it pins:
  *   1. A job registered with a 500 ms budget is killed at roughly its deadline
  *      (not left to run its 8 s command), its `killReason` is `'timeout'`, its
@@ -37,6 +43,18 @@
  *      a live job with 800 ms left is ALLOWED and the join resolves when the job's
  *      budget ends it;
  *      an already finished job keeps today's wording (`finished with exit code …`).
+ *   5. The **lock** rule, through a real `SessionRuntime` over a real `BackgroundHub`:
+ *      `start_detached` is fire-and-forget, so a detached job must never lock its
+ *      owner node — with only a detached job running, `lockedNodes()` is **empty**,
+ *      `lockedWorkCount(owner)` is `0` and `hasRunningNodeBackground()` is `false`,
+ *      i.e. that node's composer keeps offering **Send** (the exact failure the
+ *      feature exists for: a dev server used to hold its owner on Stop until it
+ *      ended). The same fixture with `detached: false` locks its owner, `lockedNodes()`
+ *      naming that owner and nothing else — the positive control that keeps this
+ *      guard from being vacuously green — and with **both** running only the node
+ *      job's owner is listed. `lockedWorkCount` counts the node job and not the
+ *      detached one. See the section itself for why `hasRunningNodeBackground()` and
+ *      `hasRunningBackground()` differ on purpose, and how the fixture is reaped.
  *
  * Every await is bounded: a case that never settles FAILS the run instead of
  * hanging it, and the whole script settles in a few seconds.
@@ -48,6 +66,7 @@
  * Run: npm run check:budget   /   node tools/bg-budget-acceptance.js
  */
 const path = require('path');
+const os = require('os');
 const Module = require('module');
 
 const ROOT = path.resolve(__dirname, '..');
@@ -58,11 +77,39 @@ const LIMIT_SEC = 1;
 const SETTINGS = { commandMaxForegroundDuration: LIMIT_SEC };
 
 const vscodeStub = {
-  env: {},
+  // The extra keys below are what `out/chat/runtime.js` (the lock section) reads while
+  // it loads; the settings stub stays keyed by name, which is what the timeout gate needs.
+  l10n: { t: (s, ...args) => String(s).replace(/\{(\d+)\}/g, (_, i) => String(args[i] ?? '')) },
+  env: { language: 'en' },
+  window: {
+    showWarningMessage: async () => undefined,
+    showInformationMessage: async () => undefined,
+    createOutputChannel: () => ({ appendLine() {}, append() {}, show() {}, dispose() {}, clear() {} }),
+  },
   workspace: {
     workspaceFolders: [{ uri: { fsPath: ROOT, toString: () => 'file:///' + ROOT.split(path.sep).join('/') } }],
-    getConfiguration: () => ({ get: (key) => SETTINGS[key] }),
+    getConfiguration: () => ({ get: (key) => SETTINGS[key], update: async () => undefined, has: () => false }),
   },
+  Uri: { file: (p) => ({ fsPath: p, scheme: 'file', toString: () => String(p) }) },
+  EventEmitter: class {
+    constructor() {
+      this.event = () => ({ dispose() {} });
+    }
+    fire() {}
+    dispose() {}
+  },
+  Disposable: class {
+    constructor(fn) {
+      this.fn = fn;
+    }
+    dispose() {
+      this.fn && this.fn();
+    }
+  },
+  StatusBarAlignment: { Left: 1, Right: 2 },
+  ViewColumn: { One: 1, Active: -1, Beside: 2 },
+  extensions: { getExtension: () => undefined },
+  commands: { registerCommand: () => ({ dispose() {} }), executeCommand: async () => undefined },
 };
 const origLoad = Module._load;
 Module._load = function (request, parent, isMain) {
@@ -74,6 +121,12 @@ const bg = require(path.join(OUT, 'tools', 'background.js'));
 const { spawnShellCommand, BackgroundRegistry } = bg;
 const remainingBudgetMs = bg.remainingBudgetMs;
 const { makeJoinBackgroundTool } = require(path.join(OUT, 'tools', 'backgroundTools.js'));
+// The lock section (item 5) drives the real `SessionRuntime`: `lockedNodes` lives there,
+// and "would the composer show Stop?" is not answerable from a hub alone.
+const R = require(path.join(OUT, 'chat', 'runtime.js'));
+const T = require(path.join(OUT, 'chat', 'tree.js'));
+const { ClientRegistry } = require(path.join(OUT, 'agent', 'clients.js'));
+const { BackgroundHub } = require(path.join(OUT, 'chat', 'backgroundHub.js'));
 
 const owner = { sessionId: 's1', nodeId: 'n1' };
 
@@ -168,13 +221,18 @@ function budgetParam() {
 const BUDGET_PARAM = budgetParam();
 
 /** Register a job, filling the earlier parameters (`notifyAgent` = true, no id). */
-function registerJob(registry, handle, command, cwd, timeoutMs) {
+function registerJob(registry, handle, command, cwd, timeoutMs, detached) {
   const tail = [];
   for (let i = 3; i < BUDGET_PARAM.index; i++) {
     tail.push(i === 3 ? true : undefined);
   }
   if (BUDGET_PARAM.object) tail.push(timeoutMs === undefined ? {} : { timeoutMs });
   else tail.push(timeoutMs);
+  // `detached` is the last parameter, after the budget: `budgetParam()` reads this
+  // function's source text to find where the budget sits, so the flag has to stay behind
+  // it. Passing `false` explicitly for the ordinary cases keeps them byte-for-byte the
+  // same call shape as before.
+  tail.push(detached === true);
   const id = registry.register(handle, command, cwd, ...tail);
   return { id, task: registry.get(id) };
 }
@@ -185,6 +243,114 @@ function spawnSlow(ms) {
   const handle = spawnShellCommand(slowCommand(ms), ROOT, { killOnTruncate: true });
   live.push(handle);
   return handle;
+}
+
+// ---- the lock fixture: a real SessionRuntime over a real BackgroundHub ----------
+// `lockedNodes()` is what the composer turns into **Stop**, so "is a node locked" is a
+// question only the runtime can answer. It is built here, windowlessly, the way
+// `tools/model-switch-acceptance.js` does it: the `vscode` stub above plus a narrow host.
+
+const LOCK_SESSION = 'sess-lock';
+/** The node whose turn started the *node* job: it **must** be locked. */
+const LOCK_NODE = 'n-node';
+/** The node whose turn started the *detached* job: it must **never** be locked. */
+const LOCK_DETACHED_NODE = 'n-det';
+const lockOwner = (nodeId) => ({ sessionId: LOCK_SESSION, nodeId });
+
+/**
+ * The host a real `SessionRuntime` talks to. Only the members its construction and the
+ * lock reads below touch are real values; anything else is an inert no-op (`persist`,
+ * `postTo`, `stateChanged`…), so the run needs no window and writes nothing.
+ */
+const lockHost = new Proxy(
+  {
+    getConfig: () => ({
+      saveSessionTranscripts: false,
+      saveSubAgentTranscripts: false,
+      subAgentTranscriptDir: '',
+      maxConcurrentSubagents: 4,
+      maxLevel2Subagents: 4,
+      autoSessionTitles: false,
+      foldToolCalls: true,
+      foldThinking: true,
+      defaultCardId: 'deepseek-flash',
+      replyLanguage: 'English',
+    }),
+    getContextWindow: () => 1_048_576,
+    transcriptRoot: () => os.tmpdir(),
+    transcriptDir: (sessionId) => path.join(os.tmpdir(), sessionId),
+    dumpSessionTranscript: () => undefined,
+    writeSubAgentTranscript: () => undefined,
+    systemPrompt: () => 'SYSTEM-PROMPT-TEXT',
+    resolveModel: (candidate) => candidate,
+    isHeld: () => false,
+    isReadOnly: () => false,
+    disposed: false,
+    output: { appendLine() {} },
+  },
+  {
+    get(target, prop) {
+      if (typeof prop === 'symbol') return undefined;
+      if (prop in target) return target[prop];
+      return () => undefined;
+    },
+  },
+);
+
+/**
+ * A session with two sibling nodes that can each own a job: the detached job and the
+ * node job have **different** owners, which is what makes "with both running, only the
+ * node job's owner is listed" a real assertion and not a coincidence of one owner.
+ */
+function makeLockRuntime(hub) {
+  const session = {
+    id: LOCK_SESSION,
+    title: 'lock',
+    createdAt: 1,
+    updatedAt: 1,
+    nodes: {},
+    rootIds: [],
+    activeNodeId: null,
+    orphanItems: [],
+  };
+  T.attachNode(session, T.createNode('root', null, 'root', 'done'));
+  for (const id of [LOCK_NODE, LOCK_DETACHED_NODE]) {
+    T.attachNode(session, T.createNode(id, 'root', id, 'done'));
+  }
+  session.activeNodeId = 'root';
+  return new R.SessionRuntime(
+    lockHost,
+    session,
+    new ClientRegistry({ apiKeyFor: async () => 'x' }),
+    'deepseek-flash',
+    'medium',
+    hub,
+  );
+}
+
+/**
+ * Kill jobs through the hub's own path (the one Stop uses) and await each confirmation.
+ * `'exited'` is the child's **own** `exit` event, so it is a measurement of the process
+ * rather than a restatement of the registry's intent — which is what lets the lock
+ * section claim it left nothing running.
+ */
+async function killThroughHub(hub, ids) {
+  const outcomes = [];
+  for (const id of ids) {
+    const hit = hub.lookup(LOCK_SESSION, id);
+    if (!hit) {
+      outcomes.push('unknown-id');
+      continue;
+    }
+    const task = hit.task.status === 'running' ? hub.kill(LOCK_SESSION, id) : hit.task;
+    if (!task || !task.killConfirm) {
+      outcomes.push('no-confirmation');
+      continue;
+    }
+    const r = await bounded(`the kill of background job ${id}`, task.killConfirm, 4000);
+    outcomes.push(r.ok ? r.value : 'no-answer');
+  }
+  return outcomes;
 }
 
 /**
@@ -310,6 +476,140 @@ watchdog.unref?.();
   const text4 = r4.ok ? String(r4.value) : '';
   check('a finished job keeps today’s wording', /finished with exit code 0/.test(text4), short(text4));
 
+  console.log('== join_background on a detached job: refused outright ==');
+  const handleDet = spawnSlow(8000);
+  const jobDet = registerJob(gate, handleDet, SLOW_DESC, ROOT, undefined, true);
+  check('the detached flag reached the registry', jobDet.task.detached === true, `detached=${String(jobDet.task.detached)}`);
+  const rDet = await bounded('the refused join (detached job)', join.execute({ pid: jobDet.id }, undefined), 4000);
+  const textDet = rDet.ok ? String(rDet.value) : '';
+  check('a detached job is refused outright', textDet.includes('is a detached job'), short(textDet));
+  check(
+    'the refusal says it never notices and that no turn ever waits for it',
+    /never sends a completion notice/.test(textDet) && /no turn ever waits/.test(textDet),
+    short(textDet),
+  );
+  check('it names check_background_terminal(<id>) as the way to read it', textDet.includes(`check_background_terminal(${jobDet.id})`), short(textDet));
+  check('and kill_background(<id>) as the way to end it', textDet.includes(`kill_background(${jobDet.id})`), short(textDet));
+  check('it is the detached refusal, not the budget one', !/budget left/.test(textDet) && !/has no deadline/.test(textDet), short(textDet));
+
+  console.log('== the lock: a detached job never holds its node on Stop ==');
+  // Why this section exists: a job that holds its owner's composer on Stop means the
+  // owner cannot send a message there until the job ends — so a long-lived thing (a dev
+  // server, an emulator, a watcher) could only be started by freezing the conversation.
+  // `start_detached` is fire-and-forget: it never sends a completion notice, so there is
+  // nothing for its owner to wait for, and the lock rule skips it. That rule lives in
+  // three places (`SessionRuntime.lockedNodes`, `lockedWorkCount` and
+  // `hasRunningNodeBackground`) and is asserted here as behaviour — `lockedNodes()` is
+  // exactly the set the composer turns into Stop.
+  //
+  // `hasRunningNodeBackground()` and `hasRunningBackground()` deliberately differ, and a
+  // future reader would otherwise 'fix' one into the other:
+  //   - `hasRunningNodeBackground()` feeds the **idle gates**: the hop refusal, the
+  //     session list's `busy` flag, `globallyIdle()` (which the queued session start, the
+  //     hop return and the control plane's `POST /wait-for-finish` all wait on) and the
+  //     reload refusal. Counting a detached job there would mean a dev server keeps the
+  //     harness permanently "not idle", so the supervisor could never reload the window.
+  //     It must ignore detached jobs.
+  //   - `hasRunningBackground()` is the **factual readout** ("is a process running in
+  //     this session?") behind `ControlState.runningBackgrounds`, and a detached job is a
+  //     real process that a session/branch deletion really does kill. Hiding it would
+  //     misreport the machine. It must count them.
+  // Two true statements about two different questions; neither is a bug in the other.
+  const lockHub = new BackgroundHub();
+  const lockRt = makeLockRuntime(lockHub);
+
+  check(
+    'with no job at all, no node is locked',
+    lockRt.lockedNodes().length === 0 && !lockRt.hasRunningNodeBackground() && !lockRt.hasRunningBackground(),
+    `lockedNodes=${JSON.stringify(lockRt.lockedNodes())}`,
+  );
+
+  // (a) Only a detached job. This is the failure the feature exists for, stated as the
+  // thing that must never come back: the owner keeps offering Send.
+  const handleDetOnly = spawnSlow(8000);
+  const detOnlyId = lockHub.register(lockOwner(LOCK_DETACHED_NODE), handleDetOnly, SLOW_DESC, ROOT, undefined, true);
+  const detOnlyTask = lockHub.lookup(LOCK_SESSION, detOnlyId)?.task;
+  check(
+    'the detached job is really running, and flagged detached',
+    statusOf(detOnlyTask) === 'running' && detOnlyTask.detached === true,
+    `status=${String(statusOf(detOnlyTask))} detached=${String(detOnlyTask && detOnlyTask.detached)}`,
+  );
+  check(
+    'with ONLY a detached job running, lockedNodes() is empty (its owner keeps offering Send)',
+    lockRt.lockedNodes().length === 0,
+    `lockedNodes=${JSON.stringify(lockRt.lockedNodes())}`,
+  );
+  check(
+    '  … lockedWorkCount(its owner) is 0, so a send from that node is not refused either',
+    lockRt.lockedWorkCount(LOCK_DETACHED_NODE) === 0,
+    `count=${lockRt.lockedWorkCount(LOCK_DETACHED_NODE)}`,
+  );
+  check('  … hasRunningNodeBackground() is false, so the idle gates stay idle', lockRt.hasRunningNodeBackground() === false);
+  check('  … hasRunningBackground() is still true: the process is a fact', lockRt.hasRunningBackground() === true);
+  await killThroughHub(lockHub, [detOnlyId]);
+
+  // (b) The positive control, in the same fixture with `detached` false. Without it an
+  // implementation that locked nothing at all would sail through (a).
+  const handleNodeOnly = spawnSlow(8000);
+  const nodeOnlyId = lockHub.register(lockOwner(LOCK_NODE), handleNodeOnly, SLOW_DESC, ROOT, undefined, false);
+  check(
+    'a node job (detached false) locks its owner node — and nothing else',
+    JSON.stringify(lockRt.lockedNodes()) === JSON.stringify([LOCK_NODE]),
+    `lockedNodes=${JSON.stringify(lockRt.lockedNodes())}`,
+  );
+  check(
+    '  … lockedWorkCount(that owner) counts it',
+    lockRt.lockedWorkCount(LOCK_NODE) === 1,
+    `count=${lockRt.lockedWorkCount(LOCK_NODE)}`,
+  );
+  check(
+    '  … the jobless sibling node counts 0 (nothing is over-counted)',
+    lockRt.lockedWorkCount(LOCK_DETACHED_NODE) === 0,
+    `count=${lockRt.lockedWorkCount(LOCK_DETACHED_NODE)}`,
+  );
+  check('  … hasRunningNodeBackground() is true for a node job', lockRt.hasRunningNodeBackground() === true);
+  check('  … and hasRunningBackground() is true here too', lockRt.hasRunningBackground() === true);
+
+  // (c) Both at once: the detached job is still not a lock, and still not hidden.
+  const handleBoth = spawnSlow(8000);
+  const bothId = lockHub.register(lockOwner(LOCK_DETACHED_NODE), handleBoth, SLOW_DESC, ROOT, undefined, true);
+  check(
+    "with both running, only the node job's owner is listed",
+    JSON.stringify(lockRt.lockedNodes()) === JSON.stringify([LOCK_NODE]),
+    `lockedNodes=${JSON.stringify(lockRt.lockedNodes())}`,
+  );
+  check(
+    "  … the detached job's owner still counts 0 work",
+    lockRt.lockedWorkCount(LOCK_DETACHED_NODE) === 0,
+    `count=${lockRt.lockedWorkCount(LOCK_DETACHED_NODE)}`,
+  );
+  check(
+    '  … but the detached job is NOT hidden: both jobs are counted and their owners reported',
+    lockRt.runningBackgroundCount() === 2 &&
+      lockRt.backgroundNodes().includes(LOCK_NODE) &&
+      lockRt.backgroundNodes().includes(LOCK_DETACHED_NODE),
+    `runningBackgroundCount=${lockRt.runningBackgroundCount()} backgroundNodes=${JSON.stringify(lockRt.backgroundNodes())}`,
+  );
+
+  // (d) Reap, and prove the reap. The fixture's jobs go through the hub's own kill path
+  // (the one Stop uses) and each confirmation is awaited: `'exited'` is the child's own
+  // exit event, so "nothing is left running" is measured rather than claimed. Every other
+  // handle this script spawned is killed by the `live` loop below; these are in it too,
+  // and a second kill is idempotent.
+  const lockOutcomes = await killThroughHub(lockHub, [nodeOnlyId, bothId]);
+  check(
+    'every job this section started was killed and the OS confirmed the exit',
+    lockOutcomes.length === 2 && lockOutcomes.every((outcome) => outcome === 'exited'),
+    lockOutcomes.join(', ') || '(no outcome)',
+  );
+  check(
+    'nothing of the fixture is left running at the end of the section',
+    lockHub.listForSession(LOCK_SESSION).every((hit) => hit.task.status === 'finished') &&
+      !lockRt.hasRunningBackground() &&
+      lockRt.lockedNodes().length === 0,
+    `${lockHub.listForSession(LOCK_SESSION).length} job(s) tracked, all finished`,
+  );
+
   for (const handle of live) {
     try {
       await handle.kill();
@@ -319,6 +619,20 @@ watchdog.unref?.();
   }
   clearTimeout(watchdog);
 
+  // 6. Nothing is left running. How that is known rather than assumed: every handle this
+  // script spawned goes through the loop above, and `handle.kill()` resolves only once the
+  // child's own `exit` event arrived (or the OS refused to confirm it — which would show up
+  // in the fixtures' kill assertions). The lock fixture's jobs were in that same set *and*
+  // were killed through the hub's kill path with their `'exited'` confirmations asserted.
+  check(
+    'no job this script started is left running when it ends',
+    !lockRt.hasRunningBackground() &&
+      !lockRt.hasRunningNodeBackground() &&
+      lockRt.lockedNodes().length === 0 &&
+      lockHub.listForSession(LOCK_SESSION).every((hit) => hit.task.status === 'finished'),
+    `${live.length} spawned handle(s) reaped through handle.kill()`,
+  );
+
   console.log('');
   if (problems.length) {
     console.log(`FAIL bg-budget: ${problems.length} of ${total} check(s) failed`);
@@ -326,6 +640,7 @@ watchdog.unref?.();
   }
   console.log(
     `PASS bg-budget: ${total}/${total} checks — a background job with a budget is killed at its deadline and says why, ` +
-      'an unbudgeted job is left alone, and join_background refuses to hold a turn longer than the limit',
+      'an unbudgeted job is left alone, join_background refuses to hold a turn longer than the limit, and a detached ' +
+      'job never locks its owner (that node keeps offering Send)',
   );
 })();

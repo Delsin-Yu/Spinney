@@ -14,7 +14,25 @@ import {
   Usage,
   detectImageMime,
 } from './types';
-import { MAX_IMAGE_BYTES, ModelCard, cardDisplayName, isVisionCard, visionCardsLabel } from './models';
+import {
+  IMAGE_BUDGET_RATIO,
+  INLINE_REQUEST_BODY_BYTES,
+  MAX_IMAGE_BYTES,
+  MAX_REQUEST_IMAGE_BYTES,
+  ModelCard,
+  cardDisplayName,
+  isVisionCard,
+  visionCardsLabel,
+} from './models';
+import {
+  IMAGE_TARGET_MAX_SIDE,
+  ImageTransformRecord,
+  Rect,
+  TransformOutcome,
+  normalizeRect,
+  readImageSize,
+  transformImage,
+} from './imageTransform';
 
 /**
  * The model-facing replacements for an image a request cannot carry. They are stored in the
@@ -30,6 +48,7 @@ import * as prompt from './prompt';
 import { ToolCapabilities, interceptedDefinitions } from './tools';
 import { formatDuration } from '../duration';
 import { perf } from '../perf';
+import { clipText } from '../text';
 
 /**
  * Tools whose result must never carry the generic duration prefix. Two reasons, one
@@ -72,11 +91,48 @@ function withCallDuration(name: string, result: string, ms: number): string {
  * One image `read_image` attached this turn: either uploaded to the provider's
  * Files API (`file_id` — the card's `deepseek` vision transport) or, for a card
  * whose transport is `openai`, kept as a `data:` URL and sent inside the request
- * body.
+ * body. `bytes` is what that part costs the request (**wire** bytes: the uploaded
+ * file, or the base64 URL the inline transport puts in the body) and `transform`
+ * is the record of how the source became these bytes — together they are what
+ * makes the per-request image budget computable (`docs/agents/plans/image-budget.md` §7).
  */
 type PendingImage =
-  | { kind: 'file'; fileId: string; path: string }
-  | { kind: 'inline'; url: string; path: string };
+  | { kind: 'file'; fileId: string; path: string; bytes: number; transform?: ImageTransformRecord }
+  | { kind: 'inline'; url: string; path: string; bytes: number; transform?: ImageTransformRecord };
+
+/**
+ * The host's accounting view, installed **per agent** by the provider that owns the chain
+ * (`SessionRuntime.workerFor` / `runSubAgent`). One view per agent, deliberately: branches,
+ * sessions and sub-agents all run in parallel, and a process-wide view would answer one
+ * chain's request with another chain's index — `read_image` would then attach, or refuse,
+ * on a number that describes someone else's history. A view that was never installed means
+ * "nothing is known", and the brake then counts only what this agent itself uploaded rather
+ * than refusing on a number nobody can vouch for.
+ */
+export interface ImageAccounting {
+  /** Bytes behind one image content part, or undefined when unknown. */
+  bytesOf: (part: ContentPart) => number | undefined;
+  /** The limit for this card's transport (200 MB referenced, 48 MiB inline). */
+  limitBytes: number;
+}
+
+/** Bytes as the budget sentences read them: one decimal, in MiB. */
+function mib(bytes: number): string {
+  return `${(bytes / 1024 / 1024).toFixed(1)} MiB`;
+}
+
+/**
+ * The one-line pixel story of a transformed image: the **source**'s size (a later `rect` is
+ * aimed at the source, not at what we sent), the region that was kept, and the size of what
+ * actually leaves. The zoom hint appears only when pixels were really dropped (`scale < 1`),
+ * because that is the only case where naming a region buys detail the model did not get.
+ */
+function describeTransform(t: ImageTransformRecord, scale: number): string {
+  const source = t.sourceWidth && t.sourceHeight ? `${t.sourceWidth}x${t.sourceHeight}` : '';
+  const region = t.rect ? `, rect ${t.rect.x},${t.rect.y} ${t.rect.w}x${t.rect.h}` : '';
+  const sizes = source ? `${source}${region} -> ${t.width}x${t.height}` : `${t.width}x${t.height}`;
+  return scale < 1 ? `${sizes}; zoom any region with rect {x,y,w,h} in source pixels` : sizes;
+}
 
 /**
  * Injected as an extra user message before a follow-up prompt when the previous
@@ -108,7 +164,7 @@ interface InterruptedToolCall {
 
 /** Cap a field value so a very long command/path does not bloat the notice. */
 function truncateField(value: string, limit = 120): string {
-  return value.length > limit ? `${value.slice(0, limit)}…` : value;
+  return value.length > limit ? clipText(value, limit) : value;
 }
 
 /** Read a single string field out of a (possibly truncated) JSON tool-call payload. */
@@ -332,6 +388,19 @@ export class Agent {
   private lastInterruptedTools: InterruptedToolCall[] = [];
   /** Images attached by read_image this turn; flushed as a user content block. */
   private pendingImages: PendingImage[] = [];
+  /**
+   * What this agent itself put into the request this turn, by the id its part references
+   * (`file_id`, or the inline `data:` URL) → the wire bytes that part costs. Kept apart
+   * from `pendingImages`, which is drained into a user block after every tool batch: the
+   * provider's provenance is written when the turn *ends*, so mid-turn these are the only
+   * numbers that exist for the brake's sum (`this.imageAccounting`, §2.2).
+   */
+  private readonly uploadedThisTurn = new Map<string, number>();
+  /**
+   * What the host knows about the images this agent's next request would already carry
+   * ({@link ImageAccounting}). Set by the provider per agent, and `null` until it is.
+   */
+  private imageAccounting: ImageAccounting | null = null;
   /** The card this agent runs on (provider, wire name, vision, effort levels). */
   private card?: ModelCard;
   private thinkingEffort: ThinkingEffort = 'none';
@@ -378,9 +447,19 @@ export class Agent {
    * epoch needs to translate a `file_id` into whatever another card can read
    * (`docs/agents/plans/session-epoch.md` §6). Accumulated for the agent's lifetime —
    * the message that references an id can be stored long after the upload — and read by
-   * the runtime when it writes a finished turn's provenance.
+   * the runtime when it writes a finished turn's provenance. `bytes` (wire bytes) and
+   * `transform` are the two facts that provenance needs beyond the path: the first makes
+   * the per-request image budget exact instead of estimated, the second lets a copied
+   * chain rebuild the **same view** rather than inlining the raw source file
+   * (`docs/agents/plans/image-budget.md` §2.4).
    */
-  private readonly imageUploads: { fileId: string; providerId: string; path?: string }[] = [];
+  private readonly imageUploads: {
+    fileId: string;
+    providerId: string;
+    path?: string;
+    bytes: number;
+    transform?: ImageTransformRecord;
+  }[] = [];
 
   constructor(
     private readonly clients: ClientRegistry,
@@ -477,10 +556,24 @@ export class Agent {
     this.canSpawnReadOnly = v;
   }
 
+  /**
+   * Install this agent's view of the images its next request would already carry — what the
+   * provider knows about the frozen history (`docs/agents/plans/image-budget.md` §2.2). The
+   * other half of the sum is this agent's own record of what it uploaded this turn
+   * ({@link uploadedThisTurn}), because a turn's provenance is written only when the turn
+   * ends. `null` (the default) means nothing is known: `read_image` then counts only its own
+   * uploads and still applies the ceiling's margin, rather than refusing on a number nobody
+   * can vouch for.
+   */
+  setImageAccounting(accounting: ImageAccounting | null): void {
+    this.imageAccounting = accounting;
+  }
+
   /** Start a fresh conversation: the system prompt plus nothing else. */
   reset(): void {
     this.messages = Agent.initialMessages(this.modelLabel, this.thinkingEffort, this.replyLanguage);
     this.pendingImages = [];
+    this.uploadedThisTurn.clear();
   }
 
   /**
@@ -558,7 +651,13 @@ export class Agent {
 
 
   /** The `read_image` uploads this agent made, for the runtime's provenance record. */
-  getImageUploads(): { fileId: string; providerId: string; path?: string }[] {
+  getImageUploads(): {
+    fileId: string;
+    providerId: string;
+    path?: string;
+    bytes: number;
+    transform?: ImageTransformRecord;
+  }[] {
     return this.imageUploads;
   }
 
@@ -640,8 +739,11 @@ export class Agent {
     this.isRunning = true;
     this.cancelled = false;
     // Discard any image attached in a previously interrupted turn (it was never
-    // flushed as a user block, so it must not leak into this turn).
+    // flushed as a user block, so it must not leak into this turn). The per-turn
+    // upload record goes with it: from this turn on, the provider's provenance is
+    // what knows about the earlier images (`uploadedThisTurn`).
     this.pendingImages = [];
+    this.uploadedThisTurn.clear();
     this.abortController = new AbortController();
     const signal = this.abortController.signal;
 
@@ -971,14 +1073,16 @@ export class Agent {
     });
 
     let imagePath = '';
+    let rawRect: unknown;
     try {
       const args = JSON.parse(call.function.arguments || '{}') as Record<string, unknown>;
       imagePath = String(args.path ?? '');
+      rawRect = args.rect;
     } catch {
       imagePath = '';
     }
 
-    const result = await this.tryReadImage(imagePath, signal);
+    const result = await this.tryReadImage(imagePath, rawRect, signal);
     const ms = Date.now() - startedAt;
     // An image read is a call like any other: a slow upload is marked the same way.
     const content = withCallDuration('read_image', result, ms);
@@ -986,8 +1090,15 @@ export class Agent {
     this.messages.push({ role: 'tool', tool_call_id: call.id, content });
   }
 
-  /** Read + validate an image file and attach it, or return a friendly error. */
-  private async tryReadImage(filePath: string, signal?: AbortSignal): Promise<string> {
+  /**
+   * Read + validate an image file and attach it, or return a friendly error.
+   *
+   * Since P1/P2 the bytes that leave here are the **transformed** ones — the optional
+   * `rect` crop, then a downscale to {@link IMAGE_TARGET_MAX_SIDE} — and the per-request
+   * byte budget is checked before anything is attached, so this request never carries what
+   * the provider would refuse (`docs/agents/plans/image-budget.md` §2).
+   */
+  private async tryReadImage(filePath: string, rawRect?: unknown, signal?: AbortSignal): Promise<string> {
     const card = this.card;
     if (!isVisionCard(card)) {
       const vision = visionCardsLabel();
@@ -1021,24 +1132,194 @@ export class Agent {
     if (!mime) {
       return `Error: ${resolved} is not a supported image. Supported formats: JPEG, PNG, GIF, WebP.`;
     }
+    // The transform sits exactly here: after the cheap checks (an over-size or non-image
+    // file must not be decoded) and before the upload (the bytes that ever reach the
+    // provider are the small ones). The source's pixel size is read from the header alone,
+    // because a `rect` is expressed in source pixels and must be validated against them
+    // before anything is decoded.
+    const source = readImageSize(buffer, mime);
+    let rect: Rect | undefined;
+    if (rawRect !== undefined && rawRect !== null) {
+      if (!source) {
+        // A rect is a claim about pixels. With no size to check it against, honouring it
+        // would be a guess and ignoring it would be a silent lie, so it is an ordinary tool
+        // error — the same shape as the MAX_IMAGE_BYTES refusal above.
+        return (
+          `Error: cannot apply a rect to ${resolved}: its pixel size could not be read, and a rect is in source pixels. ` +
+          'PNG and JPEG support rect; GIF and WebP are sent as they are.'
+        );
+      }
+      const normalized = normalizeRect(rawRect, source.width, source.height);
+      if (!normalized.rect) {
+        return (
+          `Error: invalid rect for ${resolved} (the image is ${source.width}x${source.height}): ` +
+          `${normalized.error ?? 'it leaves no region inside the image.'}`
+        );
+      }
+      rect = normalized.rect;
+    }
+    let outcome: TransformOutcome | undefined;
     try {
-      if (card?.vision.transport === 'openai') {
+      outcome = await transformImage({ bytes: buffer, mime, rect });
+    } catch (err) {
+      // The transform is a saving, never a prerequisite: a codec that throws must not turn a
+      // read that used to work into a failed turn. `changed` stays false below, so the
+      // source bytes ride as they always did and the brake remains the backstop.
+      perf(() => `image-transform failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+    // `changed: false` means the outcome's bytes ARE the input (the transform's contract),
+    // so the untouched case keeps both the old bytes and the old sentence.
+    const changed = outcome !== undefined && outcome.changed;
+    const sentBytes = outcome && changed ? Buffer.from(outcome.bytes) : buffer;
+    const sentMime = outcome && changed ? outcome.mime : mime;
+    const transform: ImageTransformRecord | undefined =
+      outcome && changed
+        ? {
+            rect: outcome.rect,
+            targetMaxSide: IMAGE_TARGET_MAX_SIDE,
+            sourceWidth: outcome.sourceWidth,
+            sourceHeight: outcome.sourceHeight,
+            width: outcome.width,
+            height: outcome.height,
+          }
+        : undefined;
+    // What those bytes cost the request: a referenced `file_id` costs the file, while the
+    // inline transport base64s the image into the body — four characters per three bytes.
+    const inline = card?.vision.transport === 'openai';
+    const wireBytes = Math.ceil(sentBytes.length * (inline ? 4 / 3 : 1));
+    const refusal = this.imageBudgetRefusal(resolved, wireBytes);
+    if (refusal) {
+      return refusal;
+    }
+    // The report that follows the name: the payload's size and, only when the transform
+    // changed something, the pixel story the model needs for a later `rect` — the source's
+    // size and the region that was kept. Untouched, it is exactly the sentence this tool has
+    // always answered with.
+    const report = (payloadBytes: number): string =>
+      transform
+        ? `${(payloadBytes / 1024).toFixed(1)} KiB; ${describeTransform(transform, outcome?.scale ?? 1)}`
+        : `${(payloadBytes / 1024).toFixed(1)} KiB`;
+    try {
+      if (inline) {
         // The card says its provider takes images inline: keep the bytes in the
         // request body instead of uploading them first.
-        const url = `data:${mime};base64,${buffer.toString('base64')}`;
-        this.pendingImages.push({ kind: 'inline', url, path: resolved });
-        return `Loaded image ${resolved} inline (${(buffer.length / 1024).toFixed(1)} KiB).`;
+        const url = `data:${sentMime};base64,${sentBytes.toString('base64')}`;
+        // Inline, the wire cost is the URL itself (base64), not the image's own size.
+        const bytes = url.length;
+        this.pendingImages.push({ kind: 'inline', url, path: resolved, bytes, transform });
+        this.uploadedThisTurn.set(url, bytes);
+        return `Loaded image ${resolved} inline (${report(sentBytes.length)}).`;
       }
-      const uploaded = await this.clients.upload(card as ModelCard, buffer, path.basename(resolved), signal);
-      this.pendingImages.push({ kind: 'file', fileId: uploaded.id, path: resolved });
+      const uploaded = await this.clients.upload(card as ModelCard, sentBytes, path.basename(resolved), signal);
+      // The provider's own byte count is what the request will carry, so the budget is
+      // recorded from it rather than from our guess at it.
+      const bytes = uploaded.bytes > 0 ? uploaded.bytes : sentBytes.length;
+      this.pendingImages.push({ kind: 'file', fileId: uploaded.id, path: resolved, bytes, transform });
+      this.uploadedThisTurn.set(uploaded.id, bytes);
       // Remember where these bytes came from: a `file_id` is one provider's private
       // handle, so a later epoch that runs on another card can only translate it if the
       // source (here: the local file) is still known (`docs/agents/plans/session-epoch.md` §6).
-      this.imageUploads.push({ fileId: uploaded.id, providerId: card?.providerId ?? '', path: resolved });
-      return `Loaded image ${resolved} -> ${uploaded.id} (${uploaded.filename}, ${(uploaded.bytes / 1024).toFixed(1)} KiB).`;
+      this.imageUploads.push({
+        fileId: uploaded.id,
+        providerId: card?.providerId ?? '',
+        path: resolved,
+        bytes,
+        transform,
+      });
+      return `Loaded image ${resolved} -> ${uploaded.id} (${uploaded.filename}, ${report(bytes)}).`;
     } catch (err) {
       return `Error: image attach failed: ${err instanceof Error ? err.message : String(err)}`;
     }
+  }
+
+  /**
+   * How many of the request's bytes are images. Two contributors, two owners: the provider
+   * resolves a part of the frozen history (`bytesOf`), and this agent answers for what it
+   * uploaded **this turn** — provenance is written when the turn ends, so a just-uploaded
+   * file is invisible to the provider until then. A part neither side can measure counts as
+   * 0: an unmeasurable image is a gap in the sum, and the brake prefers an honest
+   * under-count to a number nobody can explain. The ceiling's margin (`IMAGE_BUDGET_RATIO`)
+   * is what absorbs that gap.
+   */
+  private imageBytesInUse(): number {
+    let total = 0;
+    const inHistory = new Set<string>();
+    for (const message of this.messages) {
+      if (!Array.isArray(message.content)) {
+        continue;
+      }
+      for (const part of message.content) {
+        const id = this.imagePartId(part);
+        if (id === null) {
+          continue;
+        }
+        inHistory.add(id);
+        total += this.imageAccounting?.bytesOf(part) ?? this.uploadedThisTurn.get(id) ?? 0;
+      }
+    }
+    // Uploaded this turn but not yet in the history: the pending block is flushed only after
+    // the whole tool batch (`runTurn`), so a second `read_image` in the same batch has to
+    // feel the first one's bytes.
+    for (const [id, bytes] of this.uploadedThisTurn) {
+      if (!inHistory.has(id)) {
+        total += bytes;
+      }
+    }
+    return total;
+  }
+
+  /**
+   * The byte brake (`docs/agents/plans/image-budget.md` §2.2): the tool's answer when the
+   * image must **not** be attached, or null when it may be.
+   *
+   * The limit is the host's `limitBytes` when there is one — it is the transport's own
+   * ceiling with the safety margin already taken off — and the same ceiling scaled by
+   * {@link IMAGE_BUDGET_RATIO} when there is not. The margin exists because the next request
+   * carries whatever is already there: a brake that fires exactly at the wall arrives one
+   * image too late, and a false refusal costs one delegation while a false pass costs the
+   * whole turn. Nothing is rewritten when it refuses: the model simply does not get the
+   * image, and the sentence it gets instead has to be enough to act on. It says how much is
+   * in use and what the limit is, forbids describing an image that was never seen and
+   * retrying the call that just failed, and names the one real way out — delegating the look
+   * to a sub-agent, whose history starts empty and therefore can carry the image this
+   * conversation no longer can. An agent that cannot spawn (`depth 2`, or read-only without
+   * the fan-out capability, or a session with no sub-agent support at all) has no such way
+   * out and is told to report the failure instead; being honest about the dead end is the
+   * point.
+   */
+  private imageBudgetRefusal(path: string, wireBytes: number): string | null {
+    const ceiling =
+      this.card?.vision.transport === 'openai' ? INLINE_REQUEST_BODY_BYTES : MAX_REQUEST_IMAGE_BYTES;
+    // With a host, `limitBytes` is the number to use as given: it is the transport's own
+    // ceiling with the margin already taken off (the host owns both because the transport is
+    // a property of the card it picked). Without one, the same margin is applied here, so the
+    // brake fires in the same place either way.
+    const limit = this.imageAccounting?.limitBytes ?? ceiling * IMAGE_BUDGET_RATIO;
+    const inUse = this.imageBytesInUse();
+    const projected = inUse + wireBytes;
+    if (projected <= limit) {
+      return null;
+    }
+    // Only claim a way out the model actually has: the capability flags and the hooks behind
+    // them are what `executeToolCall` would answer a `spawn_agents` call with.
+    const canSpawn = this.canSpawn && this.spawnHandler !== null;
+    const canFanOut = this.canSpawnReadOnly && this.spawnHandler !== null;
+    const head =
+      `Error: read_image refused ${path}: this request already carries about ${mib(inUse)} of images, and adding this one would make it ${mib(projected)} — over the ${mib(limit)} it is allowed. ` +
+      'You have NOT seen this image, so do not describe it or guess at its contents; and do not retry read_image in this conversation — every further call is refused the same way. ';
+    if (!canSpawn && !canFanOut) {
+      return (
+        head +
+        'This agent cannot spawn sub-agents (not permitted at this depth or for its capabilities), so there is no way for you to look at the image: stop retrying and report to the user that you could not read it.'
+      );
+    }
+    const tool = canSpawn ? 'spawn_agents' : 'spawn_readonly_agents';
+    return (
+      head +
+      `To look at it, delegate the looking with \`${tool}\`: give the sub-agent an instruction that names the image path(s) and the exact question to answer. ` +
+      'A sub-agent starts with an empty history, so it can see images this conversation can no longer carry, and it reports back to you as text. ' +
+      'A new context window (the ⧉ rollover) also starts without these images — tell the user that this is the other way forward.'
+    );
   }
 
   /**

@@ -295,6 +295,22 @@ export interface BackgroundTask {
    */
   notifyAgent: boolean;
   /**
+   * True for a **detached** job (`exec_command`'s `timeout_behavior:
+   * "start_detached"`): session-wide and fire-and-forget. It is still owned by the
+   * node that started it — its card renders in that node's column and it is torn
+   * down (killed) with that node's session — but it **locks no node** (the
+   * composer never turns into Stop for it) and it **never sends a completion
+   * notice**, so nothing but `check_background_terminal` ever reads its outcome.
+   * Joining it is refused outright (`src/tools/backgroundTools.ts`).
+   *
+   * Set once, at registration ({@link BackgroundRegistry.register}), and never
+   * changed afterwards. The registry sets `notifyAgent: false` together with it,
+   * because that is the mechanism the notify path already understands — and it is
+   * the **only** field of the two a coordinator needs to read, so the lock rule is
+   * the coordinator's one `task.detached` check.
+   */
+  detached: boolean;
+  /**
    * True once the completion notice has been delivered to the agent (or the
    * agent was already informed via a join/kill tool result). A finished task
    * stays in the "pending delivery" panel state until this flips true.
@@ -366,6 +382,13 @@ export class BackgroundRegistry {
    * reason for the extension host to stay alive — and cleared in {@link complete},
    * so a command that ends by itself leaves no timer behind. Any other value
    * (absent, 0, negative, Infinity, NaN) means no budget and no timer.
+   *
+   * `detached` marks the job as fire-and-forget ({@link BackgroundTask.detached}):
+   * session-wide, never locking a node and never notifying. It is recorded on the
+   * task and it also forces `notifyAgent` to false — a detached job is exactly the
+   * case the existing suppression exists for, so the registry expresses "never
+   * notifies" in the one flag the delivery path already reads, and the coordinator
+   * needs only `detached` for the lock rule.
    */
   register(
     handle: CommandHandle,
@@ -374,6 +397,7 @@ export class BackgroundRegistry {
     notifyAgent = true,
     id?: number,
     timeoutMs?: number,
+    detached = false,
   ): number {
     const taskId = id ?? ++this.counter;
     const task: BackgroundTask = {
@@ -387,7 +411,8 @@ export class BackgroundRegistry {
       killed: false,
       truncated: handle.isTruncated(),
       handle,
-      notifyAgent,
+      notifyAgent: detached ? false : notifyAgent,
+      detached,
       delivered: false,
       waiters: [],
     };
@@ -494,6 +519,13 @@ export class BackgroundRegistry {
     return false;
   }
 
+  /**
+   * How many jobs are still running. A **detached** job counts exactly like any
+   * other: it is real work that Stop, the delete/clear confirmation and the
+   * control plane must still see. "Detached" is a *lock and notice* rule — no
+   * composer Stop, no completion notice — not a reason to hide a running process,
+   * and the coordinator applies it from {@link BackgroundTask.detached}.
+   */
   runningCount(): number {
     let n = 0;
     for (const t of this.tasks.values()) {

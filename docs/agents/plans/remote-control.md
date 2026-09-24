@@ -345,9 +345,26 @@ real sender's window with a garbage-tagged frame that merely *claimed* its salt,
 that peer silently. Both rules are now in §4 and pinned twice: by case 7c of `check:relay` (stub level) and by
 that run's own three-member assertion (a real room).
 
+**A defect the owner found on his own phone.** A pasted token whose text carried a trailing
+newline, a leading space, a non-breaking space or a byte-order mark derived a **different
+room id** — so the phone and the desktop could each show a room called `home` and sit in two
+different rooms, with nothing on either screen to say so. That is the one failure the whole
+design rests on: "two machines meet in a room because their tokens match" is its only
+membership rule. The desktop already trimmed; the phone did not, and neither surface could
+*show* which room it was in. Both are fixed: the phone normalises on write, on read and on
+paste (repairing a token an older build stored with a newline), it refuses a token the
+desktop would refuse, and both surfaces now display the first eight characters of the
+derived room id so two screens can be compared by eye. `check:interop` grew a section
+comparing ten token spellings Kotlin-against-TypeScript — including the two places the
+languages genuinely disagree about whitespace (a BOM is whitespace to JavaScript and not to
+Kotlin; the C0 separators are the reverse) — and `:core`'s tests pin the premise, that the
+four spellings really are four different rooms.
+
 Still open:
-- **The Android app has never been launched** — no emulator, no device. The interop run
-  proves the transport *the app constructs* is correct on a wire; the Compose screens,
-  the WebView host, the `acquireVsCodeApi()` bridge, the injected dictionary and the
-  Keystore-backed token have never run. The image path (M2's picker → `userMessage`
-  attachment → the publisher) has never carried a byte on a wire either.
+- **Nothing in this repository has ever launched the Android app** — no emulator, no device,
+  so no run here exercises its UI. It *has* been run by hand on a real phone (which is how
+  the defect above was found), so what a person used is hand-verified. What remains
+  compile-verified only is the rest of the UI — the reveal toggle, the IME hints, the
+  fingerprint rendering, the repair-on-read path against a real `EncryptedSharedPreferences`
+  file — and the image path (M2's picker → `userMessage` attachment → the publisher), which
+  has still never carried a byte on a wire.

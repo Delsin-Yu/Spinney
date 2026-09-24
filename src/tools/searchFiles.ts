@@ -5,6 +5,7 @@ import * as vscode from 'vscode';
 import { AgentTool } from '../agent/types';
 import { beginWork, countWork, perf } from '../perf';
 import { RequestGate } from '../agent/requestGate';
+import { sliceText } from '../text';
 import {
   SKIP_DIRS,
   ensureNotAborted,
@@ -270,7 +271,7 @@ function rgLineText(lines: { text?: string; bytes?: string } | undefined): strin
   if (CONTROL_CHARS.test(trimmed)) {
     return null;
   }
-  return trimmed.slice(0, 160);
+  return sliceText(trimmed, 160);
 }
 
 /** A path as rg reported it (relative to the root we cwd'd into), slash-joined. */
@@ -553,10 +554,10 @@ async function runWalk(opts: SearchOptions): Promise<SearchOutcome> {
         const to = Math.min(lines.length - 1, i + opts.context);
         for (let j = from; j <= to; j++) {
           const sep = j === i ? ':' : '-';
-          results.push(`${label}${sep}${j + 1}${sep} ${lines[j].trim().slice(0, 160)}`);
+          results.push(`${label}${sep}${j + 1}${sep} ${sliceText(lines[j].trim(), 160)}`);
         }
       } else {
-        results.push(`${label}:${i + 1}: ${lines[i].trim().slice(0, 160)}`);
+        results.push(`${label}:${i + 1}: ${sliceText(lines[i].trim(), 160)}`);
       }
     }
   };
@@ -756,10 +757,10 @@ export const searchFilesTool: AgentTool = {
           const to = Math.min(lines.length - 1, i + context);
           for (let j = from; j <= to; j++) {
             const sep = j === i ? ':' : '-';
-            results.push(`${label}${sep}${j + 1}${sep} ${lines[j].trim().slice(0, 160)}`);
+            results.push(`${label}${sep}${j + 1}${sep} ${sliceText(lines[j].trim(), 160)}`);
           }
         } else {
-          results.push(`${label}:${i + 1}: ${lines[i].trim().slice(0, 160)}`);
+          results.push(`${label}:${i + 1}: ${sliceText(lines[i].trim(), 160)}`);
         }
       }
       return report(

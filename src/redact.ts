@@ -19,10 +19,13 @@
  *    whitespace (a heredoc's command is often multi-line and would otherwise write
  *    a dozen log lines).
  *
- * Deliberately vscode-free and dependency-free: the rules are the part that can be
+ * Deliberately vscode-free and dependency-free (its one import, `./text`, is
+ * itself dependency-free): the rules are the part that can be
  * wrong, and `tools/diagnostics-log-acceptance.js` drives them from a plain node
  * script.
  */
+
+import { sliceText } from './text';
 
 /** Name → value shapes that hold a secret (`--api-key=…`, `Authorization: …`). */
 const SECRET_NAME = /\b(?:api[-_]?key|token|secret|password|passwd|pwd|authorization|auth|bearer)\b(\s*[:=]\s*)(\S+)/gi;
@@ -42,7 +45,7 @@ export function redactCommand(command: string, max = REDACT_MAX): string {
   if (masked.length <= max) {
     return masked;
   }
-  return `${masked.slice(0, max)}…(+${masked.length - max} chars)`;
+  return `${sliceText(masked, max)}…(+${masked.length - max} chars)`;
 }
 
 /** How much of a command reaches the log (see `redactCommand`). */

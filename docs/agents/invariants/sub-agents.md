@@ -30,7 +30,7 @@
   `read_file` / `list_dir` / `search_files` / `search_transcripts` (plus `write_file` /
   `replace_in_file` / `exec_command` when it is writable) and nothing else. `check_background_terminal` /
   `kill_background` / `join_background` are **not** in that list: a sub-agent that backgrounds a job
-  (`exec_command` with `timeout_behavior = move_to_background` / `start_in_background`) still gets its
+  (`exec_command` with `timeout_behavior = background_when_timeout` / `start_in_background` / `start_detached`) still gets its
   session-local id back, but a call to any of the three answers `Error: unknown tool "…"` — a job id it
   cannot manage. The job registers under the **sub-agent's own** node (see "A sub-agent's tools/handlers
   are bound to the sub-agent's own node" below) and its completion notice does reach the sub-agent; only

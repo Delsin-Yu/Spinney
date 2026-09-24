@@ -3357,6 +3357,259 @@ if (contextLabel !== 'ctx 50%') {
   notes.push('elapsed chips: running, frozen (tool/job/agent), repainted and legacy');
 }
 
+// --- Scroll memory: a repaint never moves a reader (both zones remember) --------
+// The two scrollers of a turn card — `.node-work` (the work log) and `.node-answer`
+// (the answer band) — each remember where their reader was: the memory is attached
+// once, when the card is built (`createNodeCard`), a `scroll` listener stores
+// `container.scrollTop`, and the offset is handed back with a write at every point
+// that can take it away — a routed append (`delta` / `toolStart` / `toolEnd` /
+// `backgroundNotice`), a `tree` or `path` repaint (the full render path), unfolding
+// the work log, and the split measurement inside `settleAnswerSplit`.
+//
+// Nothing here throws when it breaks, which is exactly why it is pinned: a repaint
+// that forgot the memory still renders, still promotes the answer, and quietly moves
+// the reader — the band jumps back to the first line of an answer they were half-way
+// through, or the unlocked log jumps to the bottom. Only the person reading the card
+// can see that happen, and this is the only place it can be seen without one.
+//
+// Two rules pull in opposite directions and are pinned together, so a fix for one
+// cannot quietly break the other:
+//  - zone 3 goes to its top ONCE per card (a flag on the card): the first render
+//    opens the band at the first line, and *later* repaints must not;
+//  - a LOCKED card (a node in `runningNodes`: the follow light on, `.scroll-locked`
+//    on the container) is never handed an older offset — its log stays pinned to its
+//    newest content, and the offset its memory holds loses to the light.
+//
+// The sandbox has no layout, so what it *can* observe is the writes: an offset the
+// webview never writes stays exactly where this fixture put it. Every assertion below
+// is that comparison — the value the reader handed the memory is the value the zone
+// has to read back once the message has been handled.
+//
+// The fixture's log holds a handful of items on purpose: past 60 items a finished
+// card's log is *windowed*, and the last `scroll` handler on `.node-work` is then the
+// window's, not the memory's (that card is the one the windowed fixture above checks).
+{
+  const ID = 'mem-node';
+  const node = (id, parentId, children, extra) =>
+    Object.assign(
+      { id, parentId, children, title: id, status: 'done', createdAt: 0, preview: id, usage: null, size: null },
+      extra || {},
+    );
+  const cardOf = (id) => {
+    for (const child of elementById('tree-canvas').children) {
+      if (child.dataset && child.dataset.id === id) return child;
+    }
+    return null;
+  };
+  /**
+   * The last `scroll` handler on a container. The stub keeps one handler per event
+   * type, so on a log that is *not* windowed this is the memory itself (see the note
+   * above) — and on the answer band it is the only one there is.
+   */
+  const scrollHandler = (element) =>
+    element && element._listeners && typeof element._listeners.scroll === 'function' ? element._listeners.scroll : null;
+
+  // A `user` item is the pinned ask (zone 1) and never a log item, so the log keeps
+  // the tool card and the trailing assistant run is what gets promoted into zone 3.
+  const items = [
+    { kind: 'user', text: 'the ask' },
+    { kind: 'tool', name: 'read_file', args: '{"path":"a"}', id: 'mem-tool', content: 'ok', status: 'done' },
+    { kind: 'assistant', text: 'the answer' },
+  ];
+  const treeMsg = {
+    type: 'tree',
+    viewId: ID,
+    // Checked out, so the `setBusy` path at the end of this block reaches this card
+    // (`setActiveScrollLock` locks the *view focus* card).
+    activeId: ID,
+    rootId: ID,
+    rootIds: [ID],
+    nodes: [node(ID, null, [])],
+  };
+  const pathMsg = { type: 'path', ids: [ID], nodes: [{ id: ID, status: 'done', items }] };
+
+  dispatch({ type: 'reset' });
+  dispatch(treeMsg);
+  dispatch(pathMsg);
+
+  const card = cardOf(ID);
+  const work = card ? findByClass(card, 'node-work') : null;
+  const answer = card ? findByClass(card, 'node-answer') : null;
+  if (!card || !work || !answer) {
+    problems.push(
+      `the scroll-memory fixture has no .node-work (${work ? 'yes' : 'no'}) / .node-answer (${answer ? 'yes' : 'no'}) — ` +
+        'a finished, unlocked card with a handful of items was expected',
+    );
+  } else {
+    // Geometry a laid-out card would have: both zones are taller than their boxes, so
+    // every clamp below is a real comparison instead of `0 === 0`.
+    work.scrollHeight = 1000;
+    work.clientHeight = 400;
+    answer.scrollHeight = 900;
+    answer.clientHeight = 300;
+
+    // (a) Zone 3 opens at the top of the answer — the one write its own rule makes,
+    // and the reason it carries no green dot: an answer is read from its first line.
+    if (answer.scrollTop !== 0) {
+      problems.push(
+        `zone 3 sits at ${answer.scrollTop} of a ${answer.scrollHeight}px answer — the band has to open at its top ` +
+          '(its end is not what a reader wants first)',
+      );
+    }
+
+    // A promoted answer folds the log (`autoWorkFold`), so the card is unfolded once
+    // here. That first unfold is the card opening at its own newest content
+    // (`_needsBottomScroll`), deliberately *not* asserted: it is not the memory. What
+    // the checks below need is a plain unfolded card whose fold the reader owns.
+    const head = findByClass(card, 'node-work-head');
+    const headClick = () => {
+      const handler = head && head._listeners && head._listeners.click;
+      if (typeof handler !== 'function') return false;
+      handler({ stopPropagation() {} });
+      return true;
+    };
+    if (!headClick()) {
+      problems.push('the work log has no clickable header — the fold/unfold steps below cannot run');
+    }
+
+    // (b) The memory itself: on a log that is not windowed the last handler is the
+    // memory, and the band has its own. Both zones are told where their reader is
+    // (300 / 120) — the state every assertion below compares against.
+    const WORK_TOP = 300;
+    const ANSWER_TOP = 120;
+    for (const [zone, name] of [
+      [work, 'the work log (.node-work)'],
+      [answer, 'the answer band (.node-answer)'],
+    ]) {
+      if (!scrollHandler(zone)) {
+        problems.push(
+          `${name} carries no \`scroll\` listener — nothing remembers where its reader was, so a repaint has ` +
+            'nothing to give back (the memory is attached once, where the card is built)',
+        );
+      }
+    }
+    /** Both zones still hold the offset their reader left — the whole point. */
+    const expectOffsets = (what) => {
+      if (work.scrollTop !== WORK_TOP) {
+        problems.push(
+          `${what} moved the work log from ${WORK_TOP} to ${work.scrollTop} — an unlocked reader's offset has to ` +
+            'survive the message (the rebuild hands it back)',
+        );
+      }
+      if (answer.scrollTop !== ANSWER_TOP) {
+        problems.push(
+          `${what} moved the answer band from ${ANSWER_TOP} to ${answer.scrollTop} — zone 3 is read where the ` +
+            'reader left it; only its *first* render goes to the top',
+        );
+      }
+    };
+
+    /**
+     * The reader takes the two zones to 300 / 120 and tells the memory, which is the
+     * state every message below starts from. Re-armed before each step on purpose: a
+     * step that loses an offset is then the step that lost it, and never merely the one
+     * that inherited a position an earlier step had already thrown away.
+     */
+    const arm = () => {
+      work.scrollTop = WORK_TOP;
+      if (scrollHandler(work)) scrollHandler(work)();
+      answer.scrollTop = ANSWER_TOP;
+      if (scrollHandler(answer)) scrollHandler(answer)();
+    };
+
+    // (c) The routed appends an unlocked card sees: a `delta`, a tool call and a
+    // delivered notice. Each one demotes the answer back into the log first, which is
+    // a rebuild of zone 2 — and neither zone may move.
+    arm();
+    dispatch({ type: 'delta', nodeId: ID, text: 'x' });
+    if (work.children.length < 2) {
+      problems.push(
+        'the routed `delta` did not land in the log — the offset assertion below would say nothing about an append',
+      );
+    }
+    expectOffsets('a routed `delta` append');
+    // The tool messages in the order the provider sends them: the argument deltas
+    // open the live tool card, `toolStart` finalizes it in place and `toolEnd` closes
+    // it (a `toolStart` with no live tool is not a shape the host produces).
+    arm();
+    dispatch({ type: 'toolCallDelta', nodeId: ID, index: 0, id: 'mem-tool-2', name: 'read_file', args: '{"path":"a"}' });
+    dispatch({
+      type: 'toolStart',
+      nodeId: ID,
+      index: 0,
+      id: 'mem-tool-2',
+      name: 'read_file',
+      args: '{"path":"a"}',
+      startedAt: Date.now() - 100,
+    });
+    dispatch({ type: 'toolEnd', nodeId: ID, id: 'mem-tool-2', content: 'ok', ms: 130 });
+    expectOffsets('a routed `toolCallDelta` / `toolStart` / `toolEnd` append');
+    arm();
+    dispatch({
+      type: 'backgroundNotice',
+      nodeId: ID,
+      item: { kind: 'subagent', id: 'mem-bg', name: 'sub', doneText: 'done', content: 'x' },
+    });
+    expectOffsets('a delivered `backgroundNotice`');
+
+    // (d) A full repaint: `tree` rebuilds the view and `path` re-renders the view path
+    // (the full render path for this card). These are the passes that used to take a
+    // reader's position away, so they are checked as one rule, not as two.
+    arm();
+    dispatch(treeMsg);
+    expectOffsets('a `tree` repaint');
+    arm();
+    dispatch(pathMsg);
+    expectOffsets('a `path` re-render');
+
+    // (e) The log's own fold — the one scroller that is also a control. Folding takes
+    // the scroller away (a `scrollTop` written into a `display: none` box is thrown
+    // away) and unfolding it is the moment the memory is applied (`setWorkFold`).
+    if (card.classList.contains('work-folded')) {
+      problems.push('the work log is folded before the fold/unfold step — the unfold restore cannot be seen');
+    }
+    arm();
+    headClick();
+    if (!card.classList.contains('work-folded')) {
+      problems.push('clicking the work-log header did not fold the log — the unfold step below says nothing');
+    }
+    expectOffsets('folding the work log');
+    arm();
+    headClick();
+    if (card.classList.contains('work-folded')) {
+      problems.push('clicking the work-log header a second time did not unfold the log');
+    }
+    expectOffsets('unfolding the work log');
+
+    // (f) A LOCKED card still owns its log. A `state` naming this node in
+    // `runningNodes` (the `setBusy` path) engages the follow light; the append after
+    // that has to pin the log to its newest content, and the 300 the memory holds must
+    // lose. `clientHeight` is 0 for this step so "the bottom" is exactly the full
+    // `scrollHeight`: the clamped write the follow path makes and a plain
+    // `scrollTop = scrollHeight` are then the same number.
+    dispatch({ type: 'state', busy: true, status: '', sessionId: 'mem-session', runningNodes: [ID] });
+    const dot = findByClass(card, 'scroll-lock-dot');
+    if (!work.classList.contains('scroll-locked') || !dot || !dot.classList.contains('locked')) {
+      problems.push(
+        "a `state` naming this node in `runningNodes` did not engage the card's follow light — the locked-log " +
+          'check below cannot see the pin at all',
+      );
+    }
+    work.clientHeight = 0;
+    // The reader's older offset is the memory's 300 (armed above): the pin has to win.
+    arm();
+    dispatch({ type: 'delta', nodeId: ID, text: 'more' });
+    if (work.scrollTop !== work.scrollHeight) {
+      problems.push(
+        `a locked card's work log sits at ${work.scrollTop} after an append, expected ${work.scrollHeight} — the ` +
+          'follow light pins the log to its newest content, and the offset the memory holds must not win',
+      );
+    }
+  }
+
+  notes.push('scroll memory: both zones hold through append / repaint / re-render / unfold, a locked log still pins');
+}
+
 // --- report ------------------------------------------------------------------
 
 /**

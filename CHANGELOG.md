@@ -30,13 +30,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`tools/fixtures/web-backends/`), so an engine that redesigns its result page fails the package
   instead of silently reporting "no results" — plus the private-address refusals, the gbk path, the
   relevance bar and the backend cooldown.
+- **`read_image` now transforms an image before it uploads it, and `rect` is a zoom.** The tool
+  crops to an optional `rect` and downscales to a longest side of `IMAGE_TARGET_MAX_SIDE` (1024), so
+  the bytes that ever reach the request are the small ones. PNG and JPEG are transformed natively;
+  GIF, WebP and an interlaced or 16-bit PNG pass through unchanged; every output is re-encoded as
+  PNG; and `changed:false` says there was nothing to do. The endpoint keeps only ~800 px of what it
+  is sent and charges a flat ~384 tokens per image, so the pixels above that were discarded
+  server-side — the transform loses nothing the model would have seen. Because that token cost is
+  flat, `rect` is a **zoom**, not only a saving: a 1/16 crop costs the same ~384 tokens and shows
+  that region at full detail.
+- **`read_image` refuses to attach an image that would cross the provider's per-request ceiling.**
+  Before uploading, the tool adds up the image bytes the next request would already carry; an image
+  that would cross the limit (200 MB per request, less the `IMAGE_BUDGET_RATIO` 0.9 margin; 48 MiB
+  for the inline body) is **not attached**, and the tool answers with an ordinary error naming what
+  is in use and what to do instead — delegate the looking to a sub-agent, whose history starts
+  empty. Nothing is rewritten, so no cached prefix is invalidated. An image's provenance now records
+  `bytes` and the transform that produced it: the bytes make the budget exact, and the transform is
+  the record a faithful copy would need — today a copied chain whose source carried one keeps the
+  placeholder instead, and the replay is an open item (`docs/agents/plans/image-budget.md` §2.4).
 
 ### Changed
 
+- **`exec_command`'s `timeout_behavior` is now the job's identity, and one identity is new.** `stop`
+  and `move_to_background` are renamed `stop_when_timeout` (still the default) and
+  `background_when_timeout`; `start_in_background` keeps its name. The new value is
+  **`start_detached`**: a session-wide, fire-and-forget job that **never locks its node** and **never
+  sends a completion notice** — it exists because a node holding unfinished work keeps its composer
+  on Stop, so a long-lived thing (a dev server, an emulator, a watcher) used to freeze the
+  conversation until it ended. The price is exact and deliberate: a detached job never wakes the
+  model, so its outcome is read with `check_background_terminal` rather than pushed; its id resolves
+  per session, so any node can check or kill it. Two refusals complete the contract: a **node**
+  job asked for **without** a `timeout` — `start_in_background` **or** `background_when_timeout` —
+  is refused before the spawn (an unbounded *node* job holds its node forever — that lifetime
+  belongs to `start_detached`, which is why only it may omit a `timeout`), and
+  `join_background` refuses a detached job outright (no deadline, no notice, nothing to wait for).
 - A tool's failure to fetch now names the cause. Node leaves a failed `fetch` as `fetch failed` and
   puts the real reason in `error.cause`, so a `web_fetch` result reads
   `request failed (fetch failed UND_ERR_CONNECT_TIMEOUT: …)`. An HTML page that yields no readable
   text is reported as such instead of coming back as an empty success.
+- **A window can be full by bytes as well as by tokens, and `⧉` is the way out.** The provider's
+  per-request image-size refusal is classified alongside the context-length refusal by
+  `windowFullReason()` in `src/agent/models.ts`, and both make `nodeContextFull()` true — so
+  **⧉ Continue in a new window** is offered on a card that used to be a dead end (its context read
+  `ok` while its images filled the request). A new window does not carry attachments, so that is the
+  right way out.
 
 ## [0.1.0] - 2026-09-22
 

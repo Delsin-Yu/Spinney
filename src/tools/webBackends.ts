@@ -1,3 +1,4 @@
+import { sliceText } from '../text';
 import { absoluteUrl, decodeBody, decodeEntities, hasClass, scanTags, textOf } from './webHtml';
 
 /**
@@ -137,7 +138,7 @@ function blocksByClass(html: string, className: string): string[] {
 
 function tidy(value: string, limit = 320): string {
   const text = decodeEntities(value).replace(/\s+/g, ' ').trim();
-  return text.length > limit ? `${text.slice(0, limit - 1)}\u2026` : text;
+  return text.length > limit ? `${sliceText(text, limit - 1)}\u2026` : text;
 }
 
 /** Parse the RSS view Bing serves for `&format=rss`. */
@@ -659,7 +660,7 @@ export async function attemptBackend(
     if (controller.signal.aborted && !/cap|exceeded/i.test(message)) {
       return done('timeout', [], `${timeoutMs}ms`);
     }
-    return done('http-error', [], message.slice(0, 120));
+    return done('http-error', [], sliceText(message, 120));
   } finally {
     clearTimeout(timer);
     options.signal?.removeEventListener('abort', onAbort);

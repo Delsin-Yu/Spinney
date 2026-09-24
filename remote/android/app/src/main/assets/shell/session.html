@@ -12,7 +12,9 @@
     2. `window.__spinneyL10n` is injected by the Kotlin host (see `ShellAssets.kt`) at the
        `<!--SPINNEY_L10N-->` marker instead of by a `vscode.l10n` call, and the host-rendered
        chrome below reads its own strings out of the same dictionary through `data-l10n*`
-       attributes, because a webview has no `vscode.l10n`;
+       attributes, because a webview has no `vscode.l10n`. That read is a *pass* over the
+       built DOM (`assets/shell/session-boot.js`) and it runs at the end of the body, before
+       `media/main.js` — its tag says why;
     3. the CSP carries a per-load nonce for that one injected inline script and pins
        `connect-src 'none'` — the session view talks to the publisher through the Kotlin host,
        never through a fetch of its own.
@@ -31,9 +33,15 @@
   <link rel="stylesheet" href="/assets/webview/style.css" />
   <title>Spinney</title>
   <!--SPINNEY_L10N-->
-  <!-- The host half of the message protocol: acquireVsCodeApi() and the l10n dictionary. -->
+  <!-- The host half of the message protocol: acquireVsCodeApi(), window.__spinneyHost.receive
+       and the l10n dictionary (injected above). This must stay the shell's own first script —
+       only the injected dictionary precedes it — because `media/main.js`, the last script in the
+       body, calls acquireVsCodeApi() on its line 2, and the Kotlin host holds every
+       host→webview frame until main.js posts `ready` (the order of operations is written out
+       in session-shim.js's header). The l10n pass is not here: it rewrites `data-l10n*`
+       attributes, so it can only work once the body that carries them exists — the tag is in
+       the body, before the renderer, and explains itself there. -->
   <script src="/assets/shell/session-shim.js"></script>
-  <script src="/assets/shell/session-boot.js"></script>
 </head>
 <body>
   <div id="tree-toolbar">
@@ -83,6 +91,27 @@
       </span>
     </div>
   </div>
+  <!-- The shell chrome's l10n pass, and why the tag sits exactly here.
+       `session-boot.js` walks the page for `data-l10n*` attributes and rewrites them. That
+       means it needs the elements that carry them to exist already: everything above this line
+       — the toolbar, the tree wrap, the composer (Send/Stop, the placeholder, every tooltip) and
+       the meter row — and nothing after it but scripts. Loaded from the `<head>`, where this
+       file first shipped it, the body did not exist yet, so the walk selected nothing and the
+       phone rendered Send and Stop with no text at all.
+       It must also run BEFORE `media/main.js` (the last script below), and that rules out
+       `defer` as the fix: a deferred script runs after the document is parsed, while a plain
+       script runs the moment it is parsed — so a deferred pass here would run *after* main.js,
+       whose opening IIFE calls `updateFollowButton()` and writes the stateful title
+       `Following the active node` onto #follow-btn. The pass would then clobber it with the
+       static English source `Follow the active node` and nothing would re-render it until the
+       follow state changed, so the phone's tooltip would disagree with the desktop's.
+       A body script has the other property this needs too: it runs in the same parsing task as
+       main.js, so no host frame can interleave. The Kotlin host releases the frames it held
+       (`tree`, `config`) the instant main.js posts `ready`, and those callbacks are queued
+       tasks — with a task boundary between the pass and the renderer, a frame that carried a
+       dynamic title (`Context: … / … tokens`) could land first and then be overwritten by the
+       static one. -->
+  <script src="/assets/shell/session-boot.js"></script>
   <script src="/assets/webview/vendor/markdown-it/markdown-it.min.js"></script>
   <script src="/assets/webview/vendor/non-layered-tidy-tree-layout/dist/non-layered-tidy-tree-layout.js"></script>
   <script src="/assets/webview/tree.js"></script>

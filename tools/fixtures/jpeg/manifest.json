@@ -1,0 +1,182 @@
+{
+  "oracle": "PIL 12.3.0 (libjpeg-turbo), /d/Utils/miniForge3/python",
+  "generatedBy": "tools/gen-jpeg-fixtures.py",
+  "tolerance": {
+    "maxChannelDifference": 8,
+    "meanChannelDifference": 1.5
+  },
+  "toleranceNote": "IDCT/rounding tolerance; the 4:2:0/4:2:2 fixtures keep their structure in luma and their chroma gentle because the oracle upsamples chroma with libjpeg's fancy filter while the contract is box repetition (jpegReconstruct.ts)",
+  "fixtures": [
+    {
+      "file": "gray-16x16.jpg",
+      "bytes": 458,
+      "width": 16,
+      "height": 16,
+      "mode": "L",
+      "components": 1,
+      "subsampling": "1x1",
+      "quality": 90,
+      "restartIntervalBlocks": null,
+      "desc": "grayscale, sharp 4px checkers + steps: pure luma through the IDCT",
+      "expectKind": "rgba",
+      "expect": "gray-16x16.rgba",
+      "expectBytes": 1024,
+      "stride": 1
+    },
+    {
+      "file": "gray-17x9.jpg",
+      "bytes": 436,
+      "width": 17,
+      "height": 9,
+      "mode": "L",
+      "components": 1,
+      "subsampling": "1x1",
+      "quality": 90,
+      "restartIntervalBlocks": null,
+      "desc": "grayscale at an odd size (17x9): partial MCUs on both axes",
+      "expectKind": "rgba",
+      "expect": "gray-17x9.rgba",
+      "expectBytes": 612,
+      "stride": 1
+    },
+    {
+      "file": "rgb-444-32x24.jpg",
+      "bytes": 1132,
+      "width": 32,
+      "height": 24,
+      "mode": "RGB",
+      "components": 3,
+      "subsampling": 0,
+      "quality": 90,
+      "restartIntervalBlocks": null,
+      "desc": "4:4:4 colour with texture and hard edges: the oracle is exact here",
+      "expectKind": "rgba",
+      "expect": "rgb-444-32x24.rgba",
+      "expectBytes": 3072,
+      "stride": 1
+    },
+    {
+      "file": "rgb-420-32x24.jpg",
+      "bytes": 1035,
+      "width": 32,
+      "height": 24,
+      "mode": "RGB",
+      "components": 3,
+      "subsampling": 2,
+      "quality": 90,
+      "restartIntervalBlocks": null,
+      "desc": "4:2:0 colour, smooth chroma (box vs the oracle's fancy upsampling)",
+      "expectKind": "rgba",
+      "expect": "rgb-420-32x24.rgba",
+      "expectBytes": 3072,
+      "stride": 1
+    },
+    {
+      "file": "rgb-420-17x9.jpg",
+      "bytes": 753,
+      "width": 17,
+      "height": 9,
+      "mode": "RGB",
+      "components": 3,
+      "subsampling": 2,
+      "quality": 90,
+      "restartIntervalBlocks": null,
+      "desc": "4:2:0 at 17x9: chroma blocks overhang the frame on both axes",
+      "expectKind": "rgba",
+      "expect": "rgb-420-17x9.rgba",
+      "expectBytes": 612,
+      "stride": 1
+    },
+    {
+      "file": "rgb-422-24x16.jpg",
+      "bytes": 833,
+      "width": 24,
+      "height": 16,
+      "mode": "RGB",
+      "components": 3,
+      "subsampling": 1,
+      "quality": 88,
+      "restartIntervalBlocks": null,
+      "desc": "4:2:2 h2v1: horizontal-only upsampling (2 wide, 1 tall)",
+      "expectKind": "rgba",
+      "expect": "rgb-422-24x16.rgba",
+      "expectBytes": 1536,
+      "stride": 1
+    },
+    {
+      "file": "gray-restart-48x40.jpg",
+      "bytes": 552,
+      "width": 48,
+      "height": 40,
+      "mode": "L",
+      "components": 1,
+      "subsampling": "1x1",
+      "quality": 88,
+      "restartIntervalBlocks": 2,
+      "desc": "grayscale with DRI/RSTn markers (restart every 2 MCUs)",
+      "expectKind": "rgba",
+      "expect": "gray-restart-48x40.rgba",
+      "expectBytes": 7680,
+      "stride": 1
+    },
+    {
+      "file": "rgb-420-restart-32x24.jpg",
+      "bytes": 1027,
+      "width": 32,
+      "height": 24,
+      "mode": "RGB",
+      "components": 3,
+      "subsampling": 2,
+      "quality": 88,
+      "restartIntervalBlocks": 3,
+      "desc": "4:2:0 with DRI/RSTn markers (restart every 3 MCUs)",
+      "expectKind": "rgba",
+      "expect": "rgb-420-restart-32x24.rgba",
+      "expectBytes": 3072,
+      "stride": 1
+    },
+    {
+      "file": "large-444-160x120.jpg",
+      "bytes": 9139,
+      "width": 160,
+      "height": 120,
+      "mode": "RGB",
+      "components": 3,
+      "subsampling": 0,
+      "quality": 84,
+      "restartIntervalBlocks": null,
+      "desc": "4:4:4 texture, sampled expectation (stride 4 + last column)",
+      "expectKind": "samples",
+      "expect": "large-444-160x120.samples.json",
+      "expectBytes": 25191,
+      "stride": 4
+    }
+  ],
+  "negatives": [
+    {
+      "file": "progressive-444-32x24.jpg",
+      "bytes": 928,
+      "desc": "progressive (SOF2) - must be refused",
+      "why": "progressive"
+    },
+    {
+      "file": "truncated-420-32x24.jpg",
+      "bytes": 816,
+      "desc": "valid 4:2:0 baseline cut mid-scan - must be refused",
+      "why": "truncated",
+      "cutAt": 816
+    },
+    {
+      "file": "cmyk-32x24.jpg",
+      "bytes": 1086,
+      "desc": "4 components (CMYK) - must be refused",
+      "why": "components"
+    },
+    {
+      "file": "baseline-444-16x16.jpg",
+      "bytes": 458,
+      "desc": "plain 16x16 baseline - source for the guard's patched cases",
+      "why": "baseline-source"
+    }
+  ]
+}

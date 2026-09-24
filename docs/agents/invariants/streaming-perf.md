@@ -23,13 +23,19 @@
   zones (see §"The three zones of a card"). It has a `createScrollController`
   with a green lock dot (`attachLock(container, host, locked)`) and is also the
   only zone that windows a long transcript; the answer zone has no controller of
-  its own — it opens at its top — so the two zone wrappers and the card classes
-  `has-answer` / `work-folded` are what decide the heights. The controller starts locked only
+  its own — it opens at its top **once per card** (`_answerOpened`) — so the two zone wrappers
+  and the card classes `has-answer` / `work-folded` are what decide the heights. The controller starts locked only
   for a **live** turn (`status === 'running'`); a finished node starts unlocked
   and is positioned at its newest content once on first render, so history is
-  scrollable immediately. Both item-render paths (`expandedCard` and
+  scrollable immediately — and that one move survives as a pending
+  `_needsBottomScroll` when the same pass folded the log, because a `scrollTop`
+  written into a `display: none` scroller is thrown away (§"A repaint never moves a
+  scroller", below). Both item-render paths (`expandedCard` and
   `renderPath`) apply that default right after `renderNodeItems`, which also ends
-  in `syncAnswerZone(card)`.
+  in `syncAnswerZone(card)`. **A repaint never moves a scroller**: only the follow
+  light (locked → pinned to the bottom) and the once-per-card "opens at its newest
+  content" may move one, and where a fold or unfold is involved the zone is put
+  back where the reader left it.
   Locked = pinned to bottom with `scroll-locked` hiding and disabling the
   scrollbar; clicking the dot toggles it and hands scrolling back to the user. It is never re-engaged from scroll position (that heuristic
   was unreliable). Instead it follows the turn lifecycle: `setBusy(true)`
@@ -61,7 +67,8 @@ rules above (one scroller, one expanded block) are really properties of that spl
   (`.node-work-head`, below), and a **folded** log hides the dot with itself: nothing
   scrolls, so there is nothing to lock.
 - **zone 3, `.node-answer`** — a **conditional** pretty-print of the *tail* of zone 2.
-  It has no lock dot and opens at its top. It is a surface of its own *around* the
+  It has no lock dot and opens at its top **once per card** (`_answerOpened`); after
+  that a repaint leaves it where the reader left it. It is a surface of its own *around* the
   answer (below), and the heights of the two zones are a ratio of the card, not a cap
   on either one.
 
@@ -91,8 +98,10 @@ cards on screen).
 are flex children of `.node-body`, and the split is settled in JS (`settleAnswerSplit`)
 rather than in CSS, because "the height this answer needs" is not something a stylesheet
 can read. The card class `answer-split` marks a settled card, and the measurement that
-decides it suspends the split (the card class `split-measure`, whose CSS puts both zones
-back on a content basis) and then writes:
+decides it suspends the split (the card class `split-measure`, whose CSS content-sizes the
+**answer** zone only — the log's natural height comes from its own `scrollHeight` plus the
+wrapper's chrome, or off the wrapper itself in the one case where the log has nothing to
+scroll over, §"A repaint never moves a scroller") and then writes:
 
 - the answer is pinned to the share it can use — `min(answer, room − floor)` as an inline
   height on `.node-answer-wrap` — and **the answer is what makes the card taller**;
@@ -192,8 +201,59 @@ That derivation is also why the live DOM and a repaint cannot disagree:
 `syncAnswerZone` is a **pure function of `(items, card state)`**, so a repaint that
 replays the same items reaches the same verdict and builds the same card — there is no
 second copy of "the answer" to keep in sync, and no flag to migrate. The only per-card
-memory is `_answerAnchor`, rebuilt with the card, and "it is already promoted" is an
-early return rather than stored state.
+memory behind that verdict is `_answerAnchor`, rebuilt with the card, and "it is already
+promoted" is an early return rather than stored state.
+
+### A repaint never moves a scroller
+
+`settleAnswerSplit` measures the two zones with the split suspended, and the card class
+`split-measure` used to put **both** wrappers on a content basis. Content-sizing the log's
+wrapper stretched `.node-work` — the card's one scroller — to the height of its own
+content, which leaves the container with no scrollable overflow at all: the engine then
+clamps its `scrollTop` to 0 and nothing put it back. That ran on every routed append
+(`routeTo` → `demoteAnswer` → `autoWorkFold` → `settleAnswerSplit`) and on every `tree` /
+`path` repaint (`expandedCard` → `settleAnswerSplit`). A locked card hid it, because it
+pins itself to the bottom right afterwards (`scrollToBottom`); an unlocked card did not, so
+a reader who released the follow light to inspect an older tool call was thrown back to the
+top of the log on every token the agent emitted.
+
+`.split-measure` therefore content-sizes the **answer** zone only. The log's natural height
+is read two ways, and which one applies is the point: a log that is **already showing
+everything it holds** has no offset a reader could lose (`0` is the only representable one),
+so it is let onto a content basis for that single read (the card class `split-measure-log`)
+and measured off the wrapper exactly as every card was measured before; a log that
+**overflows** is read off its own `scrollHeight` — the number the stretched wrapper stood in
+for — plus the wrapper's chrome: its 10px inset, the fold head above the scroller with its
+own bottom margin, and the log's own 20px dot strip. The strip is still added a second time,
+exactly as the old stretched-wrapper read counted it, because the number is a floor
+comparison and no card's share may move with this change. `scrollHeight` is floored at the
+box height, which is exactly why the no-overflow case cannot use it and hugs instead — and
+that case can never be the one where a reader is thrown to the top, because there is nothing
+there to scroll.
+
+**The guard is that a repaint never moves a scroller.** Each zone (`.node-work`,
+`.node-answer`) remembers the last offset it was scrolled to — `rememberScroll` /
+`scrollMemory` / `restoreScroll` on the element, fed by a `scroll` listener attached when
+`createNodeCard` builds the card — and it is put back at that offset after every step that
+can destroy it: `settleAnswerSplit`'s measurement, `renderNodeItems`' full re-render,
+unfolding the log in `setWorkFold` and the window repaint (`paintItemsWindow`). It is never
+restored while the card is locked (the follow light owns the bottom) nor while
+`_needsBottomScroll` is still pending, so only two things may move a scroller at all: the
+follow light while it is on, and the once-per-card "opens at its newest content".
+
+**Zone 3 opens at its top once per card, not once per repaint** (the card flag
+`_answerOpened`): the old unconditional `answerEl.scrollTop = 0` in `expandedCard` is what
+undid a reader's position inside a long answer. `_needsBottomScroll` — the once-only "a
+finished card opens at its newest content" — is consumed where the log actually becomes
+visible: the promotion that lifts the answer into zone 3 folds the log in the same pass, and
+a `scrollTop` written into a `display: none` scroller is thrown away, so the flag stays
+pending and `setWorkFold` consumes it on the unfold.
+
+**The window repaint corrects in both directions.** `extendItemsWindow` adjusts the scroll
+position by the height difference whichever way the window grew; it used to correct the
+upward direction only. `tools/check-webview.js` pins the whole thing: an unlocked card's log
+and answer keep their offsets across a routed append and a `tree` / `path` repaint, and a
+locked card still pins its log to the bottom.
 
 ### Diagnosing a stutter (the `[perf] op#` traces)
 A stutter — above all when **switching sessions** — is one user-visible operation

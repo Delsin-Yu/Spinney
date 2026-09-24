@@ -24,6 +24,8 @@
  * `docs/agents/invariants/streaming-perf.md` for what to look for.
  */
 
+import { sliceText } from './text';
+
 export type PerfSink = (line: string) => void;
 
 let sink: PerfSink | null = null;
@@ -464,7 +466,7 @@ function fieldsOf(record: Record<string, unknown>, skip: readonly string[]): str
       continue;
     }
     const text = typeof value === 'object' ? safeJson(value) : String(value);
-    parts.push(`${key}=${text.length > 120 ? `${text.slice(0, 120)}…` : text}`);
+    parts.push(`${key}=${text.length > 120 ? `${sliceText(text, 120)}…` : text}`);
   }
   return parts.join(' ');
 }

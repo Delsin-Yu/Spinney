@@ -23,7 +23,9 @@
  *  - an epoch, once frozen, is never re-rendered.
  */
 import { ChatMessage, ThinkingEffort, ToolDefinition, Usage } from '../agent/types';
+import type { ImageTransformRecord, Rect } from '../agent/imageTransform';
 import type { RemoteOrigin } from '../remote/origin';
+import { sliceText } from '../text';
 
 export type TurnStatus = 'pending' | 'running' | 'done' | 'interrupted' | 'error';
 
@@ -104,8 +106,29 @@ export type ImageSource =
       fileId: string;
       /** Where the bytes were read from, when a local file was the origin. */
       srcPath?: string;
+      /**
+       * The bytes this image puts into the request — the payload actually sent, not the size
+       * of the file behind it. Recorded so the chain's per-request image budget is arithmetic
+       * over `imageSources` alone (what is *already* committed is what decides whether the
+       * next image fits) instead of a re-read of every source file. Optional: an entry
+       * stored before the budget existed simply contributes no known bytes.
+       */
+      bytes?: number;
+      /**
+       * What produced those bytes. `materialiseMessages` replays it to rebuild the **same
+       * view** for a copied chain (a fork), where the transformed bytes no longer exist:
+       * without it a 10 MiB source sheet would exceed the inline ceiling and the fork would
+       * be handed a placeholder instead of the image the model actually saw.
+       */
+      transform?: ImageTransformRecord;
     }
-  | { kind: 'inline'; dataUrl: string };
+  | {
+      kind: 'inline';
+      dataUrl: string;
+      /** The same two fields as the upload variant above, for the same two reasons. */
+      bytes?: number;
+      transform?: ImageTransformRecord;
+    };
 
 /**
  * One image block's provenance inside a node's `messages`: which message, which
@@ -373,7 +396,7 @@ export function newId(): string {
 /** First line of a prompt, clipped, used as the node card title. */
 export function titleFromPrompt(text: string): string {
   const first = (text || '').trim().split('\n')[0].trim();
-  return (first || 'Turn').slice(0, 80);
+  return sliceText(first || 'Turn', 80);
 }
 
 /** Plain text of a message's content (text parts joined; images ignored). */
@@ -873,6 +896,53 @@ function normalizeEpoch(raw: unknown): Epoch | undefined {
   };
 }
 
+/**
+ * Read a persisted transform back, or `undefined` when anything about it is unreadable.
+ *
+ * Deliberately **all-or-nothing**: the numbers describe a decode that already happened, so a
+ * record missing one cannot be completed by guessing — and a half-read one would let
+ * `materialiseMessages` rebuild a view that was never sent to the provider. The image's own
+ * provenance is unaffected: only the transform is dropped, never invented.
+ */
+function normalizeTransform(raw: unknown): ImageTransformRecord | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return undefined;
+  }
+  const t = raw as Partial<ImageTransformRecord>;
+  const sides = [t.targetMaxSide, t.sourceWidth, t.sourceHeight, t.width, t.height];
+  if (sides.some((n) => typeof n !== 'number' || !Number.isFinite(n) || !Number.isInteger(n) || n <= 0)) {
+    return undefined;
+  }
+  let rect: Rect | undefined;
+  if (t.rect !== undefined) {
+    const r = t.rect as Partial<Rect> | undefined;
+    if (!r || typeof r !== 'object') {
+      return undefined;
+    }
+    const corners = [r.x, r.y, r.w, r.h];
+    if (corners.some((n) => typeof n !== 'number' || !Number.isFinite(n) || !Number.isInteger(n) || n < 0)) {
+      return undefined;
+    }
+    if (r.w === 0 || r.h === 0) {
+      return undefined;
+    }
+    rect = { x: r.x as number, y: r.y as number, w: r.w as number, h: r.h as number };
+  }
+  return {
+    rect,
+    targetMaxSide: t.targetMaxSide as number,
+    sourceWidth: t.sourceWidth as number,
+    sourceHeight: t.sourceHeight as number,
+    width: t.width as number,
+    height: t.height as number,
+  };
+}
+
+/** A stored byte count, or undefined: a byte count is a whole non-negative number or nothing. */
+function normalizeImageBytes(raw: unknown): number | undefined {
+  return typeof raw === 'number' && Number.isInteger(raw) && raw >= 0 ? raw : undefined;
+}
+
 /** Read a node's image provenance back, dropping anything malformed or unaddressed. */
 function normalizeImageSources(raw: unknown): ImageSourceEntry[] | undefined {
   if (!Array.isArray(raw)) {
@@ -890,6 +960,11 @@ function normalizeImageSources(raw: unknown): ImageSourceEntry[] | undefined {
     if (messageIndex < 0 || partIndex < 0 || !s || typeof s !== 'object') {
       continue;
     }
+    // The bytes and the transform are optional and additive (no version bump, exactly like
+    // `imageSources` itself was): an unreadable one is dropped and never guessed at, while the
+    // entry keeps its provenance — a source whose byte count is lost still re-materialises.
+    const bytes = normalizeImageBytes(s.bytes);
+    const transform = normalizeTransform(s.transform);
     if (s.kind === 'upload' && typeof s.fileId === 'string' && s.fileId) {
       out.push({
         messageIndex,
@@ -899,10 +974,12 @@ function normalizeImageSources(raw: unknown): ImageSourceEntry[] | undefined {
           providerId: typeof s.providerId === 'string' ? s.providerId : '',
           fileId: s.fileId,
           srcPath: typeof s.srcPath === 'string' ? s.srcPath : undefined,
+          bytes,
+          transform,
         },
       });
     } else if (s.kind === 'inline' && typeof s.dataUrl === 'string' && s.dataUrl) {
-      out.push({ messageIndex, partIndex, source: { kind: 'inline', dataUrl: s.dataUrl } });
+      out.push({ messageIndex, partIndex, source: { kind: 'inline', dataUrl: s.dataUrl, bytes, transform } });
     }
   }
   return out.length > 0 ? out : undefined;

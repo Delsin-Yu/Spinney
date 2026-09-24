@@ -1325,11 +1325,26 @@ button.icon-btn {
    `1 1 auto` above. */
 .node.has-answer.work-folded .node-work-wrap { flex: 0 0 auto; }
 
-/* One read with the split suspended, for `settleAnswerSplit` (media/main.js): both
-   zones hug their content, so `offsetHeight` *is* the natural height it decides from.
-   Last in the group, so it wins for as long as the flag is on. */
-.node.split-measure .node-work-wrap,
+/* One read with the split suspended, for `settleAnswerSplit` (media/main.js): the
+   answer zone hugs its content, so `offsetHeight` *is* the natural height it decides
+   from. The work log's wrapper is deliberately *not* in this rule. Content-sizing it
+   put the log itself — the card's one scroller — at the height of its own content,
+   and a scroll container with nothing to scroll over is a container the engine clamps
+   to `scrollTop: 0`: a card the reader had unlocked to inspect an older tool call was
+   thrown back to the top of its log by every token the agent emitted. The log's
+   natural height needs no stretch — `settleAnswerSplit` reads it off the log's own
+   `scrollHeight`. Last in the group, so it wins for as long as the flag is on. */
 .node.split-measure .node-answer-wrap {
+  flex: 0 0 auto;
+}
+
+/* The one case where the log itself may be let back onto a content basis: it is
+   already showing everything it holds, so there is no offset a reader could lose
+   (`0` is the only representable one) and hugging is exactly how the wrapper's
+   `offsetHeight` becomes the natural height again. `settleAnswerSplit` adds this for
+   that single readability of the measurement and takes it straight back off — a log
+   that *does* overflow is read off its own `scrollHeight` and never stretched. */
+.node.split-measure-log .node-work-wrap {
   flex: 0 0 auto;
 }
 
@@ -1846,6 +1861,26 @@ button.icon-btn {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* `shared` badge: this `kind:'bg'` job is **detached** — fire-and-forget. Its card is
+   still here and keeps updating, but the job locks no node (no Stop in the composer) and
+   it never sends a completion notice, so this token is the only thing on screen that says
+   so; the tooltip carries the sentence. Same compact 9px box as `CTX` / `Delivered`, dim
+   rather than filled because it labels how a job reports, not a state the user must act
+   on — and deliberately untranslated, exactly like `CTX` / `SUB` / `BG`. */
+.node-shared-badge {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-family: "Consolas", monospace;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  color: var(--text-dim);
+  background: var(--bg3);
+  border: 1px dashed var(--border);
+}
+
 .node-kill {
   flex: 0 0 auto;
   width: 18px;

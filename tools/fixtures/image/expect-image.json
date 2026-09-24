@@ -1,0 +1,246 @@
+{
+ "generator": "tools/gen-image-fixtures.py",
+ "pillow": "12.3.0",
+ "oracle": "result pixels are the exact integer-weight area average of the crop; a crop-only case is a PIL crop. The result bytes are our own PNG, so the guard decodes them with decodePng (itself PIL-anchored by check-png). expectChanged false + reasonMustMatch means the input bytes come back verbatim: either there was nothing to do, or the re-encode would not have been smaller than the source and was discarded (that second rule only applies with no rect).",
+ "files": {
+  "tm-small-40x30.png": {
+   "mime": "image/png",
+   "width": 40,
+   "height": 30
+  },
+  "tm-wide-2000x8.png": {
+   "mime": "image/png",
+   "width": 2000,
+   "height": 8
+  },
+  "tm-tall-600x1500.png": {
+   "mime": "image/png",
+   "width": 600,
+   "height": 1500
+  },
+  "tm-noisy-1400x120.png": {
+   "mime": "image/png",
+   "width": 1400,
+   "height": 120
+  },
+  "tm-photo-1200x800.jpg": {
+   "mime": "image/jpeg",
+   "width": 1200,
+   "height": 800
+  },
+  "tm-photo-1200x800-progressive.jpg": {
+   "mime": "image/jpeg",
+   "width": 1200,
+   "height": 800,
+   "progressive": true
+  },
+  "tm-webp-300x200.webp": {
+   "mime": "image/webp",
+   "width": 300,
+   "height": 200
+  },
+  "tm-anim-8x8.gif": {
+   "mime": "image/gif",
+   "width": 8,
+   "height": 8
+  },
+  "tm-16bit-rgb.png": {
+   "mime": "image/png",
+   "width": 5,
+   "height": 6,
+   "unsupported": "16-bit"
+  },
+  "tm-interlaced-rgb.png": {
+   "mime": "image/png",
+   "width": 9,
+   "height": 7,
+   "unsupported": "interlaced"
+  },
+  "tm-malformed.png": {
+   "mime": "image/png",
+   "width": 40,
+   "height": 30,
+   "unsupported": "corrupt"
+  }
+ },
+ "cases": [
+  {
+   "name": "tm-small 40x30, no rect -> byte-identical",
+   "src": "tm-small-40x30.png",
+   "rect": null,
+   "expectChanged": false,
+   "width": 40,
+   "height": 30
+  },
+  {
+   "name": "tm-small crop rect(10,5,20,15) -> 20x15, scale 1",
+   "src": "tm-small-40x30.png",
+   "rect": [
+    10,
+    5,
+    20,
+    15
+   ],
+   "expectChanged": true,
+   "width": 20,
+   "height": 15,
+   "scale": 1,
+   "rgbaSha256": "322a24e6f0ceb239728da7eb96c51539d56771bbefec41ee8894f831274edadd",
+   "oracle": "PIL crop (pixels unchanged)"
+  },
+  {
+   "name": "tm-noisy 1400x120, no rect (a downscale that shrinks)",
+   "src": "tm-noisy-1400x120.png",
+   "rect": null,
+   "expectChanged": true,
+   "width": 1024,
+   "height": 88,
+   "scale": 0.7314285714285714,
+   "rgbaSha256": "2a2066348eefac31b182c917cd3fe858fecf7d8e8a33c4f8c37457a848a81714",
+   "oracle": "exact area average (python integer weights) over the kept region"
+  },
+  {
+   "name": "tm-tall 600x1500, no rect (the re-encode would be 5x bigger)",
+   "src": "tm-tall-600x1500.png",
+   "rect": null,
+   "expectChanged": false,
+   "width": 600,
+   "height": 1500,
+   "sourceWidth": 600,
+   "sourceHeight": 1500,
+   "reasonMustMatch": "the re-encode would not have been smaller",
+   "oracle": "the source's own bytes (the re-encode was discarded)"
+  },
+  {
+   "name": "tm-wide 2000x8, no rect (the re-encode would be 3x bigger)",
+   "src": "tm-wide-2000x8.png",
+   "rect": null,
+   "expectChanged": false,
+   "width": 2000,
+   "height": 8,
+   "sourceWidth": 2000,
+   "sourceHeight": 8,
+   "reasonMustMatch": "the re-encode would not have been smaller",
+   "oracle": "the source's own bytes (the re-encode was discarded)"
+  },
+  {
+   "name": "tm-photo small baseline JPEG, no rect (a PNG re-encode would be 10x bigger)",
+   "src": "tm-photo-1200x800.jpg",
+   "rect": null,
+   "expectChanged": false,
+   "width": 1200,
+   "height": 800,
+   "sourceWidth": 1200,
+   "sourceHeight": 800,
+   "reasonMustMatch": "the re-encode would not have been smaller",
+   "oracle": "the source's own bytes (the re-encode was discarded)"
+  },
+  {
+   "name": "tm-wide rect(0,0,2000,8) (the whole image: a rect is not dropped)",
+   "src": "tm-wide-2000x8.png",
+   "rect": [
+    0,
+    0,
+    2000,
+    8
+   ],
+   "expectChanged": true,
+   "width": 1024,
+   "height": 4,
+   "scale": 0.512,
+   "rgbaSha256": "7f12f74d665a21c6f8a4811f9d1e62e6dc3cfd78248880f053174780f5d2b72f",
+   "oracle": "exact area average (python integer weights) over the kept region"
+  },
+  {
+   "name": "tm-wide rect(500,0,1500,8) (crop + downscale)",
+   "src": "tm-wide-2000x8.png",
+   "rect": [
+    500,
+    0,
+    1500,
+    8
+   ],
+   "expectChanged": true,
+   "width": 1024,
+   "height": 5,
+   "scale": 0.6826666666666666,
+   "rgbaSha256": "be661f426b7632675572c6722b6d4f6b55b3a7f02ced75cf66144c138c835f77",
+   "oracle": "exact area average (python integer weights) over the kept region"
+  },
+  {
+   "name": "tm-tall rect(100,200,500,800) (a crop bigger than the source file)",
+   "src": "tm-tall-600x1500.png",
+   "rect": [
+    100,
+    200,
+    500,
+    800
+   ],
+   "expectChanged": true,
+   "width": 500,
+   "height": 800,
+   "scale": 1,
+   "rgbaSha256": "e2c14ae08b4f07e6337fd08aa06446adda031e4500e0f6be57fd1915f893f997",
+   "oracle": "PIL crop (pixels unchanged)"
+  },
+  {
+   "name": "tm-photo baseline JPEG rect(100,50,600,400) (a crop is kept)",
+   "src": "tm-photo-1200x800.jpg",
+   "rect": [
+    100,
+    50,
+    600,
+    400
+   ],
+   "expectChanged": true,
+   "width": 600,
+   "height": 400,
+   "scale": 1,
+   "sourceWidth": 1200,
+   "sourceHeight": 800,
+   "oracle": "no pixel oracle: a lossy decode is not reproducible byte for byte"
+  },
+  {
+   "name": "tm-photo progressive JPEG (A2 refuses progressive)",
+   "src": "tm-photo-1200x800-progressive.jpg",
+   "rect": null,
+   "expectChanged": false,
+   "sourceWidth": 1200,
+   "sourceHeight": 800
+  },
+  {
+   "name": "tm-anim GIF passes through",
+   "src": "tm-anim-8x8.gif",
+   "rect": null,
+   "expectChanged": false
+  },
+  {
+   "name": "tm-webp passes through",
+   "src": "tm-webp-300x200.webp",
+   "rect": null,
+   "expectChanged": false
+  },
+  {
+   "name": "tm-16bit-rgb passed through, size still read",
+   "src": "tm-16bit-rgb.png",
+   "rect": null,
+   "expectChanged": false,
+   "sourceWidth": 5,
+   "sourceHeight": 6
+  },
+  {
+   "name": "tm-interlaced-rgb passed through, size still read",
+   "src": "tm-interlaced-rgb.png",
+   "rect": null,
+   "expectChanged": false,
+   "sourceWidth": 9,
+   "sourceHeight": 7
+  },
+  {
+   "name": "tm-malformed passed through",
+   "src": "tm-malformed.png",
+   "rect": null,
+   "expectChanged": false
+  }
+ ]
+}

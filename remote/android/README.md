@@ -174,6 +174,62 @@ canonicalises that to the repo's region-invariant catalog tag (`LanguageTags`, m
 `build-deploy.ps1` deletes again in its `finally`) are neither shipped nor needed. The mapping is
 pure `:core` code and is unit-tested.
 
+## 4c. The token: one spelling, one room
+
+The room id is derived from the token and nothing else (§3), and a wrong token is **not an error —
+it is an empty room** (the plan's §11). That is why a stray character is a silent defect rather than
+a cosmetic one, and it was measured on a phone: the relay's log showed **four rooms out of four
+spellings of one token** (as typed, plus a trailing space, plus a trailing newline — what a paste
+produces — and with the IME capitalising the first letter).
+
+Four layers, in the order a token meets them:
+
+1. **the IME** (`TokenField.kt`): a **platform `EditText`** in an `AndroidView`, because the two
+   signals that stop an IME from "helping" have no Compose `KeyboardOptions` parameter. Measured on
+   API 28, a Compose password field reports `inputType=0x81`, `imeOptions=0x2000006` — a password
+   *hint* that third-party IMEs are free to ignore, and no "do not learn this" flag at all. The
+   platform field sets, explicitly:
+
+   ```
+   inputType  = TYPE_CLASS_TEXT | TYPE_TEXT_VARIATION_PASSWORD | TYPE_TEXT_FLAG_NO_SUGGESTIONS   = 0x80081
+   imeOptions = IME_ACTION_DONE | IME_FLAG_NO_PERSONALIZED_LEARNING | IME_FLAG_NO_EXTRACT_UI    = 0x11000006
+   ```
+
+   The flags are stamped at creation **and on every focus gain** (an IME re-applies its own
+   `EditorInfo` when a field regains focus), and the masking is applied *after* them, because
+   `setInputType` re-derives a transformation method from the type. Masking is
+   `PasswordTransformationMethod` (which is also what makes `uiautomator` report `password="true"`);
+   the reveal toggle sets it to `null`. The bordered container, the label above it, the eye and the
+   fingerprint line are Compose, so the screen still reads as one form. (`setHorizontallyScrolling`
+   is used where the brief says `isHorizontallyScrollable`: that property has no setter in the
+   android-35 stubs.)
+2. **the reveal toggle**: a masked field plus no fingerprint is how the wrong room stayed invisible.
+   The field can be shown, with a TalkBack label;
+3. **the fingerprint**: `Room · a1b2c3d4…` under the field, updating as you type, and repeated for
+   every saved room — the first 8 characters of `roomId`, so two devices can be compared *before*
+   anything is saved. The full id is on the room screen. The derivation is 600000 PBKDF2 iterations
+   by design, so the fingerprint is debounced (250 ms) and computed off the main thread;
+4. **`TokenInput.normalize`** (`:core`, unit-tested): leading and trailing whitespace removed and
+   **nothing else** — no lowercasing, no interior stripping. The set is the one
+   `String.prototype.trim` removes, because the desktop is the other end of the comparison; Kotlin's
+   `Char.isWhitespace()` disagrees with it in both directions (a BOM is trimmed by JS and not
+   whitespace to Kotlin; the C0 separators are the reverse), which is why the set is written out.
+   It runs in the connect path, on write to `EncryptedSharedPreferences`, **and on read** — a token
+   stored with a newline by an older build is repaired instead of silently kept.
+
+A token that is too short (< 16 code points) or too repetitive (< 8 distinct characters) is refused
+*on the phone*, with the desktop's own sentence, instead of becoming an empty room on the other
+side. The thresholds are the desktop's (`TokenInput.MIN_TOKEN_CHARS` / `MIN_DISTINCT_CHARS`, mirroring
+`tokenIssue` in `src/remote/rooms.ts`) rather than new ones, and the three refusal sentences are the
+extension's own catalog strings — reused, so a Chinese phone reads the same words the desktop shows
+and no new catalog entry is needed.
+
+`tools/remote-interop.mjs` proves the agreement by running both implementations over ten spellings
+(trailing space, trailing newline, leading newline, a copied multi-whitespace prefix, NBSP, BOM, the
+capitalised first letter, a short token, a repeated one): same normalised characters, same strength
+verdict, **same room id**, and — as the control — the untrimmed spelling really would have been a
+different room.
+
 ## 5. The room tree is native Compose — why
 
 The **session view** must be the shipped renderer (it has to be: that is the whole architecture).
@@ -270,7 +326,11 @@ Verified by **running**, on this machine:
   reproduces the vectors' bytes exactly;
 - `:core:test` green (22 tests) and `:app:assembleDebug` green, from a clean tree and with
   `--offline --rerun-tasks` (so the vector test genuinely re-reads `remote/vectors/vectors.json`);
-- the APK contains `assets/webview/main.js`, both catalogs, the shell and the shim;
+- the APK contains `assets/webview/main.js`, both catalogs, the shell and the shim, and the token
+  field's flags are verifiable *inside the artifact*: `dexdump -d` on the installed APK's
+  `classes4.dex` shows `TokenField.applyImeFlags` computing `const v1, #00080081` before
+  `setInputType` and `const v1, #11000006` before `setImeOptions` (the constants are inlined, so the
+  values are what travels, not the field names);
 - **`tools/remote-interop.mjs`: 35/35 checks** — a frame crossed between the Kotlin and TypeScript
   transports through the real relay, byte for byte, in both directions, multi-slice included, with
   each side opening the other's frame from the envelope's `s`, a replay refused in both

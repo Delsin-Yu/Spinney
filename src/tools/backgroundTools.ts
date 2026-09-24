@@ -15,6 +15,31 @@ function budgetMsOf(task: BackgroundTask): number | null {
 }
 
 /**
+ * The refusal a `join_background` returns when the job is **detached**
+ * (`start_detached`): session-wide and fire-and-forget. Whether or not the call
+ * gave it a deadline, no completion notice ever comes back for it and no turn ever
+ * waits for it, so there is nothing for a join to return — and nothing a refusal
+ * takes away from the agent either.
+ *
+ * It is refused *outright*, finished or still running. The status does not matter:
+ * the two reasons a join could ever be useful — a bounded wait, or a notice to
+ * come back on — do not exist for this job, and `check_background_terminal` answers
+ * exactly what a join would have (the accumulated output, and the exit code once
+ * there is one). Same voice as the two refusals below: name the id, say nothing
+ * changed, and name both tools that *do* work.
+ */
+function refuseJoinDetached(id: number): string {
+  return (
+    `Background terminal ${id} is a detached job (timeout_behavior "start_detached"): it is session-wide and ` +
+    `fire-and-forget, so it never sends a completion notice and no turn ever waits for it — joining it is ` +
+    `meaningless and this join was refused; nothing changed. ` +
+    `Read it with check_background_terminal(${id}) instead: it reports the job's accumulated output, and its ` +
+    `exit code once the job has ended. ` +
+    `If you want to end the command rather than let it run, call kill_background(${id}).`
+  );
+}
+
+/**
  * The refusal a gated `join_background` returns when the job has **no deadline**:
  * nothing bounds it, so waiting on it could hold the turn for as long as it likes.
  *
@@ -57,7 +82,7 @@ export function makeCheckBackgroundTool(getAccess: () => BackgroundAccess | null
       function: {
         name: 'check_background_terminal',
         description:
-          'Check the status of a background terminal started by exec_command (timeout_behavior = move_to_background / start_in_background). Returns whether it is running or finished, its exit code (when finished), and the output accumulated so far.',
+          'Check the status of a background terminal started by exec_command (timeout_behavior = background_when_timeout / start_in_background / start_detached). Returns whether it is running or finished, its exit code (when finished), and the output accumulated so far. This is how a detached job (start_detached) is read at all: it never sends a completion notice.',
         parameters: {
           type: 'object',
           properties: {
@@ -180,7 +205,7 @@ export function makeJoinBackgroundTool(getAccess: () => BackgroundAccess | null)
       function: {
         name: 'join_background',
         description:
-          'Block until a background terminal (by pid) finishes, then return its final exit code and full accumulated output. Respects Stop. Use to wait for a command you moved to the background and collect its result. A join is refused while the job still has more than the foreground limit of its budget left (spinney.commandMaxForegroundDuration, 300 s unless changed), because a turn must never wait longer than that — end your turn instead and let the completion notice arrive.',
+          'Block until a background terminal (by pid) finishes, then return its final exit code and full accumulated output. Respects Stop. Use to wait for a command you moved to the background and collect its result. A join is refused while the job still has more than the foreground limit of its budget left (spinney.commandMaxForegroundDuration, 300 s unless changed), because a turn must never wait longer than that — end your turn instead and let the completion notice arrive. A detached job (start_detached) is refused outright: it never notifies, so check_background_terminal is how its result is read.',
         parameters: {
           type: 'object',
           properties: {
@@ -203,6 +228,16 @@ export function makeJoinBackgroundTool(getAccess: () => BackgroundAccess | null)
       const task = access.hub.lookup(sessionId, id)?.task;
       if (!task) {
         return `Error: no background terminal with id ${id}.`;
+      }
+      // A detached job is refused outright — before the finished check, and
+      // regardless of status. The two things a join ever gives back are a *bounded
+      // wait* and the *result*: a detached job has no notice to come back on and is
+      // explicitly not something a turn waits for, while `check_background_terminal`
+      // returns its output (and its exit code, once there is one) at once. Refusing
+      // it also cannot mislead: the refusal says there is no notice, so nothing here
+      // tells the agent to expect one.
+      if (task.detached) {
+        return refuseJoinDetached(id);
       }
       // The join gate, and the reason it exists: `join_background` used to block
       // until the job finished, so a job with hours to go held the turn for hours.

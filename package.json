@@ -648,12 +648,17 @@
     "check:l10n": "node tools/check-l10n.js",
     "check:grid": "node tools/check-tree-grid.js",
     "check:docs": "node tools/check-docs.js",
+    "check:unicode": "node tools/check-unicode.js",
     "check:cwd": "node tools/exec-cwd-acceptance.js",
     "check:shell": "node tools/shell-argv-acceptance.js",
     "check:kill": "node tools/exec-kill-acceptance.js",
     "check:timeout": "node tools/exec-timeout-acceptance.js",
     "check:budget": "node tools/bg-budget-acceptance.js",
     "check:websearch": "node tools/websearch-acceptance.js",
+    "check:png": "node tools/check-png.js",
+    "check:resample": "node tools/check-resample.js",
+    "check:image": "node tools/check-png.js && node tools/check-resample.js && node tools/check-image.js && node tools/check-jpeg.js",
+    "check:jpeg": "node tools/check-jpeg.js",
     "check:remote": "node tools/check-remote.js",
     "check:relay": "node tools/relay-acceptance.js",
     "check:remote-assets": "node tools/check-remote-assets.js",
@@ -662,7 +667,7 @@
     "check:interop": "node tools/remote-interop.mjs",
     "sim": "node tools/sim/run.mjs",
     "sim:selftest": "node tools/sim/run.mjs --selftest",
-    "vscode:prepublish": "npm run compile && npm run sync:l10n && npm run check:models && npm run check:webview && npm run check:modeltree && npm run check:signals && npm run check:l10n && npm run check:rollover && npm run check:grid && npm run check:docs && npm run check:cwd && npm run check:shell && npm run check:kill && npm run check:timeout && npm run check:budget && npm run check:websearch && npm run check:remote && npm run check:relay && npm run check:remote-surfaces && npm run check:remote-assets"
+    "vscode:prepublish": "npm run compile && npm run sync:l10n && npm run check:models && npm run check:webview && npm run check:modeltree && npm run check:signals && npm run check:l10n && npm run check:rollover && npm run check:grid && npm run check:docs && npm run check:cwd && npm run check:shell && npm run check:kill && npm run check:timeout && npm run check:budget && npm run check:websearch && npm run check:image && npm run check:remote && npm run check:relay && npm run check:remote-surfaces && npm run check:remote-assets && npm run check:unicode"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

@@ -107,6 +107,7 @@ import {
   heapReadout,
   workReadout,
 } from '../perf';
+import { sliceText } from '../text';
 
 // Model cards, providers, context windows and image support all live in one
 // place: `src/agent/models.ts` (their editor is the Model Card Tree page,
@@ -2325,7 +2326,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     return this.sessions
       .map((s) => {
         const rt = this.runtimes.get(s.id);
-        const runningBg = rt ? rt.hasRunningBackground() : false;
+        const runningBg = rt ? rt.hasRunningNodeBackground() : false;
         return {
           id: s.id,
           title: s.title,
@@ -2949,10 +2950,10 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     for (let i = node.displayItems.length - 1; i >= 0; i--) {
       const item = node.displayItems[i];
       if (item.kind === 'assistant' && item.text) {
-        return item.text.split('\n')[0].trim().slice(0, 120);
+        return sliceText(item.text.split('\n')[0].trim(), 120);
       }
     }
-    return node.title.slice(0, 80);
+    return sliceText(node.title, 80);
   }
 
   // ---- Session hop (global bookkeeping) ----
@@ -2978,14 +2979,14 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       return 'Error: a session start is already queued.';
     }
     const session = rt.session;
-    if (rt.hasRunningBackground()) {
+    if (rt.hasRunningNodeBackground()) {
       return 'Error: a background terminal is still running in this session; finish or kill it before hopping.';
     }
     const returnNodeId = typeof args.returnNodeId === 'string' ? args.returnNodeId.trim() : '';
     if (returnNodeId && !session.nodes[returnNodeId]) {
       return `Error: no such node in this session: ${returnNodeId} (use list_nodes to see the tree).`;
     }
-    const title = typeof args.title === 'string' ? args.title.trim().slice(0, 80) : '';
+    const title = typeof args.title === 'string' ? sliceText(args.title.trim(), 80) : '';
     this.pendingSessionStart = { title: title || undefined, prompt };
     this.hopReturn = {
       originSessionId: session.id,
@@ -3040,7 +3041,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       return;
     }
     const answer = node ? lastAssistantText(node) : '';
-    const clipped = answer.length > 8000 ? `${answer.slice(0, 8000)}\n…[truncated]` : answer;
+    const clipped = answer.length > 8000 ? `${sliceText(answer, 8000)}\n…[truncated]` : answer;
     this.pendingSessionStart = {
       sessionId: hop.originSessionId,
       nodeId: hop.returnNodeId,
@@ -3085,7 +3086,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   /** True when no session has a run, a sub-agent or a background terminal live. */
   private globallyIdle(): boolean {
     for (const rt of this.runtimes.values()) {
-      if (rt.isRunning() || rt.runningSubAgentCount() > 0 || rt.hasRunningBackground()) {
+      if (rt.isRunning() || rt.runningSubAgentCount() > 0 || rt.hasRunningNodeBackground()) {
         return false;
       }
     }
@@ -3103,7 +3104,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
 
   private anyRunningBackground(): boolean {
     for (const rt of this.runtimes.values()) {
-      if (rt.hasRunningBackground()) {
+      if (rt.hasRunningNodeBackground()) {
         return true;
       }
     }

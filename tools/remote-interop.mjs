@@ -329,6 +329,94 @@ try {
   const largeFile = path.join(tempDir, 'large-body.json');
   fs.writeFileSync(largeFile, largeBody);
 
+  // ---- the token: one spelling, one room — checked against the desktop's own rules ------------
+  //
+  // This is the defect that started this run's predecessor: the desktop trims a token, a phone
+  // did not, and four spellings of one token became four rooms with neither device ever seeing the
+  // other. The Kotlin side answers for its own normalisation here, the TypeScript side answers for
+  // its own (`String.prototype.trim` + `tokenIssue`, the compiled `rooms.js`), and every spelling
+  // is compared spelling by spelling.
+  const typedToken = 'a1f3c9d2e5b8a470f3a1c02b7d4e685';
+  const spellings = [
+    typedToken, // as typed
+    `${typedToken} `, // a trailing space
+    `${typedToken}\n`, // what a phone paste produces
+    `\n${typedToken}`, // a paste with a leading newline
+    `\r\n\t${typedToken} \t`, // a copy that carried more than one
+    `\u00A0${typedToken}\u00A0`, // a non-breaking space
+    `\uFEFF${typedToken}\uFEFF`, // a byte-order mark: trimmed by JS, not whitespace to Kotlin
+    typedToken[0].toUpperCase() + typedToken.slice(1), // the IME capitalised the first letter
+    'short', // too short for either side
+    'aaaaaaaaaaaaaaaa', // one character repeated: the keyboard slip
+  ];
+  const spellingsFile = path.join(tempDir, 'token-spellings.json');
+  fs.writeFileSync(spellingsFile, JSON.stringify(spellings));
+
+  const probe = start('token-probe', 'java', [
+    '-cp',
+    INTEROP_JAR,
+    'dev.spinney.remote.core.InteropMain',
+    '--probe-tokens-file',
+    spellingsFile,
+  ]);
+  await bounded(
+    'the Kotlin token probe to exit',
+    waitFor('the Kotlin token probe to exit', () => (probe.exited ? true : null), 60_000),
+    65_000,
+  );
+  const kotlinTokens = probe.lines
+    .filter((line) => line.startsWith('{'))
+    .map((line) => JSON.parse(line))
+    .filter((line) => line.event === 'token');
+  ok('the Kotlin token probe answered for every spelling', kotlinTokens.length === spellings.length, `${kotlinTokens.length}/${spellings.length}`);
+
+  for (const [index, spelling] of spellings.entries()) {
+    const kotlin = kotlinTokens[index];
+    if (!kotlin) continue;
+    const label = `spelling #${index} (${JSON.stringify(spelling.length > 12 ? `${spelling.slice(0, 8)}…(${spelling.length})` : spelling)})`;
+    // `String.prototype.trim` is what the desktop applies, and the harness applies the same
+    // built-in — so the comparison is against the desktop's *rule*, not against a value the harness
+    // took from Kotlin.
+    const desktopTrimmed = spelling.trim();
+    const desktopIssue = rooms.tokenIssue(desktopTrimmed);
+    ok(
+      `Kotlin and TypeScript trim ${label} to the same characters`,
+      kotlin.normalized === desktopTrimmed,
+      `kotlin=${JSON.stringify(kotlin.normalized)} js=${JSON.stringify(desktopTrimmed)}`,
+    );
+    ok(
+      `…and the two implementations agree about the strength of ${label}`,
+      (kotlin.issue ?? null) === (desktopIssue ?? null),
+      `kotlin=${kotlin.issue ?? 'usable'} js=${desktopIssue ?? 'usable'}`,
+    );
+    if (desktopIssue === null) {
+      ok(
+        `…and derive the SAME room for ${label}`,
+        kotlin.roomId === rooms.deriveRoom(desktopTrimmed).roomId,
+        `room ${kotlin.roomId}`,
+      );
+      // The control: hashing the spelling the phone was actually handed would have been another
+      // room, whenever the spelling was not already trimmed. That is the bug, still reproducible.
+      if (spelling !== desktopTrimmed) {
+        ok(
+          '…while the untrimmed spelling would have been a different room (the defect this fixes)',
+          rooms.deriveRoom(spelling).roomId !== kotlin.roomId,
+          `${rooms.deriveRoom(spelling).roomId} vs ${kotlin.roomId}`,
+        );
+      }
+    }
+  }
+  ok(
+    'the two implementations carry the desktop’s own thresholds (16 characters, 8 distinct)',
+    kotlinTokens[0]?.minChars === 16 && kotlinTokens[0]?.minDistinct === 8 && rooms.MIN_TOKEN_CHARS === 16 && rooms.MIN_DISTINCT_CHARS === 8,
+    `kotlin=${kotlinTokens[0]?.minChars}/${kotlinTokens[0]?.minDistinct} ts=${rooms.MIN_TOKEN_CHARS}/${rooms.MIN_DISTINCT_CHARS}`,
+  );
+  ok(
+    'the capitalised spelling is a real second room on both sides (so the IME had to be constrained, not the token guessed at)',
+    kotlinTokens[7]?.roomId !== kotlinTokens[0]?.roomId && kotlinTokens[7]?.normalized === spellings[7],
+    `${kotlinTokens[0]?.roomId} → ${kotlinTokens[7]?.roomId}`,
+  );
+
   kotlin = start('kotlin', 'java', [
     '-cp',
     INTEROP_JAR,

@@ -85,7 +85,9 @@
 - **Change what a full context window does** (a context rollover) → the frozen contract is
   `docs/agents/invariants/context-rollover.md`; the pieces are `contextBaseId` +
   `contextBase()` and the `pathMessages` cut in `src/chat/tree.ts`,
-  `parseContextLengthError()` in `src/agent/models.ts`, `rolloverContext()` /
+  `parseContextLengthError()` / `windowFullReason()` in `src/agent/models.ts` (the two
+  refusal kinds a full window can be — tokens and image bytes, `invariants/vision-images.md`),
+  `rolloverContext()` /
   `beginTurn({ freshContext })` / the harness resume text / the `contextFull` flag in
   `src/chat/runtime.ts`, the `rolloverTurn` route and its confirm gate in
   `ChatViewProvider.ts`, the meta field in `src/chat/transcript.ts`, the button variant in

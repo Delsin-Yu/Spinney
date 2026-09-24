@@ -100,8 +100,10 @@ a suggestion. What that does is `context-rollover.md`.
   `context: 'ok' | 'near' | 'full'` plus `contextPct` (the rounded percentage, for
   the `near` variant's title) on the `tree` node payload and in every `nodeUpdate`
   patch. `full` is computed from the node's own persisted failure text
-  (`node.status === 'error' && parseContextLengthError(lastFailureText(node)) !==
-  undefined`), `near` from the newest prompt usage on that node's chain against the
+  (`node.status === 'error' && windowFullReason(lastFailureText(node)) !==
+  undefined` — the token refusal *and* the provider's per-request image-size refusal,
+  `windowFullReason()` in `src/agent/models.ts`), `near` from the newest prompt usage on
+  that node's chain against the
   chain card's window, so a reload and a live turn agree. The webview therefore
   never parses an error string, and no second copy of the provider's wording exists
   in `main.js`. `nodeStatePatch` still carries the older `contextFull: boolean`

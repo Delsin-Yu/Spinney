@@ -70,13 +70,19 @@ const CRC_TABLE: readonly number[] = (() => {
   return table;
 })();
 
-function crc32(bytes: Uint8Array): number {
+/**
+ * Exported for `pngCodec.ts`: a PNG chunk is only trustworthy if its CRC checks out, and
+ * the codec both verifies the CRCs it reads and stamps the ones it writes — one
+ * implementation of the polynomial, in the file that already had it.
+ */
+export function crc32(bytes: Uint8Array): number {
   let c = 0xffffffff;
   for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
   return (c ^ 0xffffffff) >>> 0;
 }
 
-function readU32BE(bytes: Uint8Array, off: number): number {
+/** Big-endian u32 at `off` — the PNG chunk/IHDR field width. Exported with {@link crc32}. */
+export function readU32BE(bytes: Uint8Array, off: number): number {
   return ((bytes[off] << 24) | (bytes[off + 1] << 16) | (bytes[off + 2] << 8) | bytes[off + 3]) >>> 0;
 }
 

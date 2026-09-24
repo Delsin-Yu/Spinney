@@ -1,5 +1,6 @@
 import * as dns from 'dns';
 import { AgentTool } from '../agent/types';
+import { sliceText } from '../text';
 import { ensureNotAborted, limitInline } from './index';
 import { decodeBody, htmlToMarkdown, mainHtml, stripChrome, textOf } from './webHtml';
 
@@ -226,7 +227,7 @@ function describeFetchError(error: unknown): string {
   const cause = (error as { cause?: { code?: string; message?: string } } | undefined)?.cause;
   const code = cause?.code ? ` ${cause.code}` : '';
   const detail = cause?.message && cause.message !== message ? `: ${cause.message}` : '';
-  return `${message}${code}${detail}`.slice(0, 200);
+  return sliceText(`${message}${code}${detail}`, 200);
 }
 
 /** Follow redirects by hand so every hop can be checked before it is requested. */

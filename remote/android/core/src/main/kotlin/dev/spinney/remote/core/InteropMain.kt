@@ -55,6 +55,9 @@ import kotlinx.coroutines.launch
  *   --exit-after-ms <n>      stop and leave, this long after start (default: never)
  *   --exit-on-stdin          stop and leave when stdin reaches EOF, which is how the harness says
  *                            "I have finished asserting" without guessing at a duration
+ *   --probe-tokens-file <p>  no relay, no client: read a JSON array of raw token spellings, print
+ *                            one line each with the normalised token, the room id it derives and
+ *                            the strength issue (if any), then exit 0
  * ```
  *
  * Exit code 0 when it left cleanly, 1 when a flag was wrong, 2 when it never came online.
@@ -99,6 +102,16 @@ object InteropMain {
 
     @JvmStatic
     fun main(args: Array<String>) {
+        // The token probe needs no relay and no room: it answers one question — what would this
+        // spelling of a token actually become? — and `tools/remote-interop.mjs` compares that answer
+        // with the desktop's own. It runs before the flags that describe a connection, because it
+        // has no connection to describe.
+        flag(args, "--probe-tokens-file")?.let { path ->
+            probeTokens(File(path))
+            out.flush()
+            kotlin.system.exitProcess(0)
+        }
+
         val relay = flag(args, "--relay")
         val token = flag(args, "--token")
         val name = flag(args, "--name")
@@ -107,7 +120,6 @@ object InteropMain {
             System.err.println("  this is the interop harness's entry point, not a client: see tools/remote-interop.mjs")
             kotlin.system.exitProcess(1)
         }
-
         val sendFile = flag(args, "--send-file")
         val sendAfterMs = flagMs(args, "--send-after-ms") ?: 300L
         val replayAfterMs = flagMs(args, "--replay-after-ms")
@@ -298,6 +310,40 @@ object InteropMain {
      */
     private fun oldConventionSalt(fid: String): Int =
         (Hex.decode(fid.substring(0, 8)).fold(0) { acc, b -> (acc shl 8) or (b.toInt() and 0xff) })
+
+    /**
+     * Print, for each raw spelling in a JSON array, what this implementation would make of it: the
+     * normalised token, the room id that token derives, and the strength issue when there is one.
+     *
+     * The `issue` names are the desktop's own codes (`TokenIssue` in `src/remote/rooms.ts`:
+     * `empty` / `too-short` / `too-few-distinct`) rather than this enum's constant names, so the
+     * harness can compare the two implementations as strings and a mapping mistake shows up as a
+     * failed check instead of as a passing one.
+     */
+    private fun probeTokens(file: File) {
+        val array = JsonValue.parse(file.readText()) as? JsonValue.Arr
+            ?: error("--probe-tokens-file expects a JSON array of strings")
+        for (item in array.items) {
+            val raw = (item as? JsonValue.Str)?.value ?: error("--probe-tokens-file expects strings")
+            val normalized = TokenInput.normalize(raw)
+            val issue = TokenInput.issue(normalized)
+            emitRaw(
+                "event" to "token",
+                "raw" to raw,
+                "normalized" to normalized,
+                "roomId" to if (normalized.isEmpty()) null else RoomKeys.derive(normalized).roomId,
+                "issue" to issue?.let { issueName(it) },
+                "minChars" to TokenInput.MIN_TOKEN_CHARS,
+                "minDistinct" to TokenInput.MIN_DISTINCT_CHARS,
+            )
+        }
+    }
+
+    private fun issueName(issue: TokenInput.Issue): String = when (issue) {
+        TokenInput.Issue.EMPTY -> "empty"
+        TokenInput.Issue.TOO_SHORT -> "too-short"
+        TokenInput.Issue.TOO_FEW_DISTINCT -> "too-few-distinct"
+    }
 
     private fun newFid(): String {
         val buffer = ByteArray(Protocol.FRAMING_ID_LENGTH / 2)

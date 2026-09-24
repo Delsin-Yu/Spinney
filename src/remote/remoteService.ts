@@ -42,6 +42,7 @@ import * as vscode from 'vscode';
 import { ControlSessionInfo, ControlState } from '../http/controlServer';
 import { TreeNode } from '../chat/tree';
 import { hasPendingTranscriptWrite } from '../chat/transcript';
+import { sliceText } from '../text';
 import { mayAcceptFromPeer, mayMirrorToPeer } from './allowlist';
 import { FRAME_VERSION, FrameEnvelope, newFrameId } from './frames';
 import { OutboundFrame, RelayTransport, TransportStatus } from './relayClient';
@@ -1455,7 +1456,7 @@ export class RemoteService implements vscode.Disposable {
         onStatus: (status) => this.onStatus(room, status),
       });
       room.transport.start();
-      this.options.log(`[remote] ${config.name}: connecting to ${relayUrl} as device ${room.deviceId.slice(0, 12)}…`);
+      this.options.log(`[remote] ${config.name}: connecting to ${relayUrl} as device ${sliceText(room.deviceId, 12)}…`);
     } catch (err) {
       this.transportFailed(room, err);
     }

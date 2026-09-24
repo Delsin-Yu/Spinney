@@ -1,31 +1,87 @@
 ## Background terminals
-- **`exec_command` has one knob and three behaviors** (`timeout_behavior`: `stop` — **the default** —
-  `move_to_background`, `start_in_background`), and this matrix is the whole contract. The knob is
+- **`exec_command` has one knob and four behaviors** (`timeout_behavior`: `stop_when_timeout` —
+  **the default** — `background_when_timeout`, `start_in_background`, `start_detached`), and this
+  matrix is the whole contract. The values are the **job's identity**, not a mode: each one decides
+  what is registered, whether the call locks its node, whether it notifies, and whether the job can
+  be joined:
+
+  | value | behaviour | registered as | locks its node | notifies | joinable |
+  | --- | --- | --- | --- | --- | --- |
+  | `stop_when_timeout` (**the default**) | a foreground call, killed at the timeout | nothing | (it is the turn) | - | - |
+  | `background_when_timeout` | foreground up to the five-minute limit, then promoted, carrying `timeout − limit` as its own deadline | a node job | **yes** | yes | yes, if its remaining budget fits in a turn |
+  | `start_in_background` | a node job from the start | a node job | **yes** | yes | as above |
+  | `start_detached` (**new**) | **fire-and-forget**: session-wide | a **detached** job | **no** | **no** | **refused** |
+
+  The knob is
   `spinney.commandMaxForegroundDuration` (seconds, default 300 = 5 minutes), the longest anything may
   hold a turn; `timeout` is the command's **total budget** — foreground plus background, with **no
   ceiling** — and the foreground slice a call may hold the turn for is `min(timeout, limit)`, zero
-  for `start_in_background` (which returns before waiting):
+  for `start_in_background` and `start_detached` (both return before waiting):
 
-  | `timeout` | no behavior / `stop` | `move_to_background` | `start_in_background` |
-  | --- | --- | --- | --- |
-  | omitted | killed at the limit | a job with **no deadline** | a job with **no deadline** |
-  | ≤ limit | killed at the timeout | killed at the timeout, **not** promoted | the whole budget as the job's deadline |
-  | > limit | **refused before the spawn** | promoted at the **limit**, the hub gets `timeout − limit` | the whole budget as the job's deadline |
+  | `timeout` | no behavior / `stop_when_timeout` | `background_when_timeout` | `start_in_background` | `start_detached` |
+  | --- | --- | --- | --- | --- |
+  | omitted | killed at the limit | **refused before the spawn** | **refused before the spawn** | a detached job with **no deadline** |
+  | ≤ limit | killed at the timeout | killed at the timeout, **not** promoted | the whole budget as the job's deadline | the whole budget as the job's deadline |
+  | > limit | **refused before the spawn** | promoted at the **limit**, the hub gets `timeout − limit` | the whole budget as the job's deadline | the whole budget as the job's deadline |
 
-  `move_to_background` runs the command in the foreground up to the slice and, only when the budget
-  outlives the slice (`timeout > limit`, or no `timeout` at all), promotes it to a background terminal
+  Two refusals carry this vocabulary, and they are the load-bearing part of it:
+
+  - **A node job without a `timeout` is refused before the spawn** — both of the values that would
+    register one, `background_when_timeout` and `start_in_background`. A node job with no deadline
+    holds its node's composer on Stop until it is killed, so an unbounded lifetime belongs to
+    `start_detached` — which is why the same omission is legal there and refused here, and why the
+    two node-job values are refused by one function (`needsTimeoutError(behavior)`,
+    `src/tools/execCommand.ts`) whose first words name the value that was asked for. It names both
+    ways out and ends the way every pre-spawn refusal does: `timeout_behavior "${behavior}" needs a
+    timeout: without one the job has no deadline, so nothing ends it on its own and it locks this
+    node (the composer shows Stop for it) until something kills it. Either pass a timeout — the
+    job's whole budget in seconds, with no ceiling, and the job is killed when it runs out — or pass
+    timeout_behavior "start_detached", which is session-wide and fire-and-forget: it locks no node,
+    never sends a completion notice, and its result is read with check_background_terminal. Nothing
+    was started.` (`${behavior}` is `background_when_timeout` or `start_in_background`, whichever
+    the call asked for; no other word of the sentence changes.)
+  - **`join_background` on a detached job is refused** — outright, before the finished check, so
+    the status does not matter: the job has no deadline and never notifies, and the two things a
+    join ever gives back (a bounded wait, a notice to come back on) do not exist for it. The
+    refusal names the tool that answers the same question on demand instead:
+    `Background terminal 3 is a detached job (timeout_behavior "start_detached"): it is
+    session-wide and fire-and-forget, so it never sends a completion notice and no turn ever waits
+    for it — joining it is meaningless and this join was refused; nothing changed. Read it with
+    check_background_terminal(3) instead: it reports the job's accumulated output, and its exit
+    code once the job has ended. If you want to end the command rather than let it run, call
+    kill_background(3).`
+
+  Why `start_detached` exists, and what it costs — this is the part not to miss: a job that holds a
+  node's composer on Stop means **the owner cannot send a message on that node until the job ends**,
+  so a long-lived thing (a dev server, an emulator, a watcher) could only be started by freezing the
+  conversation. A detached job is registered **per session**, so any node in that session can check
+  it, be refused its join, or kill it. The price is stated plainly: a detached job **never wakes the
+  model** — the agent learns its outcome only by asking — so the fire-and-forget spelling is for work
+  whose result is not needed to continue.
+
+  `background_when_timeout` runs the command in the foreground up to the slice and, only when the budget
+  outlives the slice (`timeout > limit`), promotes it to a background terminal
   at the **limit** instead of killing it: the result names the `id`, the working directory, the fact
   that **nothing was killed** and that it keeps running, the budget the job now has, and the join
-  caveat below (`[command moved to background: id 7]`, then the output so far). The hub is handed the
+  caveat below (`[command moved to background: id 7]`, then the output so far). A call that omitted
+  `timeout` never reaches this point — it is refused before the spawn, like `start_in_background`
+  (see the refusal above) — so a promotion always has a remainder to hand over. The hub is handed the
   **remainder** (`timeout − limit`), never the budget a second time, because the job's deadline is
   measured from the registration that happens at the promotion. A promotion is its own kind of ending
   in the diagnostics: `outcome=promoted`, neither `exit` nor `timeout`, because the process is alive
   and now belongs to the hub — whose card, id and completion notice take over. `timeout ≤ limit` with
   a background behavior is therefore killed at its timeout and **never** promoted: its budget is spent
   exactly when the slice ends, so a promotion there would be "kill it immediately" in disguise.
-  `start_in_background` is unchanged: it launches immediately and returns a **session-local** `id`
-  with no foreground time to report. With **no background access** (a bare `ToolRegistry` — the
-  acceptance drivers build one — or a worker with no hub) the default `stop` path needs no hub and
+  `start_in_background` keeps its spelling and its behaviour: it launches immediately and returns a
+  **session-local** `id` with no foreground time to report, and it refuses an omitted `timeout`, as
+  `background_when_timeout` does.
+  `start_detached` is the fire-and-forget spelling of that shape: it launches immediately and returns
+  an id the same way, but the job it registers is **detached** — it keeps the node that started it as
+  its owner (its card renders there) and only its **lock** and its **notice** are off: no composer
+  Stop, no completion notice — while its id resolves **per session**, so any node in the session can
+  check it, be refused its join, or kill it. With **no background access** (a bare
+  `ToolRegistry` — the acceptance drivers build one — or a worker with no hub) the default
+  `stop_when_timeout` path needs no hub and
   must not throw, which is what keeps the `check:cwd` gate green; an *explicit* background behavior
   there does throw — `Background terminals are not available in this session.` — because that is a
   request the context cannot honour. The id is minted by the hub (`BackgroundHub.mintId`) — a
@@ -34,17 +90,21 @@
   single knob a knob. `spinney.commandMaxForegroundDuration` is read live per call
   (`commandMaxForegroundDurationSec()` in `src/tools/execCommand.ts`, with
   `DEFAULT_COMMAND_MAX_FOREGROUND_SEC = 300`), and a `timeout` longer than it with no behavior (or
-  with `stop`) throws `timeoutTooLongError` **before the spawn** — no process, no job, nothing
+  with `stop_when_timeout`) throws `timeoutTooLongError` **before the spawn** — no process, no job, nothing
   started, which is the half the model needs or it will go looking for an output that does not
   exist — because a command that may run that long must say *which* kind of background job it is:
   `timeout 1800 s is longer than the 300 s a turn may hold (spinney.commandMaxForegroundDuration).
-  A command that may run that long must not hold the turn: pass timeout_behavior "move_to_background"
+  A command that may run that long must not hold the turn: pass timeout_behavior "background_when_timeout"
   (300 s in the foreground, the rest of its 1800 s budget in the background) or
   "start_in_background" (the whole 1800 s in the background), or pass a timeout of 300 s or less.
-  Nothing was started.` (the registry adds the `Error: ` prefix). There is **no ceiling** on
+  Nothing was started.` (the registry adds the `Error: ` prefix). The same value set adds the
+  other refusal: a node-job value **without** a `timeout` — `start_in_background` and, since this
+  change, `background_when_timeout` — is refused before the spawn too,
+  naming `start_detached` as the value that owns an unbounded lifetime, because a node job with no
+  deadline would hold its node's composer on Stop until it is killed. There is **no ceiling** on
   `timeout` itself — `timeout: 99999` with `start_in_background` is accepted and the whole budget
   travels to the hub — and `spinney.commandTimeout` / `spinney.commandTimeoutMax` no longer exist.
-  `tools/exec-timeout-acceptance.js` (`npm run check:timeout`, 47 checks, part of
+  `tools/exec-timeout-acceptance.js` (`npm run check:timeout`, 52 checks, part of
   `vscode:prepublish`) pins the matrix and the refusal with a settings stub keyed **by name**
   (`commandMaxForegroundDuration` → 1), which is the only way the limit is observable at all — and a
   stub that answered one value for every key would hide a leftover `commandTimeout` read. The key is
@@ -61,11 +121,19 @@
   may wait, so this join was refused and nothing changed. End your turn instead: the completion
   notice for id 3 will reach you when it finishes (check_background_terminal(3) reports it sooner).
   If you want to end the command rather than wait for it, call kill_background(3).` A job with **no
-  deadline** cannot be waited on at all and is refused for the same reason, saying so instead of
-  naming a budget: `Background terminal 3 has no deadline, so it can run longer than the 300 s a turn
-  may wait, and this join was refused — nothing changed. End your turn instead: the completion notice
-  for id 3 will reach you when it finishes (check_background_terminal(3) reports it sooner). If you
-  want to end the command rather than wait for it, call kill_background(3).`. A finished job is never
+  deadline** (`remainingBudgetMs(task)` → `null`) cannot be waited on at all and is refused for the
+  same reason, saying so instead of naming a budget: `Background terminal 3 has no deadline, so it
+  can run longer than the 300 s a turn may wait, and this join was refused — nothing changed. End
+  your turn instead: the completion notice for id 3 will reach you when it finishes
+  (check_background_terminal(3) reports it sooner). If you want to end the command rather than wait
+  for it, call kill_background(3).`. Since this change the
+  only value that can register such a job is `start_detached` with `timeout` omitted, and a detached
+  job is refused by the check just below, which runs first — so this wording is what the gate answers
+  for a task whose `timeoutMs` is `undefined`, the registry-level statement of the same rule. A
+  **detached** job (`start_detached`) is refused as well, and that refusal says why instead of naming
+  a budget: the job has no deadline and never notifies, so there is nothing to wait for — the caller
+  is told to read it with `check_background_terminal(3)` and to end it with `kill_background(3)`. It is
+  refused outright, before the finished check, so its status does not matter. A finished job is never
   gated (the wait
   returns at once, so there is nothing to bound, and a refusal would tell the model to expect a notice
   for a job that already ended), and a job with ≤ the limit left joins exactly as before.
@@ -95,7 +163,12 @@
   keyed by `(session, node)`: `registries: Map<sessionId, Map<nodeId, BackgroundRegistry>>`
   (`registryFor(owner)` creates lazily) plus a per-session `id → owner` index
   (`lookup(sessionId, id)`). A job therefore belongs to the **node whose turn spawned it** and
-  renders beside that node's card — never another branch or session. `listForNode`,
+  renders beside that node's card — never another branch or session. A **detached** job
+  (`start_detached`) is not a second kind of bucket: it is a task in that same `(session, node)`
+  bucket with `detached: true`, so it keeps its owner, its card and its place in every listing and
+  kill — and only its **lock** and its **notice** are off (the composer keeps offering Send, the
+  delivery path reads `notifyAgent: false`). Its id resolves **per session**, so any node in that
+  session can check it, be refused its join, or kill it. `listForNode`,
   `listForSession` (each hit tagged with its owner), `runningForNode`, `kill`, `waitFor` all take
   `sessionId`, so a task id never leaks across sessions. `register(owner, handle, command, cwd, timeoutMs?)`
   also fires the `onRegistered` hook (`backgroundHub.ts:46`, called at `backgroundHub.ts:106`) once
@@ -198,7 +271,10 @@
   card from the tree node's own meta plus the latest snapshot: a status row of `#taskId` + status +
   the **elapsed chip** (and the same value as the card head's status chip), then the command and the
   output tail, plus a `kill` button (built by `killBackgroundButton`, which posts
-  `killBackground { id }`) only while the job runs.
+  `killBackground { id }`) only while the job runs. A **detached** job's card also wears the
+  `shared` badge: `treeMessage` sets `bgDetached` from the **live task** (the hub's `lookup`), never
+  from the node, so a card restored after a reload — which has no task left to ask — renders as the
+  plain record it is, and the badge says why that job's composer stayed on Send.
 - **The elapsed chip is rendered locally, from clocks the host sends.** The snapshot ships
   `startedAt` and `finishedAt`, never a counter: a running card ticks its chip from `startedAt` on a
   **250 ms `setInterval` in the webview**, so a command that prints nothing for minutes still shows
@@ -256,7 +332,12 @@
   `backgrounds` snapshot, and the card stays as a record with a `Delivered` badge
   (`media/main.js:1211-1224`, `.node-delivered-badge`) plus its persisted `bg*` terminal fields. A
   tool-initiated kill/join (`notifyAgent=false`) skips the notice and settles the card directly
-  (`runtime.ts:3926-3933`). After a restart the card survives `pruneSession` (`tree.ts:531-590`),
+  (`runtime.ts:3926-3933`). A **detached** job is the third ending no notice follows, and the only
+  one that is structural rather than incidental: `onBackgroundFinished` returns before a
+  `SignalNotice` is ever built — nothing is queued for a tool boundary, nothing is injected into an
+  idle owner, nothing is written back — and it settles the card itself (`delivered` flips, the
+  terminal state is repainted), because the agent was never the waiter: it asks with
+  `check_background_terminal`. After a restart the card survives `pruneSession` (`tree.ts:531-590`),
   but never claims to be live: the generic normalization turns a stored `running` into
   `interrupted` (`tree.ts:550-554`) and `delivered` is forced true (`tree.ts:564-566`), because the
   hub is in-memory and the process was torn down. Its body is then rendered from the node's `bg*`
@@ -316,6 +397,12 @@
   `startedAt` plus `finishedAt: number | null` — `finishedAt` is stamped once when the job settles
   (exit, kill, or a failed start) and is what a snapshot's chip freezes on, while the card's
   persisted `bgElapsedMs` is the same subtraction done once when the terminal state is snapshotted.
+  A **detached** job carries `detached: boolean` — set once at `register` (its last argument, after
+  the budget) and never changed afterwards — and the registry sets `notifyAgent: false` together
+  with it, because that is the mechanism the delivery path already understands. The coordinator
+  needs to read only `detached` for the lock rule, and the job itself is counted like any other by
+  `runningCount`: "detached" is a **lock and notice** rule, not a reason to hide a running process
+  from Stop, the delete/clear confirmation or the control plane.
   A job that was given a **budget** carries it too: `timeoutMs` (the total it may run, set only by
   `register`'s last argument) and `deadlineAt` (`startedAt + timeoutMs`) — a deadline rather than a
   countdown, so what is left can be read at any moment through `remainingBudgetMs(task)` (`null` for
@@ -335,7 +422,7 @@
   own deadline — the **only** record of a clean budget kill, which is why the line exists at all) and
   `bg kill id=<id> pid=<pid|none> reason=<user|stop|timeout|rollover|none> outcome=<exited|no-exit|no-pid> ms=<elapsed>`,
   written only when the confirmation failed.
-  `tools/bg-budget-acceptance.js` (`npm run check:budget`, 28 checks, part of `vscode:prepublish`)
+  `tools/bg-budget-acceptance.js` (`npm run check:budget`, 51 checks, part of `vscode:prepublish`)
   pins it: a 500 ms budget kills at about its deadline with `killReason: 'timeout'` and
   `remainingBudgetMs` reading `0` afterwards, an unbudgeted job is still running a second later and
   reads `null` (not `0`), a live job's remaining budget counts down, and the join gate refuses both
@@ -352,7 +439,9 @@
   and the `background` acceptance suite — can verify ownership survived a view move. The `kind:'bg'`
   cards are display-only and never appear there.
 - **A background terminal cannot drive a window reload.** `POST /reload-window` refuses while
-  any sub-agent or background terminal is live (`controlReloadWindow`), so a hub-owned job that
+  any sub-agent or **node** background terminal is live (`controlReloadWindow` →
+  `anyRunningBackground()` → `hasRunningNodeBackground()`; a `start_detached` job is
+  fire-and-forget and deliberately does not block a reload), so a hub-owned job that
   calls it is refused by its own existence, and a foreground call from inside a turn is refused
   by the turn check. A reload has to come from outside the window — the `hvsc` supervisor, a
   terminal issuing `wait-for-finish` + `reload-window`, or the user. This is the one action a job

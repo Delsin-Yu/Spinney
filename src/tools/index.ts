@@ -4,6 +4,7 @@ import * as path from 'path';
 import * as vscode from 'vscode';
 import { AgentTool, ToolDefinition } from '../agent/types';
 import type { BackgroundAccess } from '../chat/backgroundHub';
+import { clipText } from '../text';
 import { makeCheckBackgroundTool, makeJoinBackgroundTool, makeKillBackgroundTool } from './backgroundTools';
 import { makeExecCommandTool } from './execCommand';
 import { listDirTool } from './listDir';
@@ -208,7 +209,7 @@ export function searchExcludeGlobs(): string[] {
 const RAW_TOKEN_RE = /<<<RAW:([A-Za-z0-9_]+)>>>|<<<END_RAW:([A-Za-z0-9_]+)>>>/g;
 
 function truncate(s: string, n = 200): string {
-  return s.length > n ? s.slice(0, n) + '…' : s;
+  return s.length > n ? clipText(s, n) : s;
 }
 
 /**

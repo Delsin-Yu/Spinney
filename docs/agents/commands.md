@@ -21,10 +21,12 @@ npm run check:kill                           # guard: the kill-confirmation cont
 npm run check:timeout                        # guard: the foreground limit and the background promotion
 npm run check:budget                         # guard: the background job budget (deadline, countdown, join refusals)
 npm run check:websearch                      # guard: the keyless web_search / web_fetch pair
+npm run check:image                          # guard: the pre-upload image transform (PNG codec, resampler, JPEG decode)
 npm run check:remote                         # guard: the remote mirror transport and the cross-language crypto
 npm run check:relay                          # guard: a real relay on a loopback port driving RelayTransport
 npm run check:remote-surfaces                # guard: the remote-control surfaces (services, routing table, blocklist)
 npm run check:remote-assets                  # guard: the Android copies of the shipped webview assets
+npm run check:unicode                        # guard: the well-formed text contract (out/text.js)
 npm run package                              # compile + guards + package (.vsix) + collect   — POSIX
 npm run artifacts                            # collect the built artifacts into artifacts/ (no rebuild)
 powershell -File build-deploy.ps1            # compile + package + install         — Windows
@@ -33,12 +35,12 @@ powershell -File build-deploy.ps1 -NoInstall # compile + package only           
 
 `npm run package` and `build-deploy.ps1` are the two side-by-side closing paths.
 `npm run package` is the POSIX entry point: it packages the `.vsix`, runs the
-`vscode:prepublish` gate (compile + `sync:l10n` + the **eighteen** guards — `check:models`,
+`vscode:prepublish` gate (compile + `sync:l10n` + the **twenty** guards — `check:models`,
 `check:webview`, `check:modeltree`, `check:signals`, `check:l10n`, `check:rollover`,
 `check:grid`, `check:docs`, `check:cwd`, `check:shell`, `check:kill`, `check:timeout`,
-`check:budget`, `check:websearch`, `check:remote`, `check:relay`, `check:remote-surfaces`,
-`check:remote-assets`) on the way, and takes the generated l10n aliases off disk
-again once it is done.
+`check:budget`, `check:websearch`, `check:image`, `check:remote`, `check:relay`, `check:remote-surfaces`,
+`check:remote-assets`, `check:unicode`) on the way, and takes the generated l10n
+aliases off disk again once it is done.
 `build-deploy.ps1` is the Windows path, and it also installs
 `artifacts/spinney-<version>.vsix` **by that exact path** with
 `code --install-extension --force` (there is no "newest `.vsix`" search any more).

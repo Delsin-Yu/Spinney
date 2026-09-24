@@ -85,6 +85,20 @@
   `src/tools/searchTranscripts.ts` sits *inside* its `try` so an invalid regex still
   answers `Error: invalid regex: …`. `listTranscriptSessions` (the cheap index
   branch) is still synchronous on purpose.
+- **A rendered line is clipped, never sliced.** Every cut in the renderer goes through
+  `clipText` from `src/text.ts` — the module's only text import
+  (`import { clipText } from '../text';`); `sliceText` / `tailText` belong to the callers
+  that write their own tail — the content (`clip(text, 400)`), the tool arguments
+  (`clip(fn.arguments, 200)`), the thinking block (`clip(reasoning, 200)`), the meta values
+  (`clip(value, 400)`), and, outside the renderer proper, the hit line and its label
+  (`clip(rendered[i], 200)` / `clip(label, 100)`) and the session-header titles
+  (`clip(t, 60)`) — because a clip that cuts at a UTF-16 code-unit boundary splits an
+  emoji's surrogate pair, and a lone high surrogate in a **hit** is what poisoned a whole
+  request (`conversation-validity.md`): the rendered line is returned to the model verbatim,
+  the half becomes a message, `JSON.stringify` writes it as `"\ud83d"`, and the provider's
+  reader answers 400 `unexpected end of hex escape`. A search hit quotes **verbatim** text
+  from other sessions, which is exactly how foreign text reaches a request — the clip site,
+  not the source transcript, is where well-formedness has to hold.
 - **Deleting a branch deletes its dumps** so the on-disk record never outlives the
   history that produced it: `removeTranscripts(dir, nodeIds)` removes
   `<dir>/<nodeId>.jsonl` per id (ids are validated against `^[A-Za-z0-9_-]+$`, so

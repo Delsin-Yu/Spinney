@@ -32,6 +32,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { ChatMessage, Usage } from '../agent/types';
+import { clipText } from '../text';
 
 /**
  * Tool results that are a runtime denial rather than real output. Anchored and
@@ -496,9 +497,15 @@ const MAX_TRANSCRIPT_FILE = 8 * 1024 * 1024;
 const MAX_TRANSCRIPT_FILES = 20000;
 const MAX_CONTEXT_LINES = 10;
 
+/**
+ * One search-result line, at most `n` characters. The cut goes through
+ * {@link clipText}, never `slice`: an unpaired surrogate half (an emoji's
+ * high half) is what a strict JSON reader rejects as `unexpected end of hex
+ * escape`, failing the whole request.
+ */
 function clip(s: string, n: number): string {
   const one = s.replace(/\s+/g, ' ').trim();
-  return one.length > n ? one.slice(0, n) + '…' : one;
+  return one.length > n ? clipText(one, n) : one;
 }
 
 /** Flatten a message's content (string or content-part array) to plain text. */

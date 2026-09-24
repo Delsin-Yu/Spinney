@@ -12,7 +12,7 @@ gitignored, so a leftover is harmless). Before a release, confirm `npm run compi
 `npm run vscode:prepublish` — on a push to `main`, on a `v*` tag, on a pull request and on
 demand, so a red workflow and a red gate are the same thing instead of two lists that drift.
 
-Eighteen build-time guards are the exception, all run by `vscode:prepublish` so a
+Twenty build-time guards are the exception, all run by `vscode:prepublish` so a
 regression fails *packaging* instead of the user's session:
 
 - `npm run check:models` (`tools/check-models.js`) — the model configuration:
@@ -92,6 +92,35 @@ regression fails *packaging* instead of the user's session:
   real window fills up — a wrong cut silently sends the entire dead history, or nothing
   at all — so they are pinned here. Like `check:signals` it is pure node against `out/`,
   and therefore also runs after `compile` in `vscode:prepublish`.
+- `npm run check:unicode` (`tools/check-unicode.js`) — text that stays **well-formed**, the
+  one failure nothing local can see and the provider's reader rejects outright: `clipText` /
+  `sliceText` must never return an unpaired UTF-16 surrogate for **any** cut position (a
+  valid emoji pair straddling the boundary included) and never differ from a naive
+  `s.slice(0, n) + '…'` except where that cut would have split a pair; `tailText`, the mirror
+  cut at the **head** (a background terminal's output tail), has its own assertion group —
+  a pair straddling that cut is dropped whole, so the kept text never begins on a low half;
+  `wellFormed` turns a lone leading surrogate, a lone trailing one and a reversed pair into
+  U+FFFD while a valid pair survives byte-for-byte; `wellFormedDeep` fixes a whole
+  message-shaped tree (content parts and `tool_calls[].function.arguments`) without mutating
+  its input; in that same group sits the regression that matters — `JSON.stringify` of a
+  sanitised value carries **no** unpaired-surrogate escape, the exact shape serde_json
+  rejects (`unexpected end of hex escape`) — an HTTP 400 that kills the whole request, the
+  2026-09-24 incident, where one clipped `📎` in a `search_transcripts` hit turned every
+  later request of that turn into a failure. Its **last** step is the source scan:
+  `src/**/*.ts` for a reintroduced clip, in **four** shapes, each read with the ellipsis
+  written either literally (`…`) or as the escape `\u2026` (both spellings are in the tree —
+  `src/tools/webBackends.ts` writes the escape — and an escaped ellipsis splits a pair just
+  as well): the two **head** shapes (`.slice(…) + '…'`, a `slice` interpolated into `…` —
+  remedy `clipText` / `sliceText`) and the two **tail** shapes (`'…' + value.slice(-n)`,
+  `` `…${value.slice(-n)}` ``, the same failure with the halves swapped, so the lone half is a
+  **low** surrogate — remedy `tailText`). A hit fails the build with `file:line`, pointing at
+  `src/text.ts`.
+  Pure node against the compiled `out/text.js` — the helper, never the source — so like
+  `check:signals` it needs `compile` first and runs after it in `vscode:prepublish`. What it
+  can **not** see: a value that reaches the wire without one of these helpers; the clip is
+  only half the contract, the `wellFormedDeep` call at the request boundary
+  (`src/agent/apiClient.ts`) the other, and a missing call site leaves no `slice` behind for
+  the source scan to find.
 - `npm run check:grid` (`tools/check-tree-grid.js`) — the Chat Tree's sidecar lattice
   (`media/tree.js` plus the vendored tidy-tree engine into node with `vm`, no DOM and no
   VS Code): over ~18 topologies (flat 1..9, nesting two and three levels deep, a card
@@ -178,27 +207,32 @@ regression fails *packaging* instead of the user's session:
   `bg kill id=… pid=… outcome=… ms=…` diagnostics line, a confirmed one stays quiet.
   Needs `out/` and is portable — the POSIX and Windows halves exercise the same public
   API. Part of `vscode:prepublish`.
-- `npm run check:timeout` (`tools/exec-timeout-acceptance.js`, **47 checks**) — the
+- `npm run check:timeout` (`tools/exec-timeout-acceptance.js`, **52 checks**) — the
   **foreground limit** `spinney.commandMaxForegroundDuration` (300 s) and the
   `exec_command` budget model it rules: `timeout` is the command's **total** budget —
   foreground plus background — with **no ceiling**, the limit caps only the
   **foreground slice** (`min(timeout, limit)`), and the default `timeout_behavior` is
-  `stop` again. It pins, in order: (1) a fast command stays a plain foreground call
+  `stop_when_timeout` again. It pins, in order: (1) a fast command stays a plain foreground call
   (`[exit 0 in …]`, nothing registered anywhere); (2) a `timeout` at or below the
-  limit, with no behavior or an explicit `"stop"`, is killed at that timeout even
+  limit, with no behavior or an explicit `"stop_when_timeout"`, is killed at that timeout even
   where a background terminal was available (the budget is spent, so promoting it
   would be "kill it immediately" in disguise); (3) **rule R2** — a `timeout` *above*
-  the limit with no behavior, or with `"stop"`, is **refused before the spawn** by
+  the limit with no behavior, or with `"stop_when_timeout"`, is **refused before the spawn** by
   `timeoutTooLongError`, with the message naming both numbers and saying
   `Nothing was started.`, and with neither a process nor a background job created
   (a returned value would be a silent clamp); (4) `timeout` above the limit **with**
-  `"move_to_background"` is promoted at the **limit**, not at `timeout`, and the job
+  `"background_when_timeout"` is promoted at the **limit**, not at `timeout`, and the job
   carries only the **remaining** budget `timeout − limit` — the message names both
   numbers, `hub.register` happens exactly once under the **owner of the turn** (a job
   registered under the wrong owner renders in the wrong branch and its notice reaches
   nobody), and a `timeout` that fits inside the limit is *not* promoted at all;
-  (5) a background behavior with `timeout` omitted registers a job with **no
-  deadline** (`hub.register` gets no budget) and the message names no budget in ms;
+  (5) a **node-scoped** value with `timeout` omitted — `background_when_timeout` (case 7)
+  and `start_in_background` (case 8b) alike — is **refused before the spawn** by the one
+  refusal (`needsTimeoutError(behavior)`) that names the value that was asked for, the
+  missing `timeout`, the reason (`locks this node`) and both ways out (pass a `timeout`,
+  or use `start_detached`), and it returns at once with nothing registered
+  (`hub.register` is never called — the shape that used to be promoted into a node job
+  with **no deadline** is closed here);
   (6) there is **no ceiling** — `timeout: 99999` with `start_in_background` is
   accepted and the whole 99999 s travels to the background as that job's budget;
   (7) a session without background access — a bare `ToolRegistry`, exactly what
@@ -206,7 +240,9 @@ regression fails *packaging* instead of the user's session:
   `timed out`, registers nothing and never throws `Background terminals are not
   available`; and (8) the tool description keeps the two rules a sub-agent reads
   there (never background the command yourself, use `cwd` instead of a
-  `cd <dir> && …` prefix), gains the limit sentence, and no longer contains the
+  `cd <dir> && …` prefix), gains the limit sentence and the rule that **both**
+  node-scoped values need a `timeout` while `start_detached` is the only value that may
+  omit one, and no longer contains the
   deleted `spinney.commandTimeout` / `spinney.commandTimeoutMax` at all. The settings
   stub answers **keyed by name** (`commandMaxForegroundDuration` → 1), because the
   limit is only observable when the key can be wrong: a stub that answers every key
@@ -215,7 +251,7 @@ regression fails *packaging* instead of the user's session:
   compile` first) and is portable by construction: the "slow" command is
   `process.execPath -e …`, so it needs no `sleep`, no shell builtin and no PATH
   lookup. Part of `vscode:prepublish`.
-- `npm run check:budget` (`tools/bg-budget-acceptance.js`, **28 checks**) — the
+- `npm run check:budget` (`tools/bg-budget-acceptance.js`, **51 checks**) — the
   **background budget** contract, the half of "a turn may not be held forever" the
   foreground could not fix: once a job left the foreground it ran until the end of
   time, and `join_background` would block a turn for as long as it took. It stubs
@@ -234,7 +270,9 @@ regression fails *packaging* instead of the user's session:
   `End your turn`, names `kill_background(<id>)`, is an instruction rather than an
   `Error:` line, and comes back at once instead of waiting on the job it refused), a
   live job with **no deadline** is refused too (`has no deadline` — otherwise an
-  unbudgeted job could hold a turn for hours, which is the whole bug), a live job
+  unbudgeted job could hold a turn for hours, which is the whole bug; this guard
+  registers such a job directly, since `exec_command` now only produces one for
+  `start_detached`, whose refusal the detached check answers first), a live job
   with 800 ms left is **allowed** and the join resolves when the budget ends it, and
   an already-finished job keeps today's wording. Every await is bounded: a case that
   never settles fails the run instead of hanging it. Needs `out/` and is portable by
@@ -338,6 +376,31 @@ not end, `check:budget` what happens once the work has left the turn).
   `tools/fixtures/web-backends/`, so a backend that changes its markup or its
   captcha wall fails packaging instead of quietly returning nothing to the user.
   See `docs/agents/web-search.md`.
+- `npm run check:png` (`tools/check-png.js`) — the PNG codec (`src/agent/pngCodec.ts`):
+  a decode → encode **round trip**, colour types 0 / 2 / 3 / 4 / 6, filters 0–4, and
+  adaptive re-filtering on encode (RGBA in, RGBA out). Needs `out/` (`npm run compile`
+  first), like the three beside it.
+- `npm run check:resample` (`tools/check-resample.js`) — `cropResample`
+  (`src/agent/imageResample.ts`): an **area-average** downscale (nearest-neighbour
+  thinning is the bug this pins — it invents aliasing the model then reports as image
+  content), **no** upscale (a crop already inside the target comes back as it is), the
+  crop `rect` itself, and the `scale` it reports. Needs `out/` (`npm run compile` first).
+- `npm run check:image` (`tools/check-image.js`, and `check:png` + `check:resample` +
+  `check:jpeg` run with it — `check:image` is the aggregate `npm run` entry, `check:jpeg`
+  the JPEG half alone) — the transform itself (`src/agent/imageTransform.ts`):
+  bytes-in / bytes-out, `changed: false` for an unsupported variant (GIF, WebP, an
+  interlaced or 16-bit PNG, a damaged file), `rect` clamping through `normalizeRect`,
+  `readImageSize` — and the **PIL-oracle rule**: its fixtures are produced by an
+  **independent** tool (Python PIL) and the guard compares **pixels** against that tool's
+  committed expectation, it does not merely round-trip, because a pure-JS encoder and
+  decoder pair can share a bug and certify itself — exactly what
+  `docs/agents/plans/image-budget.md` §6 says this must not do. It needs `out/`
+  (`npm run compile` first), because it drives the compiled modules, and `check:image` is
+  the one wired into `vscode:prepublish` by the integration slice.
+- `npm run check:jpeg` (`tools/check-jpeg.js`) — the JPEG decoder (`src/agent/jpegDecode.ts`,
+  with `jpegEntropy.ts` / `jpegReconstruct.ts` behind its seam) against the **same PIL
+  oracle** (baseline sequential only): the expected pixels are committed beside each
+  fixture, so PIL is not needed at guard time. Needs `out/` (`npm run compile` first).
 
 `tools/exec-cwd-acceptance.js` and the four scripts listed after it above
 (`shell-argv-acceptance.js` / `exec-kill-acceptance.js` / `exec-timeout-acceptance.js` /

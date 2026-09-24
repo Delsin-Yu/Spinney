@@ -107,10 +107,22 @@ That 400 text now has a **second consumer**: `parseContextLengthError()` in the
 same catalog module recognizes the refusal, and that is what triggers a context
 rollover (`context-rollover.md`) — the provider's refusal, never a local
 threshold, because a threshold would have to fire before the window is full and
-would therefore have to summarise. The parser does return the window and the
-refused size it matched, but no caller reads them: its one consumer
-(`contextFull`, `chat/runtime.ts`) only asks whether the failure *is* that
-refusal, which is why the fields are never compared or written back. `usage.prompt_tokens`
+would therefore have to summarise. The classifier that sits in front of it is
+`windowFullReason()` in the same module: it returns the refusal's *kind* —
+`'tokens'` for the context-length text above, `'images'` for the provider's
+**per-request image-size** refusal (`Total image size exceeds the limit: max 200 MB
+per request, got … MB` — the byte budget `vision-images.md` tracks), `undefined` for
+anything else — and the second kind earns exactly the same treatment for exactly the
+same reason: it is the same *kind* of authoritative refusal text out of the provider,
+so **the text stays the only trigger**. No threshold is introduced with it, and
+nothing is compared against the declared `contextWindow` or against
+`MAX_REQUEST_IMAGE_BYTES`. `windowFullReason()` is the classifier **both** consumers
+run through: it returns the kind, and `nodeContextFull` (`chat/runtime.ts`) only asks
+whether it is defined — which is why both kinds make a node context-full and offer
+the same `⧉` rollover. `parseContextLengthError()` remains the **token-half reader**,
+and no caller ever reads the window and the refused size it matched — the only
+question asked of it is whether the failure *is* that refusal — which is why the
+fields are never compared or written back. `usage.prompt_tokens`
 is **never a trigger, only a readout**: it is the *previous* request's number, and
 it has already lied once — the header read `ctx 65%` while the request that failed
 carried ~1.28 M tokens. When the window named in the 400 disagrees with

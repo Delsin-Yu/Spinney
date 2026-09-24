@@ -1049,6 +1049,66 @@
     }
   }
 
+  // ---- Remembering where a reader was ------------------------------------------
+  // **A repaint never moves a scroller.** A rebuild, a measurement or a fold can each
+  // take a container's position away, and none of them puts it back: `innerHTML = ''`
+  // resets it, and a scroll container that is briefly given the height of its own
+  // content has nothing to scroll over at all, so the engine clamps its `scrollTop` to
+  // 0 (that is what the split measurement used to do to the work log — see the
+  // `split-measure` rule in style.css). The one thing that survives all of them is the
+  // offset the reader last scrolled to, so each zone keeps it and hands it back.
+  // A locked card is never restored: its follow light owns the bottom, and the caller
+  // pins it there (`scrollToBottom`).
+  const SCROLL_MEMORY = '_scrollMemory';
+
+  /**
+   * Start remembering this container's offset. Attached once, when the card that owns
+   * the container is built; a container with no scrollable geometry at all (the
+   * offline webview checker has no layout) never records anything, and a host without
+   * that geometry simply never restores.
+   */
+  function rememberScroll(container) {
+    if (!container || container[SCROLL_MEMORY]) return container;
+    const memory = { top: 0, seen: false };
+    container[SCROLL_MEMORY] = memory;
+    container.addEventListener(
+      'scroll',
+      () => {
+        // A container with nothing to scroll over — an empty zone mid-rebuild, or one
+        // the split measurement has briefly stretched to its own content height — has
+        // no offset worth keeping. Those are exactly the transitions this memory
+        // exists to survive, and the 0 they leave behind would *delete* the reader's
+        // position instead of saving it, so it is not recorded.
+        const top = container.scrollTop || 0;
+        const scrollable = (container.scrollHeight || 0) > (container.clientHeight || 0);
+        if (top === 0 && !scrollable) return;
+        memory.top = top;
+        memory.seen = true;
+      },
+      { passive: true },
+    );
+    return container;
+  }
+
+  /** The offset this container was last scrolled to, or `null` if it never was. */
+  function scrollMemory(container) {
+    const memory = container && container[SCROLL_MEMORY];
+    return memory && memory.seen ? memory.top : null;
+  }
+
+  /** Put a remembered offset back. The engine clamps it to the box it now has. */
+  function restoreScroll(container, top) {
+    if (!container || top == null) return;
+    if (container.scrollTop !== top) container.scrollTop = top;
+  }
+
+  /** One computed length off an element; `0` when there is no layout to ask. */
+  function cssPx(node, prop) {
+    if (!node || typeof window.getComputedStyle !== 'function') return 0;
+    const cs = window.getComputedStyle(node);
+    return cs ? parseFloat(cs[prop]) || 0 : 0;
+  }
+
   // ---- Active blocks: the block that is live right now is always expanded ----
   // A thinking block receiving deltas, and a tool call between its first delta and
   // its end, are *active*: they are expanded whatever `foldThinking` /
@@ -1359,9 +1419,23 @@
     return last;
   }
 
+  /**
+   * Nullish coalescing, for an engine that may not have it.
+   *
+   * This file is rendered twice: by the desktop's Electron Chromium, and inside the Android
+   * app's WebView, which can be far older — API 28 ships Chromium 69, and the two-question-mark
+   * operator needs Chromium 80. There the whole script fails to PARSE, so nothing renders: the
+   * shell's static HTML is still on screen while every card is missing. The syntax floor is
+   * therefore the older of the two engines, and a guard fails packaging when a modern-syntax
+   * operator returns (tools/check-remote-assets.js).
+   */
+  function orElse(value, fallback) {
+    return value === undefined || value === null ? fallback : value;
+  }
+
   function formatUsage(usage) {
-    const hit = usage.prompt_cache_hit_tokens ?? 0;
-    const miss = usage.prompt_cache_miss_tokens ?? 0;
+    const hit = orElse(usage.prompt_cache_hit_tokens, 0);
+    const miss = orElse(usage.prompt_cache_miss_tokens, 0);
     return tr(
       'tokens {0} (prompt {1} + completion {2}) · cache hit {3} / miss {4}',
       usage.total_tokens,
@@ -1745,6 +1819,13 @@
     const answerEl = card.querySelector('.node-answer');
     const answerWrap = card.querySelector('.node-answer-wrap');
     if (!workEl || !askEl) return;
+    // A full render clears both zones, which is the one way a position can be thrown
+    // away with nothing to be said for it: keep what each zone remembers and hand it
+    // back once the items are in. On a card's *first* render there is nothing to hand
+    // back (`rememberScroll` has not seen a scroll yet) and `_needsBottomScroll` is
+    // the positioning that render wants, so both cases fall through untouched.
+    const keepWork = scrollMemory(workEl);
+    const keepAnswer = scrollMemory(answerEl);
     workEl.innerHTML = '';
     if (answerEl) answerEl.innerHTML = '';
     askEl.innerHTML = '';
@@ -1831,6 +1912,14 @@
     // settled by now, and a header click the user made earlier is preserved
     // (`_workTouched`).
     autoWorkFold(card);
+    // Now that the zones are painted and folded, a reader who was here before gets
+    // their offset back (a folded log has nothing to scroll, so it keeps the offset
+    // for the unfold — see `setWorkFold`). Follow owns a locked card, and
+    // `_needsBottomScroll` is still the card opening at its newest content.
+    if (!(card._itemScroll && card._itemScroll.locked) && !card._needsBottomScroll && !card.classList.contains('work-folded')) {
+      restoreScroll(workEl, keepWork);
+      restoreScroll(answerEl, keepAnswer);
+    }
   }
 
   // ---- The three zones of a turn card ------------------------------------------
@@ -2052,6 +2141,23 @@
     // The fold is also the moment the 1:2 rule starts or stops applying, so the
     // body's definite height is settled with it (see `settleAnswerSplit`).
     settleAnswerSplit(card);
+    // Unfolding is the moment the log is a scroller again, so it is also the moment
+    // the two things this card remembers can be applied — and it is the *only* moment
+    // for a card that opened with its log folded: the promotion that lifts the answer
+    // into zone 3 folds the log in the same pass, and a `scrollTop` written into a
+    // `display: none` scroller is thrown away, so `_needsBottomScroll` waits here.
+    if (card._workFolded) return;
+    const work = card.querySelector('.node-work');
+    if (!work) return;
+    if (card._needsBottomScroll) {
+      work.scrollTop = work.scrollHeight;
+      card._needsBottomScroll = false;
+      return;
+    }
+    // Everything else is the reader's: give back the offset they had (nothing to give
+    // while follow owns the card — `settleAnswerSplit` above already skipped it).
+    if (card._itemScroll && card._itemScroll.locked) return;
+    restoreScroll(work, scrollMemory(work));
   }
 
   /**
@@ -2081,6 +2187,12 @@
   // with the split suspended (`SPLIT_MEASURE`) both zones report their natural height, and
   // only then can either be given "what it needs" instead of a guessed share.
   const SPLIT_MEASURE = 'split-measure';
+  /**
+   * The one case where the log's own wrapper may hug its content during that read: the
+   * log is already showing everything it holds, so it has no offset to lose (see
+   * `settleAnswerSplit`, and the matching rule in style.css).
+   */
+  const SPLIT_MEASURE_LOG = 'split-measure-log';
   /**
    * The log's own strip: what it shows while scrolling, by default. It is the one number
    * that decides how much of the process stays visible under an answer, and dragging the
@@ -2144,6 +2256,11 @@
    * does not apply (a folded log, a collapsed card) or when the host has no layout at all:
    * the offline webview checker measures 0, and a height written on a guess — or a split
    * class with no measurement behind it — would be worse than none.
+   *
+   * This function runs on every routed append and on every repaint, and it is the one
+   * step that can move a reader: the answer zone is *measured* by letting it hug its
+   * content, and the log's own measurement used to do the same to the one scroller in
+   * the card (see the tail of this function and the `split-measure` rule in style.css).
    */
   function settleAnswerSplit(card) {
     if (!card || kindOf(card) === 'bg') return;
@@ -2151,6 +2268,16 @@
     const workWrap = card.querySelector('.node-work-wrap');
     const answerWrap = card.querySelector('.node-answer-wrap');
     if (!body || !workWrap || !answerWrap) return;
+    // Where the two zones were before this pass touches anything, and whether follow
+    // owns the card: a locked card is pinned to its newest content by its caller, and
+    // must never be handed back to an older offset. A zone the reader never scrolled
+    // has no offset to give back (`null`), so a fresh card still opens where its own
+    // rules put it.
+    const workEl = card.querySelector('.node-work');
+    const answerEl = card.querySelector('.node-answer');
+    const keepWork = scrollMemory(workEl);
+    const keepAnswer = scrollMemory(answerEl);
+    const following = !!(card._itemScroll && card._itemScroll.locked);
     const wanted = card.classList.contains('expanded') && !card.classList.contains('work-folded');
     let bodyH = 0;
     let answerH = '';
@@ -2166,16 +2293,39 @@
       // the end of this function re-apply whatever this pass decides.
       answerWrap.style.height = '';
       card.classList.add(SPLIT_MEASURE);
-      const work = card.querySelector('.node-work');
-      // The log reserves a strip under itself for its scroll-lock dot (a margin, so
-      // the wrapper's `offsetHeight` does not count it) — without it the log would
-      // still miss those pixels and scroll by them.
-      const strip =
-        work && typeof window.getComputedStyle === 'function'
-          ? parseFloat(window.getComputedStyle(work).marginBottom) || 0
-          : 0;
-      const logH = (workWrap.offsetHeight || 0) + strip;
+      const work = workEl;
+      // The log reserves a strip under itself for its scroll-lock dot (a margin) —
+      // without it the log would still miss those pixels and scroll by them.
+      const strip = cssPx(work, 'marginBottom');
+      // Two ways to read the log's natural height, and choosing between them is the
+      // whole point of this measurement. A log that is *already showing everything it
+      // holds* has no offset a reader could lose (`0` is the only representable one),
+      // so it may be let onto a content basis for one read and measured the way every
+      // card used to be: the wrapper's own `offsetHeight`. A log that DOES overflow is
+      // read off its own `scrollHeight` — the number the stretched wrapper stood in for
+      // — and its box is left alone, because stretching a scroller to the height of its
+      // own content leaves it with nothing to scroll over and the engine clamps its
+      // `scrollTop` to 0. That is how a card the reader had unlocked to inspect an older
+      // tool call was thrown back to the top of its log by every token the agent
+      // emitted, and a locked card hid it by re-pinning itself to the bottom right
+      // after. `scrollHeight` is floored at the box height, which is exactly why the
+      // no-overflow case cannot use it and hugs instead. The strip is counted twice,
+      // as the wrapper read counted it: this number is a floor comparison, and no
+      // card's share may move with this change.
+      const overflows = !!work && (work.scrollHeight || 0) > (work.clientHeight || 0);
+      if (!overflows) card.classList.add(SPLIT_MEASURE_LOG);
+      const head = card.querySelector('.node-work-head');
+      const logChrome =
+        cssPx(workWrap, 'paddingTop') +
+        cssPx(workWrap, 'paddingBottom') +
+        (head ? head.offsetHeight || 0 : 0) +
+        cssPx(head, 'marginBottom') +
+        strip;
+      const logH = overflows
+        ? (work.scrollHeight || 0) + logChrome + strip
+        : (workWrap.offsetHeight || 0) + strip;
       const answerNatural = answerWrap.offsetHeight || 0;
+      if (!overflows) card.classList.remove(SPLIT_MEASURE_LOG);
       card.classList.remove(SPLIT_MEASURE);
       if (logH + answerNatural > 0) {
         const others = cardFixedHeight(card);
@@ -2252,6 +2402,15 @@
       // The card's size just changed and the tree places cards by measured height:
       // hand it a relayout (debounced) instead of leaving a neighbour overlapping.
       scheduleLayout();
+    }
+    // The measurement is over and the real heights are written back, so the offsets
+    // the reader had can go home. Never while follow owns the card (a locked card is
+    // pinned to its newest content by the caller) and never while `_needsBottomScroll`
+    // is pending: that flag *is* the card opening at its newest content, which is not
+    // where the reader was.
+    if (!following && !card._needsBottomScroll) {
+      restoreScroll(workEl, keepWork);
+      restoreScroll(answerEl, keepAnswer);
     }
   }
 
@@ -2370,9 +2529,11 @@
   }
 
   /**
-   * Extend the window towards the end the user reached, and keep the scroll
-   * position on the text they are reading: the window above grows by what the
-   * newly rendered items add to the scroll height.
+   * Extend the window towards the end the user reached, and keep the scroll position
+   * on the text they are reading: the window that grew above the viewport added
+   * exactly that much to the scroll height, and the window that grew below it added
+   * nothing above — the same correction, read off the container itself, covers both.
+   * (It used to be applied to the upward direction only.)
    */
   function extendItemsWindow(container, state) {
     const atTop = state.start > 0 && container.scrollTop <= VIRTUAL_EXTEND_PX;
@@ -2381,10 +2542,11 @@
       container.scrollTop + container.clientHeight >= container.scrollHeight - VIRTUAL_EXTEND_PX;
     if (!atTop && !atBottom) return;
     const heightBefore = container.scrollHeight;
+    const topBefore = container.scrollTop;
     if (atTop) state.start = Math.max(0, state.start - VIRTUAL_WINDOW);
     if (atBottom) state.end = Math.min(state.items.length, state.end + VIRTUAL_WINDOW);
     paintItemsWindow(container, state);
-    if (atTop) container.scrollTop = Math.max(0, container.scrollTop + (container.scrollHeight - heightBefore));
+    container.scrollTop = Math.max(0, topBefore + (container.scrollHeight - heightBefore));
   }
 
   // Render a stored DisplayItem into the current target container (messagesEl).
@@ -2473,6 +2635,10 @@
    */
   function renderBgBody(card, meta) {
     if (!card) return;
+    // The `shared` badge is a property of the *job* (detached or not), so it is synced
+    // wherever a job card is rendered — the snapshot, a `tree`, a `path` — and not only
+    // while the job is in the snapshot (see `syncSharedBadge`).
+    syncSharedBadge(card, meta);
     const task = meta && meta.bgTaskId != null ? bgTasks.get(Number(meta.bgTaskId)) : null;
     const itemsEl = card.querySelector('.node-work');
     if (!itemsEl) return;
@@ -2582,6 +2748,39 @@
       badge.remove();
     }
     card.classList.toggle('delivered', wanted);
+  }
+
+  /**
+   * The `shared` badge: this job is **detached** — fire-and-forget. The card is still
+   * owned by the node that started it and keeps updating (it is the only place the job
+   * is visible at all), but the job locks no node and never notifies: the composer never
+   * turns into Stop for it, and no completion notice will ever reach the agent, which
+   * reads the outcome with `check_background_terminal` if it wants it.
+   *
+   * A compact 9px dock token like `CTX` / `SUB` / `BG`, placed the way they are (just
+   * before the status chip) and created/removed lazily, so a repaint can never stack
+   * two of them. Both the token and the tooltip are English literals on purpose: a new
+   * `tr()` key would leave every shipped catalog without an entry and fail
+   * `npm run check:l10n`, and the sentence names a model-facing tool, not a UI concept.
+   *
+   * `meta.bgDetached` is the host's judgement (`treeMessage` reads it off the live
+   * task), never re-derived here — and it is absent for a card restored after a
+   * restart, because that card has no live job to be detached from.
+   */
+  function syncSharedBadge(card, meta) {
+    if (!card) return;
+    const wanted = !!(meta && meta.kind === 'bg' && meta.bgDetached === true);
+    let badge = byClass(card, 'node-shared-badge');
+    if (wanted && !badge) {
+      badge = el('span', 'node-shared-badge', 'shared');
+      badge.title =
+        'This job does not block the composer and will not notify the agent; read its result with check_background_terminal.';
+      const head = card.querySelector('.node-head');
+      const status = head.querySelector('.node-status');
+      if (status) head.insertBefore(badge, status); else head.appendChild(badge);
+    } else if (!wanted && badge) {
+      badge.remove();
+    }
   }
 
   /**
@@ -2751,6 +2950,12 @@
     // output (locked); a finished node starts unlocked so it scrolls freely.
     card._itemScroll = attachLock(work, workWrap, meta.status === 'running');
 
+    // Both zones remember where their reader is (`rememberScroll`): a repaint, the
+    // split measurement or a fold/unfold puts them back there — see the memory block
+    // at the top — and this is the one place a card's zones are built.
+    rememberScroll(work);
+    rememberScroll(answer);
+
     // The header exists from here on and is never rebuilt, so its label is written
     // once at creation; every later change goes through the fold hooks.
     updateWorkHead(card);
@@ -2760,7 +2965,7 @@
     // "wake this card before writing into it" hook both hold an element and need its id.
     card._nodeId = id;
     treeCanvas.appendChild(card);
-    cvObserver?.observe(card);
+    if (cvObserver) cvObserver.observe(card);
     return card;
   }
 
@@ -3033,8 +3238,14 @@
       syncAnswerZone(card);
     }
     // Not a follow target (no lock dot): zone 3 opens at the top, where an answer
-    // starts — the end of an answer is not what a reader wants to see first.
-    if (answerEl) answerEl.scrollTop = 0;
+    // starts — the end of an answer is not what a reader wants to see first. Once per
+    // card, though: a repaint must give the band back where the reader left it (that
+    // restore lives in `settleAnswerSplit`), and this write used to undo it on every
+    // `tree` / `path` — the answer jumped back to its first line under the reader.
+    if (answerEl && !card._answerOpened) {
+      answerEl.scrollTop = 0;
+      card._answerOpened = true;
+    }
     excerptEl.classList.add('hidden');
     // The zones are on screen now, so the state that wants the 1:2 split can be
     // settled (a repaint re-measures; a hidden card cannot be measured at all).
@@ -3042,11 +3253,18 @@
     if (card._itemScroll && card._itemScroll.locked) {
       // Following a live turn: pin to the newest content.
       card._itemScroll.scrollToBottom();
-    } else if (card._needsBottomScroll) {
-      // Unlocked (finished) card: open at the newest content, then scroll freely.
-      if (workEl) workEl.scrollTop = workEl.scrollHeight;
+      card._needsBottomScroll = false;
+    } else if (card._needsBottomScroll && workEl && !card.classList.contains('work-folded')) {
+      // Unlocked (finished) card: open at the newest content, then scroll freely —
+      // but only once the log is really showing. A finished card usually opens with
+      // its log folded (the promotion above hides it the moment there is an answer),
+      // and a `scrollTop` written into a `display: none` scroller is thrown away, so
+      // the flag stays pending and `setWorkFold` consumes it when the reader unfolds
+      // the log — which is the moment this card's newest content first becomes
+      // visible.
+      workEl.scrollTop = workEl.scrollHeight;
+      card._needsBottomScroll = false;
     }
-    card._needsBottomScroll = false;
   }
 
   function collapsedCard(id, meta) {
@@ -3807,7 +4025,7 @@
     // The view focus is independent of the stream target (spec §2.2): the tree
     // expands / docks on `viewId`, while `activeId` (the node currently streaming)
     // is only there for hosts that predate the split.
-    treeActiveId = tree.viewId ?? tree.activeId ?? null;
+    treeActiveId = orElse(orElse(tree.viewId, tree.activeId), null);
     activePathSet = new Set(pathIdsFromTree(treeNodes, treeActiveId));
 
     for (const id in treeNodes) {
@@ -4033,7 +4251,8 @@
       keepActiveInView();
       const card = treeActiveId ? nodeEls[treeActiveId] : null;
       if (card && card._itemScroll) card._itemScroll.scrollToBottom();
-      if (treeActiveId && treeNodes[treeActiveId]?.children?.length) scheduleLayout();
+      const active = treeActiveId ? treeNodes[treeActiveId] : null;
+      if (active && active.children && active.children.length) scheduleLayout();
     });
   }
 
@@ -5304,10 +5523,16 @@
           card._needsBottomScroll = true;
         }
         // Open the just-filled card at its newest content (a locked card is pinned
-        // there anyway, an unlocked one takes the flag `expandedCard` would).
-        if (card._itemScroll && card._itemScroll.locked) card._itemScroll.scrollToBottom();
-        else if (card._needsBottomScroll) itemsEl.scrollTop = itemsEl.scrollHeight;
-        card._needsBottomScroll = false;
+        // there anyway, an unlocked one takes the flag `expandedCard` would) — but
+        // only while the log is really showing: a folded log has nothing to scroll,
+        // and the flag waits for `setWorkFold` to unfold it (same rule as there).
+        if (card._itemScroll && card._itemScroll.locked) {
+          card._itemScroll.scrollToBottom();
+          card._needsBottomScroll = false;
+        } else if (card._needsBottomScroll && itemsEl && !card.classList.contains('work-folded')) {
+          itemsEl.scrollTop = itemsEl.scrollHeight;
+          card._needsBottomScroll = false;
+        }
         // The items are what gives this card its height, and the card's height
         // feeds the layout, so re-place the tree like any other card that changed
         // size (debounced, so a burst of answers coalesces into one relayout).
@@ -5315,7 +5540,7 @@
         break;
       }
       case 'panTo':
-        panToNode(String(msg.id ?? ''));
+        panToNode(String(orElse(msg.id, '')));
         break;
       case 'config': {
         const prevFoldToolCalls = foldToolCalls;

@@ -150,6 +150,28 @@ export const NO_EFFORT = 'none';
  */
 export const MAX_IMAGE_BYTES = 64 * 1024 * 1024;
 
+/**
+ * The provider's **per-request** image ceiling: the request carries every uploaded file
+ * the chain references, and an over-limit request is refused with
+ * `Total image size exceeds the limit: max 200 MB per request, got … MB`
+ * (`docs/agents/plans/image-budget.md` — the failure that started this work). The API's
+ * "MB" is not pinned down, so the number is read as MiB and the brake fires below it
+ * ({@link IMAGE_BUDGET_RATIO}); a false refusal costs one delegation, a false pass costs
+ * a dead turn.
+ */
+export const MAX_REQUEST_IMAGE_BYTES = 200 * 1024 * 1024;
+
+/** The inline transport's own cap: base64 `data:` URLs ride in the request body (48 MiB). */
+export const INLINE_REQUEST_BODY_BYTES = 48 * 1024 * 1024;
+
+/**
+ * The fraction of either ceiling at which `read_image` refuses to attach another image and
+ * answers with the delegation hint instead. The margin is deliberate: the *next* request
+ * carries whatever is already there, so a brake that fires exactly at the wall arrives one
+ * image too late.
+ */
+export const IMAGE_BUDGET_RATIO = 0.9;
+
 /** The vendored provider — the endpoint the built-in `default` provider points at. */
 export const VENDORED_PROVIDER: ProviderSpec = {
   id: DEFAULT_PROVIDER_ID,
@@ -869,6 +891,62 @@ export function parseContextLengthError(text: string): { window?: number; reques
   }
   const window = windowOnly ? tokenCount(windowOnly[1]) : tokenCount(LOOSE_WINDOW.exec(body)?.[1]);
   return { window, requested: tokenCount(REQUESTED_SIZE.exec(body)?.[1]) };
+}
+
+/**
+ * The wording that means "this **request** carried too many image bytes" — the provider's
+ * per-request image ceiling ({@link MAX_REQUEST_IMAGE_BYTES}), which is a different budget
+ * from the token window and is the one nothing used to track
+ * (`docs/agents/plans/image-budget.md`). Deliberately a fixed phrase, for the same reason
+ * {@link CONTEXT_LENGTH_HINT} is one: the refusal itself is the only authoritative statement
+ * of the ceiling, so an unrelated 400 — an unsupported image, a bad key, a malformed body —
+ * must never be able to read as this.
+ */
+const TOTAL_IMAGE_SIZE_HINT = /total\s+image\s+size[^,;]{0,32}?exceeds\s+the\s+limit/i;
+
+/**
+ * The two sizes the refusal names, e.g. `max 200 MB per request, got 203 MB`: read tolerantly
+ * (MB and MiB, decimals, either case) and never captured into a decision. The numbers are
+ * deliberately **not** the trigger and are not returned — a byte count the provider prints is
+ * a snapshot of one failed request, not a limit to pre-empt, which is the same reading
+ * {@link parseContextLengthError} documents for the window it finds (the *hint* classifies,
+ * the numbers only describe).
+ */
+const IMAGE_SIZE_NUMBERS = /max(?:imum)?\s*([\d.]+)\s*(mib|mb)\b[\s\S]{0,32}?\bgot\s*([\d.]+)\s*(mib|mb)\b/i;
+
+/**
+ * Which budget a provider refusal names — from its text alone, exactly like
+ * {@link parseContextLengthError}, and for the same reason
+ * (`docs/agents/invariants/model-capabilities.md`: the provider's own refusal is the only
+ * authoritative statement, so nothing here compares a number to a threshold):
+ *
+ *  - `'tokens'` — the model's context window is full ({@link parseContextLengthError});
+ *  - `'images'` — the request is over the provider's image-**byte** ceiling
+ *    (`Total image size exceeds the limit: max 200 MB per request, got 203 MB`). That is the
+ *    same kind of statement as a full window — the request cannot be sent — so it has to offer
+ *    the same way out (a rollover starts a window that carries no attachments).
+ *
+ * `undefined` for every other failure: a 400 that means something else (an unsupported image,
+ * an authentication error) must never start a rollover. It is a pure reader of error text and
+ * must never write a card.
+ */
+export function windowFullReason(text: string): 'tokens' | 'images' | undefined {
+  const body = text ?? '';
+  // The token budget is asked first: it is the readout a rollover has always run on, and it
+  // keeps precedence if a provider ever words both budgets into one body.
+  if (parseContextLengthError(body) !== undefined) {
+    return 'tokens';
+  }
+  if (!TOTAL_IMAGE_SIZE_HINT.test(body)) {
+    return undefined;
+  }
+  // The two sizes are read here and **knowingly dropped**: the kind is the whole answer, and
+  // a caller that compared them would be deciding on a figure that describes a request that
+  // already failed (the brake in `read_image` is where a number *is* used, against the
+  // accounting, never against a refusal). Executing the read keeps the sentence's two-numbered
+  // shape written down beside the phrase it belongs to, where it is compared.
+  void IMAGE_SIZE_NUMBERS.exec(body);
+  return 'images';
 }
 
 // --- content hashes: "did this configuration change?" --------------------------

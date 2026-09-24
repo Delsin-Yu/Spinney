@@ -33,9 +33,15 @@ one call may hold the turn) and it is the number rule **R2** is checked against
 (`timeoutTooLongError`). `timeout` is **not** capped — it is the command's **total
 budget**, foreground plus background, with **no ceiling** — and a `timeout` above the
 limit is **refused before the spawn** unless the call asked for a background
-`timeout_behavior` (`move_to_background` gives the job the rest of that budget,
+`timeout_behavior` (`background_when_timeout` gives the job the rest of that budget,
 `timeout − limit`, as its own deadline; `start_in_background` gives it the whole of
-it; a background behavior that omits `timeout` registers a job with **no deadline**).
+it and is refused **without** a `timeout`, because a node job with no deadline would
+hold its node's composer on Stop until it is killed; `start_detached` gives it the
+whole of it as a session-wide **detached** job that locks no node, never notifies and
+cannot be joined, which is why it — and only it — may omit `timeout`; and a
+`background_when_timeout` that omits `timeout` is refused before the spawn exactly as
+`start_in_background` is, for the same reason: an unbounded *node* lifetime belongs to
+`start_detached` and to nothing else).
 A background job carries that budget as its deadline (`BackgroundTask.timeoutMs` /
 `deadlineAt`, readable again through `remainingBudgetMs` in `src/tools/background.ts`);
 the two keys this replaced — `commandTimeout` (600) and `commandTimeoutMax` (1800) —

@@ -1,4 +1,3 @@
-<<<RAW:content>>>
 # Context rollover (continuing a conversation in a new context window)
 
 When a conversation fills the model's context window, this harness does **not**
@@ -106,6 +105,8 @@ contextBaseId?: string;
 // src/agent/models.ts — the module that owns every context-window fact
 /** Read the window and the refused size out of a provider context-length error. */
 export function parseContextLengthError(text: string): { window?: number; requested?: number } | undefined;
+/** Which budget a refusal names — from its text alone. */
+export function windowFullReason(text: string): 'tokens' | 'images' | undefined;
 ```
 
 Primary match (the format the provider actually emits, see
@@ -113,15 +114,36 @@ Primary match (the format the provider actually emits, see
 requested <M>`. Loose fallback so a reworded provider still rolls over:
 `context_length_exceeded` / `context length` / `reduce the length`.
 
+**A window can be full by bytes, not only by tokens.** `windowFullReason()`
+classifies the refusal's *kind* and nothing else: `'tokens'` for the context-length
+error above, `'images'` for the provider's **per-request** image-size refusal —
+`Total image size exceeds the limit: max 200 MB per request, got … MB`, the budget
+`vision-images.md` describes and the token window cannot see. Both are the same kind
+of authoritative statement (the request cannot be sent), so both have to offer the
+same way out, and the `⧉` rollover is exactly it: a new window carries **no
+attachments** (§6). Today such a card is a dead end — the window is `1_048_576`
+tokens and a chain that hits the image wall sits at ~30 %, so `contextState()` is
+`ok` and no button is offered while every retry walks into the same wall.
+
 A node is **context-full** when
 
 ```
-node.status === 'error' && parseContextLengthError(lastFailureText(node)) !== undefined
+node.status === 'error' && windowFullReason(lastFailureText(node)) !== undefined
 ```
 
-`lastFailureText()` (runtime.ts) reads the `⚠️ …` item back off the node's own
-card, so the judgement survives a reload and the model is told exactly what the
-user can read there.
+`nodeContextFull()` (runtime.ts) only asks whether the classifier returned
+*anything* — the kind is not its business — so both kinds make a node context-full,
+and both therefore make `contextState(node)` `full` and offer the `⧉` button. The
+harness note names which refusal it was: `rolloverReason()` (`runtime.ts`) returns
+`'images'` for the byte refusal and `'full'` for the token one, because the two are
+different statements and a model told the wrong one redoes the wrong thing (§6). The
+message itself stays model-facing English. The rule itself is untouched by the second
+kind: the refusal **text** is
+still the only trigger — never a local threshold — and the numbers a refusal prints are
+still read by nobody (`parseContextLengthError`'s `window` / `requested`, and the two
+sizes the byte refusal names, §11). `lastFailureText()` (runtime.ts) reads the
+`⚠️ …` item back off the node's own card, so the judgement survives a reload and the
+model is told exactly what the user can read there.
 
 `SessionRuntime.contextState(node)` combines that hard trigger with a second,
 **user-initiated** entry: the newest `usage.prompt_tokens` *on that node's own
@@ -131,7 +153,8 @@ resolution). It is the same three-valued answer the host ships to the webview
 (`'ok' | 'near' | 'full'`, `contextPercent` for the tooltip) — never re-derived in
 the webview:
 
-- `full` — the provider refused the request (the `nodeContextFull` predicate above);
+- `full` — the provider refused the request, by tokens or by image bytes (the
+  `nodeContextFull` predicate above);
 - `near` — that chain's latest prompt usage is **≥ 90 %** of the card's window;
 - `ok` — otherwise, including a node with no usage yet.
 
@@ -273,12 +296,20 @@ transcript first — do not guess.
 
 Rules for building it:
 
-- **The reason is named.** `buildContextRolloverMessage({ reason })` receives
-  `'full'` when the provider refused the request and `'near'` when the user took the
-  90 % entry, and the first paragraph says which: `… could not be sent to the model
-  any more (the provider refused it: the context window was full)` versus `… was
-  stopped before the provider had to refuse it (the context window was nearly used
-  up)`. Telling the model "it was refused" in the second case would be a lie.
+- **The reason is named.** `buildContextRolloverMessage({ reason })` receives one of
+  **three** values, read off the same refusal text `nodeContextFull()` reads
+  (`rolloverReason()`, runtime.ts): `'full'` when the provider refused the request over
+  its **tokens**, `'images'` when it refused it over its **bytes** (§3), and `'near'`
+  when the user took the 90 % entry. The first paragraph says which: `… could not be
+  sent to the model any more (the provider refused it: the context window was full)`;
+  `… could not be sent to the model any more: the provider refused the request because
+  of its images (the attachments it carried were over its per-request image size
+  limit)`, which then says outright that none of those images came along and that
+  attaching them again would cost the same bytes again — have them looked at by a
+  sub-agent and report back in text; versus `… was stopped before the provider had to
+  refuse it (the context window was nearly used up)`. Telling the model "it was
+  refused" in the last case would be a lie, and naming the wrong refusal in the first
+  two sends it after the wrong fix.
 - **The pointer degrades.** If `spinney.saveSessionTranscripts` is off, or the
   file is missing (`rolloverTranscriptOnDisk(prevId)` →
   `fs.existsSync(path.join(host.transcriptDir(sessionId), prevId + '.jsonl'))`, the path
@@ -339,7 +370,7 @@ Three things the rollover must add on top of `stopNode`:
 | Piece | File |
 | --- | --- |
 | `contextBaseId`, `contextBase()`, `epochForNode()`, the `pathMessages()` cut, `normalizeTreeSession` | `src/chat/tree.ts` |
-| `parseContextLengthError()` | `src/agent/models.ts` |
+| `parseContextLengthError()`, `windowFullReason()` | `src/agent/models.ts` |
 | `beginTurn({ freshContext, freshEpoch })`, `rolloverContext()`, `canRollover()`, `contextState()` / `contextPercent()`, `freezeEpoch()`, the harness text, `nodeStatePatch()`, the kill + settle + flush + re-dump | `src/chat/runtime.ts` |
 | `rolloverTurn` routing, `askSetups()`, `rolloverWithSetup()`, the kill modal, the transcript meta field | `src/chat/ChatViewProvider.ts` |
 | `SessionTranscriptInput` / meta `contextBaseId` | `src/chat/transcript.ts` |
@@ -416,9 +447,14 @@ token), and the `[config]` / `[perf]` diagnostics.
   `(session, node)` by design (`background-terminals.md`); the rollover kills them
   and records them instead.
 - **The provider's window number never writes a card — and nothing compares it.**
-  `parseContextLengthError(...)` is used only as a **boolean** (does this failure text
+  `windowFullReason(...)` is used only to **classify** (which budget did this failure
+  name? — `'tokens'` or `'images'`), and `parseContextLengthError(...)` below it only
+  as a **boolean** (does this failure text
   name a context-length error?); its `window` / `requested` fields are never read, so a
   mismatch between the 400's window and `contextWindowFor()` (the active card's
   `contextWindow`) is neither detected nor logged — not on `[config]`, not on `[perf]`.
   That is fine by design: the field is the user's, and a wrong window is their
-  one-field fix on the card (`model-capabilities.md`, `model-cards.md`).
+  one-field fix on the card (`model-capabilities.md`, `model-cards.md`). The byte
+  refusal gets the same treatment for the same reason: the two sizes it prints are a
+  snapshot of one failed request, so they are read and knowingly dropped — nothing
+  compares them against `MAX_REQUEST_IMAGE_BYTES` either (`vision-images.md`).

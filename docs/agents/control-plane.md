@@ -88,8 +88,9 @@ resumes in a new turn with the child's answer. `list_nodes` renders the active
 session's tree (node ids, status, parent,
 title) so the agent can name that node — node ids are otherwise invisible to the
 model. Guards: one hop at a time (`hopReturn` armed), the origin and the return
-node must exist, a hop is refused while its session owns a running background terminal
-(`rt.hasRunningBackground()` in `handleHopSession`), and the return waits for the whole
+node must exist, a hop is refused while its session owns a running **node** background
+terminal (`rt.hasRunningNodeBackground()` in `handleHopSession` — a `start_detached` job is
+fire-and-forget and deliberately does not block a hop), and the return waits for the whole
 harness to be idle (`runPendingSessionStart` polls `globallyIdle()`, which also covers
 sub-agents and background jobs). A failed return logs to the agent output channel and
 drops the result — the child's transcript is still on disk.

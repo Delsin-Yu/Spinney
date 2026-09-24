@@ -326,11 +326,22 @@ After a restart, a sub-agent that was running shows as `killed`.
 
 A background terminal holds a long command while the turn continues. The agent starts one through `exec_command` with `timeout_behavior`.
 
-Nothing holds a turn longer than `spinney.commandMaxForegroundDuration` (300 seconds, 5 minutes). The `timeout` of `exec_command` is the whole budget of the command: its foreground time plus its background time, with no ceiling. A `timeout` longer than the limit is refused before anything starts, unless the call also passes `timeout_behavior` `"move_to_background"` or `"start_in_background"`. The default `timeout_behavior` is again `"stop"`, so Spinney kills a command that still runs at the limit. With a background mode, a command that reaches the limit leaves the turn: Spinney moves it to the background and returns its id, and the rest of its budget is the budget of the job. Spinney kills the job when its budget runs out. A background mode with no `timeout` gives the job no deadline. `join_background` must not hold a turn past the limit either: while the job has more budget left than the limit, or no deadline at all, the join is refused and the agent is told to end its turn, so the completion notice reaches it later. `check_background_terminal` and `kill_background` still work.
+Nothing holds a turn longer than `spinney.commandMaxForegroundDuration` (300 seconds, 5 minutes). The `timeout` of `exec_command` is the whole budget of the command: its foreground time plus its background time, with no ceiling. A `timeout` longer than the limit is refused before anything starts, unless the call also asks for a background value.
+
+`timeout_behavior` gives the call its identity. It has four values:
+
+| Value | What Spinney starts | What it costs |
+|---|---|---|
+| `stop_when_timeout` | Nothing. Spinney kills a command that still runs at the timeout. This value is the default. | Nothing. |
+| `background_when_timeout` | A job on that node. The command runs in the foreground up to the 5-minute limit, then Spinney moves it to the background. The rest of the budget is the budget of the job. The call must give a `timeout`. | The node cannot send a message until the job ends. Spinney sends a completion notice at the end. |
+| `start_in_background` | A job on that node, at once. The whole budget is the deadline of the job. The call must give a `timeout`. | The same as the row above. |
+| `start_detached` | A detached job, at once. The job locks no node. The `timeout` is optional. | The node stays free, and the job never sends a notice, so the agent learns its result only when it asks. Any node in the session can read the job or kill it. |
+
+Spinney kills a job when its budget runs out. `background_when_timeout` and `start_in_background` need a `timeout`: without one, Spinney refuses the call before anything starts. A job with no deadline keeps its node busy until it ends, so that job belongs to `start_detached`. The refusal names the value that the call asked for, says that nothing was started, and gives both ways out: give a `timeout`, or use `start_detached`. Only `start_detached` can have no deadline, because it locks no node. `join_background` must not hold a turn past the limit either: while the job has more budget left than the limit, or no deadline at all, the join is refused and the agent is told to end its turn, so the completion notice reaches it later. Spinney also refuses a join of a detached job: that job has no deadline and sends no notice, so there is nothing to wait for. The agent reads a detached job with `check_background_terminal`, and ends it with `kill_background`. `check_background_terminal` and `kill_background` work for every job.
 
 The agent does not start a process in the background itself, for example with `&` or `Start-Process`. Spinney cannot track such a process, and you cannot stop it from a card.
 
-The card shows `#<id>`, the status, the elapsed time, the command, and the last output lines. The elapsed time ticks while the command runs, and it stays on the card after the command ends. The result of the command also tells the agent how long the command took.
+The card shows `#<id>`, the status, the elapsed time, the command, and the last output lines. The elapsed time ticks while the command runs, and it stays on the card after the command ends. The result of the command also tells the agent how long the command took. A detached job shows the `shared` badge: the badge means that the job is fire-and-forget, so the card never waits for the agent.
 
 | Status | Meaning |
 |---|---|
@@ -339,6 +350,8 @@ The card shows `#<id>`, the status, the elapsed time, the command, and the last 
 | `exit {0}` | The exit code of the command. |
 | `killed` | Spinney or you killed the process tree. |
 | `finished` | The end of the record. |
+
+A detached job never shows `pending delivery`, because it sends no notice.
 
 A background job belongs to the node that started it. It does not lock another branch or another session. The `#id` is a session counter, not an operating-system pid.
 
@@ -406,13 +419,13 @@ A finished card can carry one of three buttons. The button depends on the state 
 | `interrupted` | **▶ Continue** | Sends a harness message and resumes the turn in the same card. The partial output stays. |
 | `error` | **↻ Retry** | Sends a harness message and runs the turn again from that node. The partial output of the failed turn is discarded. |
 | `interrupted` or `error`, context at or above 90% | **⧉ Continue in a new window** | Offers a new context window. The tooltip shows the percentage. See section 10.3. |
-| `error`, context full | **⧉ Continue in a new window** | Starts a new context window. See section 10.3. |
+| `error`, context full | **⧉ Continue in a new window** | Starts a new context window. The window can be full by tokens or by image bytes. See section 10.3. |
 
 The button carries the work. You do not type the instruction yourself.
 
 ### 10.3 A full context window
 
-A context window is full when the provider answers with a context-length error. Spinney does not guess a limit from the `ctx` readout. The card shows a **⚠️** message, and the button becomes **⧉ Continue in a new window**.
+A context window is full when the provider answers with a context-length error. A request also carries its images as uploaded bytes, and the provider caps these bytes at 200 MB for one request. A refusal for that reason is also a full window. For example, the message reads `Total image size exceeds the limit: max 200 MB per request, got 203 MB`. Spinney does not guess a limit from the `ctx` readout. The card shows a **⚠️** message, and the button becomes **⧉ Continue in a new window**.
 
 Spinney offers this button before a failure too. A card whose turn ended without an answer offers it from about 90% of the `contextWindow` of the card. The tooltip carries the number, for example `Context 93% full - continue in a new window`. This offer is a suggestion, not a repair. Nothing failed yet.
 
@@ -451,7 +464,7 @@ All keys start with `spinney.`. Open the Settings UI, or edit `settings.json`.
 | `spinney.foldToolCalls` | `true` | Fold the tool-call cards of the work log by default. The running call stays open. |
 | `spinney.foldWork` | `true` | Fold the work log into its one-line header by default when a turn completes; a header that you clicked stays as you left it. |
 | `spinney.promptSections` | `{}` | Extra prompt snippets, keyed by the name in the menu. A name that matches a shipped snippet replaces its text. |
-| `spinney.commandMaxForegroundDuration` | `300` | The longest time anything may hold a turn, in seconds. 300 is 5 minutes. A command that still runs at the limit leaves the turn: Spinney moves it to the background, with the rest of its own `timeout` as its budget. A command whose timeout is longer than the limit must ask for background mode. |
+| `spinney.commandMaxForegroundDuration` | `300` | The longest time anything may hold a turn, in seconds. 300 is 5 minutes. The limit caps only the foreground part of a command. A command that still runs at the limit leaves the turn only when the call asks for a background value: `background_when_timeout` or `start_in_background`. A `timeout` longer than the limit must ask for one of them. Both of those values need a `timeout` of their own, or Spinney refuses the call. `start_detached` never holds a turn, and it can have no deadline. |
 | `spinney.maxInlineToolOutput` | `32768` | The size limit of a tool result, in bytes. A larger result goes to a file. `0` turns the limit off. |
 | `spinney.maxConcurrentSubagents` | `15` | How many level-1 sub-agents can run at once. Extra tasks wait. |
 | `spinney.maxLevel2Subagents` | `2` | How many children one sub-agent can start. |

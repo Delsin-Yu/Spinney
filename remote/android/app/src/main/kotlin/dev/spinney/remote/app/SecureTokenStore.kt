@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
 import dev.spinney.remote.core.Hex
+import dev.spinney.remote.core.TokenInput
 import java.security.SecureRandom
 
 /**
@@ -65,11 +66,36 @@ class SecureTokenStore(context: Context) {
         prefs.edit().remove(tokenKey(name)).apply()
     }
 
-    fun token(roomName: String): String? = prefs.getString(tokenKey(roomName), null)?.takeIf { it.isNotEmpty() }
+    /**
+     * The token, **normalised on the way out too**.
+     *
+     * A token already stored with a trailing newline (a paste saved before
+     * [TokenInput.normalize] existed, or by a build of this app that predates it) would otherwise
+     * keep deriving a different room from the one the desktop derives — silently, because a wrong
+     * token is an empty room and not an error. So the stored value is repaired the first time it is
+     * read, and written back: the phone's own copy stops carrying the junk instead of being
+     * re-normalised on every read for the rest of its life.
+     */
+    fun token(roomName: String): String? {
+        val key = tokenKey(roomName)
+        val stored = prefs.getString(key, null)?.takeIf { it.isNotEmpty() } ?: return null
+        val normalized = TokenInput.normalize(stored)
+        if (normalized.isEmpty()) {
+            // Nothing but whitespace is not a token: treat it as absent rather than as a room.
+            prefs.edit().remove(key).apply()
+            return null
+        }
+        if (normalized != stored) {
+            prefs.edit().putString(key, normalized).apply()
+        }
+        return normalized
+    }
 
+    /** The token as it must be hashed: normalised on the way in, before it is ever stored. */
     fun setToken(roomName: String, token: String) {
-        require(token.isNotEmpty()) { "an empty token is an empty room, not a configuration" }
-        prefs.edit().putString(tokenKey(roomName), token).apply()
+        val normalized = TokenInput.normalize(token)
+        require(normalized.isNotEmpty()) { "an empty token is an empty room, not a configuration" }
+        prefs.edit().putString(tokenKey(roomName), normalized).apply()
     }
 
     fun clearToken(roomName: String) {

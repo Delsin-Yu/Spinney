@@ -4,6 +4,7 @@ import android.annotation.SuppressLint
 import android.content.Context
 import android.graphics.Color
 import android.net.Uri
+import android.os.Looper
 import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
@@ -41,11 +42,17 @@ import dev.spinney.remote.core.RemoteClient
  *
  * ```
  * publisher --(sealed mirror frame)--> RemoteClient --(SharedFlow)--> host.deliver(json)
- *          --> window.__spinneyHost.receive --> MessageEvent --> media/main.js
+ *          --(held until the page says `ready`)--> window.__spinneyHost.receive
+ *          --> MessageEvent --> media/main.js
  *
  * media/main.js --> vscode.postMessage --> shim --> spinneyControl/__spinneyAndroid
  *          --> SessionWebView --> §6 routing --> RemoteClient.submit  (or a local action)
  * ```
+ *
+ * The hold in the middle of that diagram is not an optimisation: the publisher answers this
+ * surface's `attach` within a network round trip of `load()`, so the session's first frame
+ * (`tree`) usually arrives *while the document is still parsing* — before `media/main.js` has
+ * defined anything, and before the renderer has a `message` listener. See [SessionWebHost.deliver].
  *
  * §6's routing is `MirrorPolicy`: a message that acts on this phone (the clipboard, a link, the
  * image picker) is handled here; a message that acts on the session is submitted verbatim; a
@@ -58,7 +65,10 @@ class SessionWebHost(
 
     /**
      * Every webview→host message, as the JSON text `media/main.js` produced. Set by the
-     * composable; called on the main thread (the WebView bridge always is).
+     * composable; called on whichever thread the bridge used, which is the main thread only for
+     * the WebMessageListener route — a legacy `@JavascriptInterface` call arrives on the
+     * WebView's own bridge thread. A handler that touches the WebView, the held queue or the
+     * Compose tree therefore hops first ([onMain]).
      */
     var onMessage: ((String) -> Unit)? = null
 
@@ -67,40 +77,169 @@ class SessionWebHost(
     private var replyProxy: JavaScriptReplyProxy? = null
 
     /**
+     * Host→webview messages that arrived before the page could hear them, in arrival order.
+     *
+     * The page cannot hear anything until it has run its own scripts, and the moment that is
+     * true is the renderer's own `ready`: `media/main.js` installs its `window` `message`
+     * listener a hundred lines before the end of the file and posts `ready` at the very end, so
+     * `ready` is the first instant at which *both* halves of the bridge exist — the shim's
+     * `window.__spinneyHost.receive` (defined when `assets/shell/session-shim.js` runs, in the
+     * `<head>`) and the renderer's listener that turns one into a `MessageEvent`. Delivering
+     * before that loses the frame on either route: the legacy route throws
+     * `Cannot read property 'receive' of undefined` and the frame is gone, while the
+     * `postMessage` route dispatches a `MessageEvent` to nobody — the same loss with no symptom
+     * at all, which is exactly how a replica that never received a `tree` renders no cards.
+     *
+     * Same mechanism, same signal, same cap as the desktop replica of the same session
+     * (`src/remote/remoteSessionPanel.ts`: "Set by the webview's first `ready`: before that,
+     * mirror messages are held"). `WebViewCompat.postWebMessage` was the other candidate and is
+     * not the fix: it is only supported where `WEB_MESSAGE_LISTENER` is, and the emulator's
+     * error names `__spinneyHost.receive`, the route `evaluateJavascript` takes when
+     * `replyProxy` is still null — i.e. the case that has to keep working is the one that API
+     * cannot serve.
+     */
+    private val held = ArrayDeque<String>()
+
+    /** Set by the page's first `ready`: the release for everything in [held]. */
+    private var rendererReady = false
+
+    /**
      * The WebMessageListener route carries a big string without the legacy bridge's mangling —
      * a phone photo is ~10 MB of base64 inside one `userMessage` (§8 counts on exactly that).
      * When the platform WebView is too old for it, the legacy `addJavascriptInterface` bridge is
-     * used and a reply proxy never appears; [deliver] then goes through `evaluateJavascript`.
+     * used and a reply proxy never appears; [push] then goes through `evaluateJavascript`.
      */
     val usesWebMessageListener: Boolean = WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)
 
     val webView: WebView = buildWebView()
 
+    /**
+     * Load the shell. This is a **fresh document**, so the hold starts over: whatever the
+     * previous page was told, this one may not be pushed to until its own `ready` arrives.
+     */
     fun load() {
+        rendererReady = false
+        held.clear()
         webView.loadUrl(assets.shellUrl)
     }
 
-    /** Push one host→webview message into the page, verbatim. Main thread only. */
+    /**
+     * Push one host→webview message into the page, verbatim, once the page can hear it.
+     *
+     * Before the page's `ready` the message is *held* rather than dropped or thrown at a global
+     * that does not exist yet (see [held]); `ready` then releases the hold in arrival order, and
+     * every later message goes straight through. Held, not merged: the frames that matter are
+     * the publisher's answer to this surface's `attach`, and reordering or coalescing them here
+     * would be a second, silent copy of the protocol's ordering rules.
+     */
     fun deliver(messageJson: String) {
-        val post = Runnable {
-            val proxy = replyProxy
-            if (proxy != null) {
-                proxy.postMessage(messageJson)
-            } else {
-                // `JSONObject.quote` is the JSON string literal the page needs; the payload is
-                // the publisher's bytes and is not re-encoded anywhere else.
-                webView.evaluateJavascript(
-                    "window.__spinneyHost.receive(${JSONObject.quote(messageJson)})",
-                    null,
-                )
+        onMain {
+            if (!rendererReady) {
+                // A cap, never a queue — the same number as the desktop replica's MAX_HELD. A
+                // document that never reports `ready` (a broken asset, a syntax error, a dead
+                // page) must not grow this list without bound; `tree` is the whole state, so the
+                // newest frames are the ones worth keeping.
+                if (held.size >= MAX_HELD) held.removeFirst()
+                held.addLast(messageJson)
+                return@onMain
             }
+            push(messageJson)
         }
-        if (android.os.Looper.myLooper() == android.os.Looper.getMainLooper()) post.run() else webView.post(post)
+    }
+
+    /**
+     * The page announced its boot handshake (`{"type":"ready"}` from `media/main.js`) — the one
+     * signal that says "there is a listener on the other side of `receive` now". Release the
+     * hold.
+     */
+    fun rendererReady() {
+        onMain {
+            if (rendererReady) return@onMain
+            rendererReady = true
+            // Drain before anything newer can be pushed, so a frame that arrived during the
+            // load is still rendered before the frame that arrived after it.
+            val queued = held.toList()
+            held.clear()
+            for (messageJson in queued) push(messageJson)
+            // TEMPORARY DIAGNOSTIC — delete before committing. Reads the renderer's *DOM* (its
+            // internals are inside an IIFE and unreachable from here) two seconds after the
+            // release, to tell "the tree never arrived" apart from "the tree arrived and was
+            // laid out off-screen".
+            webView.postDelayed(
+                {
+                    webView.evaluateJavascript(
+                        "(function(){var c=document.getElementById('tree-canvas');" +
+                            "var w=document.getElementById('tree-wrap');var n=document.querySelector('.node');" +
+                            "var r=n?n.getBoundingClientRect():null;return JSON.stringify({" +
+                            "wrap:w?w.clientWidth+'x'+w.clientHeight:'none'," +
+                            "mode:document.compatMode," +
+                            "chain:(function(){function f(el){if(!el)return 'none';var s=getComputedStyle(el);" +
+                            "return el.tagName+(el.id?'#'+el.id:'')+'='+el.clientHeight+'/'+s.height+'/'+s.display+'/'+s.position;}" +
+                            "return [f(document.documentElement),f(document.body),f(document.getElementById('tree-toolbar'))," +
+                            "f(document.getElementById('tree-wrap')),f(document.getElementById('composer'))].join(' | ');})()," +
+                            "win:window.innerWidth+'x'+window.innerHeight," +
+                            "body:document.body.clientWidth+'x'+document.body.clientHeight," +
+                            "wrapCss:w?getComputedStyle(w).height+'/'+getComputedStyle(w).overflow:'none'," +
+                            "canvas:c?c.clientWidth+'x'+c.clientHeight+' scroll='+c.scrollWidth+'x'+c.scrollHeight:'none'," +
+                            "transform:c?c.style.transform:'none',cards:document.querySelectorAll('.node').length," +
+                            "first:r?[Math.round(r.x),Math.round(r.y),Math.round(r.width),Math.round(r.height)]:null," +
+                            // EXPERIMENT: apply the candidate fix in the *live* page and re-measure. If the
+                            // tree becomes visible, the cause is the html/percentage chain and the fix
+                            // belongs in the CSS; if `100vh` is also 0, the WebView's *layout viewport* is
+                            // itself broken and the fix belongs in Kotlin.
+                            "afterFix:(function(){document.body.style.height='100vh';" +
+                            "var f=document.getElementById('fit-btn');if(f)f.click();" +
+                            "var w=document.getElementById('tree-wrap');var n=document.querySelector('.node');" +
+                            "var r=n?n.getBoundingClientRect():null;var c=document.getElementById('tree-canvas');" +
+                            "return 'body='+document.body.clientHeight+' wrap='+(w?w.clientWidth+'x'+w.clientHeight:'none')+" +
+                            "' transform='+(c?c.style.transform:'none')+' first='+" +
+                            "(r?[Math.round(r.x),Math.round(r.y),Math.round(r.width),Math.round(r.height)].join(','):'none');})()" +
+                            "});})()",
+                    ) { value -> android.util.Log.i("SpinneyProbe", "after-release $value") }
+                    // The native half of the same question: is the WebView *view* tall? If it is,
+                    // the page's layout viewport is the broken thing; if it is 0, the Compose slot
+                    // never gave it a height and no page-side fix can help.
+                    android.util.Log.i("SpinneyProbe", "webview view = ${webView.width}x${webView.height}")
+                },
+                2000,
+            )
+        }
+    }
+
+    /** Hand one message to the page. Only meaningful once the page can hear it. */
+    private fun push(messageJson: String) {
+        val proxy = replyProxy
+        if (proxy != null) {
+            proxy.postMessage(messageJson)
+        } else {
+            // `JSONObject.quote` is the JSON string literal the page needs; the payload is the
+            // publisher's bytes and is not re-encoded anywhere else.
+            webView.evaluateJavascript(
+                "window.__spinneyHost.receive(${JSONObject.quote(messageJson)})",
+                null,
+            )
+        }
+    }
+
+    /**
+     * Run [block] on the thread that owns the WebView.
+     *
+     * Only the WebMessageListener route is main-thread by contract; a legacy
+     * `@JavascriptInterface` call arrives on the WebView's own bridge thread, and `replyProxy`,
+     * [held], [rendererReady], `postMessage` and `evaluateJavascript` are all main-thread state.
+     * Posting through the WebView's handler makes the two routes behave identically, and keeps
+     * their order: a [deliver] and a [rendererReady] reached in that order are queued in it.
+     */
+    private fun onMain(block: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) block() else webView.post(Runnable(block))
     }
 
     fun destroy() {
         replyProxy = null
         onMessage = null
+        // A destroyed page can never report `ready`, and its held frames belong to it alone.
+        rendererReady = false
+        held.clear()
         webView.destroy()
     }
 
@@ -118,6 +257,14 @@ class SessionWebHost(
             builtInZoomControls = false
             mediaPlaybackRequiresUserGesture = false
             cacheMode = WebSettings.LOAD_NO_CACHE
+            // The shell carries a viewport meta (`width=device-width, initial-scale=1.0`), so the
+            // WebView has to honour it: Android's default is `useWideViewPort = false`, which
+            // *ignores* the meta and computes the layout viewport itself — and on API 28 that
+            // came out 393x**0** while the view was 393x719, so `html{height:100%}`, `100vh` and
+            // `#tree-wrap` all resolved to 0 and the tree was drawn and then clipped away
+            // entirely (measured; the page was correct all along).
+            useWideViewPort = true
+            loadWithOverviewMode = false // honour the meta; never zoom out to fit content
             // The page is a control surface, not a document: it must not be able to navigate
             // away from the app's own origin.
             setGeolocationEnabled(false)
@@ -178,6 +325,12 @@ class SessionWebHost(
 
         /** The legacy fallback's global, used only when the listener is unavailable. */
         const val LEGACY_BRIDGE_NAME = "__spinneyAndroid"
+
+        /**
+         * How many host→webview messages are held before the page's first `ready`. The same
+         * figure, and the same meaning, as `MAX_HELD` in `src/remote/remoteSessionPanel.ts`.
+         */
+        const val MAX_HELD = 400
     }
 }
 
@@ -210,7 +363,7 @@ fun SessionWebView(
         }
         when {
             type == null || message == null -> onNotice(l10n.t("The session sent a message this phone cannot read."))
-            type == "ready" -> Unit // this surface's own boot handshake, deliberately never forwarded (§6)
+            type == "ready" -> host.rendererReady() // this surface's own boot handshake, deliberately never forwarded (§6) — and the release for every frame the host held while this document was loading (§5)
             MirrorPolicy.routeWebviewMessage(type) == MirrorPolicy.Route.LOCAL -> onLocal(type, message)
             MirrorPolicy.routeWebviewMessage(type) == MirrorPolicy.Route.INPUT_UP -> {
                 if (!client.submit(sessionId, json)) {
