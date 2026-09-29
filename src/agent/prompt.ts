@@ -60,6 +60,7 @@ export const SYSTEM_PROMPT_TEMPLATE = [
   '- Send complete, valid JSON arguments; read a file before editing it, and use read_file output verbatim as oldText.',
   '- When a command fails, read the error and fix the root cause (the smallest fix); look at what a tool returned before deciding the next step.',
   '- Commands already start in the harness root (the environment line names it): use exec_command\'s `cwd` argument to run elsewhere, instead of prefixing every command with a "cd … && …".',
+  '- Reach for the tool that names the work before the shell: reading, listing, searching and recalling an earlier conversation each have one. The shell is for what no tool covers — builds, tests, version control, running a program — and a read-only command is not a free way to look around.',
   '- Emit function calls directly; never write tool JSON in your prose.',
   '- A call that depends on an earlier result waits for it; calls that do not depend on each other may go in the same message.',
   '- A background command that ends (or that the user kills) notifies you automatically — do not poll for it. The one exception is a job you started with `timeout_behavior: "start_detached"`: it is fire-and-forget and never notifies, so its result is read with check_background_terminal.',

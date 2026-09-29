@@ -15,6 +15,17 @@
 > Windows is read as `D:\dev\null`; that is the accepted trade, because the model
 > that writes `/d/…` means the drive.
 
+> **Tool choice is stated twice on purpose.** Reach for the tool that names the work —
+> reading, listing, searching, session history each have one — and keep the shell for what no
+> tool covers (builds, tests, version control, running a program); a read-only command is not a
+> free way to look around. The rule is written in two places, deliberately: the system prompt's
+> `## Calling conventions` bullet, and the tool descriptions — `exec_command` states the shell
+> half, while `read_file` / `list_dir` / `search_files` each state what their own implementation
+> does that the shell equivalent cannot (a line range and a line count; the heavy-directory
+> exclusions and a bounded entry cap; heavy and binary skips with *excluded* told apart from
+> *absent*). That is the same deliberate duplication recorded for the no-self-background rule in
+> `docs/agents/invariants/background-terminals.md`:142-149.
+
 | Tool | Args | Behavior |
 | --- | --- | --- |
 | `read_file` | `path`, `startLine?`, `endLine?` | Returns `File: <path> (N lines, <EOL>)` header + LF-normalized content (line-numbered if a range is given). Always LF content, but reports on-disk EOL. `N` follows the `wc -l` convention (a trailing newline does **not** add a line); `read_file(path, 1, 1)` is the cheap way to get just the count. |
