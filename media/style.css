@@ -258,6 +258,12 @@ body {
   color: var(--accent);
 }
 
+/* `line-height` must stay above 1 here, unlike the icon buttons further down: the
+   status text below clips with `overflow: hidden` (it ellipsizes), and a line box
+   shorter than the font's own content area — 10px × 1 — puts an ideographic glyph's
+   ink above that box. The zh-Hans status ("思考中…") then loses the top of every
+   character, while the Latin-only `#metrics` beside it never reaches that high.
+   1.35 is `.composer-ident`'s value, one line above: the two read as one block. */
 #meter-row-readout {
   display: flex;
   align-items: center;
@@ -265,7 +271,7 @@ body {
   min-width: 0;
   font-family: "Consolas", "Courier New", monospace;
   font-size: 10px;
-  line-height: 1;
+  line-height: 1.35;
   color: var(--text-dim);
   user-select: none;
   margin: 0;
