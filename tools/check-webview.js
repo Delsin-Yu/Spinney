@@ -109,12 +109,12 @@ const TURN_MESSAGES = [
   // shapes are checked in the lazy-sidecar section at the bottom of this file.
   { type: 'agentItems', id: NODE_ID, items: [] },
   // The same answer shape for a **regular** node's items (`loadNodeItems` → `nodeItems`),
-  // which a replica's card asks for when the `tree` it holds carried none — and which a
-  // *summarised* card (`summary: true`, a finished node's row carries its first ask and its
-  // last answer instead of the log) asks for on its first expansion. Both are checked in
-  // the sections at the bottom of this file. The `path` above already rendered this node,
-  // so the answer renders nothing here; what this entry pins is that the provider may post
-  // the new type without the webview throwing.
+  // which a card built from the `tree` alone asks for when the `tree` it holds carried none
+  // — and which a *summarised* card (`summary: true`, a finished node's row carries its
+  // first ask and its last answer instead of the log) asks for on its first expansion. Both
+  // are checked in the sections at the bottom of this file. The `path` above already
+  // rendered this node, so the answer renders nothing here; what this entry pins is that
+  // the provider may post the new type without the webview throwing.
   { type: 'nodeItems', id: NODE_ID, items: [] },
   {
     type: 'config',
@@ -1583,17 +1583,16 @@ if (contextLabel !== 'ctx 50%') {
   }
 }
 
-// --- A card whose items never arrived asks for them (the replica's fetch) -------
-// A replica gets the structural `tree` and nothing else — `RemoteService.mirrorTree`
-// answers an `attach` with `treeMessage()`, and no `path` ever reaches that surface — so a
-// regular card's items are in *no* payload it holds. Measured on a real phone: three cards
-// at `work:0 ans:0` next to a `preview` that promised a full session, indistinguishable
-// from an empty, finished node. Such a card now says it is waiting and asks once
-// `loadNodeItems` → `nodeItems`). The five cases are checked here as (a) waiting and one
-// ask, (b) the answer rendering and clearing, (c) a re-expansion not re-asking, (d) the
-// `pnode` trap in its own fixture — `pnode` used to win whenever it merely *existed*, so a
-// `path` row carrying no items hid the real ones on the row next to it — and (e) a reply
-// for an unknown id being ignored rather than thrown.
+// --- A card whose items never arrived asks for them (the tree-only fetch) -------
+// A session switch posts the structural `tree` first and the `path` that describes it a
+// task later, so between the two a regular card's items are in *no* payload it holds: it
+// would sit at `work:0 ans:0` next to a `preview` that promised a full session,
+// indistinguishable from an empty, finished node. Such a card now says it is waiting and
+// asks once (`loadNodeItems` → `nodeItems`). The five cases are checked here as (a) waiting
+// and one ask, (b) the answer rendering and clearing, (c) a re-expansion not re-asking,
+// (d) the `pnode` trap in its own fixture — `pnode` used to win whenever it merely
+// *existed*, so a `path` row carrying no items hid the real ones on the row next to it —
+// and (e) a reply for an unknown id being ignored rather than thrown.
 {
   const ROOT = 'fetch-root';
   const LAST = 'fetch-last'; // the second card of the same session, for the re-expansion
@@ -1617,7 +1616,7 @@ if (contextLabel !== 'ctx 50%') {
   const asked = () => posted.filter((m) => m && m.type === 'loadNodeItems');
   const askedOf = (id) => asked().filter((m) => m.id === id);
 
-  // The replica's shape: one `tree`, its `viewId` card expanded, and no `path` message.
+  // The tree-only shape: one `tree`, its `viewId` card expanded, and no `path` message.
   dispatch({ type: 'reset' });
   posted.length = 0;
   dispatch({
@@ -1637,8 +1636,8 @@ if (contextLabel !== 'ctx 50%') {
     if (!hasClass(root, 'items-loading')) {
       problems.push(
         'a card with no items does not show a loading state (`items-loading`) — a card that shows nothing is ' +
-          'indistinguishable from an empty, finished node, which is the measured replica symptom (three cards, ' +
-          '`work:0 ans:0`, a full published session)',
+          'indistinguishable from an empty, finished node, and the strip is the only thing that tells the two ' +
+          'apart until the log lands',
       );
     }
     const strip = findByClass(root, 'node-loading');
@@ -1749,7 +1748,7 @@ if (contextLabel !== 'ctx 50%') {
 // `items` = the turn's first `user` item and its last answer, `summary: true`, and the
 // node's real `itemCount` (`SessionRuntime`, see `itemsSource` in media/main.js). The card
 // renders that summary, knows it is not the log, and asks for the rest with the *same*
-// on-demand pair the replica case above uses (`loadNodeItems` -> `nodeItems`) — there is no
+// on-demand pair the tree-only case above uses (`loadNodeItems` -> `nodeItems`) — there is no
 // second mechanism and no second request shape. Eight facts are pinned here, each as its own
 // fixture:
 //  (a) a collapsed summarised card renders nothing and asks for nothing — the fetch is the
@@ -1855,7 +1854,7 @@ if (contextLabel !== 'ctx 50%') {
   }
 
   // (b) Expanding it (the view focus moves onto it) renders the summary, asks once and waits
-  // visibly: the same strip the replica case above uses, because "the first ask and the last
+  // visibly: the same strip the tree-only case above uses, because "the first ask and the last
   // answer" must not read as "the whole turn".
   frame(SUM, [summaryRow(SUM), node(FULL, null, [], { items: LOG })]);
   const openedSum = cardOf(SUM);
@@ -1914,7 +1913,7 @@ if (contextLabel !== 'ctx 50%') {
 
   // (f) The local surface: the summary rides the `path` (a session switch renders from it)
   // and the `tree` row that arrives first carries no items at all, so the card already asked
-  // (the replica case above). The `path` summary is *content*, not the answer to that
+  // (the tree-only case above). The `path` summary is *content*, not the answer to that
   // request: it renders, the strip stays on, and the request is not posted a second time.
   dispatch({ type: 'reset' });
   posted.length = 0;
@@ -1957,7 +1956,7 @@ if (contextLabel !== 'ctx 50%') {
   // (g) A summary that summarises to nothing is still a summary: a whole turn of one `user` item
   // (the ask, which is zone 1 and not an item of the log) leaves `items: []`, and the flag
   // is then the only thing that says the rest is somewhere else. Rendering that empty log and
-  // never asking is the "card with nothing in it" symptom of the replica case above.
+  // never asking is the "card with nothing in it" symptom the tree-only case above rules out.
   dispatch({ type: 'reset' });
   posted.length = 0;
   frame(EMPTY, [node(EMPTY, null, [], { items: [], summary: true, itemCount: LOG.length })]);
@@ -4452,10 +4451,9 @@ if (contextLabel !== 'ctx 50%') {
 }
 
 // --- Touch navigation: a finger pans the tree, two fingers pinch it -----------
-// The phone's session view is this same renderer inside an Android WebView, and there
-// the pan and the zoom above it are both unreachable: `touch-action` is `auto` on the
-// whole subtree, so the browser classifies a one-finger drag as *its* pan and cancels
-// the pointer stream (`pointercancel`, which the pan handler honours), and a pinch
+// On a touch screen the pan and the zoom above it are both unreachable: `touch-action` is
+// `auto` on the whole subtree, so the browser classifies a one-finger drag as *its* pan and
+// cancels the pointer stream (`pointercancel`, which the pan handler honours), and a pinch
 // produces no `wheel` at all. What the touch layer near the end of `media/main.js` has
 // to do instead is read both gestures off the touch stream, driving the same camera.
 //
@@ -4466,7 +4464,8 @@ if (contextLabel !== 'ctx 50%') {
 //       finger reaches the camera, and the compatibility pointer stream is *not* panning
 //       on top of it (that would show as twice the travel);
 //   (b) the same drag starting on a *card* pans too — the mouse rule up there leaves a
-//       card to the checkout click, and a phone has no empty background to copy it from;
+//       card to the checkout click, and a touch screen has no empty background to copy it
+//       from;
 //   (c) a tap, and a wobble under the slop, are not `defaultPrevented` and move nothing —
 //       that is what leaves the browser free to synthesise the `click` the checkout needs;
 //   (d) a claimed drag *is* `defaultPrevented` — the cancellation that stops the browser's
@@ -4544,8 +4543,8 @@ if (contextLabel !== 'ctx 50%') {
   if ([start, move, end, cancel].some((handler) => typeof handler !== 'function')) {
     problems.push(
       'the tree wrapper registered no touch gesture (missing `touchstart` / `touchmove` / `touchend` / `touchcancel` ' +
-        'on #tree-wrap) — on a phone the browser takes a one-finger drag as its own pan, so with no touch layer ' +
-        'a finger cannot move the tree at all and two fingers cannot zoom it',
+        'on #tree-wrap) — on a touch screen the browser takes a one-finger drag as its own pan, so with no touch ' +
+        'layer a finger cannot move the tree at all and two fingers cannot zoom it',
     );
   } else {
     // (a) + (b) One finger pans — 1:1, once, and from a card. Follow is engaged first so
@@ -4576,9 +4575,9 @@ if (contextLabel !== 'ctx 50%') {
         if (Math.abs(dx - 60) > 0.51 || Math.abs(dy + 50) > 0.51) {
           problems.push(
             `a one-finger drag of (60, -50) out of a card moved the tree by (${round(dx)}, ${round(dy)}) — expected ` +
-              'exactly the finger\'s own travel: a finger has to pan the tree (it is a card, and a phone has no empty ' +
-              'background to grab instead), and twice that means the compatibility pointer stream panned on top of ' +
-              'the finger',
+              'exactly the finger\'s own travel: a finger has to pan the tree (it is a card, and a touch screen has ' +
+              'no empty background to grab instead), and twice that means the compatibility pointer stream panned ' +
+              'on top of the finger',
           );
         }
         if (Math.abs(after.zoom - before.zoom) > 1e-6) {
@@ -4595,7 +4594,8 @@ if (contextLabel !== 'ctx 50%') {
     if (!dragMove.defaultPrevented) {
       problems.push(
         'the touchmove of a drag worth 78px was not `defaultPrevented` — the browser keeps its own pan for that ' +
-          'finger and cancels the rest of the gesture, which is the `pointercancel` that made this dead on a phone',
+          'finger and cancels the rest of the gesture, which is the `pointercancel` that makes this dead wherever ' +
+          'a finger is the input',
       );
     }
 
@@ -4642,7 +4642,7 @@ if (contextLabel !== 'ctx 50%') {
       if (zoneMove.defaultPrevented) {
         problems.push(
           `a drag out of .${zone} cancelled its touchmove — the browser's own touch scrolling inside that zone is ` +
-            'switched off, so the log / answer / ask / composer cannot be scrolled on a phone',
+            'switched off, so the log / answer / ask / composer cannot be scrolled by touch',
         );
       }
       const zoneAfter = camera();
@@ -4982,7 +4982,7 @@ if (contextLabel !== 'ctx 50%') {
         problems.push(
           `a mouse drag of (60, -20) on .node-resize left the card at ${cornerBox()}, expected 648 × 484 (600 × 500 ` +
             "plus the pointer's 48 × -16 canvas px) — the mouse entry point and the finger's have to be the same " +
-            'gesture, or the two inputs drift apart and only the phone notices',
+            'gesture, or the two inputs drift apart and only a touch screen notices',
         );
       }
 

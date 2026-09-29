@@ -2952,19 +2952,19 @@
   //
   //  - a `kind: 'agent'` node ships no transcript in the `tree` / `path` payload (only
   //    `itemCount`), so its card fetches it with `loadAgentItems`;
-  //  - a **regular** node's items normally ride in the `path`, but a replica never gets
-  //    one: `mirrorTree` answers an `attach` with the structural `tree` and nothing else.
-  //    Every one of its cards used to stay `work:0 ans:0` next to a `preview` that
-  //    promised a full session — the measured symptom on a real phone, three cards, and
-  //    a card with nothing in it is indistinguishable from an empty, finished node. That
-  //    card now asks with `loadNodeItems` and the host answers `nodeItems` (the same
-  //    clipped `displayItems` the `path` would have carried, `SessionRuntime.postItems`).
+  //  - a **regular** node's items normally ride in the `path`, and a session switch posts
+  //    the `tree` a task earlier: a card built from that `tree` alone holds no items at
+  //    all, and used to stay `work:0 ans:0` next to a `preview` that promised a full
+  //    session — a card with nothing in it is indistinguishable from an empty, finished
+  //    node. That card now asks with `loadNodeItems` and the host answers `nodeItems` (the
+  //    same clipped `displayItems` the `path` would have carried,
+  //    `SessionRuntime.postItems`).
   //  - a **finished regular** node's row carries a *summary* of its log instead of the log
-  //    (`summary: true`, see `itemsSource`), on the local surface and the replica alike:
-  //    the card renders what it has, and asks for the rest with that same `loadNodeItems`
-  //    the first time it is expanded. So `_itemsRendered` no longer means "the real items
-  //    are here" on its own — `_itemsSummary` is the other half of that pair, and it is
-  //    what `itemsWanted` reads to keep this request from being dropped as redundant.
+  //    (`summary: true`, see `itemsSource`): the card renders what it has, and asks for
+  //    the rest with that same `loadNodeItems` the first time it is expanded. So
+  //    `_itemsRendered` no longer means "the real items are here" on its own —
+  //    `_itemsSummary` is the other half of that pair, and it is what `itemsWanted` reads
+  //    to keep this request from being dropped as redundant.
   //    A card the turn's own stream wrote into is not one of these: `_itemsRendered` is set
   //    where that append lands (`routeTo`), so the summary of a finished row never replaces
   //    a log that is already on screen, and there is nothing to ask for.
@@ -2978,8 +2978,8 @@
   // `ITEMS_CONCURRENCY` are in flight, and an answer releases the next one. A summarised
   // card goes through the same queue: the `path` that lands after the `tree` renders its
   // summary, which is *not* an answer to the request, so the queue must keep it (see
-  // `itemsWanted`) and post it — while the plain replica card's request is still dropped
-  // unposted the moment a `path` really fills it.
+  // `itemsWanted`) and post it — while a plain card's request is still dropped unposted
+  // the moment a `path` really fills it.
   //
   // Two rules keep the burst honest:
   //  - a repaint that needs exactly one *agent* transcript is not a burst: that request
@@ -3007,13 +3007,13 @@
       : null;
 
   // How long a waiting card may claim its content is on its way (see `setCardLoading`).
-  // It is the only end a *refused* request gets, as well as one nobody answers: a refusal
-  // is an `error` frame between peers (`remote/PROTOCOL.md`), and nothing about a refused or
-  // dropped `loadNodeItems` reaches this webview — "answered" and "answered with nothing"
-  // are the same silence here. There is no measurement behind the number: it has to cover a
-  // relay round trip plus the host's serialization of a long transcript, and be short enough
-  // that a card nobody is going to fill stops claiming it — a card that showed nothing *was*
-  // the measured symptom, and a spinner with no end is that same lie with more motion. The
+  // It is the only end a *refused* request gets, as well as one nobody answers: nothing
+  // about a refused or dropped `loadNodeItems` comes back to this webview — "answered" and
+  // "answered with nothing" are the same silence here. There is no measurement behind the
+  // number: it has to cover a host round trip plus the serialization of a long transcript,
+  // and be short enough that a card nobody is going to fill stops claiming it — a card
+  // that showed nothing *was* the symptom this state exists to avoid, and a spinner with
+  // no end is that same lie with more motion. The
   // timeout does not cancel anything: a late answer still renders (`applyFetchedItems` only
   // asks whether the log is already in hand — a summary on screen is not).
   const ITEMS_WAIT_MS = 5000;
@@ -3206,7 +3206,7 @@
    * documents (see `_itemsRequested`). A lone request goes out right away; a
    * repaint that re-expands many sidecar cards queues them behind the cap. The card
    * says it is waiting while it does (`setCardLoading`): a sub-agent's transcript is as
-   * absent from the tree as a replica card's items are, and "nothing yet" must not read
+   * absent from the `tree` as a regular card's items are, and "nothing yet" must not read
    * as "nothing there".
    */
   function requestAgentItems(id, card) {
@@ -3224,14 +3224,14 @@
 
   /**
    * Ask the host for one **regular** card's items (`loadNodeItems`) — the same one-shot
-   * contract, for the card whose items never arrived at all: a replica holds the `tree`
-   * and never a `path` (see the block above), and a card with no items in hand is a card
-   * that shows nothing. Unlike the agent half this always goes through the queue, which
-   * is what keeps it cheap in the local case it is not for: a session switch posts the
-   * `tree` before the `path`, a `tree`-only card asks, and the `path` that lands a task
-   * later fills it before the observer has had a frame to promote it — the queue's own
-   * `itemsWanted` check drops the request unposted. An off-screen card stays queued until
-   * it is panned to, exactly like a sidecar's transcript.
+   * contract, for the card whose items never arrived at all: a `tree`-first card holds
+   * the structural node and no items (see the block above), and a card with no items in
+   * hand is a card that shows nothing. Unlike the agent half this always goes through the
+   * queue, which is what keeps it cheap in the local case it is not for: a session switch
+   * posts the `tree` before the `path`, a `tree`-only card asks, and the `path` that lands
+   * a task later fills it before the observer has had a frame to promote it — the queue's
+   * own `itemsWanted` check drops the request unposted. An off-screen card stays queued
+   * until it is panned to, exactly like a sidecar's transcript.
    */
   function requestNodeItems(id, card) {
     card._itemsRequested = true;
@@ -3325,9 +3325,9 @@
 
   /**
    * Which of a card's two sources to render from, and whether what it holds is a
-   * **summary** rather than the log. `pnode` used to win whenever it merely *existed*,
-   * and that is the second half of the measured replica symptom: a `path` / `tree` node
-   * carrying `items: []` (or no `items` at all) hid the real items next to it on the row.
+   * **summary** rather than the log. `pnode` used to win whenever it merely *existed*, and
+   * that hid real items: a `path` / `tree` node carrying `items: []` (or no `items` at all)
+   * beat the row next to it that had them.
    * So a source that *has* items beats one that does not, a real transcript beats a
    * summary of the same node (a repaint can hold both — the `tree` row and the `path`
    * row of one node are built by different callers), and when neither has any the old
@@ -3416,14 +3416,14 @@
         requestAgentItems(id, card);
       } else if (!isSidecarKind(pendingKind) && !runningNodes.has(id) && (!source || card._itemsSummary)) {
         // The same one-shot ask for a **regular** card whose log is not in hand: either
-        // it has no items at all — a replica holds the `tree` and never a `path` (see the
-        // block above), so this is the only way such a card is ever filled — or what it
-        // holds is a summary the host sent (`summary: true`). The gates are the card's:
-        // no log to render (the `pnode` trap — an empty `items` on the path used to win
-        // over real ones, and `itemsSource` has already preferred whichever has any), not
-        // a sidecar (`agent` has its own request, `bg` its own body), and not *running* —
-        // a live card is being filled by its own stream, and rendering a snapshot under
-        // it would rebuild the log the next delta is still appending to.
+        // it has no items at all — a `tree`-first card holds the structural node and no
+        // items (see the block above), so this is the only way such a card is ever filled
+        // — or what it holds is a summary the host sent (`summary: true`). The gates are
+        // the card's: no log to render (the `pnode` trap — an empty `items` on the path
+        // used to win over real ones, and `itemsSource` has already preferred whichever
+        // has any), not a sidecar (`agent` has its own request, `bg` its own body), and
+        // not *running* — a live card is being filled by its own stream, and rendering a
+        // snapshot under it would rebuild the log the next delta is still appending to.
         requestNodeItems(id, card);
       }
     }
@@ -5031,8 +5031,7 @@
   // classifies a one-finger drag as *its* pan first: `touch-action` is `auto` throughout
   // this subtree, so the compositor claims the drag and fires `pointercancel` — and the
   // handler above faithfully stops the drag it was told to stop, which is why nothing
-  // ever moves. The zoom only ever hears `wheel`, and a pinch is not a wheel (the
-  // Android host's `setSupportZoom(false)` means the WebView does not do it either). So
+  // ever moves. The zoom only ever hears `wheel`, and a pinch is not a wheel. So
   // both are read off the touch stream here, driving the same camera the mouse drives —
   // `pan`, `applyTransform()`, `setFollow(false)` and, for the pinch, `zoomAt()`.
   //
@@ -5083,9 +5082,9 @@
       }
       // The scroll zones belong to themselves: a finger there scrolls the log/answer/ask
       // natively, never the camera. A *card* is fair game, unlike the mouse rule above which
-      // leaves cards to the checkout click — on a phone the tree fills the screen and there is
-      // no empty background left to grab, and the tap-vs-drag threshold below is what still
-      // keeps a tap a tap.
+      // leaves cards to the checkout click — on a touch screen the tree fills the screen and
+      // there is no empty background left to grab, and the tap-vs-drag threshold below is
+      // what still keeps a tap a tap.
       if (target && target.closest && target.closest(NATIVE_SCROLL_ZONES)) {
         touchGesture = null;
         return;
@@ -5977,12 +5976,12 @@
       case 'nodeItems':
         // The host's answer to `loadAgentItems` / `loadNodeItems`: one node's items,
         // which the `tree` / `path` payload did not carry — a sub-agent's transcript
-        // (`itemCount` only, see `SessionRuntime.postTree`) or a regular card's items
-        // for a surface that holds the `tree` and never a `path` (a replica, see
-        // `requestNodeItems`). Both are one shape and one code path (`applyFetchedItems`):
-        // a second answer for a card that already has its items — or one for a node a tree
-        // rebuild has dropped — is ignored, never thrown (a webview callback that throws
-        // is silent in the real UI) and renders nothing twice.
+        // (`itemCount` only, see `SessionRuntime.postTree`) or a regular card's items for
+        // a `tree`-first card that asked for them (see `requestNodeItems`). Both are one
+        // shape and one code path (`applyFetchedItems`): a second answer for a card that
+        // already has its items — or one for a node a tree rebuild has dropped — is
+        // ignored, never thrown (a webview callback that throws is silent in the real UI)
+        // and renders nothing twice.
         applyFetchedItems(msg.id, msg.items);
         break;
       case 'panTo':

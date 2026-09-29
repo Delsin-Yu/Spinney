@@ -2,24 +2,21 @@
 /**
  * One place owns the artifacts layout.
  *
- * Three different toolchains build three different things — `vsce` writes the
- * extension package to the repository root, `dotnet publish` writes the relay deep
- * under `remote/server/bin/`, and Gradle writes the APK under
- * `remote/android/app/build/`. Nothing in common, and in practice three places to
- * look. This script collects them into one gitignored `artifacts/` directory with a
- * predictable name, so "the build output" is one answer instead of three.
+ * `vsce` writes the extension package to the repository root, next to everything else the
+ * repository keeps there — and in practice that meant six stale packages piled up beside
+ * each other, with no way to tell which was current. This script collects the built package
+ * into one gitignored `artifacts/` directory under a predictable name, so "the build
+ * output" is one answer instead of "look for the newest `.vsix`".
  *
- * It **collects, it does not build**. Running three toolchains from one script turns
- * a build script into a black box that nobody dares touch; each build stays its own
- * documented command and this script only decides where its output lands.
+ * It **collects, it does not build**. Running the toolchain from one script turns a build
+ * script into a black box that nobody dares touch; the build stays its own documented
+ * command and this script only decides where its output lands.
  *
  *   node tools/collect-artifacts.mjs                  # whatever exists, warn on the rest
  *   node tools/collect-artifacts.mjs --vsix --strict   # the closing paths: no vsix, no pass
  *
- * The `.vsix` is **moved** out of the repository root (its source is our own output,
- * and leaving it behind is what let six stale packages pile up there). The relay and
- * the APK are **copied**, because their source is the toolchain's own output tree and
- * deleting from it would confuse an incremental build.
+ * The `.vsix` is **moved** out of the repository root, because its source is our own
+ * output and leaving it behind is what let those packages pile up there.
  *
  * Dev-only: `.vscodeignore` excludes `tools/**`, so nothing here ships.
  */
@@ -32,8 +29,6 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const ARTIFACTS = path.join(ROOT, 'artifacts');
 
 const version = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8')).version;
-
-const PUBLISH = path.join(ROOT, 'remote', 'server', 'bin', 'Release', 'net10.0', 'linux-x64', 'publish');
 
 /**
  * One kind per build output. `build` is printed when the input is missing, so a reader
@@ -50,32 +45,6 @@ const KINDS = {
     // Everything this kind owns in artifacts/, so the previous build cannot linger.
     slot: /^spinney-.*\.vsix$/i,
   },
-  relay: {
-    label: 'relay (linux-x64)',
-    build: 'dotnet publish -r linux-x64 -c Release   (in remote/server)',
-    move: false,
-    sources: [path.join(PUBLISH, 'spinney-relay')],
-    target: (name) => `spinney-${name}-relay-linux-x64`,
-    // The relay is not one file: ASP.NET loads `appsettings.json` **by that exact name**
-    // from the executable's own directory, so it is collected flat beside the binary
-    // under its canonical — not version-stamped — name. A deployment renames the
-    // executable and keeps this file as it is. Missing while the binary is present is a
-    // relay that would start on defaults by accident, so it is reported like a missing
-    // input (a failure under `--strict`).
-    companion: { source: path.join(PUBLISH, 'appsettings.json'), name: 'appsettings.json' },
-    // The AOT publish also emits a ~55 MiB `spinney-relay.dbg`. It is deliberately
-    // **not** collected: it stays in the toolchain's publish tree, which is where anyone
-    // symbolizing a crash report should look. This directory holds the deployable pair.
-    slot: /^spinney-.*-relay-linux-x64(\.dbg)?$/i,
-  },
-  apk: {
-    label: 'Android debug APK',
-    build: './gradlew :app:assembleDebug --offline   (in remote/android)',
-    move: false,
-    sources: [path.join(ROOT, 'remote', 'android', 'app', 'build', 'outputs', 'apk', 'debug', 'app-debug.apk')],
-    target: (name) => `spinney-${name}-debug.apk`,
-    slot: /^spinney-.*-debug\.apk$/i,
-  },
 };
 
 function parseArgs(argv) {
@@ -88,7 +57,7 @@ function parseArgs(argv) {
     else if (arg.startsWith('--') && Object.hasOwn(KINDS, arg.slice(2))) kinds.push(arg.slice(2));
     else {
       console.error(`collect-artifacts: unknown argument ${JSON.stringify(arg)}`);
-      console.error('usage: node tools/collect-artifacts.mjs [--vsix] [--relay] [--apk] [--strict]');
+      console.error('usage: node tools/collect-artifacts.mjs [--vsix] [--strict]');
       process.exit(2);
     }
   }
@@ -145,31 +114,12 @@ function collect(kind, spec, strict) {
   place(source, target, spec.move);
   console.log(`[ok  ] ${kind}: ${name}  ${human(fs.statSync(target).size)}  sha256 ${sha256(target).slice(0, 16)}…`);
 
-  if (spec.companion) {
-    const { source: from, name: companionName } = spec.companion;
-    if (!fs.existsSync(from)) {
-      const message = `${kind}: ${companionName} is missing from the publish directory — the relay would start on built-in defaults`;
-      if (strict) {
-        console.error(`collect-artifacts: ${message}`);
-        return false;
-      }
-      console.log(`[warn] ${message}`);
-      return true;
-    }
-    const companionTarget = path.join(ARTIFACTS, companionName);
-    place(from, companionTarget, false);
-    console.log(
-      `       ${companionName}  ${human(fs.statSync(companionTarget).size)}  ` +
-        `sha256 ${sha256(companionTarget).slice(0, 16)}…  (loaded by name from the relay's own directory)`,
-    );
-  }
-
   return true;
 }
 
 const { kinds, strict, help } = parseArgs(process.argv.slice(2));
 if (help) {
-  console.log('usage: node tools/collect-artifacts.mjs [--vsix] [--relay] [--apk] [--strict]');
+  console.log('usage: node tools/collect-artifacts.mjs [--vsix] [--strict]');
   console.log('');
   console.log('Collects the built artifacts into artifacts/ with a predictable name.');
   console.log('With no kind flag, every kind is collected and a missing one is a warning.');
