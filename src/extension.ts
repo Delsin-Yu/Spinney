@@ -9,6 +9,7 @@ import { RemoteService } from './remote/remoteService';
 import { RoomsStore } from './remote/roomsStore';
 import { manageRemoteRooms } from './remote/roomsCommand';
 import { RemoteSessionPanels, REMOTE_SESSION_VIEW_TYPE } from './remote/remoteSessionPanel';
+import { showRoomPairingCode } from './remote/pairingCode';
 import {
   RemoteTreeContext,
   RemoteTreeProvider,
@@ -277,6 +278,22 @@ export function activate(context: vscode.ExtensionContext): void {
     ),
     vscode.commands.registerCommand('spinney.remoteDisconnect', (arg) =>
       void setRemoteRoomConnected(remoteTreeCtx, arg, false),
+    ),
+    // Pairing a phone: the desktop draws the room token as a QR code, the phone photographs it.
+    // The token never reaches the relay, so this is the only channel that can hand it over, and
+    // it is why the PNG lands in the extension's own storage rather than in the workspace
+    // (`context.storageUri`; a no-folder window has no workspace-scoped storage, so it falls
+    // back to the global one — see `src/remote/pairingCode.ts`).
+    vscode.commands.registerCommand('spinney.remotePairingCode', (arg) =>
+      void showRoomPairingCode(
+        {
+          service: remote,
+          store: remoteRooms,
+          storage: context.storageUri ?? context.globalStorageUri,
+          log: (line) => chatProvider?.outputLog(line),
+        },
+        arg,
+      ),
     ),
     // Export/import of the session data folder: the user's own copy of their history, and the
     // way a rename or a new machine recovers it (see invariants/session-persistence.md).

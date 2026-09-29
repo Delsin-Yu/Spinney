@@ -18,4 +18,7 @@ internal static class HttpJson
     public static string? RouteRoomId(HttpContext context) => context.Request.RouteValues["roomId"] as string;
 
     public static string QueryPeerId(HttpContext context) => context.Request.Query["peer"].ToString();
+
+    /// <summary>The source address, for the per-address join brake. Never logged.</summary>
+    public static string? SourceAddress(HttpContext context) => context.Connection.RemoteIpAddress?.ToString();
 }

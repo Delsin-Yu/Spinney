@@ -23,7 +23,7 @@ internal sealed class CommandLine
 
     public static string Usage =>
         """
-        spinney-relay - dumb byte pipe that pairs two peers of one room
+        spinney-relay - dumb byte pipe that pairs the peers of one room, and remembers which rooms exist
 
         usage: spinney-relay [--flag value ...] [--selftest] [--help]
 
@@ -39,8 +39,17 @@ internal sealed class CommandLine
           --peer-queue-bytes <int>        per-peer outbound queue (default 4194304)
           --idle-timeout-seconds <int>    eviction timeout (default 90)
           --heartbeat-seconds <int>       SSE ping interval (default 15)
+          --room-record-ttl-days <int>    how long a room stays joinable with no members (default 30)
+          --max-room-records <int>        rooms on record (default 1024)
+          --room-records-file <file>      where the record of existing rooms lives (default rooms.json)
+          --join-rate-per-second <num>    per-address join refill (default 1)
+          --join-rate-burst <num>         per-address join burst (default 5)
           --selftest                      run the contract in process, print PASS/FAIL
           --help                          this text
+
+        `POST /v1/room/{roomId}/join` creates a room on first use and never refuses an unknown one.
+        `POST /v2/room/{roomId}/join` takes `{"mode":"create"|"join"}`: `join` answers 404
+        `room_unknown` for a room this relay has no record of, and `create` records it. See README.md.
 
         appsettings.json is read once, beside the executable. Its "Relay" section sets the same keys
         in PascalCase ("Relay:MaxPeersPerRoom"); the environment form is Relay__MaxPeersPerRoom. A
@@ -51,7 +60,9 @@ internal sealed class CommandLine
     public static string Describe(Limits limits) =>
         $"peers/room {limits.MaxPeersPerRoom}, rooms {limits.MaxRooms}, frame {limits.MaxFrameBytes} B, " +
         $"rate {limits.RatePerSecond}/s burst {limits.RateBurst}, queue {limits.PeerQueueBytes} B, " +
-        $"idle {limits.IdleTimeoutSeconds}s, heartbeat {limits.HeartbeatSeconds}s";
+        $"idle {limits.IdleTimeoutSeconds}s, heartbeat {limits.HeartbeatSeconds}s, " +
+        $"records {limits.MaxRoomRecords} for {limits.RoomRecordTtlDays}d in {limits.RoomRecordsFile}, " +
+        $"join {limits.JoinRatePerSecond}/s burst {limits.JoinRateBurst}";
 
     public static CommandLine Parse(string[] args)
     {

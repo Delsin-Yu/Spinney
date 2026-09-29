@@ -137,6 +137,19 @@ export type TransportPhase =
   | 'error';
 
 /**
+ * The refusals a *user* can act on, as opposed to the transport failures a retry loop handles.
+ * A wrong token used to be neither: it produced an empty room and no error at all.
+ */
+export type TransportCause =
+  /** `404 room_unknown`: no room on this relay answers to this token. Eventually a hint: check the token on both devices. */
+  | 'room-unknown'
+  /** `404` with no error body at all: the relay predates `/v2`, so it cannot refuse a room it has never seen. */
+  | 'relay-too-old';
+
+/** What a connection may do to the room it names: `PROTOCOL.md` §3, and `/v2`'s `mode`. */
+export type JoinMode = 'create' | 'join';
+
+/**
  * Everything the down-reader refused, by cause.
  *
  * `remote/PROTOCOL.md` §4 says the three failure kinds must stay distinguishable —
@@ -194,6 +207,18 @@ export interface TransportStatus {
    * reading.
    */
   inboundRefused: InboundRefusalCounts;
+  /**
+   * Set by the join that **created** the room on this relay: nobody had used this token here
+   * before. It is the publisher's half of the same legible failure the replica gets from
+   * `room_unknown` — a window that expected to *find* a room has just learned it made one, which
+   * is exactly what two devices with two different tokens each do to this relay.
+   */
+  roomCreated?: boolean;
+  /**
+   * The machine-readable cause behind `error`, for the refusals a user can act on. The service
+   * localizes these; `error` stays English for the log (`PROTOCOL.md` §3).
+   */
+  cause?: TransportCause;
 }
 
 /** What a caller hands to `send`; the transport fills in `v`, `from` and `id`. */
@@ -222,6 +247,18 @@ export interface RelayTransportOptions {
    * so a raw material the service may keep is simply never needed by this layer.
    */
   deviceId: string;
+  /**
+   * What this connection may do to the room, sent as `POST /v2/…/join`'s `mode`: `create` for a
+   * publisher — a VS Code window is the thing that brings a room into being — and `join` for a
+   * replica, which may only enter a room that already exists.
+   *
+   * This is the whole of §3's second half. With `join`, a token naming a room nobody ever created
+   * is *refused* (`room_unknown`) instead of answered with a live empty room, so "wrong token"
+   * stops looking exactly like "nobody is publishing right now". It is a client's declaration and
+   * not a privilege: the relay cannot tell a phone from a desktop, and in this design whoever holds
+   * the token *is* the room.
+   */
+  joinMode: JoinMode;
   /** Every decoded inbound frame addressed to us or broadcast. */
   onFrame: (frame: FrameEnvelope) => void;
   /** Phase changes and the drop counter. */
@@ -289,6 +326,10 @@ export class RelayTransport {
   private attempt = 0;
   /** True while a frame has been taken off the queue and is not fully posted yet. */
   private inFlight = false;
+  /** Whether the join that is live now *created* the room (`/v2`'s `created`). */
+  private roomCreated = false;
+  /** The last join refusal a user can act on; cleared when an attempt starts. */
+  private cause: TransportCause | undefined;
 
   constructor(private readonly options: RelayTransportOptions) {}
 
@@ -304,6 +345,12 @@ export class RelayTransport {
     }
     if (this.lastError !== undefined) {
       status.error = this.lastError;
+    }
+    if (this.roomCreated) {
+      status.roomCreated = true;
+    }
+    if (this.cause !== undefined) {
+      status.cause = this.cause;
     }
     return status;
   }
@@ -400,6 +447,7 @@ export class RelayTransport {
     }
     this.phase = 'connecting';
     this.retryAt = undefined;
+    this.cause = undefined;
     this.publish();
 
     const conn = new AbortController();
@@ -418,7 +466,12 @@ export class RelayTransport {
     });
     let response: Response;
     try {
-      response = await this.fetch(this.joinUrl(), { method: 'POST', signal: guard.signal });
+      response = await this.fetch(this.joinUrl(), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ mode: this.options.joinMode }),
+        signal: guard.signal,
+      });
     } catch (err) {
       if (this.live(epoch) && !conn.signal.aborted) {
         this.fail(timedOut ? `join stayed unanswered for ${POST_TIMEOUT_MS} ms` : `join failed: ${reasonOf(err)}`, true);
@@ -434,11 +487,13 @@ export class RelayTransport {
     }
     if (!response.ok) {
       const status = response.status;
-      drainQuietly(response);
-      // A 429 is "the room is full" and a 5xx is "the relay is unwell": both pass. Any
-      // other status on `join` is the room id itself (the relay answers 404 for a
-      // malformed one) or a refusal, and neither improves by waiting.
-      this.fail(`join was refused with HTTP ${status}`, status === 429 || status >= 500);
+      const code = await errorCodeOf(response);
+      if (!this.live(epoch)) {
+        return;
+      }
+      const refusal = joinRefusal(status, code);
+      this.cause = refusal.cause;
+      this.fail(refusal.message, refusal.retry);
       return;
     }
 
@@ -454,17 +509,22 @@ export class RelayTransport {
     if (!this.live(epoch)) {
       return;
     }
-    const peer = peerIdOf(text);
-    if (peer === null) {
+    const answer = joinAnswerOf(text);
+    if (answer === null) {
       this.fail('join answered without a peer id (8 lowercase hex characters)', true);
       return;
     }
+
+    // `created` is the publisher's own legible failure: a window that expected to *find* a room
+    // and reads `true` here has just learned that this token had never been used on this relay —
+    // which is what a phone holding a different token looks like from this side.
+    this.roomCreated = answer.created;
 
     // A new connection, from the salt up: `seq` starts at 1 and the salt is fresh, which
     // is what keeps a reconnect from reusing a nonce (§4). A reused salt here would be a
     // silent cryptographic failure, not a visible one — and now it is also visible on the
     // wire, because every slice of this connection carries it as `s`.
-    this.peer = peer;
+    this.peer = answer.peer;
     this.salt = randomBytes(4).readUInt32BE(0);
     this.seq = 0;
     // One set of sender windows per connection, cleared with it: a reconnect mints a new
@@ -1033,7 +1093,7 @@ export class RelayTransport {
   }
 
   private joinUrl(): string {
-    return `${this.base()}/v1/room/${this.options.roomId}/join`;
+    return `${this.base()}/v2/room/${this.options.roomId}/join`;
   }
 
   private downUrl(): string {
@@ -1093,15 +1153,91 @@ export function backoffDelay(attempt: number): number {
 }
 
 /** The `join` answer, or `null` when it is not the 8 lowercase hex characters §2 promises. */
-function peerIdOf(text: string): string | null {
+function joinAnswerOf(text: string): { peer: string; created: boolean } | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
     return null;
   }
-  const peer = (parsed as { peer?: unknown } | null)?.peer;
-  return typeof peer === 'string' && /^[0-9a-f]{8}$/.test(peer) ? peer : null;
+  const body = parsed as { peer?: unknown; created?: unknown } | null;
+  const peer = body?.peer;
+  if (typeof peer !== 'string' || !/^[0-9a-f]{8}$/.test(peer)) {
+    return null;
+  }
+
+  // `created` is `/v2`'s addition; a relay that answers the old shape simply never says it made
+  // the room, and "not created" is the safe reading of silence (it is the answer that asks
+  // nothing of the user).
+  return { peer, created: body?.created === true };
+}
+
+/**
+ * The refusal's own word for why, from the error body. `null` covers every case where there is no
+ * readable body at all — which, on a 404 from a relay built before `/v2`, is exactly the signal
+ * that the *route* is missing rather than the room.
+ */
+async function errorCodeOf(response: Response): Promise<string | null> {
+  let text: string;
+  try {
+    text = await response.text();
+  } catch {
+    return null;
+  }
+  try {
+    const code = (JSON.parse(text) as { error?: unknown } | null)?.error;
+    return typeof code === 'string' && code.length <= 64 ? code : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What one refused join means, and whether waiting could change it.
+ *
+ * This is where `PROTOCOL.md` §3's axiom is finally cashed in: the two answers that used to be
+ * indistinguishable — "the room exists and nobody is in it" and "no room answers to this token" —
+ * now arrive as different statuses, so the transport can say which one it got, name the cause for
+ * the UI, and *stop* instead of retrying a token that will never work.
+ */
+function joinRefusal(status: number, code: string | null): { message: string; retry: boolean; cause?: TransportCause } {
+  switch (code) {
+    case 'room_unknown':
+      return {
+        message:
+          'no room on this relay answers to this token: a wrong token is a different room, and nobody has created that one (check the token against the other device)',
+        retry: false,
+        cause: 'room-unknown',
+      };
+    case 'bad_mode':
+      return {
+        message: 'the relay refused the join mode: this window and that relay disagree about the join contract (update whichever is older)',
+        retry: false,
+      };
+    case 'invalid_room_id':
+      return { message: 'the relay refused this room id', retry: false };
+    case 'room_full':
+      return { message: 'the room is full', retry: true };
+    case 'too_many_rooms':
+      return { message: 'the relay is at its room limit', retry: true };
+    case 'rate_limited':
+      return { message: 'the relay is rate limiting joins from this address', retry: true };
+    case 'body_too_large':
+      return { message: 'the relay refused the join body as too large', retry: false };
+    default:
+      break;
+  }
+
+  if (status === 404) {
+    return {
+      message:
+        'the relay does not answer /v2 joins: it is older than this window, so it cannot tell a room that does not exist from one that is merely empty (update the relay)',
+      retry: false,
+      cause: 'relay-too-old',
+    };
+  }
+
+  return { message: `join was refused with HTTP ${status}`, retry: status === 429 || status >= 500 };
 }
 
 /** Turn any thrown value into one short line for the status. */

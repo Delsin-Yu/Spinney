@@ -108,6 +108,14 @@ const TURN_MESSAGES = [
   // expanded one asks for it and renders the host's `agentItems` answer — the two
   // shapes are checked in the lazy-sidecar section at the bottom of this file.
   { type: 'agentItems', id: NODE_ID, items: [] },
+  // The same answer shape for a **regular** node's items (`loadNodeItems` → `nodeItems`),
+  // which a replica's card asks for when the `tree` it holds carried none — and which a
+  // *summarised* card (`summary: true`, a finished node's row carries its first ask and its
+  // last answer instead of the log) asks for on its first expansion. Both are checked in
+  // the sections at the bottom of this file. The `path` above already rendered this node,
+  // so the answer renders nothing here; what this entry pins is that the provider may post
+  // the new type without the webview throwing.
+  { type: 'nodeItems', id: NODE_ID, items: [] },
   {
     type: 'config',
     // One card per provider group: `card-text` is text-only, `card-vision`
@@ -378,7 +386,15 @@ function makeElement(id) {
     getAttribute: () => null,
     removeAttribute() {},
     hasAttribute: () => false,
+    // `_listeners` keeps the last handler registered for a type — what every check
+    // below reads, and enough for every surface they touch (a button has one `click`).
+    // `_allListeners` records all of them, for the one case that has to replay a real
+    // browser event: a pointer stream after a finger lands reaches *every* listener the
+    // element registered, and a check that only saw the last one could not tell a pan
+    // that stood down from a pan that never started (the touch-gesture block at the
+    // bottom of this file is that case).
     addEventListener(type, handler) {
+      ((this._allListeners ??= {})[type] ??= []).push(handler);
       (this._listeners ??= {})[type] = handler;
     },
     removeEventListener() {},
@@ -1567,12 +1583,478 @@ if (contextLabel !== 'ctx 50%') {
   }
 }
 
+// --- A card whose items never arrived asks for them (the replica's fetch) -------
+// A replica gets the structural `tree` and nothing else — `RemoteService.mirrorTree`
+// answers an `attach` with `treeMessage()`, and no `path` ever reaches that surface — so a
+// regular card's items are in *no* payload it holds. Measured on a real phone: three cards
+// at `work:0 ans:0` next to a `preview` that promised a full session, indistinguishable
+// from an empty, finished node. Such a card now says it is waiting and asks once
+// `loadNodeItems` → `nodeItems`). The five cases are checked here as (a) waiting and one
+// ask, (b) the answer rendering and clearing, (c) a re-expansion not re-asking, (d) the
+// `pnode` trap in its own fixture — `pnode` used to win whenever it merely *existed*, so a
+// `path` row carrying no items hid the real ones on the row next to it — and (e) a reply
+// for an unknown id being ignored rather than thrown.
+{
+  const ROOT = 'fetch-root';
+  const LAST = 'fetch-last'; // the second card of the same session, for the re-expansion
+  const TRAP = 'fetch-trap'; // items on the tree row only, a `path` row without any
+  const node = (id, parentId, children, extra) => Object.assign(
+    { id, parentId, children, title: id, status: 'done', createdAt: 0, preview: id, usage: null, size: null },
+    extra || {},
+  );
+  const cardOf = (id) => {
+    for (const child of elementById('tree-canvas').children) {
+      if (child.dataset && child.dataset.id === id) return child;
+    }
+    return null;
+  };
+  /** Rendered items of a card, or -1 when a zone is missing (so a miss is not a pass). */
+  const itemsOf = (card) => {
+    const work = card ? findByClass(card, 'node-work') : null;
+    const answer = card ? findByClass(card, 'node-answer') : null;
+    return (work ? work.children.length : -1) + (answer ? answer.children.length : -1);
+  };
+  const asked = () => posted.filter((m) => m && m.type === 'loadNodeItems');
+  const askedOf = (id) => asked().filter((m) => m.id === id);
+
+  // The replica's shape: one `tree`, its `viewId` card expanded, and no `path` message.
+  dispatch({ type: 'reset' });
+  posted.length = 0;
+  dispatch({
+    type: 'tree',
+    viewId: ROOT,
+    activeId: null,
+    rootId: ROOT,
+    rootIds: [ROOT, LAST],
+    nodes: [node(ROOT, null, []), node(LAST, null, [])],
+  });
+
+  // (a) A card with no items waits, visibly, and asks exactly once.
+  const root = cardOf(ROOT);
+  if (!root) {
+    problems.push('no card was rendered for the per-node fetch fixture');
+  } else {
+    if (!hasClass(root, 'items-loading')) {
+      problems.push(
+        'a card with no items does not show a loading state (`items-loading`) — a card that shows nothing is ' +
+          'indistinguishable from an empty, finished node, which is the measured replica symptom (three cards, ' +
+          '`work:0 ans:0`, a full published session)',
+      );
+    }
+    const strip = findByClass(root, 'node-loading');
+    if (!strip || String(strip.textContent || '').length === 0) {
+      problems.push(
+        'a waiting card has no `.node-loading` strip with a label: nothing on screen says the content is on its ' +
+          'way (the one string this adds, written as a `tr()` literal so `check:l10n` can see it)',
+      );
+    }
+    if (itemsOf(root) !== 0) {
+      problems.push(`a card waiting for its items rendered ${itemsOf(root)} item(s) before they arrived`);
+    }
+  }
+  const firstAsk = asked();
+  if (firstAsk.length !== 1 || firstAsk[0].id !== ROOT) {
+    problems.push(
+      `an expanded card with no items posted ${JSON.stringify(firstAsk)}, expected exactly one ` +
+        `{ type: 'loadNodeItems', id: '${ROOT}' }`,
+    );
+  }
+
+  // (c) A second expansion — the reader collapses and reopens the card, or a repaint
+  // re-expands it — must not ask again: the host would re-serialize the whole transcript
+  // for a card that already asked (`_itemsRequested` is the one-shot contract).
+  const treeAgain = (viewId) =>
+    dispatch({
+      type: 'tree',
+      viewId,
+      activeId: null,
+      rootId: ROOT,
+      rootIds: [ROOT, LAST],
+      nodes: [node(ROOT, null, []), node(LAST, null, [])],
+    });
+  treeAgain(LAST); // the view moves: ROOT's card collapses
+  treeAgain(ROOT); // …and comes back, still waiting (no answer yet)
+  if (askedOf(ROOT).length !== 1) {
+    problems.push(
+      `a second expansion asked for ${ROOT} again (${askedOf(ROOT).length} request(s)) — collapsing and reopening ` +
+        'a card, or a repaint that re-expands it, must not re-ask',
+    );
+  }
+  const reopened = cardOf(ROOT);
+  if (!reopened || !hasClass(reopened, 'items-loading')) {
+    problems.push('a card re-expanded while it is still waiting no longer shows its loading state');
+  }
+
+  // (b) The answer: rendered into that card, once, and the waiting state goes with it.
+  dispatch({ type: 'nodeItems', id: ROOT, items: [{ kind: 'assistant', text: '来自节点的答案' }] });
+  const answered = cardOf(ROOT);
+  if (itemsOf(answered) !== 1) {
+    problems.push(
+      `a nodeItems answer left ${itemsOf(answered)} item(s) in the card, expected its one answer item ` +
+        '(the host answers with the same clipped `displayItems` a `path` would carry)',
+    );
+  }
+  if (answered && hasClass(answered, 'items-loading')) {
+    problems.push(
+      'a nodeItems answer left the card in its loading state — the strip keeps claiming the content is on its way ' +
+        'after it arrived',
+    );
+  }
+  dispatch({ type: 'nodeItems', id: ROOT, items: [{ kind: 'assistant', text: '来自节点的答案' }] });
+  if (itemsOf(cardOf(ROOT)) !== 1) {
+    problems.push(
+      `a second nodeItems answer re-rendered the card (${itemsOf(cardOf(ROOT))} item(s)) — the card must render once`,
+    );
+  }
+
+  // (d) The `pnode` trap, on its own fixture: the tree row carries the items, the path row
+  // for the same node carries none. `pnode` winning just by existing is what left a card
+  // blank while the row next to it held the whole turn.
+  dispatch({ type: 'reset' });
+  posted.length = 0;
+  dispatch({
+    type: 'tree',
+    viewId: ROOT,
+    activeId: null,
+    rootId: ROOT,
+    nodes: [
+      node(ROOT, null, [TRAP]),
+      node(TRAP, ROOT, [], { items: [{ kind: 'assistant', text: '来自树行的答案' }] }),
+    ],
+  });
+  dispatch({ type: 'path', ids: [TRAP], nodes: [{ id: TRAP, status: 'done' }] });
+  const trap = cardOf(TRAP);
+  if (itemsOf(trap) !== 1) {
+    problems.push(
+      `a card whose path row carried no items but whose tree row carried one rendered ${itemsOf(trap)} item(s) — ` +
+        'the path row must not win over a source that has items just by existing',
+    );
+  }
+  if (trap && hasClass(trap, 'items-loading')) {
+    problems.push('a card filled from its tree row still claims its content is on its way');
+  }
+
+  // (e) An answer for a node the tree no longer has must be ignored, not thrown: a
+  // webview callback that throws is silent in the real UI (`dispatch` reports it here).
+  dispatch({ type: 'nodeItems', id: 'fetch-gone', items: [{ kind: 'assistant', text: '孤儿' }] });
+
+  notes.push(
+    `per-node fetch: a card with no items waits and asks once (${askedOf(ROOT).length} loadNodeItems for the ` +
+      're-expanded card, the nodeItems answer rendered 1 item)',
+  );
+}
+
+// --- A summarised card fetches its log on expansion, and only then -----------------
+// A row describing a **finished** node no longer carries the whole transcript: it carries
+// `items` = the turn's first `user` item and its last answer, `summary: true`, and the
+// node's real `itemCount` (`SessionRuntime`, see `itemsSource` in media/main.js). The card
+// renders that summary, knows it is not the log, and asks for the rest with the *same*
+// on-demand pair the replica case above uses (`loadNodeItems` -> `nodeItems`) — there is no
+// second mechanism and no second request shape. Eight facts are pinned here, each as its own
+// fixture:
+//  (a) a collapsed summarised card renders nothing and asks for nothing — the fetch is the
+//      expansion's, never the arrival's;
+//  (b) expanding it renders the summary, asks exactly once, and wears the loading strip
+//      while the log is on its way;
+//  (c) the `nodeItems` answer replaces the summary and clears the strip;
+//  (d) collapsing and re-expanding does not ask again, and does not fall back to the
+//      summary;
+//  (e) a card whose row is **not** a summary never asks (the control);
+//  (f) the local shape: the summary rides the `path`, which is not an answer to the
+//      request the `tree` pass already posted, so the strip stays and the request stays one;
+//  (g) a summary that summarises to nothing (`items: []` plus the flag) is still a summary:
+//      the flag is what says the log is elsewhere;
+//  (h) a *full* row landing next to a rendered summary is the log — rendering it beats a
+//      round trip for items already in hand, whichever of the two rows carries it.
+{
+  const SUM = 'sum-root';    // finished, summarised tree row; collapsed in the first fixture
+  const FULL = 'sum-full';   // finished, full tree row — the control: it must never ask
+  const LOCAL = 'sum-local'; // the local shape: the summary arrives in the `path`
+  const EMPTY = 'sum-empty'; // the summary that summarises to nothing (`items: []` + the flag)
+  const UPG = 'sum-upgrade';   // the tree row summarises it, the `path` row carries the log
+  const UPG2 = 'sum-upgrade2'; // the `path` summarises it, a later `tree` row carries the log
+  const LIVE = 'sum-live';   // the turn streamed into its card, so the row's summary is not it
+  const node = (id, parentId, children, extra) => Object.assign(
+    { id, parentId, children, title: id, status: 'done', createdAt: 0, preview: id, usage: null, size: null },
+    extra || {},
+  );
+  const cardOf = (id) => {
+    for (const child of elementById('tree-canvas').children) {
+      if (child.dataset && child.dataset.id === id) return child;
+    }
+    return null;
+  };
+  /** Rendered items of a card, or -1 when a zone is missing (so a miss is not a pass). */
+  const itemsOf = (card) => {
+    const work = card ? findByClass(card, 'node-work') : null;
+    const answer = card ? findByClass(card, 'node-answer') : null;
+    return (work ? work.children.length : -1) + (answer ? answer.children.length : -1);
+  };
+  const askedOf = (id) => posted.filter((m) => m && m.type === 'loadNodeItems' && m.id === id);
+  /** The host's summary shape: the first ask of the turn, and its last answer. */
+  const SUMMARY = [
+    { kind: 'user', text: '概括的问题' },
+    { kind: 'assistant', text: '概括的答案' },
+  ];
+  // What `loadNodeItems` answers with. Two trailing answers, so the number of rendered
+  // items says *which* of the two the card shows: the summary lifts 1 item into zone 3,
+  // the log lifts 2.
+  const LOG = [
+    { kind: 'user', text: '概括的问题' },
+    { kind: 'assistant', text: '真正的答案一' },
+    { kind: 'assistant', text: '真正的答案二' },
+  ];
+  const SUMMARY_ITEMS = 1;
+  const LOG_ITEMS = 2;
+  const frame = (viewId, nodes) =>
+    dispatch({
+      type: 'tree',
+      viewId,
+      activeId: null,
+      rootId: nodes[0].id,
+      rootIds: nodes.map((n) => n.id),
+      nodes,
+    });
+
+  // (a) SUM is a sibling of the view focus, so its card is collapsed. A card nobody opened
+  // must not ask for the log behind the summary: the single ask belongs to the first
+  // expansion, and a fetch on arrival would ask for every finished card of a session at
+  // once — the burst the queue above exists to bound.
+  dispatch({ type: 'reset' });
+  posted.length = 0;
+  const summaryRow = (id) => node(id, null, [], { items: SUMMARY, summary: true, itemCount: LOG.length });
+  frame(FULL, [summaryRow(SUM), node(FULL, null, [], { items: LOG })]);
+  if (askedOf(SUM).length !== 0) {
+    problems.push(
+      `a collapsed card whose row carries a summary asked for its log (${askedOf(SUM).length} loadNodeItems) — the fetch ` +
+        'belongs to the first expansion, not to the summary arriving',
+    );
+  }
+  const collapsedSum = cardOf(SUM);
+  if (itemsOf(collapsedSum) !== 0) {
+    problems.push(
+      `a collapsed summarised card rendered ${itemsOf(collapsedSum)} item(s) — a collapsed card is its head and its preview`,
+    );
+  }
+  if (collapsedSum && hasClass(collapsedSum, 'items-loading')) {
+    problems.push('a collapsed card that asked for nothing shows the loading strip, which is for an expanded card that waits');
+  }
+
+  // (e) The control: FULL's row is the log, its card is expanded, and it must behave exactly
+  // as a card did before summaries existed — no request, ever.
+  if (itemsOf(cardOf(FULL)) !== LOG_ITEMS) {
+    problems.push(
+      `a full (non-summary) row rendered ${itemsOf(cardOf(FULL))} item(s) in its expanded card, expected the log's ${LOG_ITEMS}`,
+    );
+  }
+  if (askedOf(FULL).length !== 0) {
+    problems.push(
+      `a card whose row was not a summary asked for its log (${askedOf(FULL).length} loadNodeItems) — a card that already ` +
+        'holds the log must never ask',
+    );
+  }
+
+  // (b) Expanding it (the view focus moves onto it) renders the summary, asks once and waits
+  // visibly: the same strip the replica case above uses, because "the first ask and the last
+  // answer" must not read as "the whole turn".
+  frame(SUM, [summaryRow(SUM), node(FULL, null, [], { items: LOG })]);
+  const openedSum = cardOf(SUM);
+  const sumAsks = askedOf(SUM).map((m) => `${m.type}:${m.id}`);
+  if (sumAsks.length !== 1 || sumAsks[0] !== `loadNodeItems:${SUM}`) {
+    problems.push(
+      `expanding a summarised card posted ${JSON.stringify(sumAsks)}, expected exactly one loadNodeItems for ${SUM}`,
+    );
+  }
+  if (itemsOf(openedSum) !== SUMMARY_ITEMS) {
+    problems.push(
+      `an expanded summarised card rendered ${itemsOf(openedSum)} item(s), expected its ${SUMMARY_ITEMS} summary item — the ` +
+        'summary is what the card shows until the log lands',
+    );
+  }
+  if (!openedSum || !hasClass(openedSum, 'items-loading')) {
+    problems.push(
+      'a summarised card waiting for its log does not show the loading state (`items-loading`) — the summary must not read ' +
+        'as the whole turn',
+    );
+  }
+
+  // (c) The answer replaces the summary (2 items, not 1: `renderNodeItems` clears both zones)
+  // and takes the strip with it.
+  dispatch({ type: 'nodeItems', id: SUM, items: LOG });
+  const answeredSum = cardOf(SUM);
+  if (itemsOf(answeredSum) !== LOG_ITEMS) {
+    problems.push(
+      `a nodeItems answer left ${itemsOf(answeredSum)} item(s) in a summarised card, expected the log's ${LOG_ITEMS} — the ` +
+        'answer must replace the summary, not be dropped because the card already had content',
+    );
+  }
+  if (answeredSum && hasClass(answeredSum, 'items-loading')) {
+    problems.push('a nodeItems answer left a summarised card claiming its log is on its way');
+  }
+
+  // (d) Collapse and re-open: the one-shot ask was already spent, and the log stays — a
+  // repaint of a card that has the log must not fall back to the summary it arrived with.
+  frame(FULL, [summaryRow(SUM), node(FULL, null, [], { items: LOG })]);
+  frame(SUM, [summaryRow(SUM), node(FULL, null, [], { items: LOG })]);
+  if (askedOf(SUM).length !== 1) {
+    problems.push(
+      `re-expanding a fetched summarised card asked again (${askedOf(SUM).length} loadNodeItems) — the one-shot contract ` +
+        '(`_itemsRequested`) is the same for a summary',
+    );
+  }
+  if (itemsOf(cardOf(SUM)) !== LOG_ITEMS) {
+    problems.push(
+      `a repaint of a fetched summarised card left ${itemsOf(cardOf(SUM))} item(s), expected the log's ${LOG_ITEMS}`,
+    );
+  }
+  // Read here, while this fixture's `posted` is still the one that answered it: the two
+  // fixtures below reset it, and a note that reported 0 requests would be a note about the
+  // reset rather than about the card.
+  const sumRequests = askedOf(SUM).length;
+
+  // (f) The local surface: the summary rides the `path` (a session switch renders from it)
+  // and the `tree` row that arrives first carries no items at all, so the card already asked
+  // (the replica case above). The `path` summary is *content*, not the answer to that
+  // request: it renders, the strip stays on, and the request is not posted a second time.
+  dispatch({ type: 'reset' });
+  posted.length = 0;
+  frame(LOCAL, [node(LOCAL, null, [])]);
+  if (askedOf(LOCAL).length !== 1) {
+    problems.push(
+      `a view-focus card with no items row posted ${askedOf(LOCAL).length} loadNodeItems, expected 1 (this fixture needs ` +
+        'that request out to see what the path summary does to it)',
+    );
+  }
+  dispatch({ type: 'path', ids: [LOCAL], nodes: [{ id: LOCAL, status: 'done', items: SUMMARY, summary: true }] });
+  const localCard = cardOf(LOCAL);
+  if (itemsOf(localCard) !== SUMMARY_ITEMS) {
+    problems.push(
+      `a path row carrying a summary rendered ${itemsOf(localCard)} item(s), expected ${SUMMARY_ITEMS} — a summary is ` +
+        'content and renders like any other row',
+    );
+  }
+  if (!localCard || !hasClass(localCard, 'items-loading')) {
+    problems.push(
+      "a path summary cleared the card's loading state — the log it asked for is still on its way, and a summary is not " +
+        'that answer',
+    );
+  }
+  if (askedOf(LOCAL).length !== 1) {
+    problems.push(
+      `a path summary made the card ask again (${askedOf(LOCAL).length} loadNodeItems) — the request it already has out is ` +
+        'the same one',
+    );
+  }
+  dispatch({ type: 'nodeItems', id: LOCAL, items: LOG });
+  if (itemsOf(cardOf(LOCAL)) !== LOG_ITEMS || hasClass(cardOf(LOCAL), 'items-loading')) {
+    problems.push(
+      `the local card did not take the log from its answer (${itemsOf(cardOf(LOCAL))} item(s), ` +
+        `loading=${hasClass(cardOf(LOCAL), 'items-loading')})`,
+    );
+  }
+  const localRequests = askedOf(LOCAL).length;
+
+  // (g) A summary that summarises to nothing is still a summary: a whole turn of one `user` item
+  // (the ask, which is zone 1 and not an item of the log) leaves `items: []`, and the flag
+  // is then the only thing that says the rest is somewhere else. Rendering that empty log and
+  // never asking is the "card with nothing in it" symptom of the replica case above.
+  dispatch({ type: 'reset' });
+  posted.length = 0;
+  frame(EMPTY, [node(EMPTY, null, [], { items: [], summary: true, itemCount: LOG.length })]);
+  if (askedOf(EMPTY).length !== 1) {
+    problems.push(
+      `a summarised card whose summary is empty posted ${askedOf(EMPTY).length} loadNodeItems, expected 1 — the flag says ` +
+        'the log is elsewhere, and an empty log is not an answer',
+    );
+  }
+
+  // (h) A *full* row landing next to a rendered summary is the log, and rendering it beats a
+  // round trip for items already in hand: this is the one case where a summary is thrown
+  // away rather than fetched. Both orders are pinned, because the two rows of one node are
+  // built by different callers: the log in the `path` after a summarised `tree`, and the log
+  // in the `tree` after a summarised `path` (that one needs `itemsSource` to prefer a real
+  // row over the summary the `path` put on the card).
+  dispatch({ type: 'reset' });
+  posted.length = 0;
+  frame(UPG, [node(UPG, null, [], { items: SUMMARY, summary: true, itemCount: LOG.length })]);
+  dispatch({ type: 'path', ids: [UPG], nodes: [{ id: UPG, status: 'done', items: LOG }] });
+  if (itemsOf(cardOf(UPG)) !== LOG_ITEMS) {
+    problems.push(
+      `a full path row left the tree row's summary on the card (${itemsOf(cardOf(UPG))} item(s), expected the log's ` +
+        `${LOG_ITEMS}) — real items supersede a summary, or the card asks the host for what it already holds`,
+    );
+  }
+  // The other order, on a card that has only ever seen the summary: the `path` summarised it
+  // and a later `tree` row carries the log. Nothing but `itemsSource` can prefer that row.
+  frame(UPG2, [node(UPG2, null, [], { items: SUMMARY, summary: true, itemCount: LOG.length })]);
+  dispatch({ type: 'path', ids: [UPG2], nodes: [{ id: UPG2, status: 'done', items: SUMMARY, summary: true }] });
+  if (!hasClass(cardOf(UPG2), 'items-loading')) {
+    problems.push(
+      'the path-summarised upgrade fixture has no waiting card, so it cannot see what a full tree row does to a summary',
+    );
+  }
+  frame(UPG2, [node(UPG2, null, [], { items: LOG })]);
+  if (itemsOf(cardOf(UPG2)) !== LOG_ITEMS) {
+    problems.push(
+      `a full tree row left the path row's summary on the card (${itemsOf(cardOf(UPG2))} item(s), expected the log's ` +
+        `${LOG_ITEMS}) — the same rule from the other side, decided by ` +
+        '`itemsSource` preferring a real row over a summary',
+    );
+  }
+
+  // (i) The turn's own stream is the log. The card is created by the turn's `tree`, the
+  // deltas are appended into it, and the next repaint describes the same node as finished and
+  // summarised — which must not rebuild the card from the two-item summary nor ask the host
+  // for items that are already on screen. The ask zone (zone 1, which only a rendered `user`
+  // item fills) is what says whether a render happened at all.
+  dispatch({ type: 'reset' });
+  posted.length = 0;
+  // The host marks the node as running while it streams (`setBusy(true)` posts `state`), and
+  // that is the gate which keeps a live card from being asked for a snapshot of the items it is
+  // still appending to.
+  dispatch({ type: 'state', busy: true, status: '', runningNodes: [LIVE] });
+  frame(LIVE, [node(LIVE, null, [], { status: 'running' })]);
+  dispatch({ type: 'delta', nodeId: LIVE, text: '流式的一' });
+  dispatch({ type: 'delta', nodeId: LIVE, text: '流式的二' });
+  dispatch({ type: 'done', nodeId: LIVE });
+  frame(LIVE, [summaryRow(LIVE)]);
+  const liveCard = cardOf(LIVE);
+  const liveAsk = liveCard ? findByClass(liveCard, 'node-ask') : null;
+  if (askedOf(LIVE).length !== 0) {
+    problems.push(
+      `a card the turn streamed into asked for its log (${askedOf(LIVE).length} loadNodeItems) — its items are the ones the ` +
+        'stream wrote, so a summary row must not send it after what it already has',
+    );
+  }
+  if (!liveAsk || liveAsk.children.length !== 0) {
+    problems.push(
+      'a repaint rebuilt a streamed card from the row\'s summary (its `.node-ask` is not empty) — a repaint must not wipe a ' +
+        'log the node\'s own stream wrote (`_itemsRendered` is set where that append lands)',
+    );
+  }
+  if (liveCard && hasClass(liveCard, 'items-loading')) {
+    problems.push('a streamed card claims its log is on its way after a summary row arrived — there is nothing left to fetch');
+  }
+  if (itemsOf(liveCard) !== 1) {
+    problems.push(
+      `a repaint left ${itemsOf(liveCard)} element(s) in a streamed card, expected the turn's one streamed answer — the ` +
+        'summary must not stand in for it',
+    );
+  }
+
+  notes.push(
+    `summarised cards: collapsed = no ask, expanded = 1 loadNodeItems + the strip, the answer replaces the summary ` +
+      `(${sumRequests} request(s) for the re-expanded card, ${localRequests} for the local path shape)`,
+  );
+}
+
 // --- A repaint's sidecar burst is capped, and a long transcript is windowed -----
 // A cold repaint re-expands every sidecar card of a session at once. Firing all of
 // their `loadAgentItems` requests in the same burst asked one measured session for
 // 15 transcripts at once (~5.35 M chars, 2692 DOM nodes, handlers stuck at 900 ms),
-// so the requests are queued behind `AGENT_ITEMS_CONCURRENCY` and an answer releases
-// the next slot. And a *finished* card with a long transcript renders a window
+// so the requests are queued behind `ITEMS_CONCURRENCY` (one budget for every on-demand
+// items request, see the per-node fetch block above) and an answer releases the next slot.
+// And a *finished* card with a long transcript renders a window
 // instead of every item — the tail is what a finished card opens on, so the newest
 // items must be the rendered ones.
 {
@@ -1600,22 +2082,35 @@ if (contextLabel !== 'ctx 50%') {
     nodes: [node(ROOT, null, SUBS), ...SUBS.map((id) => node(id, ROOT, [], { kind: 'agent', agentStatus: 'done', itemCount: 2 }))],
   });
   dispatch({ type: 'path', ids: [ROOT], nodes: [{ id: ROOT, status: 'done', items: [] }] });
-  const burstAsked = posted.filter((m) => m && m.type === 'loadAgentItems');
   // The webview's cap, restated here on purpose: a change to it must be a deliberate
-  // change to this guard, not a silent one.
+  // change to this guard, not a silent one. It counts **every** on-demand items request,
+  // whichever type: `loadNodeItems` (a regular card whose items never arrived at all —
+  // see the per-node fetch block above) shares the one in-flight budget with
+  // `loadAgentItems`, because what the cap bounds is how many transcripts land in one
+  // frame, not which kind they are. The view focus (`ROOT`) asks too in this fixture, and
+  // that is the sandbox's doing: its `IntersectionObserver` answers `observe()`
+  // synchronously, while a real window delivers the callback a frame later — by then the
+  // `path` above has filled the card and the queue drops the request unposted.
+  const ITEM_REQUESTS = ['loadAgentItems', 'loadNodeItems'];
+  const burstAsked = posted.filter((m) => m && ITEM_REQUESTS.indexOf(m.type) >= 0);
   const CONCURRENCY = 3;
   if (burstAsked.length !== CONCURRENCY) {
     problems.push(
-      `a repaint burst posted ${burstAsked.length} loadAgentItems request(s), expected ${CONCURRENCY} ` +
+      `a repaint burst posted ${burstAsked.length} items request(s), expected ${CONCURRENCY} ` +
         '(the in-flight cap; the rest must queue)',
     );
   }
-  if (burstAsked.some((m) => SUBS.indexOf(m.id) < 0)) {
-    problems.push(`a burst request named a node that is not a sidecar card: ${JSON.stringify(burstAsked)}`);
+  if (burstAsked.some((m) => SUBS.indexOf(m.id) < 0 && m.id !== ROOT)) {
+    problems.push(`a burst request named a node this fixture does not have: ${JSON.stringify(burstAsked)}`);
   }
   // One answer frees one slot: the queued card must be asked for right after it.
-  dispatch({ type: 'agentItems', id: burstAsked[0].id, items: [{ kind: 'assistant', text: 'ans' }] });
-  const afterAnswer = posted.filter((m) => m && m.type === 'loadAgentItems');
+  const firstAgent = burstAsked.find((m) => m.type === 'loadAgentItems');
+  if (!firstAgent) {
+    problems.push(`a sidecar burst posted no loadAgentItems request at all: ${JSON.stringify(burstAsked)}`);
+  } else {
+    dispatch({ type: 'agentItems', id: firstAgent.id, items: [{ kind: 'assistant', text: 'ans' }] });
+  }
+  const afterAnswer = posted.filter((m) => m && ITEM_REQUESTS.indexOf(m.type) >= 0);
   if (afterAnswer.length !== CONCURRENCY + 1) {
     problems.push(
       `an agentItems answer left the burst at ${afterAnswer.length} request(s), expected ${CONCURRENCY + 1} ` +
@@ -1766,7 +2261,10 @@ if (contextLabel !== 'ctx 50%') {
 // makes sense, and it must post the node it belongs to. One failure is special: a
 // provider context-length error (the host ships `context: 'full'`, contract §3/§4) is
 // not retryable, so the button is *replaced* by the rollover variant, which posts
-// `rolloverTurn`. The same fixture carries a window-starting node, whose card wears
+// `rolloverTurn`. A window that is merely *near* full (>= 90%) is not a refusal,
+// though: there the retry stays and the `⧉` entry stands *beside* it, on its own
+// `.node-window` element, so an entry with no other way in is never hidden behind a
+// repair. The same fixture carries a window-starting node, whose card wears
 // the `CTX` badge and whose own connector — not its descendants' — is dashed.
 {
   const R = 'cont-node-root';
@@ -1777,6 +2275,7 @@ if (contextLabel !== 'ctx 50%') {
   const F = 'cont-node-f';       // failed on a full context window → ⧉ rollover
   const G = 'cont-node-g';       // interrupted *and* context 'full' → still ▶ Continue
   const NEAR = 'cont-node-near'; // interrupted at 93% → the ⧉ *suggestion* (node-near)
+  const ERR_NEAR = 'cont-node-error-near'; // *failed* at 92% → ↻ Retry *and* the ⧉ beside it
   const DONE_NEAR = 'cont-node-done-near'; // *finished* at 91% → the suggestion too
   const DONE_OK = 'cont-node-done-ok';     // finished with room left → no button at all
   const DONE_FULL = 'cont-node-done-full'; // finished, state 'full' → still nothing (full needs an error)
@@ -1806,7 +2305,7 @@ if (contextLabel !== 'ctx 50%') {
     rootId: R,
     rootIds: [R],
     nodes: [
-      node(R, null, [A, B, C, F, G, NEAR, DONE_NEAR, DONE_OK, DONE_FULL, SUB, WIN], 'done'),
+      node(R, null, [A, B, C, F, G, NEAR, ERR_NEAR, DONE_NEAR, DONE_OK, DONE_FULL, SUB, WIN], 'done'),
       node(A, R, [], aStatus),
       node(B, R, [], 'error'),
       node(C, R, [D], 'interrupted'),
@@ -1819,6 +2318,10 @@ if (contextLabel !== 'ctx 50%') {
       // At (or above) 90% the same ⧉ entry is offered as a *suggestion*: the label
       // is the rollover one, the class and the percentage-carrying tooltip are not.
       node(NEAR, R, [], 'interrupted', undefined, { context: 'near', contextPct: 93 }),
+      // A *failed* tip at 92% is not a refusal either — nothing about the request was
+      // rejected — so the repair stays and the `⧉` entry stands beside it instead of
+      // replacing it (`.node-window`).
+      node(ERR_NEAR, R, [], 'error', undefined, { context: 'near', contextPct: 92 }),
       // The suggestion does not depend on the status: a *finished* tip above 90% is
       // exactly the case it is for (the next send would hit the wall), so it shows
       // there too — while a finished tip with room left stays empty-handed.
@@ -2009,10 +2512,96 @@ if (contextLabel !== 'ctx 50%') {
       }
     }
   }
-  // The suggestion is the *only* thing the `near` state adds: a plain interrupted
-  // tip keeps ▶ Continue, and `near` on a descendant-free tip never becomes Retry.
+  // The suggestion is the *only* thing the `near` state adds where nothing failed: a
+  // plain interrupted tip keeps ▶ Continue, and such a tip keeps the single `⧉` entry
+  // (only a *failed* tip at 90%+ puts a retry beside it).
   if (!buttonOf(A) || buttonOf(A).textContent !== '▶ Continue') {
     problems.push('a node with an `ok` window no longer shows ▶ Continue while a sibling is `near`');
+  }
+
+  // --- a failure at 90%+: the repair *and* the suggestion (contract §3/§4) -------
+  // `near` is a size, not a refusal: the request was not rejected, so `↻ Retry` is a
+  // real repair and stays — and because the `⧉` entry has no other way in, the retry
+  // must not hide it either. Two elements, one meaning each.
+  const altOf = (id) => {
+    const card = cards.get(id);
+    return card ? findByClass(card, 'node-window') : null;
+  };
+  const errNear = buttonOf(ERR_NEAR);
+  if (!errNear || errNear.textContent !== '↻ Retry' || errNear.dataset.action !== 'retry') {
+    problems.push(
+      'a node whose turn failed at 92% shows no ↻ Retry (a near-full window is not a refusal, so the repair stays)',
+    );
+  } else {
+    if (hasClass(errNear, 'node-rollover')) {
+      problems.push('the ↻ Retry of a failed node at 92% carries the rollover class (it is the repair, not the rollover)');
+    }
+    if (hasClass(errNear, 'node-near')) {
+      problems.push('the ↻ Retry of a failed node at 92% is marked as the `near` suggestion itself');
+    }
+  }
+  const besideEntry = altOf(ERR_NEAR);
+  if (!besideEntry || besideEntry.textContent !== '⧉ Continue in a new window') {
+    problems.push('a failed node at 92% shows no second `⧉ Continue in a new window` entry beside ↻ Retry');
+  } else {
+    if (!hasClass(besideEntry, 'node-rollover')) {
+      problems.push('the `⧉` entry beside a repair carries no `node-rollover` class (the styling and the guard read it)');
+    }
+    if (!hasClass(besideEntry, 'node-near')) {
+      problems.push('the `⧉` entry beside a repair carries no `node-near` class (it is the 90% suggestion)');
+    }
+    if (besideEntry.dataset.action !== 'rollover') {
+      problems.push(
+        `the \`⧉\` entry beside a repair carries data-action=${JSON.stringify(besideEntry.dataset.action)}, expected 'rollover'`,
+      );
+    }
+    if (besideEntry.title !== 'Context is 92% full - continue in a new window') {
+      problems.push(
+        `the \`⧉\` entry beside a repair has the tooltip ${JSON.stringify(besideEntry.title)}, expected its own percentage`,
+      );
+    }
+    const besideClick = besideEntry._listeners && besideEntry._listeners.click;
+    if (typeof besideClick !== 'function') {
+      problems.push('the `⧉` entry beside a repair has no click handler');
+    } else {
+      posted.length = 0;
+      besideClick({ stopPropagation() {} });
+      const sent = posted.find((message) => message && message.type === 'rolloverTurn');
+      if (!sent || sent.id !== ERR_NEAR) {
+        problems.push(
+          `clicking the beside entry posted ${JSON.stringify(posted)}, expected { type: 'rolloverTurn', id: '${ERR_NEAR}' }`,
+        );
+      }
+      if (posted.some((message) => message && message.type === 'continueTurn')) {
+        problems.push('the beside entry also posted continueTurn — the two entries must not share an action');
+      }
+    }
+  }
+  // The retry beside it still continues *that* node.
+  const errNearClick = errNear && errNear._listeners && errNear._listeners.click;
+  if (typeof errNearClick !== 'function') {
+    problems.push('the ↻ Retry of a failed node at 92% has no click handler');
+  } else {
+    posted.length = 0;
+    errNearClick({ stopPropagation() {} });
+    const sent = posted.find((message) => message && message.type === 'continueTurn');
+    if (!sent || sent.id !== ERR_NEAR) {
+      problems.push(
+        `clicking ↻ Retry at 92% posted ${JSON.stringify(posted)}, expected { type: 'continueTurn', id: '${ERR_NEAR}' }`,
+      );
+    }
+  }
+  // Only a *failure* at 90%+ carries two entries: a refusal (`full`), a failure with
+  // room left, and a tip that did not fail each keep exactly one.
+  for (const [entryId, why] of [
+    [F, 'a `full` window (there the rollover replaces the retry)'],
+    [B, 'a failure with room left'],
+    [NEAR, 'a tip at 93% that did not fail'],
+    [DONE_NEAR, 'a finished tip at 91%'],
+  ]) {
+    if (altOf(entryId)) {
+      problems.push(`a second entry appeared for ${why} — only a *failure* at 90%+ carries two`);
+    }
   }
 
   // --- the `near` suggestion on a *finished* tip -------------------------------
@@ -2051,7 +2640,7 @@ if (contextLabel !== 'ctx 50%') {
         'so it keeps its error gate',
     );
   }
-  notes.push('context states: full (hard ⧉), near (suggestion, interrupted and done), ok (▶ / ↻, done = none)');
+  notes.push('context states: full (hard ⧉, replaces retry), near (suggestion; beside ↻ Retry when the tip failed), ok (▶ / ↻, done = none)');
 
   // The judgement is made by the host and can arrive *after* the tree was drawn
   // (that is exactly how a turn dies on a context-length error), so a `nodeUpdate`
@@ -2067,6 +2656,9 @@ if (contextLabel !== 'ctx 50%') {
   ) {
     problems.push('a `nodeUpdate` carrying context: "full" did not switch a ↻ Retry card to the rollover button');
   } else {
+    if (altOf(B)) {
+      problems.push('a `full` window left the second entry on the card (there the rollover replaces the retry)');
+    }
     posted.length = 0;
     if (typeof switched._listeners?.click === 'function') switched._listeners.click({ stopPropagation() {} });
     const sent = posted.find((message) => message && message.type === 'rolloverTurn');
@@ -2076,20 +2668,34 @@ if (contextLabel !== 'ctx 50%') {
       );
     }
   }
-  // A patch that only *suggests* (90%+) switches to the soft variant, tooltip and
-  // all — the percentage has to travel with the patch, or the title would lie.
+  // A patch that carries a failure at 90%+ adds the *second* entry: the repair stays,
+  // and the suggestion's tooltip has to carry the percentage the patch brought, or the
+  // title would lie.
   dispatch({ type: 'nodeUpdate', id: B, status: 'error', title: B, context: 'near', contextPct: 95 });
   const suggested = buttonOf(B);
   if (
     !suggested ||
-    suggested.textContent !== '⧉ Continue in a new window' ||
-    !hasClass(suggested, 'node-near') ||
-    suggested.dataset.action !== 'rollover' ||
-    suggested.title !== 'Context is 95% full - continue in a new window'
+    suggested.textContent !== '↻ Retry' ||
+    hasClass(suggested, 'node-rollover') ||
+    hasClass(suggested, 'node-near') ||
+    suggested.dataset.action !== 'retry'
   ) {
     problems.push(
       `a \`nodeUpdate\` carrying context: "near" and contextPct: 95 produced ` +
         `${JSON.stringify(suggested && { text: suggested.textContent, title: suggested.title })}`,
+    );
+  }
+  const suggestedWindow = altOf(B);
+  if (
+    !suggestedWindow ||
+    suggestedWindow.textContent !== '⧉ Continue in a new window' ||
+    !hasClass(suggestedWindow, 'node-near') ||
+    suggestedWindow.dataset.action !== 'rollover' ||
+    suggestedWindow.title !== 'Context is 95% full - continue in a new window'
+  ) {
+    problems.push(
+      'a `nodeUpdate` carrying context: "near" and contextPct: 95 did not add the second ' +
+        `entry with the patch's percentage: ${JSON.stringify(suggestedWindow && { text: suggestedWindow.textContent, title: suggestedWindow.title })}`,
     );
   }
   // And the state is not sticky: a later patch that clears it goes back to Retry.
@@ -2103,6 +2709,9 @@ if (contextLabel !== 'ctx 50%') {
     back.dataset.action !== 'retry'
   ) {
     problems.push('a `nodeUpdate` with context: "ok" did not switch the card back to ↻ Retry');
+  }
+  if (altOf(B)) {
+    problems.push('a `nodeUpdate` with context: "ok" left the second entry on the card');
   }
 
   // A full window is only a *failure* mode: an interrupted node keeps ▶ Continue
@@ -3840,6 +4449,581 @@ if (contextLabel !== 'ctx 50%') {
     'release light: a released dot claims the card (no fold after `done`), its untouched twin folds, re-engaging ' +
       'follow stays auto-decidable',
   );
+}
+
+// --- Touch navigation: a finger pans the tree, two fingers pinch it -----------
+// The phone's session view is this same renderer inside an Android WebView, and there
+// the pan and the zoom above it are both unreachable: `touch-action` is `auto` on the
+// whole subtree, so the browser classifies a one-finger drag as *its* pan and cancels
+// the pointer stream (`pointercancel`, which the pan handler honours), and a pinch
+// produces no `wheel` at all. What the touch layer near the end of `media/main.js` has
+// to do instead is read both gestures off the touch stream, driving the same camera.
+//
+// Every assertion below is stated as the *thing that would be broken* without it, because
+// re-running a handler proves nothing on its own: a `touchmove` listener that pans to a
+// wrong place, twice, or into a log zone would satisfy "the handler ran" just as well.
+//   (a) a one-finger drag moves the canvas by exactly the finger's travel, once — the
+//       finger reaches the camera, and the compatibility pointer stream is *not* panning
+//       on top of it (that would show as twice the travel);
+//   (b) the same drag starting on a *card* pans too — the mouse rule up there leaves a
+//       card to the checkout click, and a phone has no empty background to copy it from;
+//   (c) a tap, and a wobble under the slop, are not `defaultPrevented` and move nothing —
+//       that is what leaves the browser free to synthesise the `click` the checkout needs;
+//   (d) a claimed drag *is* `defaultPrevented` — the cancellation that stops the browser's
+//       own pan from fighting ours for the same finger;
+//   (e) a drag out of `.node-work` / the other native scroll zones neither pans nor
+//       cancels: those zones keep their own touch scrolling. `.node-resize` is not one of
+//       them — a corner is not a scroller, and the finger on it belongs to the card's own
+//       resize (case (h));
+//   (f) a two-finger spread scales the canvas by the *capped* per-event factor, around the
+//       fingers' midpoint — the world point under the pinch does not move;
+//   (g) a `pointerdown` from a finger starts no pointer drag, while the identical event
+//       with a mouse pointer type still does: the two layers can never pan at once, and
+//       the desktop mouse path is untouched;
+//   (h) a finger on `.node-resize` resizes the card — a wireframe follows the drag, the
+//       `touchmove` is cancelled and the tree does not pan, the lift writes the dragged
+//       size on the card and posts it — while a tap, a `touchcancel` and a second finger
+//       commit nothing, and the *same* finger's `pointerdown` resizes nothing at all
+//       (that path is the mouse's, and one press must not resize twice).
+{
+  const wrap = elementById('tree-wrap');
+  const canvas = elementById('tree-canvas');
+  const follow = elementById('follow-btn');
+  /** The camera as the canvas carries it — the numbers inside `applyTransform()`'s string. */
+  const camera = () => {
+    const m = /translate\((-?[\d.]+)px, (-?[\d.]+)px\) scale\((-?[\d.]+)\)/.exec(String(canvas.style.transform || ''));
+    return m ? { x: parseFloat(m[1]), y: parseFloat(m[2]), zoom: parseFloat(m[3]) } : null;
+  };
+  /** One decimal, so a failure message reads like the gesture that caused it. */
+  const round = (value) => Math.round(value * 10) / 10;
+  const touch = (x, y) => ({ clientX: x, clientY: y });
+  /**
+   * A touch target as the browser hands one over. Only the class / id form of `closest`
+   * is emulated — that is all the touch layer asks about — and an element carrying one of
+   * `names` (what "the finger landed inside .node-work" means) answers for the whole
+   * selector list, exactly as `closest` would.
+   */
+  const targetIn = (...names) => ({
+    names,
+    closest(selector) {
+      for (const part of String(selector).split(',')) {
+        const name = part.trim().replace(/^[.#]/, '');
+        if (name && names.indexOf(name) >= 0) return this;
+      }
+      return null;
+    },
+  });
+  /**
+   * The corner as a finger hands it over: the card's *real* `.node-resize`, because a
+   * resize writes into the card the renderer built and into that node's own size record
+   * — a stand-in would prove nothing about either. What it is missing is the stub's
+   * `closest()`, which answers every selector with null, so the two the touch layer asks
+   * about are taught here (the same emulation `targetIn` does for the zones).
+   */
+  const resizeCorner = (card) => {
+    const handle = card ? findByClass(card, 'node-resize') : null;
+    if (handle) {
+      handle.closest = (selector) =>
+        selector === '.node-resize' ? handle : selector === '.node' ? card : null;
+    }
+    return handle;
+  };
+  const gestureEvent = (type, touches, target) => ({
+    type,
+    touches,
+    target,
+    defaultPrevented: false,
+    preventDefault() {
+      this.defaultPrevented = true;
+    },
+  });
+  const start = wrap._listeners.touchstart;
+  const move = wrap._listeners.touchmove;
+  const end = wrap._listeners.touchend;
+  const cancel = wrap._listeners.touchcancel;
+  if ([start, move, end, cancel].some((handler) => typeof handler !== 'function')) {
+    problems.push(
+      'the tree wrapper registered no touch gesture (missing `touchstart` / `touchmove` / `touchend` / `touchcancel` ' +
+        'on #tree-wrap) — on a phone the browser takes a one-finger drag as its own pan, so with no touch layer ' +
+        'a finger cannot move the tree at all and two fingers cannot zoom it',
+    );
+  } else {
+    // (a) + (b) One finger pans — 1:1, once, and from a card. Follow is engaged first so
+    // that "the finger dropped it" is a statement about the pan and not about whatever the
+    // block above left behind; `camera()` is read after that click, because engaging
+    // follow can move the camera itself.
+    if (typeof follow._listeners?.click === 'function') {
+      follow._listeners.click();
+      if (!follow.classList.contains('active')) follow._listeners.click();
+    }
+    const followWasOn = follow.classList.contains('active');
+    const before = camera();
+    const cardTarget = targetIn('node', 'node-head');
+    const dragStart = gestureEvent('touchstart', [touch(300, 400)], cardTarget);
+    start(dragStart);
+    const dragMove = gestureEvent('touchmove', [touch(360, 350)], cardTarget);
+    move(dragMove);
+    end(gestureEvent('touchend', [], cardTarget));
+    if (!before) {
+      problems.push('the tree canvas carried no `transform` before the touch step — `applyTransform()` never ran');
+    } else {
+      const after = camera();
+      if (!after) {
+        problems.push('a one-finger drag left #tree-canvas without a `transform`');
+      } else {
+        const dx = after.x - before.x;
+        const dy = after.y - before.y;
+        if (Math.abs(dx - 60) > 0.51 || Math.abs(dy + 50) > 0.51) {
+          problems.push(
+            `a one-finger drag of (60, -50) out of a card moved the tree by (${round(dx)}, ${round(dy)}) — expected ` +
+              'exactly the finger\'s own travel: a finger has to pan the tree (it is a card, and a phone has no empty ' +
+              'background to grab instead), and twice that means the compatibility pointer stream panned on top of ' +
+              'the finger',
+          );
+        }
+        if (Math.abs(after.zoom - before.zoom) > 1e-6) {
+          problems.push('a one-finger drag changed the scale — a pan must not zoom');
+        }
+        if (followWasOn && follow.classList.contains('active')) {
+          problems.push(
+            'a touch pan left the follow light engaged — a streaming turn\'s auto-pan would then fight the finger ' +
+              'for the camera, frame by frame',
+          );
+        }
+      }
+    }
+    if (!dragMove.defaultPrevented) {
+      problems.push(
+        'the touchmove of a drag worth 78px was not `defaultPrevented` — the browser keeps its own pan for that ' +
+          'finger and cancels the rest of the gesture, which is the `pointercancel` that made this dead on a phone',
+      );
+    }
+
+    // (c) A tap is still a tap. The checkout is a `click`, and a cancelled touch event is
+    // a `click` the browser never synthesises; a thumb is never perfectly still either, so
+    // the wobble below matters as much as the dead-still tap.
+    const tapBefore = camera();
+    const tapStart = gestureEvent('touchstart', [touch(300, 400)], cardTarget);
+    start(tapStart);
+    const tapEnd = gestureEvent('touchend', [], cardTarget);
+    end(tapEnd);
+    const wobbleStart = gestureEvent('touchstart', [touch(300, 400)], cardTarget);
+    start(wobbleStart);
+    const wobbleMove = gestureEvent('touchmove', [touch(302, 401)], cardTarget);
+    move(wobbleMove);
+    end(gestureEvent('touchend', [], cardTarget));
+    const cancelled = [tapStart, tapEnd, wobbleStart, wobbleMove].filter((event) => event.defaultPrevented);
+    if (cancelled.length > 0) {
+      problems.push(
+        `${cancelled.length} of the 4 events of a tap (touchstart / touchend with no travel, plus a 2px wobble) were ` +
+          '`defaultPrevented` — the browser drops the compatibility `click` behind a cancelled touch, so a tap could ' +
+          'never check a node out',
+      );
+    }
+    const tapAfter = camera();
+    if (tapBefore && tapAfter && (Math.abs(tapAfter.x - tapBefore.x) > 0.01 || Math.abs(tapAfter.y - tapBefore.y) > 0.01)) {
+      problems.push('a tap (and a 2px wobble) moved the tree — the pan started before the drag slop was passed');
+    }
+
+    // (e) The zones that scroll themselves keep doing it. `.node-work` is the log,
+    // `.node-answer` the promoted answer, `.node-ask` the pinned ask, `.thinking-body` the
+    // folded thinking, and `#composer` its own pane — five zones whose scrolling is the
+    // browser's own, so a finger that landed in one may be neither cancelled (that is what
+    // switches the browser's touch scrolling off) nor panned by this layer. `.node-resize`
+    // is deliberately not among them: a corner is not a scroller, and the finger on it
+    // belongs to the card's resize (case (h)).
+    const zoneBefore = camera();
+    for (const zone of ['node-work', 'node-answer', 'node-ask', 'thinking-body', 'composer']) {
+      const zoneTarget = targetIn(zone);
+      start(gestureEvent('touchstart', [touch(300, 400)], zoneTarget));
+      const zoneMove = gestureEvent('touchmove', [touch(200, 500)], zoneTarget);
+      move(zoneMove);
+      end(gestureEvent('touchend', [], zoneTarget));
+      if (zoneMove.defaultPrevented) {
+        problems.push(
+          `a drag out of .${zone} cancelled its touchmove — the browser's own touch scrolling inside that zone is ` +
+            'switched off, so the log / answer / ask / composer cannot be scrolled on a phone',
+        );
+      }
+      const zoneAfter = camera();
+      if (
+        zoneBefore &&
+        zoneAfter &&
+        (Math.abs(zoneAfter.x - zoneBefore.x) > 0.01 || Math.abs(zoneAfter.y - zoneBefore.y) > 0.01)
+      ) {
+        problems.push(`a drag out of .${zone} panned the tree — that zone owns the finger, the camera does not move`);
+      }
+    }
+
+    // (f) Two fingers pinch. The frame below spreads the fingers 100px → 150px, i.e. a 1.5×
+    // frame: the scale has to follow by the *per-event cap* (1.25×, clamped again by
+    // `zoomAt()`'s own 0.4 … 1.5), not by 1.5 — the cap is what stops a jittery frame from
+    // jumping the zoom, and a check that merely saw the scale change could not tell them
+    // apart. The anchor is asserted as the camera's own invariant: the point of the canvas
+    // under the midpoint (350, 400) has to sit under the midpoint after the frame too, so a
+    // pinch anchored anywhere else (the canvas corner, the window origin) fails here.
+    const pinchBefore = camera();
+    const pinchMid = touch(350, 400);
+    const pinchTarget = targetIn('node', 'node-head');
+    start(gestureEvent('touchstart', [touch(300, 400), touch(400, 400)], pinchTarget));
+    const spread = gestureEvent('touchmove', [touch(275, 400), touch(425, 400)], pinchTarget);
+    move(spread);
+    end(gestureEvent('touchend', [], pinchTarget));
+    if (!pinchBefore) {
+      problems.push('the tree canvas carried no `transform` before the pinch — the scale cannot be read');
+    } else {
+      const pinchAfter = camera();
+      if (!pinchAfter) {
+        problems.push('a two-finger spread left #tree-canvas without a `transform`');
+      } else {
+        const expected = Math.min(1.5, Math.max(0.4, pinchBefore.zoom * 1.25));
+        if (Math.abs(pinchAfter.zoom - expected) > 1e-6) {
+          problems.push(
+            `a two-finger spread from 100px to 150px left the scale at ${pinchAfter.zoom}, expected ${expected} ` +
+              `(the previous scale × the 1.25 per-event cap, clamped by zoomAt) — two fingers have to zoom the tree, ` +
+              'and one frame may move it by no more than the cap',
+          );
+        }
+        const worldOf = (cam) => ({ x: (pinchMid.clientX - cam.x) / cam.zoom, y: (pinchMid.clientY - cam.y) / cam.zoom });
+        const worldBefore = worldOf(pinchBefore);
+        const worldAfter = worldOf(pinchAfter);
+        if (Math.abs(worldAfter.x - worldBefore.x) > 0.51 || Math.abs(worldAfter.y - worldBefore.y) > 0.51) {
+          problems.push(
+            `the pinch moved the point under the fingers by (${round(worldAfter.x - worldBefore.x)}, ` +
+              `${round(worldAfter.y - worldBefore.y)}) canvas px — the fingers' midpoint is the anchor zoomAt() has ` +
+              'to be handed, so the content under them stays under them',
+          );
+        }
+      }
+    }
+    if (!spread.defaultPrevented) {
+      problems.push(
+        'a two-finger pinch was not `defaultPrevented` — the browser keeps its own gesture for those fingers, on top ' +
+          'of the zoom we already applied',
+      );
+    }
+
+    // (g) The two layers must not pan at once, and the mouse must keep panning. The same
+    // pointer event is replayed twice — through *every* `pointerdown` `#tree-wrap`
+    // registered, then a `pointermove` through every window listener the browser would
+    // reach — and only `pointerType` differs. A touch `pointerdown` is dispatched before
+    // its own `touchstart`, so this is the one moment a finger could start a pointer pan
+    // too, and the one thing the touch layer's flag cannot have set yet.
+    const pointerDown = (pointerType) => {
+      const event = {
+        pointerType,
+        button: 0,
+        pointerId: 1,
+        clientX: 300,
+        clientY: 400,
+        target: targetIn(),
+        currentTarget: wrap,
+        defaultPrevented: false,
+        preventDefault() {
+          this.defaultPrevented = true;
+        },
+      };
+      for (const handler of (wrap._allListeners && wrap._allListeners.pointerdown) || []) handler(event);
+      return event;
+    };
+    const pointerMoveTo = (x, y) => {
+      for (const handler of listeners.pointermove || []) handler({ clientX: x, clientY: y, target: wrap });
+    };
+    const pointerUp = () => {
+      for (const handler of listeners.pointerup || []) handler({});
+    };
+    const controlsBefore = camera();
+    pointerDown('touch');
+    pointerMoveTo(340, 360);
+    const fingerAfter = camera();
+    if (
+      controlsBefore &&
+      fingerAfter &&
+      (Math.abs(fingerAfter.x - controlsBefore.x) > 0.01 || Math.abs(fingerAfter.y - controlsBefore.y) > 0.01)
+    ) {
+      problems.push(
+        'a `pointerdown` from a finger started a pointer pan — that is a second pan running under the touch layer, ' +
+          'so one finger moves the tree twice as far as it is dragged',
+      );
+    }
+    // The control: the identical replay with a mouse pointer must pan, or "the finger did
+    // not pan" would be satisfied by a pointer pan that is broken outright — and the
+    // desktop drag is the behaviour this whole layer was added around, not instead of.
+    pointerDown('mouse');
+    pointerMoveTo(340, 360);
+    const mouseAfter = camera();
+    if (
+      !controlsBefore ||
+      !mouseAfter ||
+      Math.abs(mouseAfter.x - controlsBefore.x - 40) > 0.01 ||
+      Math.abs(mouseAfter.y - controlsBefore.y + 40) > 0.01
+    ) {
+      problems.push(
+        'a mouse `pointerdown` + `pointermove` of (40, -40) moved the tree by ' +
+          `(${round(mouseAfter ? mouseAfter.x - controlsBefore.x : NaN)}, ` +
+          `${round(mouseAfter ? mouseAfter.y - controlsBefore.y : NaN)}) — the desktop drag has to keep working`,
+      );
+    }
+    pointerUp();
+
+    // (h) A finger on the resize corner drags the card. The corner used to be left to the
+    // pointer path, and that is the bug this case exists for: the browser claims a touch
+    // drag as a gesture of its own a few pixels in, so the drag ended in `pointercancel`
+    // — which the window handler reads as "the resize was abandoned": the wireframe was
+    // torn down mid-drag and the lift committed nothing. The corner is therefore the one
+    // *card* gesture the touch layer claims, driving the very `beginResize` /
+    // `onResizeMove` / `endResize(true)` a mouse drives. A tap and a `touchcancel` still
+    // commit nothing, a second finger cancels the drag, and the pointer path has to leave
+    // a finger's press alone: its `pointerdown` and the `touchstart` of the same press are
+    // one corner, and two resizes would race for the card.
+    //
+    // The fixture is the card's box as a browser would report it (this stub has no layout
+    // at all, so the numbers are handed over) and both are picked far from every clamp the
+    // drag applies — `MIN_W` / `MAX_W`, the card's own floor and the drag's ceiling — so
+    // what the assertions below read is the finger's travel converted through the camera
+    // scale, and not a clamp. The pinch above left that scale at 1.25 (its own assertion
+    // pins the number), so a drag of (80, -50) screen px is 64 × -40 canvas px: a
+    // 600 × 500 card becomes 664 × 460, and the mouse's (60, -20) becomes 648 × 484.
+    const cornerCard =
+      canvas.children.find((child) => child.dataset && child.dataset.id && findByClass(child, 'node-resize')) || null;
+    const cornerHandle = resizeCorner(cornerCard);
+    const cornerId = cornerCard ? cornerCard.dataset.id : null;
+    /** The card's box as the CSS carries it — both `NaN` when it carries no size at all. */
+    const cornerBox = () =>
+      `${round(parseFloat(cornerCard.style.width))} × ${round(parseFloat(cornerCard.style.maxHeight))}`;
+    /** Is the card exactly (w, h)? A style with no size in it (`NaN`) is no size at all. */
+    const cornerHeldAt = (w, h) =>
+      Math.abs(parseFloat(cornerCard.style.width) - w) < 1e-6 &&
+      Math.abs(parseFloat(cornerCard.style.maxHeight) - h) < 1e-6;
+    if (!cornerCard || !cornerHandle) {
+      problems.push(
+        'the touch resize case found no card carrying a .node-resize corner in #tree-canvas — every card is built ' +
+          'with one, so with none there a finger has no corner to drag and this whole case says nothing',
+      );
+    } else {
+      // The box the browser would have given the card: a drag's start size, and the
+      // ceiling it is clamped against, are both read off the element.
+      cornerCard.offsetWidth = 600;
+      cornerCard.offsetHeight = 500;
+      posted.length = 0;
+      const cornerPanBefore = camera();
+      start(gestureEvent('touchstart', [touch(300, 400)], cornerHandle));
+      const cornerMove = gestureEvent('touchmove', [touch(380, 350)], cornerHandle);
+      move(cornerMove);
+      // The wireframe has to be up *during* the drag — that is the whole point of it. The
+      // bug being pinned here is precisely this element vanishing a few pixels in, which
+      // left the user dragging a size nobody could see.
+      const wireframe = findByClass(canvas, 'resize-preview');
+      const wireframeLabel = wireframe ? findByClass(wireframe, 'resize-label') : null;
+      if (!wireframe || !wireframeLabel || !String(wireframeLabel.textContent || '').trim()) {
+        problems.push(
+          'a touch drag well past the slop on .node-resize left no .resize-preview wireframe (with its ' +
+            '.resize-label) in #tree-canvas — a corner drag with no preview is the reported bug, where the ' +
+            "browser's own `pointercancel` tore the wireframe down mid-drag",
+        );
+      }
+      if (!cornerMove.defaultPrevented) {
+        problems.push(
+          'the touchmove of a drag out of .node-resize was not `defaultPrevented` — the browser keeps its own touch ' +
+            'gesture for that finger, and the `pointercancel` it sends a few pixels later is what abandoned the resize',
+        );
+      }
+      const cornerPanAfter = camera();
+      if (
+        cornerPanBefore &&
+        cornerPanAfter &&
+        (Math.abs(cornerPanAfter.x - cornerPanBefore.x) > 0.01 ||
+          Math.abs(cornerPanAfter.y - cornerPanBefore.y) > 0.01)
+      ) {
+        problems.push(
+          `a touch drag out of .node-resize panned the tree by (${round(cornerPanAfter.x - cornerPanBefore.x)}, ` +
+            `${round(cornerPanAfter.y - cornerPanBefore.y)}) — the corner owns the finger: a card that resizes and ` +
+            'drags its own tree at the same time is not a resize',
+        );
+      }
+      end(gestureEvent('touchend', [], cornerHandle));
+      if (findByClass(canvas, 'resize-preview')) {
+        problems.push(
+          'the wireframe of a committed touch resize is still in #tree-canvas after the finger lifted — the lift ends ' +
+            'the drag, and a preview left behind over a card that is already at its new size is not a preview',
+        );
+      }
+      if (!cornerHeldAt(664, 460)) {
+        problems.push(
+          `a touch drag of (80, -50) on .node-resize left the card at ${cornerBox()}, expected 664 × 460 (600 × 500 ` +
+            'plus the finger\'s own 64 × -40 canvas px, at the 1.25 scale the pinch above left) — the finger has to ' +
+            'reach the same `onResizeMove` the mouse drives, and the lift has to write that size on the card',
+        );
+      }
+      const cornerPosted = posted.filter((message) => message && message.type === 'setNodeSize');
+      if (cornerPosted.length !== 1) {
+        problems.push(
+          `the lift of a touch resize posted ${JSON.stringify(cornerPosted)}, expected exactly one \`setNodeSize\` ` +
+            `for ${JSON.stringify(cornerId)} with the dragged 664 × 460 — the host is what persists the size, and a ` +
+            'card the host never hears about comes back at its old size on the next repaint',
+        );
+      } else if (cornerPosted[0].id !== cornerId || cornerPosted[0].w !== 664 || cornerPosted[0].h !== 460) {
+        problems.push(
+          `the lift of a touch resize posted ${JSON.stringify(cornerPosted[0])}, expected { type: 'setNodeSize', id: ` +
+            `${JSON.stringify(cornerId)}, w: 664, h: 460 } — the size the wireframe advertised and the size the host ` +
+            'is told have to be the same number, for the same card',
+        );
+      }
+
+      // A tap on the corner is a tap. The mouse path has no such rule — it resizes from
+      // the first pixel — which is why the slop is this layer's own: without it, every tap
+      // meant for the corner (and that ends as a `click`) would leave a wireframe behind.
+      posted.length = 0;
+      start(gestureEvent('touchstart', [touch(300, 400)], cornerHandle));
+      end(gestureEvent('touchend', [], cornerHandle));
+      if (findByClass(canvas, 'resize-preview')) {
+        problems.push(
+          'a tap on .node-resize left its wireframe in #tree-canvas — a finger that never passed the slop has to leave ' +
+            'the card exactly as it found it',
+        );
+      }
+      if (!cornerHeldAt(664, 460)) {
+        problems.push(
+          `a tap on .node-resize (no travel past the slop) left the card at ${cornerBox()}, expected the 664 × 460 it ` +
+            'already had — the corner may not resize on a lift that never became a drag',
+        );
+      }
+      if (posted.some((message) => message && message.type === 'setNodeSize')) {
+        problems.push(
+          `a tap on .node-resize posted ${JSON.stringify(posted.filter((m) => m && m.type === 'setNodeSize'))} — the ` +
+            'host must not be told about a size nobody dragged to',
+        );
+      }
+
+      // A `touchcancel` mid-drag is the browser taking the gesture back (a system gesture,
+      // the tab going away): the resize is abandoned and nothing may be written. This drag
+      // ends on a *different* size on purpose — a cancel that committed anyway would
+      // otherwise land on the number the committed drag above already left there.
+      posted.length = 0;
+      start(gestureEvent('touchstart', [touch(300, 400)], cornerHandle));
+      const cancelMove = gestureEvent('touchmove', [touch(420, 300)], cornerHandle);
+      move(cancelMove);
+      cancel(gestureEvent('touchcancel', [], cornerHandle));
+      if (findByClass(canvas, 'resize-preview')) {
+        problems.push(
+          'a cancelled touch resize left its wireframe in #tree-canvas — a `touchcancel` is the browser withdrawing ' +
+            'the gesture, and the card is not being sized any more',
+        );
+      }
+      if (!cornerHeldAt(664, 460)) {
+        problems.push(
+          `a touchcancel in the middle of a resize (a drag that would have reached 696 × 420) left the card at ` +
+            `${cornerBox()}, expected the 664 × 460 it had — an abandoned drag is not a size change`,
+        );
+      }
+      if (posted.some((message) => message && message.type === 'setNodeSize')) {
+        problems.push(
+          `a touchcancel in the middle of a resize posted ` +
+            `${JSON.stringify(posted.filter((m) => m && m.type === 'setNodeSize'))} — nothing was lifted, so nothing ` +
+            'may be persisted',
+        );
+      }
+
+      // The two layers must not both see one finger, and this is the corner's half of the
+      // (g) case above: the very same pointer event replayed twice, only `pointerType`
+      // differing. A finger's `pointerdown` is dispatched *before* its own `touchstart`, so
+      // it is the one moment a touch could start a pointer resize too — and one press that
+      // resized twice would leave the two of them fighting over the card on the lift.
+      const cornerPointer = (pointerType) => {
+        const event = {
+          pointerType,
+          button: 0,
+          pointerId: 1,
+          clientX: 300,
+          clientY: 400,
+          target: cornerHandle,
+          currentTarget: canvas,
+          defaultPrevented: false,
+          preventDefault() {
+            this.defaultPrevented = true;
+          },
+          stopPropagation() {
+            this.stopped = true;
+          },
+        };
+        for (const handler of (canvas._allListeners && canvas._allListeners.pointerdown) || []) handler(event);
+        return event;
+      };
+      posted.length = 0;
+      cornerPointer('touch');
+      pointerMoveTo(360, 380);
+      if (findByClass(canvas, 'resize-preview')) {
+        problems.push(
+          'a touch `pointerdown` + `pointermove` on .node-resize started a pointer resize — that press is the one the ' +
+            "touch layer's own corner gesture is for, so the same finger would resize the card twice",
+        );
+      }
+      pointerUp();
+      if (!cornerHeldAt(664, 460) || posted.some((message) => message && message.type === 'setNodeSize')) {
+        problems.push(
+          `a touch pointer stream on .node-resize resized the card behind the finger: it is now at ${cornerBox()} ` +
+            `and posted ${JSON.stringify(posted.filter((m) => m && m.type === 'setNodeSize'))}, expected 664 × 460 ` +
+            'and nothing posted',
+        );
+      }
+      // The control: the identical replay with a mouse pointer has to resize. "A finger did
+      // not" would otherwise be satisfied by a corner that stopped working outright, and
+      // the desktop drag is the behaviour this layer was added around, not instead of.
+      cornerPointer('mouse');
+      if (!findByClass(canvas, 'resize-preview')) {
+        problems.push(
+          'a mouse `pointerdown` on .node-resize started no resize — the desktop corner has to keep working, and with ' +
+            'none up a wireframe the mouse drag would commit a size nobody saw',
+        );
+      }
+      pointerMoveTo(360, 380);
+      pointerUp();
+      if (!cornerHeldAt(648, 484)) {
+        problems.push(
+          `a mouse drag of (60, -20) on .node-resize left the card at ${cornerBox()}, expected 648 × 484 (600 × 500 ` +
+            "plus the pointer's 48 × -16 canvas px) — the mouse entry point and the finger's have to be the same " +
+            'gesture, or the two inputs drift apart and only the phone notices',
+        );
+      }
+
+      // A second finger is not a resize: the wireframe belongs to a corner, and the corner
+      // is not where the pinch is. The drag is cancelled where it stands (nothing
+      // committed) and the two fingers become the pinch this layer already knows.
+      posted.length = 0;
+      const twoFingerW = parseFloat(cornerCard.style.width);
+      const twoFingerH = parseFloat(cornerCard.style.maxHeight);
+      start(gestureEvent('touchstart', [touch(300, 400)], cornerHandle));
+      move(gestureEvent('touchmove', [touch(360, 350)], cornerHandle));
+      start(gestureEvent('touchstart', [touch(300, 400), touch(400, 400)], cornerHandle));
+      if (findByClass(canvas, 'resize-preview')) {
+        problems.push(
+          'a second finger landing during a resize left the wireframe up — the drag is over the moment the gesture is ' +
+            'a pinch, and a preview kept over a card nobody is dragging is the same lie as one torn down mid-drag',
+        );
+      }
+      end(gestureEvent('touchend', [], cornerHandle));
+      if (!cornerHeldAt(twoFingerW, twoFingerH)) {
+        problems.push(
+          `a second finger landing mid-resize left the card at ${cornerBox()}, expected the ${round(twoFingerW)} × ` +
+            `${round(twoFingerH)} it had — the fingers that replaced the drag may not commit it`,
+        );
+      }
+      if (posted.some((message) => message && message.type === 'setNodeSize')) {
+        problems.push(
+          `a second finger landing mid-resize posted ` +
+            `${JSON.stringify(posted.filter((m) => m && m.type === 'setNodeSize'))} — a cancelled drag is not a size`,
+        );
+      }
+    }
+
+    notes.push(
+      'touch: one finger pans a card 1:1 (and only once), a tap and a 2px wobble stay uncancelled, the five ' +
+        'native-scroll zones neither pan nor cancel, a finger on the resize corner drags a wireframe and commits ' +
+        'that size (a tap, a touchcancel and a second finger commit nothing), a 1.5× pinch frame scales by the 1.25 ' +
+        'cap around the fingers\' midpoint, and a touch pointerdown starts neither a pointer drag nor a pointer ' +
+        'resize while a mouse one still does both',
+    );
+  }
 }
 
 // --- report ------------------------------------------------------------------

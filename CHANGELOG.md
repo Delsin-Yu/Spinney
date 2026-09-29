@@ -51,6 +51,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A failed turn at 90%+ no longer loses its retry.** The `⧉ Continue in a new window`
+  entry replaces `↻ Retry` only where the provider actually **refused** the request — a full
+  window by tokens or by image bytes — because retrying that same request is pointless. At **`near`**
+  (>= 90% of the card's window) nothing was refused, so a failed turn now shows **both**: `↻ Retry`
+  stays on the card and the `⧉` entry stands beside it, on its own element (`.node-window`). The case
+  that asked for it is a mid-answer stall (`request-stall`): the partial answer is discarded and the
+  turn rolls back, so the retry is the one repair that can work — and it used to be hidden behind the
+  context suggestion, whose entry has no other way in. Non-error tips are unchanged: a `done` or
+  `interrupted` card at 90%+ still shows the single `⧉` entry.
 - **`exec_command`'s `timeout_behavior` is now the job's identity, and one identity is new.** `stop`
   and `move_to_background` are renamed `stop_when_timeout` (still the default) and
   `background_when_timeout`; `start_in_background` keeps its name. The new value is

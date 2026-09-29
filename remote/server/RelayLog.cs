@@ -35,6 +35,27 @@ internal static partial class RelayLog
     [LoggerMessage(EventId = 10, Level = LogLevel.Information, Message = "configuration: {Note}")]
     public static partial void Configuration(ILogger logger, string note);
 
+    [LoggerMessage(EventId = 11, Level = LogLevel.Information, Message = "room records: {Count} loaded from {Path}")]
+    public static partial void RoomRecordsLoaded(ILogger logger, int count, string path);
+
+    [LoggerMessage(EventId = 12, Level = LogLevel.Error, Message = "room records could not be read ({Reason}) — starting with none, every join will look unknown until a publisher re-creates its room: {Path}")]
+    public static partial void RoomRecordsUnreadable(ILogger logger, string reason, string path);
+
+    [LoggerMessage(EventId = 13, Level = LogLevel.Error, Message = "room records could not be written ({Reason}): {Path}")]
+    public static partial void RoomRecordsUnwritable(ILogger logger, string reason, string path);
+
+    [LoggerMessage(EventId = 14, Level = LogLevel.Information, Message = "room record {Room}: created {Created} (records {Records}, ttl {Days}d)")]
+    public static partial void RoomRecordSaved(ILogger logger, bool created, string room, int records, int days);
+
+    [LoggerMessage(EventId = 15, Level = LogLevel.Information, Message = "room records: {Removed} aged out (records {Records}, ttl {Days}d)")]
+    public static partial void RoomRecordsPruned(ILogger logger, int removed, int records, int days);
+
+    [LoggerMessage(EventId = 16, Level = LogLevel.Warning, Message = "room {Room} refused: the record store is full ({Records})")]
+    public static partial void RoomRecordsFull(ILogger logger, int records, string room);
+
+    [LoggerMessage(EventId = 17, Level = LogLevel.Information, Message = "join refused for room {Room}: no record and no peer")]
+    public static partial void JoinRefusedUnknownRoom(ILogger logger, string room);
+
     public static string Tag(string id) =>
         Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(id)).AsSpan(0, 4));
 }

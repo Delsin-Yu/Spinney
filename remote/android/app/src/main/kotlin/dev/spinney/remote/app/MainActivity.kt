@@ -1,9 +1,13 @@
 package dev.spinney.remote.app
 
 import android.app.Application
+import android.net.Uri
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -20,6 +24,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -30,6 +35,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.collectAsState
 import androidx.compose.ui.Alignment
@@ -43,6 +49,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import dev.spinney.remote.core.RemoteClient
 import dev.spinney.remote.core.TokenInput
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 /**
  * Milestone M3: the Android remote controller.
@@ -149,6 +158,14 @@ private fun ConnectScreen(controller: RemoteController, state: RemoteClient.Conn
     val fingerprint by controller.fingerprint.collectAsState()
     val storedFingerprints by controller.storedFingerprints.collectAsState()
     var refusedIssue by remember { mutableStateOf<TokenInput.Issue?>(null) }
+    // One sentence about the last code — scanned or photographed — shown where the form's own errors
+    // are and cleared the moment the user edits anything: a pairing that failed must not sit under a
+    // form that now reads like a paired one.
+    var pairingError by remember { mutableStateOf<String?>(null) }
+    // The camera screen replaces the form while it is open: it is a full-screen preview, and the
+    // form behind it has nothing to show until the scan ends.
+    var scanning by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
 
     // The platform field lives outside composition, so it is remembered once and told about the
     // state on every pass (see the `update` below). Its `onText` is re-pointed each time so it
@@ -162,7 +179,43 @@ private fun ConnectScreen(controller: RemoteController, state: RemoteClient.Conn
     tokenField.onText = { typed ->
         token = typed
         refusedIssue = null
+        pairingError = null
         controller.previewToken(typed)
+    }
+
+    // One payload, two ways in, and one place where it becomes a room: the camera hands over the
+    // string zxing read out of a live frame, the picker hands over a photo the same decoder reads,
+    // and from here both fill the three fields and take the ordinary `connect` — so a paired room is
+    // normalised, stored and derived exactly like a typed one, and there is no second way in.
+    fun applyPairing(pairing: PhotoPairing) {
+        when (pairing) {
+            is PhotoPairing.Failed -> pairingError = pairing.message
+            is PhotoPairing.Paired -> {
+                pairingError = null
+                // The values are used exactly as the payload carried them (only the token is
+                // normalised, and that is `TokenInput`'s rule): the room name is the desktop's own
+                // label for the room, and trimming it here would name the room something the other
+                // device does not. A relay with whitespace in it never gets this far — `Pairing`
+                // refuses a URL that is not one.
+                name = pairing.room
+                relayUrl = pairing.relay
+                token = pairing.token
+                controller.previewToken(pairing.token)
+                val issue = controller.connect(pairing.room, pairing.relay, pairing.token)
+                refusedIssue = issue
+                rooms = controller.rooms
+                if (issue == null) controller.refreshStoredFingerprints()
+            }
+        }
+    }
+
+    // Pairing from a photo: the desktop's code photographed with the phone's own camera app and
+    // handed back by the picker. It is the same contract `SessionScreen`'s `pickImage` uses, so no
+    // permission is involved at all — the picture comes from outside the app.
+    val photoPicker = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri: Uri? ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        // Decoding a gallery-sized bitmap and reading a QR out of it is main-thread death.
+        scope.launch { applyPairing(withContext(Dispatchers.IO) { pairFromPhoto(context, uri, l10n) }) }
     }
 
     val normalizedToken = TokenInput.normalize(token)
@@ -171,6 +224,18 @@ private fun ConnectScreen(controller: RemoteController, state: RemoteClient.Conn
     val shownIssue = refusedIssue ?: liveIssue?.takeIf { it != TokenInput.Issue.EMPTY }
 
     LaunchedEffect(Unit) { controller.refreshStoredFingerprints() }
+
+    // The camera is a screen, not a dialog: the preview *is* the gesture, and the form, the room
+    // list and the status line have nothing to show while it is open. The screen stops the camera
+    // itself as soon as a frame decodes, and hands back the one payload.
+    if (scanning) {
+        CameraScanScreen(
+            l10n = l10n,
+            onPayload = { payload -> scanning = false; applyPairing(pairingFromPayload(payload, l10n)) },
+            onCancel = { scanning = false },
+        )
+        return
+    }
 
     Column(
         modifier = Modifier
@@ -191,14 +256,20 @@ private fun ConnectScreen(controller: RemoteController, state: RemoteClient.Conn
 
         OutlinedTextField(
             value = name,
-            onValueChange = { name = it },
+            onValueChange = {
+                name = it
+                pairingError = null
+            },
             label = { Text(l10n.t("Room name (a local label, never sent)")) },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
         )
         OutlinedTextField(
             value = relayUrl,
-            onValueChange = { relayUrl = it },
+            onValueChange = {
+                relayUrl = it
+                pairingError = null
+            },
             label = { Text(l10n.t("Relay URL")) },
             singleLine = true,
             modifier = Modifier.fillMaxWidth(),
@@ -256,6 +327,15 @@ private fun ConnectScreen(controller: RemoteController, state: RemoteClient.Conn
                 color = MaterialTheme.colorScheme.error,
             )
         }
+        // A failed pairing reads exactly where a refused token does: both are one sentence about
+        // why the form above is not connected, and both are cleared as soon as the user edits it.
+        pairingError?.let { message ->
+            Text(
+                text = message,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
 
         Button(
             onClick = {
@@ -271,6 +351,26 @@ private fun ConnectScreen(controller: RemoteController, state: RemoteClient.Conn
             enabled = name.isNotBlank() && relayUrl.isNotBlank() && liveIssue == null,
         ) {
             Text(l10n.t("Connect"))
+        }
+
+        // The first way in, and the one that removes the failure this feature exists for: the desktop
+        // shows the room's code, the phone is pointed at that screen, and the payload fills the three
+        // fields above and connects — a mistyped token is a different room, and nothing is mistyped
+        // here. This is the primary action because it is the plain gesture; the picker below stays
+        // for the camera a phone will not give us (see `PairingFromPhoto.kt`).
+        Button(onClick = { scanning = true }) {
+            Text(l10n.t("Scan the code with the camera"))
+        }
+
+        // The second way in, and the one that cannot be refused: the same code, photographed with
+        // the phone's own camera app and picked through the system photo picker the app already
+        // opens for attachments. No permission is involved — the picture comes from outside the app.
+        OutlinedButton(
+            onClick = {
+                photoPicker.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+            },
+        ) {
+            Text(l10n.t("or from a photo"))
         }
 
         StatusLine(state, l10n)
@@ -334,26 +434,6 @@ private fun ConnectScreen(controller: RemoteController, state: RemoteClient.Conn
         )
         Spacer(Modifier.width(4.dp))
     }
-}
-
-/**
- * One sentence per refusal, in the desktop's own words.
- *
- * The three English literals below are **not new strings**: they are the exact literals the
- * extension already ships (`l10n/bundle.l10n.zh-Hans.json` carries translations for all three,
- * because the desktop's connect dialog says them too). Reusing them means a Chinese phone reads the
- * same sentence the desktop shows, and it keeps this fix from adding a catalog entry — which the
- * l10n guard would then treat as stale, because its English literal appears nowhere in `src/` or
- * `media/`. Only the fingerprint line and the reveal toggle's label are new, and they live in
- * Kotlin, where [L10n] falls back to the English literal.
- */
-@Composable
-private fun tokenIssueSentence(issue: TokenInput.Issue, l10n: L10n): String = when (issue) {
-    TokenInput.Issue.EMPTY -> l10n.t("A room token is required.")
-    TokenInput.Issue.TOO_SHORT ->
-        l10n.t("The token is too short — use at least {0} characters.", TokenInput.MIN_TOKEN_CHARS.toString())
-    TokenInput.Issue.TOO_FEW_DISTINCT ->
-        l10n.t("The token is too easy to guess — use at least {0} different characters.", TokenInput.MIN_DISTINCT_CHARS.toString())
 }
 
 @Composable

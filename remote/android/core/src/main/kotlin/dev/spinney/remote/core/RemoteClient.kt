@@ -32,6 +32,11 @@ import okhttp3.RequestBody.Companion.toRequestBody
  *
  * - **SSE down, POST up.** The same shape the extension host has, in the only form a JVM has:
  *   OkHttp rather than `fetch` + `response.body.getReader()`.
+ * - **The join is `/v2`'s, in `join` mode** ([RelayRoutes.JoinMode]): a replica may enter a room,
+ *   it may not bring one into being. That is what turns a token naming nothing into `404
+ *   room_unknown` ([JoinRefusal.ROOM_UNKNOWN]) instead of a live empty room that looks exactly
+ *   like "nobody is publishing yet" — and a refusal a retry cannot change never reaches the loop
+ *   below, while `429`/`5xx` still do.
  * - **A 20 s application `ping`, answered by `pong`.** [Protocol.CLIENT_PING_INTERVAL_MS] is a
  *   constant of the contract, not a tunable: it is what stops a quiet room from being killed by
  *   an idle-read timeout, and — together with the relay's own 15 s comment — it is how a
@@ -85,8 +90,12 @@ class RemoteClient(
 
         data class Reconnecting(val attempt: Int, val delayMs: Long, val reason: String) : ConnectionState
 
-        /** A failure a retry cannot fix (a malformed room id, a relay that refuses this peer). */
-        data class Failed(val reason: String) : ConnectionState
+        /**
+         * A failure a retry cannot fix (a malformed room id, a relay that refuses this peer).
+         * [reason] is the transport's own English line, for the log; [refusal] is the same fact
+         * machine-readably, for the sentence the screen puts to a person.
+         */
+        data class Failed(val reason: String, val refusal: JoinRefusal) : ConnectionState
     }
 
     /** A snapshot of the room tree: immutable, so Compose can compare it and redraw. */
@@ -97,6 +106,12 @@ class RemoteClient(
         val revision: Long,
     ) {
         val isReady: Boolean get() = roomId.isNotEmpty()
+
+        /**
+         * The first 8 characters of the room id: what two devices compare *by eye*, and the only
+         * form that fits on one line next to the same 8 characters read off the other device.
+         */
+        val fingerprint: String get() = roomId.take(FINGERPRINT_CHARS)
 
         fun sessionCount(): Int = devices.sumOf { it.sessionCount }
     }
@@ -270,7 +285,10 @@ class RemoteClient(
                 // A stream that ended without an error is still a dropped connection.
                 reason = "the stream ended"
             } catch (fatal: FatalRelayException) {
-                _state.value = ConnectionState.Failed(fatal.message ?: "the relay refused this peer")
+                _state.value = ConnectionState.Failed(
+                    fatal.message ?: "the relay refused this peer",
+                    fatal.refusal,
+                )
                 return
             } catch (err: InterruptedException) {
                 return
@@ -296,6 +314,10 @@ class RemoteClient(
         // The model's room id is the routing credential, so it can only exist once the
         // derivation has run (600000 PBKDF2 iterations, once per process).
         if (model.roomId.isEmpty()) model = RoomModel(keys.roomId)
+        // Published *before* the join, not only after it: a join this loop will not retry still
+        // has to show which room it was refused for, and the room id — derived locally from the
+        // token — is the only thing on the screen that can be compared with the other device.
+        publishRoom()
 
         // A NEW connection: a fresh 32-bit salt and seq back at 1. Never the old salt.
         val conn = SealedConnection.fresh(keys)
@@ -304,7 +326,6 @@ class RemoteClient(
         peerId = peer
         lastInboundAt = System.currentTimeMillis()
         _state.value = ConnectionState.Connected(keys.roomId, peer, model.peerCount(), conn.connectionSalt)
-        publishRoom()
 
         beginHeartbeat()
         try {
@@ -328,29 +349,65 @@ class RemoteClient(
         }
     }
 
+    /**
+     * `POST /v2/room/{roomId}/join`, with an explicit `join` mode. §3's axiom ends here: a token
+     * that names no room is refused (`404 room_unknown`) instead of being answered with a live
+     * empty room, so a wrong token stops looking exactly like "nobody is publishing yet".
+     *
+     * A refusal [joinRefusalOf] classifies never goes back to the reconnect loop: the room id is
+     * derived from the token alone, so the same request would be refused the same way forever. Every
+     * other failure is the loop's: `429` backs off exactly as before, and a `5xx` — which this
+     * method used to treat as fatal — is retried like the desktop's transport retries it
+     * (`retry: status === 429 || status >= 500`), because a relay that is momentarily broken is not
+     * a verdict on the token.
+     */
     private fun join(keys: RoomKeys): String {
+        val route = RelayRoutes.join(relayUrl, keys.roomId, RelayRoutes.JoinMode.JOIN)
         val request = Request.Builder()
-            .url(RelayRoutes.join(relayUrl, keys.roomId))
-            .post(ByteArray(0).toRequestBody(null))
+            .url(route.url)
+            .post(route.body.toRequestBody(JSON))
             .build()
         postClient.newCall(request).execute().use { response ->
             val text = response.body?.string().orEmpty()
-            if (response.code == 404) {
-                throw FatalRelayException("the relay does not recognise this room id (404 invalid_room_id)")
-            }
-            if (response.code == 429) {
-                throw IOException("the room is full or the relay is at its room cap (429 $text)")
+            joinRefusalOf(response.code, text)?.let { refusal ->
+                // The English line is the transport's own and stays the transport's own: the UI
+                // puts its own sentence on `refusal` (§3's consequence, said to a person).
+                throw FatalRelayException(refusal, refusalDetail(refusal, response.code, text))
             }
             if (!response.isSuccessful) {
-                throw FatalRelayException("join refused: HTTP ${response.code} $text")
+                throw IOException("join was not accepted: HTTP ${response.code} ${text.take(200)}")
             }
             val obj = try {
                 JsonValue.parse(text) as? JsonValue.Obj
             } catch (err: IllegalArgumentException) {
                 null
             } ?: throw IOException("the relay's join answer is not JSON: $text")
-            return obj.strOrNull("peer") ?: throw IOException("the relay's join answer has no peer id")
+            val peer = obj.strOrNull("peer") ?: throw IOException("the relay's join answer has no peer id")
+            if ((obj["created"] as? JsonValue.Bool)?.value == true) {
+                // `mode=join` is not allowed to create the room. A relay that says it did is still
+                // treating the mode as advice — the old silent behaviour under a new route's name —
+                // which is worth one line in the app's diagnostics even though this join succeeded.
+                refuse("join", "the relay answered created=true to a mode=join request")
+            }
+            return peer
         }
+    }
+
+    /**
+     * The transport's own English line for a terminal refusal — the half the log and a bug report
+     * get, where the screen shows a sentence built from [JoinRefusal] instead.
+     */
+    private fun refusalDetail(refusal: JoinRefusal, status: Int, body: String): String = when (refusal) {
+        JoinRefusal.ROOM_UNKNOWN ->
+            "no room on this relay answers to this token (404 room_unknown): nobody has created it, " +
+                "or this token is not the one the other device holds"
+        JoinRefusal.RELAY_TOO_OLD ->
+            "this relay has no /v2 join route (404 with no error body): it is older than this app"
+        JoinRefusal.INVALID_ROOM_ID -> "the relay refused this room id as malformed (404 invalid_room_id)"
+        JoinRefusal.BAD_MODE ->
+            "the relay refused this app's join mode (400 bad_mode): the app and that relay disagree " +
+                "about the join contract"
+        JoinRefusal.REFUSED -> "the join was refused: HTTP $status ${body.take(200)}"
     }
 
     private fun stream(keys: RoomKeys, peer: String, conn: SealedConnection) {
@@ -734,13 +791,26 @@ class RemoteClient(
 
     companion object {
         private val PLAIN_TEXT = "text/plain; charset=utf-8".toMediaType()
+
+        /** `/v2`'s join reads a small JSON body; `up` stays plain text, its payload being opaque. */
+        private val JSON = "application/json; charset=utf-8".toMediaType()
         private const val WATCHDOG_INTERVAL_MS = 10_000L
 
         /** 2.5 x the relay's 15 s comment interval, so a lost comment is not a lost connection. */
         private const val SILENCE_LIMIT_MS = 40_000L
         private const val MAX_REFUSALS = 50
+
+        /** How much of a room id two screens show so a person can compare them: 26 characters do not fit side by side. */
+        private const val FINGERPRINT_CHARS = 8
     }
 }
 
-/** A failure no retry can fix: a malformed room id, or a relay that refuses this peer outright. */
-class FatalRelayException(message: String) : IOException(message)
+/**
+ * A failure no retry can fix: a malformed room id, or a relay that refuses this peer outright.
+ *
+ * [message] is the transport's own English line (it is what the state carries into the app's log);
+ * [refusal] is the same fact as a token, because the two refusals a person can act on — a token
+ * naming no room, and a relay older than the app — need different sentences, and neither is the
+ * other's retry.
+ */
+class FatalRelayException(val refusal: JoinRefusal, message: String) : IOException(message)

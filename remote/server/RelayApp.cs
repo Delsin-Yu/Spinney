@@ -20,10 +20,24 @@ internal static class RelayApp
         builder.WebHost.ConfigureKestrel(options => options.Limits.MaxRequestBodySize = null);
 
         builder.Services.AddSingleton(limits);
+        builder.Services.AddSingleton<RoomRecords>();
         builder.Services.AddSingleton<RoomRegistry>();
+        builder.Services.AddSingleton<JoinLimiter>();
         builder.Services.AddHostedService<RelaySweeper>();
 
         var app = builder.Build();
+
+        // Which rooms exist, read back before the first join can ask. A record that cannot be read
+        // fails loudly (RoomRecords.Load logs it) because the failure mode is invisible otherwise:
+        // every room would simply look unknown until a publisher re-created it.
+        var records = app.Services.GetRequiredService<RoomRecords>();
+        records.Load();
+
+        // The sweeper flushes the ledger while the relay runs; this is the last one, so an orderly
+        // stop does not cost the refreshes made since the previous sweep.
+        app.Services.GetRequiredService<IHostApplicationLifetime>()
+            .ApplicationStopping.Register(() => records.Save(force: true));
+
         if (configuration is not null) RelayLog.Configuration(app.Logger, configuration);
         RelayLog.Listening(app.Logger, urls);
         RelayLog.Configured(app.Logger, CommandLine.Describe(limits));

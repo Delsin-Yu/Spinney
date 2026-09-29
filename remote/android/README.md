@@ -26,23 +26,34 @@ disagree, that page wins. The user-facing contract is `docs/agents/plans/remote-
 | `androidx.webkit:webkit` | **1.12.1** | **downloaded** (network) |
 | `androidx.security:security-crypto` | **1.1.0-alpha06** | **downloaded** |
 | `com.squareup.okhttp3:okhttp` | **4.12.0** | **downloaded** |
+| `com.google.zxing:core` | **3.5.3** | **downloaded** (Maven Central) — the QR *decoder* both pairing paths read a code with (§4d) |
+| `androidx.camera:camera-core`, `camera-camera2`, `camera-lifecycle`, `camera-view` | **1.4.1** | **downloaded** (Google's Maven, `dl.google.com` — not Maven Central) — the live camera scan (§4d) |
 | `:core` tests | **`org.junit.jupiter:junit-jupiter:5.11.4`** + `junit-platform-launcher` | **downloaded** |
 
 `compileSdk = 35`, `targetSdk = 35`, `minSdk = 26`, Java/Kotlin target 17.
 
-Everything except the four downloaded artifacts was already in `~/.gradle/caches`, which is what
+Everything except the downloaded artifacts was already in `~/.gradle/caches`, which is what
 decided the AGP/Kotlin/Compose versions: a version that resolves offline beats a newer one that
 does not. After the first online run, `./gradlew --offline :core:test :app:assembleDebug` works
-(the sub-agent proved that with a full `--offline --no-build-cache clean` run).
+(the sub-agent proved that with a full `--offline --no-build-cache clean` run, and the CameraX
+change re-proved it with `--offline --rerun-tasks :app:assembleDebug`).
+
+CameraX is the one dependency that does **not** come from Maven Central, so a mirror of Central
+alone cannot resolve it; `camera-view` also drags in `androidx.appcompat` at runtime (its
+`PreviewView` is a `FrameLayout` subclass), which is where the ~40 extra transitive modules in the
+app's classpath come from. `camera-camera2` is the only backend: it is the one that exists on
+API 26+ without Google Play Services.
 
 ## 2. Modules, and where a change belongs
 
 | Path | What it is |
 | --- | --- |
-| `:core` → `core/src/main/kotlin/dev/spinney/remote/core/` | **Pure Kotlin/JVM, no Android dependency.** The whole protocol: `Derivation.kt` (§3), `Sealing.kt` (§4 nonce/AAD/AEAD, the `s` wire salt), `Connection.kt` (§5 frames + the sealing state of one connection), `Transport.kt` (§7 envelope, slices, reassembly), `ReplayWindow.kt` (§4, one window per sender salt), `Sse.kt` (§7 parser + routes), `Room.kt` (the room tree's fold over `hello`/`instances`/`bye`), `MirrorPolicy.kt` (§6 tables), `LanguageTags.kt` (a reported tag → the canonical catalog tag), `Backoff.kt`, `Json.kt`, `Bytes.kt`, `Protocol.kt` (every pinned number, in one place) |
+| `:core` → `core/src/main/kotlin/dev/spinney/remote/core/` | **Pure Kotlin/JVM, no Android dependency.** The whole protocol: `Derivation.kt` (§3), `Sealing.kt` (§4 nonce/AAD/AEAD, the `s` wire salt), `Connection.kt` (§5 frames + the sealing state of one connection), `Transport.kt` (§7 envelope, slices, reassembly), `ReplayWindow.kt` (§4, one window per sender salt), `Sse.kt` (§7 parser), `RelayRoutes.kt` (§7's routes, the `/v2` join and the mode it carries), `JoinRefusal.kt` (what a `/v2` join refusal means, and whether a retry could change it), `Room.kt` (the room tree's fold over `hello`/`instances`/`bye`), `MirrorPolicy.kt` (§6 tables), `LanguageTags.kt` (a reported tag → the canonical catalog tag), `Pairing.kt` (the strict `spinney-pair:1?…` parser, §4d), `QrScan.kt` (zxing: pixels → the payload, the one **area-averaging decode ladder** both pairing paths run, and the luma plane → ARGB ints the camera needs, §4d), `Backoff.kt`, `Json.kt`, `Bytes.kt`, `Protocol.kt` (every pinned number, in one place) |
 | `:core` → `core/src/test/kotlin/…/VectorsTest.kt` | **The point of M3**: the Kotlin ↔ TypeScript byte-for-byte proof, read straight out of `remote/vectors/vectors.json` |
-| `:core` → `…/ProtocolContractTest.kt` | The rules the vectors cannot pin: nonce freshness on reconnect, the per-salt replay window, the three distinguishable refusals, the frame's JSON, the SSE shape, backoff, the room fold, the language-tag mapping, and the §6 tables |
-| `:app` → `app/src/main/kotlin/dev/spinney/remote/app/` | The Android half: `RemoteClient.kt` (the connection), `SessionWebView.kt` (the shipped renderer in a WebView + the host bridge), `ShellAssets.kt` (the asset origin and the two injections), `RoomTreeScreen.kt` (Compose), `SessionScreen.kt` (the phone's own actions), `SecureTokenStore.kt`, `L10n.kt`, `RemoteController.kt`, `MainActivity.kt` |
+| `:core` → `…/ProtocolContractTest.kt` | The rules the vectors cannot pin: nonce freshness on reconnect, the per-salt replay window, the three distinguishable refusals, the frame's JSON, the SSE shape, the routes and the `/v2` join refusal taxonomy (a `room_unknown` body is terminal; a 404 with no `error` body is a relay older than the app), backoff, the room fold, the language-tag mapping, and the §6 tables |
+| `:core` → `…/PairingTest.kt` | The pairing payload: the three shared vectors by literal, the `%20`/`+` parity trap (asserted against `URLDecoder` itself), every refusal as its own reason, and **a zxing decode of the committed `pairing-fixture.png`** — the one place an independent reader proves the desktop's encoder (§4d) |
+| `:core` → `…/QrLadderTest.kt` | The two pieces both pairing paths share: the **measured asymmetry** — a synthetic screen photograph on which a nearest-neighbour downscale of the code finds nothing while `decodeLadder`'s area averaging finds it — and the luma-plane arithmetic (`rowStride`/`pixelStride`) the camera frames arrive with (§4d) |
+| `:app` → `app/src/main/kotlin/dev/spinney/remote/app/` | The Android half: `RemoteClient.kt` (the connection), `SessionWebView.kt` (the shipped renderer in a WebView + the host bridge), `ShellAssets.kt` (the asset origin and the two injections), `RoomTreeScreen.kt` (Compose), `SessionScreen.kt` (the phone's own actions), `CameraScanScreen.kt` (CameraX: live preview → luma frames → the shared decoder → the payload, §4d), `PairingFromPhoto.kt` (picker → pixels → payload → the three sentences, §4d), `SecureTokenStore.kt`, `L10n.kt`, `RemoteController.kt`, `MainActivity.kt` |
 | `app/src/main/assets/webview/**`, `…/assets/l10n/**` | **Generated copies.** Never edit one by hand — see §3 |
 | `app/src/main/assets/shell/**` | Hand-written, Android-owned: `session.html`, `session-shim.js`, `session-boot.js` |
 | `tools/gen-shell.js` | A one-off derivation of `assets/shell/session.html` from `ChatViewProvider.getHtml()`; kept so the next person can re-derive it instead of hand-copying |
@@ -176,11 +187,20 @@ pure `:core` code and is unit-tested.
 
 ## 4c. The token: one spelling, one room
 
-The room id is derived from the token and nothing else (§3), and a wrong token is **not an error —
-it is an empty room** (the plan's §11). That is why a stray character is a silent defect rather than
-a cosmetic one, and it was measured on a phone: the relay's log showed **four rooms out of four
-spellings of one token** (as typed, plus a trailing space, plus a trailing newline — what a paste
-produces — and with the IME capitalising the first letter).
+The room id is derived from the token and nothing else (§3), so a wrong token is **a different
+room**. What `/v2` changed is how the phone learns that: it joins in `join` mode (§7), so a token
+that names no room on that relay is *refused* — `404 room_unknown` — instead of being answered with
+a live empty room that looks exactly like "nobody is publishing yet". That refusal is the plan's §11
+axiom ("a wrong token is not an error, it is an empty room") retired; it is also a fact about the
+*room* and not about the character, so it says the token is wrong without saying which character and
+where — and the same refusal is what a *correct* token gets before the desktop has created the room.
+
+A stray character still routes to a different room id, which is why the layers below still stand, and
+it was measured on a phone: the relay's log showed **four rooms out of four spellings of one token**
+(as typed, plus a trailing space, plus a trailing newline — what a paste produces — and with the IME
+capitalising the first letter). Those four rooms existed because the phone asked to *create*; today a
+phone cannot, so the same four spellings are four fingerprints to compare instead of four rooms to
+find.
 
 Four layers, in the order a token meets them:
 
@@ -230,6 +250,119 @@ capitalised first letter, a short token, a repeated one): same normalised charac
 verdict, **same room id**, and — as the control — the untrimmed spelling really would have been a
 different room.
 
+## 4d. Pairing from a QR code — the answer to a silent failure
+
+Everything above is a *defence* against a mistyped token, and a defence is not a fix. So the desktop
+draws the room's token as a QR code (`Spinney: Show Room Pairing Code`, `src/remote/pairingCode.ts`)
+and the phone reads it back **off a screen or out of a photograph** — live, with its own camera, or
+from the system photo picker — which removes the typing instead of guarding it. The token still never
+goes to the relay (§3), and it never goes through a keyboard either: the one channel is the screen and
+the camera of the phone.
+
+The payload is one line, `spinney-pair:1?relay=<r>&room=<n>&token=<t>`, percent-encoded per **RFC
+3986** over UTF-8. `src/remote/pairing.ts` is the encoder, `:core`'s `Pairing.kt` is the parser, and
+the three literals are asserted by both (`tools/check-remote.js` §9 and `PairingTest`):
+
+```
+relay https://relay.example.com:8787  room home + lab  token a b+c/d?
+  → spinney-pair:1?relay=https%3A%2F%2Frelay.example.com%3A8787&room=home%20%2B%20lab&token=a%20b%2Bc%2Fd%3F
+```
+
+**The trap, and why `URLDecoder` is banned in `Pairing.kt`.** A bare `+` in a query is a web-form
+convention, not RFC 3986: Java's `URLEncoder` writes a space as `+` and `URLDecoder` reads `+` back
+as a space, while the desktop's `encodeURIComponent`/`decodeURIComponent` write `%20` and treat `+`
+literally. A form decoder would therefore turn a token containing `+` into one containing a space —
+a different room, and an empty one, which is precisely the defect pairing by QR exists to remove.
+`Pairing.percentDecode` is the matching strict decoder: `%XX` into **bytes**, the bytes only then
+read as UTF-8, a bare `+` kept as a literal `+`, and a malformed escape refused rather than
+repaired. `PairingTest` asserts that difference against the JDK's own `URLDecoder` rather than
+describing it.
+
+**It refuses, and it is pure.** An unknown prefix or version, a parameter that is missing or empty,
+**any parameter it does not know** (unknown fields cannot be skipped: a future field means a new
+version, or a version-1 parser would silently mis-read a version-2 payload), a malformed `%XX`
+escape or non-UTF-8 bytes, and a relay that is not an `http`/`https` URL. Each is its own reason in
+`Pairing.Refusal`. What the parser does **not** do is judge the token: it returns the three strings,
+and the flow then runs `TokenInput.normalize` + `TokenInput.issue` (§4c), so "what is a usable
+token" keeps one definition and the token sentences stay the extension's own catalog strings.
+
+**The reader is zxing, and the dependency is deliberate.** `com.google.zxing:core:3.5.3` is pure
+Java — no Google Play Services, which is a hard requirement rather than a preference, because the
+test phone is a Huawei device without them — and it is what lets the *same* `QrScan.decode` read the
+committed fixture on a plain JVM. `PairingTest` decodes `core/src/test/resources/pairing-fixture.png`
+(written by `tools/gen-qr-fixture.mjs` from the desktop's own encoder, and held to it by
+`tools/check-qr.js`'s X1) and gets shared vector 1 back field for field. **That decode is the only
+independent evidence in this repository that the hand-written encoder emits a symbol a real reader
+accepts**: no round trip through either implementation's own decoder could show it. Nothing in
+`:core`'s main source set may import `java.awt` or `javax.imageio` — they do not exist on Android —
+so the pixels cross that line as an `IntArray`; the *test* is the one place `ImageIO` loads the PNG.
+
+**The ladder, and the measured fact it exists for.** A photograph of a *screen* is not a picture of
+a code: it is a picture of a code and of the screen's own pixel grid, and the grid survives one kind
+of downscale and not the other. Measured on the very photograph that asked for this feature
+(3072x4096, a monitor shot with the phone's camera, read with this zxing): an **unfiltered**
+(nearest-neighbour) downsample finds the code at 1/4 and nowhere else, while an **area-averaging**
+one finds it at 1/2, 1/4 and 1/8. Android's `inSampleSize` does not filter, `Bitmap.createScaledBitmap`
+with `filter = true` does — and a camera frame has no Bitmap at all, so the averaging is done on the
+pixels. One implementation serves both paths, and it lives in `:core`:
+`QrScan.decodeLadder(pixels, width, height)` tries **1/1, 1/2, 1/4**, each step a 2x2 channel-wise
+area average of the previous one, and stops when the smaller side falls under 128 px — a version-6
+symbol is 41 modules across, so below that nothing can be read. `QrLadderTest` builds the synthetic
+screen photograph that pins the asymmetry: with the grid at period 3 and depth 30, a nearest-neighbour
+read finds nothing at 1/1, 1/2 or 1/4 while the ladder reads the code at its 1/4 step. (The parameters
+are measured, with room either side: at depth 10 the unfiltered reads succeed, at 20 the ladder reads
+at 1/2, at 40 at 1/4, at 60 nothing reads it. A grid whose period divides the read's stride — the
+obvious period 2 — does *not* reproduce it, which is why the test is a measurement and not an
+illustration.)
+
+**The camera is the primary action; the photo picker is the fallback.** "Scan the code with the
+camera" opens `CameraScanScreen.kt`: a CameraX `PreviewView` in an `AndroidView` (the pattern
+`MainActivity` already uses for the token field) bound to the screen's lifecycle, plus an
+`ImageAnalysis` use case on a **single-thread executor** with `STRATEGY_KEEP_ONLY_LATEST` — one frame
+at a time and no backlog, because a frame that arrived while the previous one was being decoded is
+stale by definition. Each frame's **luma plane** is turned into the `IntArray` the ladder wants by
+`QrScan.grayPixels(luma, width, height, rowStride, pixelStride)`: no Bitmap per frame, and the two
+strides are parameters rather than assumptions, because a `YUV_420_888` plane is padded per row and
+may be spaced per pixel — read as tightly packed bytes it shears the picture, a defect no preview can
+show. The analysis is asked for 1280x720: the frame's pixel count is what the ladder's 1/1 step
+allocates, and 720p still leaves about ten pixels per module when a 41-module symbol fills a third of
+the frame. **The camera stops on the first payload** — the analyzer is cleared and the use cases are
+unbound *before* the payload is handed over, so the camera (and its privacy indicator) is off while
+the connect derives the key, and a second frame cannot race the first into the form. The payload then
+takes the same path as a photograph's: `pairingFromPayload` in `PairingFromPhoto.kt` — strict parse,
+`TokenInput`'s judgement, fill relay/room/token, `RemoteController.connect`.
+
+**The permission.** `AndroidManifest.xml` declares `android.permission.CAMERA` (next to the login
+`INTERNET`) and asks for it at runtime when the scan screen opens; `uses-feature camera` is
+`required="false"`, because a phone without a camera still pairs through the picker. A refusal is a
+sentence and a way back, not a dead end — the photo path needs no permission at all, so it cannot be
+refused. Nothing about the camera is stored: frames are decoded in memory and dropped, and the token
+never goes to the relay (§3).
+
+**The flow on the connect screen** (`PairingFromPhoto.kt` + `MainActivity.kt`): "or from a photo"
+opens `ActivityResultContracts.PickVisualMedia` — the system picker the app already opens for
+attachments (`SessionScreen.pickImage`), so **no storage permission is added** and the picture arrives
+from outside the app as one content URI. Then: decode a QR out of the pixels (`BitmapFactory`,
+downsampled to keep a 108 MP photo an allocation instead of an OOM — the fixture's symbol is version
+6, i.e. 41 modules across, so capping the longest side at 2560 px still leaves about six pixels per
+module — and *then* the ladder, which is what actually decides legibility, since `inSampleSize` is an
+unfiltered read), parse it, judge the token, fill relay/room/token, and take `RemoteController.connect`
+— the same stored, normalised and derived path a typed token takes. Every failure is one sentence,
+localised through `L10n.t`, and cleared as soon as the user edits the form: no QR code in the photo; a
+payload this app cannot read; a code from a newer Spinney; a relay that is not an `http`/`https` URL —
+plus §4c's token sentences, reused verbatim, and the picker's own "that image could not be read",
+which `SessionScreen` already says.
+
+**The English strings this change adds** (they live in Kotlin; `L10n.t` falls back to the literal, and
+`l10n/*.json` is deliberately untouched — the catalog guard scans the extension, so an app-only key
+there would be reported stale, which is a known, separate gap): the camera screen's title and its
+button, `Scan the code with the camera`; the connect screen's secondary button, `or from a photo`;
+`To scan the room code, this app needs the camera.`; `The camera was not allowed, so the code cannot be
+scanned. A photo of the code still works.`; `Allow the camera`; `Cancel`; `Point the phone at the code
+on the desktop's screen.` and `The camera could not be started.` The refusal and token sentences a scan
+produces are the ones above, reused — a scanned code and a photographed code are judged by one code
+path, so no new sentence was needed for that half.
+
 ## 5. The room tree is native Compose — why
 
 The **session view** must be the shipped renderer (it has to be: that is the whole architecture).
@@ -245,6 +378,19 @@ The **room tree** does not, and it is a small list:
 If `media/remote.js` lands, wrapping it in a WebView here would be a *smaller* diff than the
 Compose screen is today (one `SessionWebView`-shaped host, a different shell), and this paragraph is
 the argument for doing that rather than porting features into Compose.
+
+**What the screen says when it is alone.** With no device row in the tree the phone prints a state
+and an action, not an axiom: the peer count is in the header, the state is "no window in this room
+has published a session yet", the action is the two ways that can happen (that device is not
+publishing, or it holds a different token, which is a different room), and the value the action needs
+is printed under it — `Room · LTKXZ4EW…`, the same 8 characters the connect screen shows, so two
+people can compare by eye. When the join itself was refused the screen prints the refusal instead of
+an empty room, because an empty room would be a lie: the room does not exist. Those two sentences —
+`room_unknown` and a relay older than the app — are the extension's own catalog entries, verbatim, so
+one wire answer is described one way on both surfaces and neither sentence is a new string. The
+alone-state sentence is the one English literal this change adds, and §4b is why it is legible on an
+English phone today: English is the source language, so an absent catalog entry *is* the string, and
+a translated one is what makes it Chinese.
 
 ## 6. The token
 
@@ -262,7 +408,17 @@ phone is one device row per room and cannot be correlated between two rooms.
 
 `RemoteClient` is §7 in Kotlin, on OkHttp:
 
-- **SSE down / POST up** over plain HTTP(S) (`RelayRoutes` builds the three URLs in one place);
+- **SSE down / POST up** over plain HTTP(S) (`RelayRoutes` builds the URLs, and the `/v2` join's
+  body with its own URL, in one place);
+- **the join is `/v2/room/{roomId}/join` with `{"mode":"join"}`.** A phone is a replica: it may
+  enter a room, it must not be able to bring one into being, which is what turns a token that names
+  nothing into `404 room_unknown` instead of a live empty room (`JoinRefusal`). That is a
+  client-mode *declaration*, not a privilege — the relay cannot tell a phone from a desktop, and
+  whoever holds the token *is* the room — so it buys legibility and not security. Both 404 answers
+  are terminal: `room_unknown` (a wrong token, or a publisher that has not created the room yet) and
+  a 404 with no `error` body, which is a relay older than this app and the reason the contract puts a
+  transport change in a new route version (§5). `429` and `5xx` stay retryable, as they were, because
+  neither is a verdict on the token;
 - a **20 s application `ping`** (`Protocol.CLIENT_PING_INTERVAL_MS` — a constant of the contract,
   not a tunable), with the relay's own 15 s `: ping` comment as a second liveness signal;
 - a watchdog that cancels the stream after 40 s of silence, because a half-open socket must not be
@@ -275,7 +431,9 @@ phone is one device row per room and cannot be correlated between two rooms.
   the salt/sequence rule, and the vectors pin the nonce *layout*;
 - §6's routing in both directions (`MirrorPolicy`), so the four messages that act on **this phone**
   — `openExternal`, `copyNodeId`, `pickImage`, `setNodeSize` — are handled here and can never be
-  asked of the owner's machine.
+  asked of the owner's machine, while the one lazy read a card does need (`loadNodeItems` up,
+  `nodeItems` down) does cross: the items are the publisher's, so asking for them is a session
+  question and only the publisher holds the answer.
 
 The phone announces itself with `hello` and publishes nothing: it is a replica-only peer, so it
 never sends `instances`, and a peer that nevertheless asks it to `attach`/`input` gets
@@ -285,7 +443,7 @@ never sends `instances`, and a peer that nevertheless asks it to `attach`/`input
 
 ```bash
 cd remote/android
-./gradlew :core:test              # 22 tests, including the vectors proof
+./gradlew :core:test              # 39 tests, including the vectors proof, the QR fixture decode, the ladder's measured asymmetry
 ./gradlew :app:assembleDebug      # -> app/build/outputs/apk/debug/app-debug.apk
 ./gradlew --offline :core:test :app:assembleDebug    # after one online run
 ./gradlew --offline --no-daemon :core:interopJar     # the interop peer jar (dev-only)
@@ -311,7 +469,9 @@ TypeScript transport**. It then proves, from both sides, that
   `fid`-derived salt the pre-`s` convention would have inferred **cannot** open it — the assertion
   that would have failed under the old hidden-salt convention;
 - a **replay** is refused by the receiver in both directions, and a frame whose envelope claims a
-  **neighbouring salt** does not open while the same bytes under the right salt do.
+  **neighbouring salt** does not open while the same bytes under the right salt do;
+- the Kotlin peer reached the room through §7's **`/v2` join in `join` mode** — the TypeScript peer
+  is the one that ran `create`, so the replica really did enter a room instead of being handed one.
 
 It is dev-only, it is not part of `vscode:prepublish` (it needs a .NET SDK and a JDK), and it
 prints `PASS remote-interop: N/N checks` only when every check ran and passed.
@@ -324,17 +484,39 @@ Verified by **running**, on this machine:
   nonce built **from `s`**), both slice sets (including each part's `s`, the splice refusal, and
   the reassembled frame's salt), the refusals, and that re-encoding each frame's plaintext
   reproduces the vectors' bytes exactly;
-- `:core:test` green (22 tests) and `:app:assembleDebug` green, from a clean tree and with
+- `:core:test` green (**39 tests**) and `:app:assembleDebug` green, from a clean tree and with
   `--offline --rerun-tasks` (so the vector test genuinely re-reads `remote/vectors/vectors.json`);
-- the APK contains `assets/webview/main.js`, both catalogs, the shell and the shim, and the token
+  the count went from 36 to 39 when the camera landed (the three in `QrLadderTest`);
+- **the QR fixture decodes with zxing** (§4d): `PairingTest` reads
+  `core/src/test/resources/pairing-fixture.png` back to shared vector 1 field for field, which is an
+  *independent* reader accepting the desktop's own encoder — the three payload literals, the
+  `%20`/`+` parity trap (asserted against `URLDecoder`), and all eight refusal reasons are green in
+  the same run;
+- **the ladder's measured asymmetry** (§4d): `QrLadderTest` builds a synthetic screen photograph
+  (nearest-neighbour upscale of the fixture + a period-3 pixel grid at depth 30), asserts that a
+  nearest-neighbour read finds nothing at 1/1, 1/2 **and** 1/4, and that `decodeLadder` reads the
+  payload at its 1/4 step — so the averaging really is what reads the code, and a future "just scale
+  it down" would fail the test rather than the phone. The same file pins `grayPixels` on a padded,
+  spaced luma plane with sentinel bytes, and decodes the fixture through a camera-shaped plane;
+- the CameraX change **resolves and compiles from the two mirrors and then from the Gradle cache**:
+  `:app:dependencies --configuration debugRuntimeClasspath` with no `FAILED` entries,
+  `:app:assembleDebug` green, and `--offline --rerun-tasks :app:assembleDebug` green again after the
+  artifacts were cached (this is what "the dependency set is complete" means here, and it is a
+  statement about resolution, not about a camera);
+- the APK contains `assets/webview/main.js`, both catalogs, the shell and the shim; the merged
+  manifest carries `android.permission.CAMERA` next to `INTERNET` and a
+  `uses-feature camera required="false"`; and the camera code is inside the artifact (`classes.dex`
+  carries `CameraScanScreen` and the CameraX classes), and the token
   field's flags are verifiable *inside the artifact*: `dexdump -d` on the installed APK's
   `classes4.dex` shows `TokenField.applyImeFlags` computing `const v1, #00080081` before
   `setInputType` and `const v1, #11000006` before `setImeOptions` (the constants are inlined, so the
   values are what travels, not the field names);
-- **`tools/remote-interop.mjs`: 35/35 checks** — a frame crossed between the Kotlin and TypeScript
+- **`tools/remote-interop.mjs`: 72/72 checks** — a frame crossed between the Kotlin and TypeScript
   transports through the real relay, byte for byte, in both directions, multi-slice included, with
   each side opening the other's frame from the envelope's `s`, a replay refused in both
-  directions, and a neighbouring salt refused (§8a);
+  directions, and a neighbouring salt refused (§8a). The Kotlin peer joins that room with §7's
+  `{"mode":"join"}` against the real `/v2` route (the TypeScript publisher is the side that ran
+  `create`), which is the one place the phone's join is exercised on a wire;
 - `tools/sync-remote-assets.js` / `tools/check-remote-assets.js` in all its modes (write, no-op,
   drift, missing, unmanaged file, `--clean`), and `check-remote-assets.js` green **both** with the
   l10n aliases present (after `npm run sync:l10n`, i.e. inside the release gate) and with them
@@ -352,7 +534,28 @@ Verified by **running**, on this machine:
   none of those have run;
 - the image path (photo picker → `dataUrl` → `imagePicked` → the composer's attachment → the
   publisher) is written but has never carried a byte;
-- §3's grouping in the room tree is exercised against synthetic frames only.
+- **the pairing flow has never been run end to end.** Its two halves are proved separately and on
+  different machines: zxing reads the committed fixture in a JVM test (§4d, the decoder and the
+  desktop's encoder), and the parser's vectors, refusals and purity are unit-tested — but the app's
+  own path (photo picker → `BitmapFactory` → the downsample cap → form fill → connect) has not run
+  on a phone, so the picker's photo has never become a room through this code;
+- **nothing about the live camera has run on a real camera.** No frame from a sensor has ever been
+  analysed: that `ImageAnalysis` hands over a `YUV_420_888` luma plane whose `rowStride`/`pixelStride`
+  are what `grayPixels` assumes, that the 1280x720 resolution request is honoured, that the preview
+  and the analysis bind together on the back camera, that a desktop's code at typical viewing
+  distance is legible at that size, that the camera really stops on the first decode, and that the
+  runtime permission dialog appears where the screen expects it — all of that is written and compiled,
+  and the pixel arithmetic underneath it is unit-tested, but the camera itself is the one part no JVM
+  test can stand in for. The synthetic screen photograph in `QrLadderTest` is a *model* of the measured
+  moiré, not a substitute for a phone held at a monitor;
+- §3's grouping in the room tree is exercised against synthetic frames only;
+- **the room screen's refusal branch has never been on a screen.** The join itself *has* been on a
+  wire (§8a: this same `RemoteClient` reaches the room with `{"mode":"join"}` against the real `/v2`
+  route), and this side's reading of the four answers is unit-tested (`joinRefusalTaxonomy`) — but no
+  phone has been *refused* by a live relay through the app, so the two refusal sentences and the
+  fingerprint line under them are compiled, not seen.
 
-The honest summary: the **crypto, the protocol and the wire are proved** — including across
-implementations; the **UI is written and compiled, not run.**
+The honest summary: the **crypto, the protocol, the wire and the QR decode are proved** — the last
+of those by an independent reader (zxing) accepting the desktop's own encoder, and now also by a
+measured synthetic screen photograph proving that the decode *ladder* handles the moiré a screen
+leaves behind; the **UI, including the camera, is written and compiled, not run.**

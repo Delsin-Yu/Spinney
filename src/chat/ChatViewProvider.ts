@@ -3591,9 +3591,9 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   /**
    * Apply one webview→host message a peer submitted (`input`), through the **same** path a
    * local webview message takes — `handleSessionMessage`, i.e. the one switch that routes
-   * `userMessage`, `stop`, `setModel`, `loadAgentItems` and the rest. There is therefore
-   * no remote-only code path that could behave differently from clicking the same control
-   * in a local tab.
+   * `userMessage`, `stop`, `setModel`, `loadAgentItems`, `loadNodeItems` and the rest. There
+   * is therefore no remote-only code path that could behave differently from clicking the
+   * same control in a local tab.
    *
    * Refusals are returned as codes (the caller answers `error{code}` per
    * `remote/PROTOCOL.md` §5) and nothing is dispatched: an unknown session, a malformed
@@ -4835,6 +4835,15 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         // A sub-agent card was expanded: its transcript was deliberately left out of
         // the `tree` message (see `SessionRuntime.postTree`).
         rt.onAgentItems(String(message.id ?? ''));
+        return;
+      case 'loadNodeItems':
+        // A card asked for **any** node's items. No local path sends this — a local card is
+        // filled from `path`, which follows the owner's own view chain — so it is the
+        // replica's per-node fetch for a session whose `tree` it holds and whose `path` it
+        // never saw. Same shape, same refusals as `loadAgentItems` above: a node this
+        // session does not have is answered with nothing, and a read-only window is refused
+        // in `applyRemoteInput` before this switch is reached.
+        rt.onNodeItems(String(message.id ?? ''));
         return;
       case 'userMessage':
         return this.dispatchUserMessage(rt, String(message.text ?? ''), message.attachments ?? [], origin);

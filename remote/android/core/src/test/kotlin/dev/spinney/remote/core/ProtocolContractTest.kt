@@ -14,7 +14,7 @@ import org.junit.jupiter.api.Test
 /**
  * The rest of the contract, asserted without the vectors: the nonce's freshness, the three
  * distinguishable failure modes, the replay window, the frame's own JSON, the SSE parser, the
- * reconnect backoff, and the room tree's fold.
+ * routes and the taxonomy of a `/v2` join refusal, the reconnect backoff, and the room tree's fold.
  *
  * `remote/vectors/vectors.json` pins *bytes*; these tests pin *behaviour* — the parts of
  * `remote/PROTOCOL.md` that are stated as rules rather than as values.
@@ -279,12 +279,65 @@ class ProtocolContractTest {
     }
 
     @Test
-    @DisplayName("the relay routes are built in one place and a trailing slash is a typo, not a host")
+    @DisplayName("the relay routes are built in one place, /v2's join carries its mode in the body, and a trailing slash is a typo")
     fun routes() {
-        assertEquals("https://relay.example/v1/room/ABC/join", RelayRoutes.join("https://relay.example/", "ABC"))
+        // The mode is not in the path — both modes post to the same URL — which is why the route
+        // and its body are built together and a caller cannot describe itself as something else.
+        val join = RelayRoutes.join("https://relay.example/", "ABC", RelayRoutes.JoinMode.JOIN)
+        assertEquals("https://relay.example/v2/room/ABC/join", join.url)
+        assertEquals("{\"mode\":\"join\"}", join.body)
+        assertEquals(
+            "https://relay.example/v2/room/ABC/join",
+            RelayRoutes.join("https://relay.example", "ABC", RelayRoutes.JoinMode.CREATE).url,
+        )
         assertEquals("https://relay.example/v1/room/ABC/down?peer=9f3a1c02", RelayRoutes.down("https://relay.example", "ABC", "9f3a1c02"))
         assertEquals("https://relay.example/v1/room/ABC/up?peer=9f3a1c02", RelayRoutes.up("https://relay.example", "ABC", "9f3a1c02"))
         assertEquals("https://relay.example/healthz", RelayRoutes.healthz("https://relay.example"))
+    }
+
+    @Test
+    @DisplayName("a /v2 join refusal is classified: room_unknown is terminal, a 404 with no error body means a relay older than the app")
+    fun joinRefusalTaxonomy() {
+        // The two answers /v1 could not tell apart — "this room exists and nobody is in it" and "no
+        // room answers to this token" — and which the app now names differently.
+        assertEquals(JoinRefusal.ROOM_UNKNOWN, joinRefusalOf(404, "{\"error\":\"room_unknown\"}"))
+        assertEquals(JoinRefusal.INVALID_ROOM_ID, joinRefusalOf(404, "{\"error\":\"invalid_room_id\"}"))
+
+        // A relay built before /v2 answers the *route miss*, not a refusal: an empty body, a plain
+        // text line, or the framework's own 404 document. None of them names an `error`, and all
+        // three are "this relay is older than this app" — the one reading that a retry cannot fix.
+        assertEquals(JoinRefusal.RELAY_TOO_OLD, joinRefusalOf(404, ""))
+        assertEquals(JoinRefusal.RELAY_TOO_OLD, joinRefusalOf(404, "Not Found"))
+        assertEquals(
+            JoinRefusal.RELAY_TOO_OLD,
+            joinRefusalOf(
+                404,
+                "{\"type\":\"https://tools.ietf.org/html/rfc9110#section-15.5.1\",\"title\":\"Not Found\",\"status\":404}",
+            ),
+        )
+
+        // A 404 that *does* name a reason this build has never heard of is not an older relay: it is
+        // a relay that knows the route and refuses for its own reason, and it is terminal too.
+        assertEquals(JoinRefusal.REFUSED, joinRefusalOf(404, "{\"error\":\"something_new\"}"))
+
+        // The other terminal 4xx answers: our own request was refused, so a retry sends the same one.
+        assertEquals(JoinRefusal.BAD_MODE, joinRefusalOf(400, "{\"error\":\"bad_mode\"}"))
+        assertEquals(JoinRefusal.REFUSED, joinRefusalOf(413, "{\"error\":\"body_too_large\"}"))
+
+        // And the answers that may still become true keep the retry they had: a full room can empty,
+        // a rate limit passes, a relay that is momentarily broken comes back. None of these is a
+        // verdict on the token, so none of them may stop the loop.
+        assertNull(joinRefusalOf(429, "{\"error\":\"room_full\"}"), "a full room is retryable, exactly as before")
+        assertNull(joinRefusalOf(429, "{\"error\":\"rate_limited\"}"))
+        assertNull(joinRefusalOf(429, "{\"error\":\"too_many_rooms\"}"))
+        assertNull(joinRefusalOf(503, "<html>service unavailable</html>"), "a 5xx is a transport failure, not a verdict")
+        assertNull(joinRefusalOf(200, "{\"peer\":\"9f3a1c02\",\"created\":false}"), "a join that worked is not a refusal")
+
+        // The tokens are the relay's own: these are wire facts, not this build's vocabulary.
+        assertEquals(JoinRefusal.ROOM_UNKNOWN, JoinRefusal.of("room_unknown"))
+        assertEquals(JoinRefusal.RELAY_TOO_OLD, JoinRefusal.of("relay_too_old"))
+        assertNull(JoinRefusal.of("room_full"), "a retryable code is not a JoinRefusal")
+        assertNull(JoinRefusal.of(null))
     }
 
     @Test
@@ -576,6 +629,13 @@ class ProtocolContractTest {
         for (type in listOf("userMessage", "forkTurn", "stop", "continueTurn", "rolloverTurn", "checkout")) {
             assertTrue(MirrorPolicy.mayAcceptFromPeer(type), "$type is the token's full control")
         }
+
+        // The lazy content round trip, both halves pinned by name: a card whose items did not ride
+        // the tree asks for them (`loadNodeItems`, up) and the publisher answers (`nodeItems`,
+        // down). Half of the pair alone is a request with no answer, which is what the phone showed
+        // before it existed — so neither half may be edited away, and neither is a local action.
+        assertTrue(MirrorPolicy.mayAcceptFromPeer("loadNodeItems"), "the items are the owner's, so the ask is the session's")
+        assertTrue(MirrorPolicy.mayMirrorToPeer("nodeItems"), "…and no surface of this phone can answer it")
 
         // The two tables must not overlap: a type is one direction or the other, never both.
         assertTrue(

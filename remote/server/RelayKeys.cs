@@ -13,6 +13,11 @@ internal enum LimitsField
     PeerQueueBytes,
     IdleTimeoutSeconds,
     HeartbeatSeconds,
+    RoomRecordTtlDays,
+    MaxRoomRecords,
+    RoomRecordsFile,
+    JoinRatePerSecond,
+    JoinRateBurst,
 }
 
 internal readonly record struct RelayKey(LimitsField Field, string Key, string Flag)
@@ -33,6 +38,11 @@ internal static class RelayKeys
         new(LimitsField.PeerQueueBytes, "Relay:PeerQueueBytes", "--peer-queue-bytes"),
         new(LimitsField.IdleTimeoutSeconds, "Relay:IdleTimeoutSeconds", "--idle-timeout-seconds"),
         new(LimitsField.HeartbeatSeconds, "Relay:HeartbeatSeconds", "--heartbeat-seconds"),
+        new(LimitsField.RoomRecordTtlDays, "Relay:RoomRecordTtlDays", "--room-record-ttl-days"),
+        new(LimitsField.MaxRoomRecords, "Relay:MaxRoomRecords", "--max-room-records"),
+        new(LimitsField.RoomRecordsFile, "Relay:RoomRecordsFile", "--room-records-file"),
+        new(LimitsField.JoinRatePerSecond, "Relay:JoinRatePerSecond", "--join-rate-per-second"),
+        new(LimitsField.JoinRateBurst, "Relay:JoinRateBurst", "--join-rate-burst"),
     };
 
     public static RelayKey? Find(string flag)
@@ -91,6 +101,31 @@ internal static class RelayKeys
             case LimitsField.HeartbeatSeconds:
                 if (!TryInt(raw, name, 1, 3600, out var heartbeatSeconds, out error)) return false;
                 result = input with { HeartbeatSeconds = heartbeatSeconds };
+                return true;
+            case LimitsField.RoomRecordTtlDays:
+                if (!TryInt(raw, name, 1, 3650, out var roomRecordTtlDays, out error)) return false;
+                result = input with { RoomRecordTtlDays = roomRecordTtlDays };
+                return true;
+            case LimitsField.MaxRoomRecords:
+                if (!TryInt(raw, name, 1, 1000000, out var maxRoomRecords, out error)) return false;
+                result = input with { MaxRoomRecords = maxRoomRecords };
+                return true;
+            case LimitsField.RoomRecordsFile:
+                if (string.IsNullOrWhiteSpace(raw))
+                {
+                    error = $"{name} expects a file name such as rooms.json, got '{raw}'";
+                    return false;
+                }
+
+                result = input with { RoomRecordsFile = raw };
+                return true;
+            case LimitsField.JoinRatePerSecond:
+                if (!TryDouble(raw, name, 0.001, 1000000, out var joinRatePerSecond, out error)) return false;
+                result = input with { JoinRatePerSecond = joinRatePerSecond };
+                return true;
+            case LimitsField.JoinRateBurst:
+                if (!TryDouble(raw, name, 1, 1000000, out var joinRateBurst, out error)) return false;
+                result = input with { JoinRateBurst = joinRateBurst };
                 return true;
             default:
                 error = $"unknown configuration key {key.Key}";

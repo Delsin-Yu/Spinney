@@ -42,11 +42,12 @@ import * as vscode from 'vscode';
 import { ControlSessionInfo, ControlState } from '../http/controlServer';
 import { TreeNode } from '../chat/tree';
 import { hasPendingTranscriptWrite } from '../chat/transcript';
-import { sliceText } from '../text';
+import { clipText, sliceText } from '../text';
 import { mayAcceptFromPeer, mayMirrorToPeer } from './allowlist';
 import { FRAME_VERSION, FrameEnvelope, newFrameId } from './frames';
-import { OutboundFrame, RelayTransport, TransportStatus } from './relayClient';
+import { OutboundFrame, RelayTransport, TransportCause, TransportStatus } from './relayClient';
 import { deriveRoom } from './rooms';
+import { buildPairingPayload } from './pairing';
 import { RoomConfig, RoomsStore } from './roomsStore';
 import type { RemoteOrigin } from './origin';
 
@@ -200,8 +201,17 @@ export interface RemoteRoomView {
   readonly relayUrl: string;
   readonly autoConnect: boolean;
   readonly phase: RemoteRoomPhase;
-  /** A short English reason for `error` / `backoff` (the UI localizes its own wording). */
+  /** A short reason for `error` / `backoff`, in the window's language when it is a refusal a
+   * user can act on (the transport's own English line goes to the log). */
   readonly error: string;
+  /**
+   * The room's identity: the 26 characters this token derives (§3). Two devices show the same id
+   * exactly when they hold the same token, which is the one comparison that tells "wrong token"
+   * apart from "nobody is publishing" — the question `error` alone could not answer.
+   */
+  readonly roomId: string;
+  /** Set by the join that created this room on the relay: no device had used this token here. */
+  readonly createdRoom: boolean;
   /** The sessions of **this window** some peer in this room has attached to. */
   readonly attached: readonly string[];
   /** Every known peer, at most the number of members the relay admits to the room. */
@@ -343,6 +353,15 @@ export interface RemotePublisherHost {
   isReadOnly(): boolean;
 }
 
+/**
+ * One room's pairing payload, or why there is none (`RemoteService.pairingPayload`). The
+ * failure arms are **codes, not sentences**: this module cannot be the place the wording
+ * lives, so `pairingCode.ts` maps each one to one localized string.
+ */
+export type PairingPayload =
+  | { readonly ok: true; readonly payload: string }
+  | { readonly ok: false; readonly reason: 'unknown-room' | 'no-relay' | 'no-token' | 'unencodable' };
+
 export interface RemoteServiceOptions {
   /** The provider this service publishes and drives. */
   host: RemotePublisherHost;
@@ -381,6 +400,15 @@ interface RoomRuntime {
   phase: RemoteRoomPhase;
   error: string;
   peerId: string | null;
+  /**
+   * The 26-character room id this token derives (§3) — the room's identity, as opposed to its
+   * local label. It is shown so that two devices can be compared by eye: the same token is the
+   * same id, a different token is a different id, and before this was displayed the two were
+   * indistinguishable from the outside.
+   */
+  roomId: string;
+  /** Set by the join that created the room on this relay: nobody had used this token here before. */
+  createdRoom: boolean;
   /** `sha256(machineId + roomId)` — this window's identity **in this room**. */
   deviceId: string;
   /** Registry key → peer. Keyed by `deviceId`+`instanceId`, never by a transient peer id. */
@@ -414,6 +442,15 @@ function peerKeyOf(deviceId: string, instanceId: string): string {
 /** `sha256hex(machineId + roomId)` — stable per machine per room, never a raw machine id. */
 function deviceIdFor(roomId: string): string {
   return createHash('sha256').update(vscode.env.machineId + roomId, 'utf8').digest('hex');
+}
+
+/**
+ * The room's short identity — what fits beside a room's local label. It is deliberately the same
+ * eight characters the phone prints (`Room · LTKXZ4EW…` in `RoomTreeScreen.kt`), because the whole
+ * point of showing it is that a person can hold two screens side by side and compare them.
+ */
+function roomFingerprint(roomId: string): string {
+  return roomId ? clipText(roomId, 8) : '—';
 }
 
 /** An http(s) relay URL, or `''` — the only transport this feature has. */
@@ -733,6 +770,41 @@ export class RemoteService implements vscode.Disposable {
     });
   }
 
+  /**
+   * One room's **pairing payload** — the string a phone reads out of a QR code
+   * (`spinney.remotePairingCode`), or the reason there is none.
+   *
+   * The read goes through `RoomsStore.readToken` and `RoomsStore.read()`, the same two places
+   * the connect path above reads them from: a second way to reach a token would be a second
+   * thing to audit, and the token is the whole trust root. Nothing is logged here — not the
+   * token, not the payload — and the payload is returned to the caller rather than kept, so
+   * this service still holds no copy of a secret it did not already hold.
+   *
+   * The refusals the caller turns into sentences are not errors in this window: a room with
+   * no token never connects and a room with no relay URL has nowhere to connect, so pairing one
+   * would hand the phone a payload that cannot become a room.
+   */
+  async pairingPayload(roomName: string): Promise<PairingPayload> {
+    const room = this.options.store.read().rooms.find((row) => row.name === roomName);
+    if (!room) {
+      return { ok: false, reason: 'unknown-room' };
+    }
+    if (!room.relayUrl) {
+      return { ok: false, reason: 'no-relay' };
+    }
+    const token = await this.options.store.readToken(room.name);
+    if (!token) {
+      return { ok: false, reason: 'no-token' };
+    }
+    try {
+      return { ok: true, payload: buildPairingPayload({ relayUrl: room.relayUrl, roomName: room.name, token }) };
+    } catch {
+      // A token with an unpaired surrogate has no UTF-8 bytes, so the phone would read a
+      // different string — a different room. Refusing beats emitting that (see `pairing.ts`).
+      return { ok: false, reason: 'unencodable' };
+    }
+  }
+
   /** The read-only state M2's room tree draws: rooms → peers → instances → sessions. */
   snapshot(): RemoteSnapshot {
     const read = this.options.store.read();
@@ -745,6 +817,10 @@ export class RemoteService implements vscode.Disposable {
           autoConnect: config.autoConnect,
           phase: 'off' as RemoteRoomPhase,
           error: '',
+          // No connection has been made, so nothing has derived this room's id yet: the id is a
+          // fact about a token, and this window has not read that token.
+          roomId: '',
+          createdRoom: false,
           attached: [],
           peers: [],
         };
@@ -795,6 +871,8 @@ export class RemoteService implements vscode.Disposable {
         autoConnect: config.autoConnect,
         phase: live.phase,
         error: live.error,
+        roomId: live.roomId,
+        createdRoom: live.createdRoom,
         attached: [...live.attachments.keys()].sort(),
         peers,
       };
@@ -1408,6 +1486,8 @@ export class RemoteService implements vscode.Disposable {
       phase: 'connecting',
       error: '',
       peerId: null,
+      roomId: '',
+      createdRoom: false,
       deviceId: '',
       peers: new Map(),
       addresses: new Map(),
@@ -1446,12 +1526,17 @@ export class RemoteService implements vscode.Disposable {
       return;
     }
     room.deviceId = deviceIdFor(keys.roomId);
+    room.roomId = keys.roomId;
     try {
       room.transport = new RelayTransport({
         relayUrl,
         roomId: keys.roomId,
         encKey: keys.encKey,
         deviceId: room.deviceId,
+        // A window is a publisher: it is the thing that brings a room into being, and the relay
+        // records it here so a replica can later tell "this room exists" from "this token names
+        // nothing" (PROTOCOL.md §3, `/v2`'s mode).
+        joinMode: 'create',
         onFrame: (frame) => this.onFrame(room, frame),
         onStatus: (status) => this.onStatus(room, status),
       });
@@ -1500,8 +1585,22 @@ export class RemoteService implements vscode.Disposable {
     const wasOnline = room.phase === 'online';
     room.broken = false;
     room.phase = this.phaseOf(status);
-    room.error = status.error ?? '';
+    // A refusal a user can act on is shown in the window's language; the transport's own English
+    // line is what goes to the log below (and the tree renders this field verbatim).
+    room.error = status.cause ? this.causeSentence(status.cause) : (status.error ?? '');
     room.peerId = status.peerId;
+    if (status.roomCreated === true) {
+      if (!room.createdRoom) {
+        room.createdRoom = true;
+        this.options.log(
+          `[remote] ${room.config.name}: this relay had no record of room ${room.roomId} — no other device had used this token here. ` +
+            'A device that expected to find this room is holding a different token.',
+        );
+      }
+    } else if (room.createdRoom) {
+      // A new connection that did not create the room: the hint belongs to the join that did.
+      room.createdRoom = false;
+    }
     if (room.phase !== 'online') {
       // The connection (and with it every attachment this window had in the room) is gone:
       // a replica surface must re-`attach` on the next join — a new `peerId` means the
@@ -2178,9 +2277,10 @@ export class RemoteService implements vscode.Disposable {
    * the local webview would receive.
    *
    * The tree message is the whole state a replica needs from this side: it is exactly what
-   * a tab renders, and the two allow-listed additions a replica may need (a node's body
-   * via `loadAgentItems`, the model list via `config`) arrive through the same funnel as
-   * soon as the replica asks for them — with the *same* message the local webview gets.
+   * a tab renders, and the allow-listed additions a replica may need (a node's body
+   * via `loadAgentItems` / `loadNodeItems`, the model list via `config`) arrive through the
+   * same funnel as soon as the replica asks for them — with the *same* message the local
+   * webview gets.
    */
   private mirrorTree(room: RoomRuntime, sessionId: string, onlyPeerId?: string): void {
     const tree = this.options.host.remoteTreeMessage(sessionId);
@@ -2243,22 +2343,60 @@ export class RemoteService implements vscode.Disposable {
     const connected = snapshot.rooms.filter((room) => room.phase === 'online').length;
     if (snapshot.rooms.length === 1) {
       const room = snapshot.rooms[0];
+      // The room's identity, on screen: before this, a window showed only a local label ("home")
+      // that two different tokens share, so a phone in a different room looked exactly like a
+      // phone in this one. The label is the user's; the fingerprint is the token's.
+      const print = roomFingerprint(room.roomId);
       this.statusItem.text =
         room.peers.length === 1
-          ? `${STATUS_ICON} ${vscode.l10n.t('{0} · 1 peer', room.name)}`
-          : `${STATUS_ICON} ${vscode.l10n.t('{0} · {1} peers', room.name, room.peers.length)}`;
+          ? `${STATUS_ICON} ${vscode.l10n.t('{0} · room {1} · 1 peer', room.name, print)}`
+          : `${STATUS_ICON} ${vscode.l10n.t('{0} · room {1} · {2} peers', room.name, print, room.peers.length)}`;
     } else {
       this.statusItem.text = `${STATUS_ICON} ${vscode.l10n.t('{0} rooms · {1} peers', snapshot.rooms.length, peers)}`;
     }
     const lines = [vscode.l10n.t('Spinney Remote Control — click to open the room tree.')];
     for (const room of snapshot.rooms) {
-      lines.push(vscode.l10n.t('{0}: {1}', room.name, this.phaseLabel(room.phase)));
+      // The full id, not the short form: this is the line a user compares against the other
+      // device, and a phone shows all 26 characters.
+      lines.push(
+        room.roomId
+          ? vscode.l10n.t('{0}: {1} · room {2}', room.name, this.phaseLabel(room.phase), room.roomId)
+          : vscode.l10n.t('{0}: {1}', room.name, this.phaseLabel(room.phase)),
+      );
+      if (room.createdRoom) {
+        lines.push(
+          vscode.l10n.t(
+            'Room {0} was created just now: no other device had used this token on this relay. If you expected to find a room here, that device holds a different token.',
+            room.roomId,
+          ),
+        );
+      }
+      if (room.error) {
+        lines.push(vscode.l10n.t('{0}: {1}', room.name, room.error));
+      }
     }
     if (connected === 0 && snapshot.rooms.length > 0) {
       lines.push(vscode.l10n.t('Not connected.'));
     }
     this.statusItem.tooltip = lines.join('\n');
     this.statusItem.show();
+  }
+
+  /**
+   * One refusal a user can act on, in the window's language. The transport keeps its own English
+   * sentence for the log; this is the same fact said to a person.
+   */
+  private causeSentence(cause: TransportCause): string {
+    switch (cause) {
+      case 'room-unknown':
+        return vscode.l10n.t(
+          'No room on this relay answers to this token. A wrong token is a different room, and nobody has created that one — compare the token with the other device.',
+        );
+      case 'relay-too-old':
+        return vscode.l10n.t(
+          'This relay does not answer /v2 joins yet: it is older than this window, so it cannot tell a room that does not exist from one that is merely empty. Update the relay.',
+        );
+    }
   }
 
   /** The localized word for one room's phase — the room UI's own vocabulary is M2's. */

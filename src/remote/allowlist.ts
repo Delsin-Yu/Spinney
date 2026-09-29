@@ -56,6 +56,10 @@ export const MIRROR_TO_PEER: ReadonlySet<string> = new Set<string>([
   'path',
   'nodeUpdate',
   'agentItems',
+  // The answer to a peer's `loadNodeItems`: one node's items, fetched on demand. It is the
+  // session's own transcript (the same body a local card gets from `path`), so it acts on
+  // the session — a replica that attached to an idle session has nothing else to render.
+  'nodeItems',
   'reset',
   // One running turn: text, thinking, tool calls, sub-agents, and its end.
   'delta',
@@ -92,7 +96,8 @@ export const MIRROR_TO_PEER: ReadonlySet<string> = new Set<string>([
  *
  * The peer is driving the owner's window, so this list is the *control* surface: send,
  * fork, stop, continue, roll over the context window, move the checkout, kill a
- * sub-agent or a background terminal, delete a branch, ask for a sub-agent's transcript,
+ * sub-agent or a background terminal, delete a branch, ask for a node's transcript (a
+ * sub-agent's with `loadAgentItems`, a regular card's with `loadNodeItems`),
  * and pick the model or the thinking effort. A token grants full control (§1) — what is
  * *not* here is not a privilege question but a 1:1-rule question: those messages act on
  * the surface they were invoked from, and a peer is operating its own.
@@ -123,6 +128,9 @@ export const ACCEPT_FROM_PEER: ReadonlySet<string> = new Set<string>([
   'killBackground',
   'deleteBranch',
   'loadAgentItems',
+  // A node's items on demand (`nodeItems`): it reads the session's transcript, not the
+  // surface's — the peer needs the body of a card it cannot collect from `tree`/`path`.
+  'loadNodeItems',
   'setModel',
   'setThinkingEffort',
 ]);

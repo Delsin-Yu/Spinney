@@ -8,6 +8,12 @@ internal static class SelfTest
         {
             ("healthz shape", SelfTestCases.HealthShapeAsync),
             ("join: valid id, invalid ids, peer cap", SelfTestCases.JoinAsync),
+            ("join v2: an unknown room is refused and creates nothing", SelfTestCases.JoinUnknownRoomAsync),
+            ("join v2: a missing or bad mode is refused", SelfTestCases.JoinModeRejectedAsync),
+            ("join v1: still creates, and the room it made is joinable after its peers", SelfTestCases.LegacyJoinAsync),
+            ("room records survive a reload and age out", SelfTestCases.RoomRecordPersistenceAsync),
+            ("join routes are rate limited per source", SelfTestCases.JoinBrakeAsync),
+            ("room records are capped", SelfTestCases.RoomRecordCapAsync),
             ("up forwards verbatim to peers, never to the sender", SelfTestCases.FanOutAsync),
             ("CR, LF and empty bodies are refused", SelfTestCases.NewlineRejectedAsync),
             ("oversize body is refused", SelfTestCases.OversizeRejectedAsync),

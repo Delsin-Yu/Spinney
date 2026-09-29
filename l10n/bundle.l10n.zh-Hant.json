@@ -363,8 +363,6 @@
   "reconnecting": "重新連線中",
   "{0} peers": "{0} 個對端",
   "{0} rooms · {1} peers": "{0} 個房間 · {1} 個對端",
-  "{0} · 1 peer": "{0} · 1 個對端",
-  "{0} · {1} peers": "{0} · {1} 個對端",
   "{0} — {1}": "{0} — {1}",
   "{0}: {1}": "{0}：{1}",
   "Remote session": "遠端工作階段",
@@ -402,5 +400,18 @@
   "This window stopped talking to {0}. It is not a revocation: that device can still reach every other window.": "本視窗已停止與 {0} 通訊。這不是撤銷權限：該裝置仍可連線其他每個視窗。",
   "Copied device name: {0}": "已複製裝置名稱：{0}",
   "Remote: {0}": "遠端：{0}",
-  "This turn was started from another window in the room.": "本回合由房間中的另一個視窗發起。"
+  "This turn was started from another window in the room.": "本回合由房間中的另一個視窗發起。",
+  "{0} · room {1} · 1 peer": "{0} · 房間 {1} · 1 個對端",
+  "{0} · room {1} · {2} peers": "{0} · 房間 {1} · {2} 個對端",
+  "{0}: {1} · room {2}": "{0}：{1} · 房間 {2}",
+  "Room {0} was created just now: no other device had used this token on this relay. If you expected to find a room here, that device holds a different token.": "房間 {0} 剛剛建立：在這台中繼上還沒有其他裝置用過這個權杖。如果你預期在這裡找到房間，那台裝置持有的權杖不同。",
+  "No room on this relay answers to this token. A wrong token is a different room, and nobody has created that one — compare the token with the other device.": "這台中繼上沒有任何房間對應這個權杖。錯誤的權杖會得到另一個房間，而那個房間還沒有人建立過——請與另一台裝置核對權杖。",
+  "This relay does not answer /v2 joins yet: it is older than this window, so it cannot tell a room that does not exist from one that is merely empty. Update the relay.": "這台中繼還不支援 /v2 加入：它比本視窗舊，因此無法區分「房間不存在」與「房間只是空著」。請更新中繼。",
+  "Room \"{0}\" has no relay URL, so a device paired with it would have nowhere to connect.": "房間「{0}」沒有中繼位址，配對的裝置無處可連。",
+  "Room \"{0}\" has no token yet, so there is nothing to pair.": "房間「{0}」還沒有權杖，沒有可配對的內容。",
+  "The token of room \"{0}\" cannot be encoded for a QR code.": "房間「{0}」的權杖無法編碼成二維碼。",
+  "No remote room is configured yet — add one with \"Spinney: Manage Remote Rooms\".": "還沒有設定任何遠端房間——請用「Spinney: Manage Remote Rooms」新增一個。",
+  "Pick the room to pair": "選擇要配對的房間",
+  "This code contains the token of room \"{0}\": anyone who photographs it can control the room, so show it to the device you are pairing and close it afterwards.": "此二維碼包含房間「{0}」的權杖：任何拍到它的人都能控制該房間，因此只把它給要配對的裝置看，之後請關閉。",
+  "Loading…": "正在載入…"
 }

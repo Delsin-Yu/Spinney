@@ -2,9 +2,15 @@
 <!--
   Spinney Remote — the Android controller (milestone M3).
 
-  INTERNET is the only permission the app asks for. There is no storage permission and no
-  location: the image picker uses the system photo picker, which hands back one URI without
-  granting access to the gallery.
+  TWO permissions, and the reason each one is here. `INTERNET` is the connection: every frame of the
+  room is sealed before it is posted (§4), and the token never leaves the phone. `CAMERA` is the
+  pairing gesture — point the phone at the desktop's screen and the room's code is read live
+  (`CameraScanScreen`), refused with a sentence if the user declines, which leaves the system photo
+  picker as the way in. There is no storage permission and no location: the picker hands back one
+  URI without granting access to the gallery, and the camera frames are read in memory and dropped.
+
+  `uses-feature camera` is deliberately `required="false"`: a phone without a camera still pairs
+  through the picker, and the manifest must not keep it out of the app's reach.
 
   `usesCleartextTraffic` is on because a relay is self-hosted and `remote/PROTOCOL.md` §7 says
   "plain HTTP(S)" — a developer's relay on a LAN is usually `http://`. It is a deliberate,
@@ -17,6 +23,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.CAMERA" />
+
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
 
     <application
         android:label="Spinney Remote"

@@ -1,4 +1,5 @@
 using System.Text;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace SpinneyRelay;
 
@@ -348,6 +349,245 @@ internal static class SelfTestCases
 
         check.True(leaks.Count == 0, $"no full room id and no peer id appears in a log line: {string.Join(" | ", leaks.Take(3))}");
         return Task.FromResult(check);
+    }
+
+    /// <summary>
+    /// The headline of this round: a join that may only enter (`mode=join`) is refused for a room
+    /// nobody has created — and refusing it creates nothing, no room, no record, no peer. This is
+    /// the case that turns a wrong token into a sentence instead of an empty room that looks
+    /// exactly like "nobody is publishing right now".
+    /// </summary>
+    public static async Task<Check> JoinUnknownRoomAsync(SelfTestFixture fixture)
+    {
+        var check = Check.New();
+        var roomId = fixture.NewRoomId();
+        using var before = await fixture.HealthAsync();
+
+        var (status, peer, created, error) = await fixture.JoinV2Async(roomId, "join");
+        check.Equal(404, status, "joining a room nobody created is refused");
+        check.Equal("room_unknown", error, "the refusal names its reason");
+        check.True(peer is null, "a refused join hands out no peer id");
+        check.True(!created, "a refused join reports no creation");
+
+        using (var after = await fixture.HealthAsync())
+        {
+            check.Equal(before.Rooms, after.Rooms, "the refused join left no live room behind");
+            check.Equal(before.Peers, after.Peers, "the refused join left no peer behind");
+        }
+
+        // The same id works the moment a publisher creates it: the refusal was about existence,
+        // not about the id.
+        var (createStatus, owner, wasCreated, createError) = await fixture.JoinV2Async(roomId, "create");
+        check.Equal(200, createStatus, $"create accepts the same room id (error {createError ?? "none"})");
+        check.True(wasCreated, "the first create says the room is new");
+        check.True(owner is not null, "create returned a peer id");
+
+        var (joinStatus, replica, joinCreated, joinError) = await fixture.JoinV2Async(roomId, "join");
+        check.Equal(200, joinStatus, $"join enters the room that now exists (error {joinError ?? "none"})");
+        check.True(!joinCreated, "a join never reports a creation");
+        check.True(replica is not null, "join returned a peer id");
+
+        using (var after = await fixture.HealthAsync())
+        {
+            check.Equal(before.Rooms + 1, after.Rooms, "exactly one room exists after the create");
+            check.Equal(before.Peers + 2, after.Peers, "and both callers are in it");
+        }
+
+        return check;
+    }
+
+    /// <summary>
+    /// The mode is required and has no default: a request without a legible one is refused, rather
+    /// than answered with the old silent behaviour under a new route's name.
+    /// </summary>
+    public static async Task<Check> JoinModeRejectedAsync(SelfTestFixture fixture)
+    {
+        var check = Check.New();
+        var roomId = fixture.NewRoomId();
+        using var before = await fixture.HealthAsync();
+
+        var (missingStatus, _, _, missingError) = await fixture.PostJoinV2RawAsync(roomId, Encoding.UTF8.GetBytes("{}"));
+        check.Equal(400, missingStatus, "a body with no mode is refused");
+        check.Equal("bad_mode", missingError, "…and it says so");
+
+        var (wrongStatus, _, _, wrongError) = await fixture.PostJoinV2RawAsync(roomId, Encoding.UTF8.GetBytes("{\"mode\":\"create-or-join\"}"));
+        check.Equal(400, wrongStatus, "an unknown mode is refused");
+        check.Equal("bad_mode", wrongError, "…and it says so");
+
+        var (emptyStatus, _, _, _) = await fixture.PostJoinV2RawAsync(roomId, [], omitContentType: true);
+        check.Equal(400, emptyStatus, "an empty body is refused");
+
+        var (brokenStatus, _, _, _) = await fixture.PostJoinV2RawAsync(roomId, Encoding.UTF8.GetBytes("{\"mode\":\"join\""));
+        check.Equal(400, brokenStatus, "a malformed body is refused");
+
+        var oversize = Encoding.UTF8.GetBytes("{\"mode\":\"join\",\"pad\":\"" + new string('x', 400) + "\"}");
+        var (largeStatus, _, _, largeError) = await fixture.PostJoinV2RawAsync(roomId, oversize);
+        check.Equal(413, largeStatus, "a body over the join cap is refused");
+        check.Equal("body_too_large", largeError, "…and it says so");
+
+        using (var after = await fixture.HealthAsync())
+        {
+            check.Equal(before.Rooms, after.Rooms, "no refused mode created a room");
+            check.Equal(before.Peers, after.Peers, "no refused mode created a peer");
+        }
+
+        return check;
+    }
+
+    /// <summary>
+    /// A client built before `/v2` keeps working: `/v1` still creates the room it names — and that
+    /// room is *recorded*, so a phone on `/v2` can join a room an old client made, and can still
+    /// join it once that client is gone.
+    ///
+    /// Runs on its own relay with a one-second idle timeout, because the second half is about a
+    /// room whose peers have been evicted — and waiting for that must not be done by asking the
+    /// relay anything that would keep the peers alive. Nothing here posts `up` after the joins.
+    /// </summary>
+    public static async Task<Check> LegacyJoinAsync(SelfTestFixture fixture)
+    {
+        var check = Check.New();
+        await using var quick = await SelfTestFixture.StartAsync(Limits.SelfTestIdle);
+        var roomId = quick.NewRoomId();
+
+        var (legacyStatus, legacyPeer) = await quick.JoinAsync(roomId);
+        check.Equal(200, legacyStatus, "/v1 still creates the room it names");
+        check.True(legacyPeer is not null, "/v1 returned a peer id");
+
+        var (joinStatus, phone, _, joinError) = await quick.JoinV2Async(roomId, "join");
+        check.Equal(200, joinStatus, $"/v2 join enters a room /v1 created (error {joinError ?? "none"})");
+        check.True(phone is not null, "the phone got a peer id");
+
+        using (var busy = await quick.HealthAsync())
+        {
+            check.Equal(1, busy.Rooms, "the room is live while its peers are");
+        }
+
+        // Both peers go quiet; the sweeper evicts them and the live room is torn down. Health is
+        // the only thing asked, because `up` would touch a peer and postpone exactly what is
+        // being waited for.
+        await Task.Delay(3500);
+        using (var torn = await quick.HealthAsync())
+        {
+            check.Equal(0, torn.Rooms, "the live room is gone once its peers idle out");
+            check.Equal(0, torn.Peers, "…and so are its peers");
+        }
+
+        var (afterStatus, _, _, afterError) = await quick.JoinV2Async(roomId, "join");
+        check.Equal(200, afterStatus, $"the record outlives the peers that made it (error {afterError ?? "none"})");
+        return check;
+    }
+
+    /// <summary>
+    /// The record is a file, and it has to survive the process that wrote it: a relay restart must
+    /// not turn every room that exists into an unknown one. Also the aging: a record past the TTL
+    /// is not a room any more, which is what keeps this metadata from accumulating forever.
+    /// </summary>
+    public static Task<Check> RoomRecordPersistenceAsync(SelfTestFixture fixture)
+    {
+        var check = Check.New();
+        var path = Path.Combine(Path.GetTempPath(), $"spinney-selftest-{Environment.ProcessId}-roundtrip.json");
+        var limits = Limits.SelfTest with { RoomRecordsFile = path };
+        var logger = NullLogger<RoomRecords>.Instance;
+        var roomId = fixture.NewRoomId();
+        var stale = fixture.NewRoomId();
+
+        try
+        {
+            var writing = new RoomRecords(limits, logger);
+            writing.Load();
+            check.Equal(RoomRecordOutcome.Created, writing.Ensure(roomId), "the first create makes a record");
+            check.Equal(RoomRecordOutcome.Existing, writing.Ensure(roomId), "a second create finds it");
+            check.True(writing.Exists(roomId), "the record is there in memory");
+            writing.Save(force: true);
+
+            var reading = new RoomRecords(limits, logger);
+            reading.Load();
+            check.True(reading.Exists(roomId), "the record survives a fresh load: a restart does not forget the room");
+
+            // Aging, on a hand-written file: a record whose last use is beyond the TTL is not a room.
+            var old = DateTimeOffset.UtcNow.ToUnixTimeSeconds() - (limits.RoomRecordTtlDays + 1) * 86400L;
+            File.WriteAllText(path, $"{{\"v\":1,\"rooms\":{{\"{roomId}\":{old},\"{stale}\":{old}}}}}");
+            var aged = new RoomRecords(limits, logger);
+            aged.Load();
+            check.True(!aged.Exists(roomId), "a record past the TTL stops being a room");
+            check.True(!aged.Exists(stale), "…for every record past it");
+            check.Equal(0, aged.Count, "…and loading prunes what it read");
+        }
+        finally
+        {
+            foreach (var leftover in new[] { path, path + ".tmp" })
+            {
+                if (File.Exists(leftover)) File.Delete(leftover);
+            }
+        }
+
+        return Task.FromResult(check);
+    }
+
+    /// <summary>
+    /// The brake on the join routes. `room_unknown` is an answer a candidate token can be tested
+    /// against, so a source that hammers joins is slowed down — while a device that joins once
+    /// when it opens never notices.
+    /// </summary>
+    public static async Task<Check> JoinBrakeAsync(SelfTestFixture fixture)
+    {
+        var check = Check.New();
+        await using var tight = await SelfTestFixture.StartAsync(Limits.SelfTestPairing);
+        var roomId = tight.NewRoomId();
+
+        var statuses = new List<int>();
+        for (var i = 0; i < 4; i++)
+        {
+            var (status, _, _, _) = await tight.JoinV2Async(roomId, "create");
+            statuses.Add(status);
+        }
+
+        check.Equal(200, statuses[0], "the first join is allowed");
+        check.Equal(200, statuses[1], "the burst is allowed");
+        check.Equal(429, statuses[2], "a join over the burst is refused");
+
+        var (refused, _, _, error) = await tight.JoinV2Async(tight.NewRoomId(), "join");
+        check.Equal(429, refused, "the brake covers a join it would otherwise have answered");
+        check.Equal("rate_limited", error, "and it says so");
+
+        // A brake, not a wall: after the refill window a join goes through again.
+        await Task.Delay(1300);
+        var (later, _, _, _) = await tight.JoinV2Async(roomId, "create");
+        check.Equal(200, later, "the brake refills");
+        return check;
+    }
+
+    /// <summary>The ledger's cap: a backstop for a relay that really does run out of room.</summary>
+    public static async Task<Check> RoomRecordCapAsync(SelfTestFixture fixture)
+    {
+        var check = Check.New();
+        var path = Limits.SelfTestLedger.RoomRecordsFile;
+        foreach (var leftover in new[] { path, path + ".tmp" })
+        {
+            if (File.Exists(leftover)) File.Delete(leftover);
+        }
+
+        await using var tiny = await SelfTestFixture.StartAsync(Limits.SelfTestLedger);
+        var created = 0;
+        var refused = 0;
+        string? refusedError = null;
+        for (var i = 0; i < tiny.Limits.MaxRoomRecords + 1; i++)
+        {
+            var (status, _, _, error) = await tiny.JoinV2Async(tiny.NewRoomId(), "create");
+            if (status == 200)
+            {
+                created++;
+                continue;
+            }
+
+            refused = status;
+            refusedError = error;
+        }
+
+        check.Equal(tiny.Limits.MaxRoomRecords, created, "the ledger takes exactly max-room-records rooms");
+        check.Equal(429, refused, "the room over the cap is refused");
+        check.Equal("too_many_rooms", refusedError, "and it says so");
+        return check;
     }
 
     private static byte[] Bytes(string text) => Encoding.UTF8.GetBytes(text);

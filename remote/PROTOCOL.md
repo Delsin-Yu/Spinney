@@ -28,8 +28,10 @@ host/client asymmetry beyond who owns a given session.
 ## 2. Topology and identity
 
 - One **token** is one **room**. Two machines meet in the same room purely
-  because their tokens match; the room's *name* is a local label and never
-  travels.
+  because their tokens match; the room's *name* is a local label, and the relay
+  never sees it. It travels in exactly one direction and one place: the pairing
+  payload of §10, from the desktop that shows the code to the phone that reads
+  it.
 - One **outbound connection per window per room**. A window never listens on a
   port, and the existing loopback control plane (`spinney.httpApi.*`,
   `src/http/controlServer.ts`) is not involved and not modified.
@@ -60,8 +62,17 @@ roomId  = base32(RFC 4648, "A-Z2-7", uppercase, no padding) of roomIdB   -> 26 c
 ```
 
 - `roomId` is the relay URL path segment and therefore the **routing
-  credential**. A wrong token produces a different room, so a wrong token is not
-  an error: it is an empty room.
+  credential**. A wrong token derives a **different, non-existent** room: a different id,
+  and one nobody has *created* on that relay. So a wrong token is no longer silent. A
+  client that asks to enter such a room — `POST /v2/room/{roomId}/join` with
+  `{"mode":"join"}` (§7) — is refused with `404 room_unknown`, which is a fact a client
+  can show a person. The room id is still the routing credential and the relay still
+  never sees the token: the refusal is about the room's *existence*, not about the token
+  being right. The relay cannot tell a right room id from a wrong one, and a client that
+  asks with `mode=create` — or on the legacy `/v1` join route, which implies it — still
+  **makes** the room exist, so *there* a wrong token still produces an empty room. The
+  mode is a client's declaration and not an authentication mechanism: whoever holds the
+  token *is* the room, and a room whose owner never asked for it simply never exists.
 - 600000 iterations is deliberate and slow (hundreds of milliseconds). It is
   paid **once per room per connection**, synchronously, and it is the reason the
   derivation is not called on any hot path. Do not lower it to make a test
@@ -155,7 +166,10 @@ try to open it. That check must not be best-effort, and `v` must be present on
 new client looks perfectly healthy to it, and the receiver's refusal is the only thing
 that turns that mismatch into a legible error instead of a garbled render. A real
 transport change — a binary blob channel, WebSocket — belongs in a new route version
-(`/v2/room/...`) that a client joins instead of `/v1`, not in a flag inside `v`.
+(`/v2/room/...`) that a client joins instead of `/v1`, not in a flag inside `v`. The
+first version to exist is the join route: `/v2/room/{roomId}/join` (§7) adds the
+required `mode`, because the old route's silence about creation is exactly what a flag
+on it would have preserved.
 
 | Type | Direction | Body |
 | --- | --- | --- |
@@ -165,7 +179,9 @@ transport change — a binary blob channel, WebSocket — belongs in a new route
 | `attach` | replica -> publisher | `{ sessionId }` — start mirroring that session to me |
 | `detach` | replica -> publisher | `{ sessionId }` — stop |
 | `mirror` | publisher -> replica | `{ sessionId, message }` — one verbatim host->webview message |
+| `nodeItems` (carried in a `mirror` frame) | publisher -> replica | `{ id, items }` — the answer to `loadNodeItems`: that node's `items` verbatim |
 | `input` | replica -> publisher | `{ sessionId, message }` — one verbatim webview->host message, restricted by §6 |
+| `loadNodeItems` (carried in an `input` frame) | replica -> publisher | `{ id }` — "send me this node's full items": a replica's card has none to render and asks for them |
 | `cmd` | replica -> publisher | `{ command, args }` — one **control-plane** command, for the affordances that are not webview messages at all. `command` is one of `session/start`, `navigate`, `continue`, `stop`, and `args` is that route's own body (`docs/agents/control-plane.md`). Answered by a `result` carrying the same `id`. This exists because "create a session on that machine" has no webview message to ride: the composer cannot express it. The publisher answers with `error{code}` when it refuses (`unknown-session`, `readonly`, `busy`) |
 | `result` | publisher -> replica | `{ ok, ... }` — the answer to a `cmd`, correlated by the frame `id`. A replica that reconnects and does not get its answer must not resend blindly: the publisher's dedupe cache answers the repeated `id` instead |
 | `resync` | either | `{ sessionId? }` or `{}` — "I dropped frames, send fresh state" |
@@ -177,8 +193,77 @@ This is the whole point of the design: the replica is a webview receiving the
 protocol the shipped `media/main.js` already speaks, so there is one renderer,
 not two. Laziness also comes for free — a replica that needs a node's body sends
 the same `loadAgentItems` the local webview sends, and the answer arrives as a
-`mirror` frame carrying the same `node` message the publisher would have posted
-locally.
+`mirror` frame carrying the same `agentItems` message the publisher would have
+posted locally.
+
+Two of the host's payloads carry a node's transcript, and only one of them
+reaches a replica whole: a **regular** node's `items` ride in the `tree` and
+`path` payloads — as a **summary** once that node's turn has ended, §5.1 — while an
+**agent** node ships only `itemCount` and is fetched on first expansion
+(`loadAgentItems` -> `agentItems`), exactly as the local webview fetches it. A
+replica can therefore draw a card that has a preview and no body — and
+until the pair below existed, nothing told the two ways a card can be bodyless
+apart: *nothing to show* and *not fetched yet* were the same picture.
+
+`loadNodeItems` `{ id }` asks for one node's full items, and `nodeItems`
+`{ id, items }` answers. The answer is the node's `items` **verbatim** — the same
+bytes the local webview would render, not a summary and not a second rendering —
+which is what keeps "one renderer, not two" true. Both are **accepted** members
+of the tables in §6, and the reason is the 1:1 rule
+(`docs/agents/plans/remote-control.md` §3): this reads **session** state, so the
+publisher answers it, exactly as it answers its own webview, and it is not about
+the surface the user is touching.
+
+### 5.1 The summary a finished row carries instead of its log
+
+The pair above is the *on demand* half: it makes a card able to ask. The default is
+the other half, and it is what a card has before anybody asks — because a replica
+that attaches to a session receives that session's `tree` and, until something is
+checked out, no `path` at all. So the transcript-bearing payloads state a summary:
+
+- A **finished** node's row — in `tree` **and** in `path` — carries `items` = a
+  **summary**: that node's **first `user` item** and its **last assistant item that
+  carries text** (which is the answer, judged the way the 120-char `preview` already
+  judges it), each clipped exactly as every other `items` entry is. The row says so with
+  **`summary: true`** and carries the node's true **`itemCount`**. `itemCount` is no
+  longer an agent node's field alone: every finished row carries it.
+- The summary rides **only when it is a proper subset** of the log. A row is left
+  **without** the flag when the log has nothing to summarise — no items at all, or
+  neither half of the pair — because a renderer reads a flagged row as "this card has
+  content" and an empty one would stop that card from ever asking for the log it has not
+  got; and it is left without the flag when the pair **is** the whole log (a one- or
+  two-item turn), because such a row carries the same bytes either way and nothing has
+  to be fetched again. A `path` row that cannot be summarised keeps shipping its whole
+  clipped log, exactly as it always did, and a `tree` row that cannot be summarised keeps
+  its `itemCount` alone.
+- A **`kind: 'agent'`** row is never summarised, whatever its status: its card's contract
+  is `itemCount` plus `loadAgentItems` (the lazy sidecar rule above), its transcript is a
+  sidecar log rather than a conversation turn, and a `summary: true` row would claim that
+  transcript is already in hand. A `kind: 'bg'` card has no items at all, so it is a row
+  with `itemCount` 0.
+- A **running** node's row is **unchanged**. Its transcript is what the live `delta` /
+  `thinkingDelta` / `toolCallDelta` stream is appending to, so a two-item snapshot under
+  it would be overwritten by the next delta: such a row carries no summary and no
+  `summary` flag.
+- `nodeItems` is **unaffected** by all of this and remains the node's `items`
+  **verbatim**. The summary is never the answer to a `loadNodeItems`, so a card that asks
+  for its body always receives the whole transcript and never its own summary back.
+
+`summary: true` is therefore the whole distinction between the two kinds of row: a row
+**without** it carries a node's own `items` or no items at all, and a row **with** it
+carries two items standing for a longer transcript. A renderer renders a flagged row's
+`items` like any other items and records that the card does **not** hold the whole log; it
+asks with `loadNodeItems` on that card's **first expansion** — once per card, and a card
+that is never expanded never asks — and the `nodeItems` answer replaces the summary. The
+waiting state §6 describes covers the interval, and a row that is already being streamed is
+rendered from the stream itself, exactly as it is today.
+
+This is also a size win and not only a legibility one: a `path` for a long session used
+to ship every transcript of the chain it names, and a summarised node now costs two items
+on the wire. A full log leaves the publisher only when somebody expands that card, so the
+room's traffic follows attention instead of the size of the session. No frame type is
+added and no allow-list entry changes: the summary rides inside `tree` and `path`, which
+already cross the mirror.
 
 A publisher mirrors only the sessions a replica attached to, plus its own
 `instances` announcement. Nothing is mirrored for a session nobody is watching.
@@ -203,6 +288,20 @@ Deliberately **never** forwarded, in either direction:
 | `openModelTree` | the model-config editor edits local settings and local secrets |
 | `ready` | a webview boot handshake in one direction, not a command |
 
+Two members are **accepted**, and neither is refused. They are the node-items
+pair `remote/PROTOCOL.md` §5 names:
+
+| Type | Where it rides | Why it is accepted |
+| --- | --- | --- |
+| `loadNodeItems` `{ id }` | replica -> publisher, inside `input` | it reads **session** state: the transcript of a node of the session the replica attached to. The publisher answers it, exactly as it answers the local webview. It is not about the surface the user is touching — a card with no items is a fact about the session, not about the replica's device. That is the 1:1 rule (`docs/agents/plans/remote-control.md` §3) |
+| `nodeItems` `{ id, items }` | publisher -> replica, inside `mirror` | the answer, and the node's `items` verbatim — the same bytes the local webview would render |
+
+They belong to `ACCEPT_FROM_PEER` and `MIRROR_TO_PEER` respectively
+(`src/remote/allowlist.ts`), and the phone's own copy of both tables goes with
+them (`remote/android/core/.../MirrorPolicy.kt`). The renderer states that a
+request is outstanding, so that *waiting for the answer* and *having nothing to
+show* are two different pictures rather than one.
+
 ## 7. Transport: SSE down, POST up
 
 Plain HTTP(S). The extension uses `fetch` plus `response.body.getReader()` — the
@@ -214,9 +313,42 @@ Relay routes (the full contract is in `remote/server/README.md`):
 | Route | Purpose |
 | --- | --- |
 | `GET /healthz` | liveness and counts |
-| `POST /v1/room/{roomId}/join` | returns `{ peer }`; 404 on a malformed room id, 429 when the room is full |
+| `POST /v2/room/{roomId}/join` | body `{"mode":"create"\|"join"}` (required, no default); returns `{ peer, created }`; `join` answers `404 room_unknown` for a room this relay has no record of |
+| `POST /v1/room/{roomId}/join` | the legacy contract, unchanged in meaning: any well-formed room id is accepted, the room is created if nobody has used that id, and the answer is `{ peer }` |
 | `GET /v1/room/{roomId}/down?peer=` | `text/event-stream`; one `data:` line per frame from another peer, plus a `: ping` comment every 15 s |
 | `POST /v1/room/{roomId}/up?peer=` | one frame payload, forwarded verbatim to every other peer of the room |
+
+`up` and `down` are unchanged routes: the join contract moved to `/v2` and nothing about
+moving bytes did. Joining is where the relay's only new state lives, so it is worth
+spelling out:
+
+- The **mode is required** and has no default: a body that names neither value is
+  `400 bad_mode`, because a default would be the old silent behaviour under a new route's
+  name. The body is capped at 256 bytes (`413 body_too_large`). A refused join answers
+  `404 invalid_room_id`, `404 room_unknown`, or `429 room_full | too_many_rooms |
+  rate_limited`. Every refusal a relay route makes carries a JSON `error` body — `invalid_room_id`
+  and `room_unknown` are one status and two different answers — which is also what lets a client
+  read a **bare** 404, with no `error` field at all, as "this relay has no `/v2` route" (the older
+  side, §5) instead of as a verdict on this room.
+- `create` records the room if this relay has never seen that id, and answers
+  `{"peer":"…","created":true|false}` — `created` is how a publisher that expected to
+  *find* a room learns that it just made one. `join` enters a room that exists, and
+  refuses with `404 room_unknown` a room that is neither on record nor live.
+- **What the relay remembers is only which room ids exist**, plus when each was last
+  used: no token (it has never seen one), no content, no peer, no room name. A record
+  outlives its last peer, so a client can still enter a room whose publisher is asleep,
+  and it expires after a time-to-live so the metadata decays instead of accumulating (the
+  defaults are in `remote/server/README.md`). A `/v1` join records the room it creates,
+  which is what makes a room that an older client made joinable by a newer one.
+- The **room id is not an authorization**: `mode=create` is open to anyone, and the
+  relay cannot tell a phone from a desktop. The mode is a declaration the caller makes
+  about what it wants to do, which is why the client that joins to *look* is the one the
+  refusal protects.
+- Because `room_unknown` is an answer a candidate token can be tested against, joins are
+  braked per source address, and the derivation's 600000 PBKDF2 iterations (§3) are the
+  client-side cost of one guess. Together they keep a dictionary walk expensive; they do
+  not make it impossible, and pretending otherwise would be the dishonest version of
+  this contract.
 
 A frame payload on the wire is one SSE-shaped line. It carries **only what a
 receiver needs before it can decrypt** — the version, the sequence number and the
@@ -303,6 +435,10 @@ never what any of it means.
 | rooms | 64 | relay |
 | peer idle eviction | 90 s | relay |
 | peer rate | 60/s, burst 120 | relay |
+| rooms on record | 1024, expiring after 30 days with no join | relay |
+| join rate | 1/s, burst 5, per source address | relay |
+| join body | <= 256 bytes | relay |
+| pairing payload | <= 213 bytes (the version-10 ceiling at level M) | desktop, before it draws the code |
 
 A phone photo is the sizing case that matters: ~8 MB of JPEG becomes ~10.7 MB of
 base64 inside the attachment, which fits the cap once. The double encoding
@@ -313,6 +449,11 @@ which at the relay's default rate (60/s, burst 120) takes roughly five seconds �
 acceptable for an image, and the reason the rate is a relay flag rather than a
 hard-coded constant.
 
+A photo is not always a payload for a wire: the one the phone takes of a pairing
+code (§10) never reaches the relay at all. It is read on the phone, and what it
+carries is a few hundred bytes of ASCII. The pairing image itself is drawn on the
+desktop, from a payload bounded by the last row of the table above.
+
 ## 9. Threat model, in one paragraph
 
 Any peer holding the token has full control of every publisher in the room,
@@ -321,7 +462,73 @@ execution on the machine running the publisher — accepted by the owner, and th
 reason the feature is off by default, the reason the status bar always shows the
 peer count, and the reason every remote command is written to the diagnostics
 log. The relay is untrusted for confidentiality and integrity: it learns traffic
-shape, room ids (which are token-derived credentials) and peer counts, and it
-can drop, delay or reorder frames, but it cannot read a frame, forge one, or
-move one between rooms. The token is the single trust root: it never goes to the
-relay, never goes to a log, and lives only in VS Code SecretStorage.
+shape, room ids (which are token-derived credentials) and peer counts, it can drop,
+delay or reorder frames, and it now also **remembers which room ids exist** and keeps
+them in a file until they age out (§7) — metadata it did not keep before, taken on
+deliberately so that a wrong token has an answer. It can never read a frame, forge one,
+or move one between rooms, and it can never check a token: what it holds is a set of
+ids it has seen a join for. The token is the single trust root: it never goes to the
+relay, never goes to a log, and lives only in VS Code SecretStorage. It leaves the
+desktop once, as a QR code on a screen (§10) — which is why that command is explicit,
+never automatic, and says what the image is.
+
+## 10. Pairing: the payload a desktop shows and a phone reads
+
+A room reaches a phone as one string, drawn as a QR code. The desktop builds it and shows
+it (`spinney.remotePairingCode`); the phone reads it out of a photo with the system photo
+picker and parses it strictly. This is the only channel that hands a token to a second
+device, and it is a screen rather than a wire.
+
+```
+spinney-pair:1?relay=<r>&room=<n>&token=<t>
+```
+
+- The prefix `spinney-pair:`, then a **version integer** — `1` in this build — then `?` and
+  **exactly three parameters in this order**: `relay` (the relay base URL, exactly as the
+  room row carries it), `room` (the room's **local label**, so the phone can name the room
+  the way its user does) and `token` (the raw token).
+- Every value is **percent-encoded per RFC 3986** over its UTF-8 bytes, so the payload is
+  printable ASCII: a space is `%20` and a literal `+` is `%2B`. Only `A-Za-z0-9-._~` stays
+  bare — the five sub-delims `!`, `'`, `(`, `)`, `*` are escaped as well, because escaping
+  them costs nothing and leaves one shape both ends can expect.
+- **The trap** this section exists to name: a bare `+` for a space is a *web form*
+  convention and not RFC 3986. Java's `URLEncoder` writes a space as `+` and its
+  `URLDecoder` reads `+` back as a space, while JavaScript's `encodeURIComponent` writes
+  `%20` and reads `+` literally. Pair the wrong two and a token holding `+` reaches the
+  phone with a space in it — which is a **different room**, and an empty one. So no bare
+  `+` and no space is ever emitted, and the phone is required to use a **strict `%XX`
+  decoder**, never a form decoder. Both sides test the same literals, so a disagreement is
+  a failing test and not a room that quietly does not exist.
+- **The parser is strict, and that is a feature.** It refuses an unknown prefix or version,
+  a missing or empty parameter, and **any parameter it does not know**: unknown fields
+  cannot be ignored, because a version-1 parser that skipped them would silently mis-read a
+  version-2 payload. A new field therefore means a new version integer, never an extra
+  parameter — which is also why the encoder above emits nothing but these three names.
+- **The payload parser does not judge the token.** It hands the raw token to the token
+  rules both ends already share (`tokenIssue` in `src/remote/rooms.ts` on the desktop,
+  `TokenInput` in `remote/android/core` on the phone: at least 16 code points, at least 8
+  distinct characters), so there stays one definition of a usable token instead of a
+  second, weaker one.
+- **The token goes screen → camera → phone.** It never passes through the relay, which is
+  §3's oldest invariant, and the room name travels here for the same reason: the relay has
+  never seen either of them. The QR code is therefore **as sensitive as the token itself** —
+  whoever photographs the screen holds the room. That is why the command is explicit and
+  never automatic, why the PNG goes into the extension's own storage under **one fixed
+  name** (never the workspace, which is a folder a user commits and syncs; never the OS
+  temp directory, which is other users' to read on a shared machine), why each pairing
+  overwrites the last, and why the command shows one warning sentence that says the image
+  carries the token.
+- **The phone needs no camera permission.** The picture comes from the system photo picker,
+  which is a picker the app already has; the code the user photographs is a picture from
+  outside the app. Nothing here adds a relay route or a frame type: pairing produces a
+  token, and everything after it is §§3–7.
+
+One worked example, shared by both sides' tests — a reader who copies it is looking at a
+string the tests use:
+
+```
+spinney-pair:1?relay=https%3A%2F%2Frelay.example.com%3A8787&room=home%20%2B%20lab&token=a%20b%2Bc%2Fd%3F
+```
+
+which is the relay `https://relay.example.com:8787`, the room `home + lab` and the token
+`a b+c/d?`.

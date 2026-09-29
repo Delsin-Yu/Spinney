@@ -87,6 +87,21 @@ html = html
   .replace(/aria-label="\$\{vscode\.l10n\.t\('([^']*)'\)\}"/g, (m, key) => l10n('aria', key))
   .replace(/placeholder="\$\{vscode\.l10n\.t\('([^']*)'\)\}"/g, (m, key) => l10n('placeholder', key));
 
+// Difference 4 (see the banner): the phone's viewport workaround, emitted immediately AFTER the
+// shared stylesheet. It overrides one box in `media/style.css` — the `body` half of
+// `html, body { height: 100% }` — and both selectors are one `body`, so the cascade is what makes
+// it win: a tag emitted anywhere earlier in the head would lose silently, and `session.html`
+// would keep rendering an empty tree with the fix sitting in the file. The anchor check below is
+// the same shape as the boot tag's: a template whose link is renamed fails here rather than
+// dropping the phone back to a 0-height `#tree-wrap`.
+const styleLink = '<link rel="stylesheet" href="/assets/webview/style.css" />';
+const viewportLink = '<link rel="stylesheet" href="/assets/shell/session-viewport.css" />';
+if (!html.includes(styleLink)) {
+  console.error('cannot find ' + styleLink + ' in the emitted head — the viewport link has no anchor');
+  process.exit(1);
+}
+html = html.replace(styleLink, styleLink + '\n  ' + viewportLink);
+
 const leftovers = html.match(/\$\{[^}]*\}/g);
 if (leftovers) {
   console.error('unsubstituted template expressions:', leftovers);
@@ -107,7 +122,7 @@ const banner = `<!DOCTYPE html>
   The Android WebView shell for a replicated remote session.
 
   This is NOT a second renderer. It is the DOM the extension host renders in
-  \`src/chat/ChatViewProvider.ts\` \`getHtml()\`, with exactly three differences:
+  \`src/chat/ChatViewProvider.ts\` \`getHtml()\`, with exactly four differences:
 
     1. the asset URLs point at the app's own assets (\`assets/webview/**\`, copied from
        \`media/**\` by \`tools/sync-remote-assets.js\` and guarded byte for byte by
@@ -121,12 +136,21 @@ const banner = `<!DOCTYPE html>
        \`media/main.js\` — its tag says why;
     3. the CSP carries a per-load nonce for that one injected inline script and pins
        \`connect-src 'none'\` — the session view talks to the publisher through the Kotlin host,
-       never through a fetch of its own.
+       never through a fetch of its own;
+    4. it links one more stylesheet after the shared one, \`assets/shell/session-viewport.css\`,
+       because this host hands the page a **0-height initial containing block**: the shell's
+       \`html, body { height: 100% }\` (and \`100vh\` with it) resolves to 0, so \`#tree-wrap\` is laid
+       out 0 tall and the replicated session draws an empty canvas on the phone while the same
+       document is correct on the desktop. That file anchors \`body\` to the viewport instead —
+       the same box on a host that is not broken — and carries the measurement in its header.
 
   Everything else here is a copy of the host's shell and must stay one: a DOM id that
   \`media/main.js\` looks up and does not find on the phone would fail in a way the desktop tab
   cannot, and that would be a renderer divergence by the back door. When \`getHtml()\` grows an
   element, this file grows it too — there is no guard for that pairing, and the README says so.
+  Difference 4 is a stylesheet, not an element, and the box it renders is the host's own number
+  rather than a second opinion about the document: a fifth difference that changed what the
+  document *is* would have to be argued for here, not slipped in.
 -->
 
 `;
@@ -158,6 +182,16 @@ if (!(out.indexOf(bootTag) > 0 && out.indexOf(bootTag) < out.indexOf(rendererTag
   console.error(
     'the l10n pass is not in the body ahead of ' + rendererTag.trim() + ' — regenerating would ' +
       'revert the fix that gave Send/Stop their text',
+  );
+  process.exit(1);
+}
+
+// The viewport stylesheet is checked on the same bytes, for the same reason: in the head, after
+// the shared stylesheet whose `body` box it overrides.
+if (!(out.indexOf(viewportLink) > out.indexOf(styleLink) && out.indexOf(viewportLink) < out.indexOf('</head>'))) {
+  console.error(
+    'the viewport stylesheet is not in the head after ' + styleLink + ' — regenerating would ' +
+      'revert the fix that gives the phone its tree',
   );
   process.exit(1);
 }

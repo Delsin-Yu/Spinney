@@ -1,0 +1,45 @@
+/*
+ * session-viewport.css — anchor the shell's `body` to the viewport, not to the percentage chain.
+ *
+ * `media/style.css` sizes the shell with `html, body { height: 100% }`, and that is the right box
+ * on every host whose initial containing block is the view: the desktop webview included. The
+ * Android WebView on the test phone is not such a host — it hands the page a **0-height** initial
+ * containing block while reporting its own viewport correctly, so `height: 100%`, `100vh` and the
+ * other viewport units all resolve to 0, `#tree-wrap` is laid out 0 tall, and the replicated
+ * session shows an empty canvas on the phone while the very same document is correct on the
+ * desktop.
+ *
+ * Measured on that phone (HarmonyOS, WebView 114) over the DevTools protocol, on the live shell:
+ *
+ *   html, body { height: 100% }                  -> 0
+ *   100vh / 100dvh / 100svh / 100lvh             -> 0
+ *   documentElement.clientHeight                 -> 268      (the viewport, in CSS px)
+ *   window.innerHeight / visualViewport.height   -> 268.148
+ *   position: fixed; height: 100%                -> 268      (this one uses the good number)
+ *
+ * Fixed positioning is therefore the lever: it resolves against the number this WebView reports
+ * correctly. On a host whose containing block is not broken the box below is the box
+ * `height: 100%` produced — same origin, same size — so the shell's layout, its flex children and
+ * every pixel the renderer draws are unchanged; only the number it is measured from differs.
+ *
+ * Verified on the phone, with the rule: the empty tree area is 229 CSS px tall (the 268 px
+ * viewport less the 39 px toolbar), the session card and its composer are inside the viewport,
+ * and the toolbar, the card and the composer paint. Without it, `#tree-wrap` is 0 tall and the
+ * canvas stays empty — with the toolbar above it still drawn, which is how the defect reads as
+ * "the tree does not render" rather than as "the page is blank".
+ *
+ * `height: auto` is load-bearing: without it `html, body { height: 100% }`'s percentage — 0 on
+ * this host — overrides `top`/`bottom` and puts the same bug one level down.
+ *
+ * The cascade, not specificity, is what makes this win (both selectors are one `body`), so
+ * `gen-shell.js` emits the tag immediately after the shared stylesheet's, and says so there.
+ * This file adds one box; it replaces no rule and carries no DOM of its own.
+ */
+body {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: auto;
+}

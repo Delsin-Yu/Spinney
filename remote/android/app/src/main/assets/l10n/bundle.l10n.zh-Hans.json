@@ -363,8 +363,6 @@
   "reconnecting": "重连中",
   "{0} peers": "{0} 个对端",
   "{0} rooms · {1} peers": "{0} 个房间 · {1} 个对端",
-  "{0} · 1 peer": "{0} · 1 个对端",
-  "{0} · {1} peers": "{0} · {1} 个对端",
   "{0} — {1}": "{0} — {1}",
   "{0}: {1}": "{0}：{1}",
   "Remote session": "远程会话",
@@ -402,5 +400,18 @@
   "This window stopped talking to {0}. It is not a revocation: that device can still reach every other window.": "本窗口已停止与 {0} 通信。这不是吊销权限：该设备仍可访问其他每个窗口。",
   "Copied device name: {0}": "已复制设备名称：{0}",
   "Remote: {0}": "远程：{0}",
-  "This turn was started from another window in the room.": "本回合由房间中的另一个窗口发起。"
+  "This turn was started from another window in the room.": "本回合由房间中的另一个窗口发起。",
+  "{0} · room {1} · 1 peer": "{0} · 房间 {1} · 1 个对端",
+  "{0} · room {1} · {2} peers": "{0} · 房间 {1} · {2} 个对端",
+  "{0}: {1} · room {2}": "{0}：{1} · 房间 {2}",
+  "Room {0} was created just now: no other device had used this token on this relay. If you expected to find a room here, that device holds a different token.": "房间 {0} 刚刚创建：在这台中继上还没有其他设备用过这个令牌。如果你预期在这里找到房间，那台设备持有的令牌不同。",
+  "No room on this relay answers to this token. A wrong token is a different room, and nobody has created that one — compare the token with the other device.": "这台中继上没有任何房间对应该令牌。错误的令牌会得到另一个房间，而那个房间还没有人创建过——请与另一台设备核对令牌。",
+  "This relay does not answer /v2 joins yet: it is older than this window, so it cannot tell a room that does not exist from one that is merely empty. Update the relay.": "这台中继还不支持 /v2 加入：它比本窗口旧，因此无法区分“房间不存在”和“房间只是空着”。请更新中继。",
+  "Room \"{0}\" has no relay URL, so a device paired with it would have nowhere to connect.": "房间“{0}”没有中继地址，配对的设备无处可连。",
+  "Room \"{0}\" has no token yet, so there is nothing to pair.": "房间“{0}”还没有令牌，没有可配对的内容。",
+  "The token of room \"{0}\" cannot be encoded for a QR code.": "房间“{0}”的令牌无法编码成二维码。",
+  "No remote room is configured yet — add one with \"Spinney: Manage Remote Rooms\".": "还没有配置任何远程房间——请用“Spinney: Manage Remote Rooms”添加一个。",
+  "Pick the room to pair": "选择要配对的房间",
+  "This code contains the token of room \"{0}\": anyone who photographs it can control the room, so show it to the device you are pairing and close it afterwards.": "此二维码包含房间“{0}”的令牌：任何拍到它的人都能控制该房间，因此只把它给要配对的设备看，之后请关闭。",
+  "Loading…": "正在加载…"
 }

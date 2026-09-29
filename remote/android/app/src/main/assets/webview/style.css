@@ -1200,6 +1200,39 @@ button.icon-btn {
   min-height: 0;
 }
 
+/* Zone 0 — "the content of this node is on its way" — is the strip a waiting card wears
+   (see `setCardLoading` in main.js). It exists because the measured replica symptom was
+   a card with *nothing at all* in it: three cards measured `work:0 ans:0` next to a
+   `preview` that promised a full session, which is indistinguishable from an empty,
+   finished node. It is only displayed for an expanded card that is still waiting
+   (`items-loading` is taken off the moment the items render, or when the wait is up),
+   so a collapsed card keeps showing its preview and a filled card keeps showing its
+   log. `.node-loading` is a child of the body, so it sits under the pinned ask — the
+   zone that is waiting is the body, and this is the line that says so. */
+.node-loading {
+  display: none;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 10px;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.node.expanded.items-loading .node-loading {
+  display: flex;
+}
+
+.node-loading::before {
+  content: '';
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  /* The same pulse the status dot uses for "working" (`@keyframes pulse` above), so a
+     card that is waiting and a session that is waiting read as one state. */
+  animation: pulse 1s ease-in-out infinite;
+}
+
 /* Zone 2 (the work log) hangs off a wrapper that is the scroll-lock light's
    positioning context: the dot is absolute, so it lands in the strip below the
    work log (the log's own `margin-bottom`), not at the bottom of the whole body.
@@ -1567,8 +1600,11 @@ button.icon-btn {
 
 /* ▶ Continue / ↻ Retry: the per-card "run it again for me" button. Only rendered
    while the node is a terminal tip (see `syncContinueButton` in main.js), so it is
-   always an actionable affordance rather than decoration. */
-.node-continue {
+   always an actionable affordance rather than decoration. `.node-window` is the
+   second element of that family: the `⧉` entry that stands *beside* a repair when a
+   failed turn's window is at or above 90% — the same box, a meaning of its own. */
+.node-continue,
+.node-window {
   flex: 0 0 auto;
   margin-left: 6px;
   padding: 1px 6px;
@@ -1581,7 +1617,8 @@ button.icon-btn {
   cursor: pointer;
   white-space: nowrap;
 }
-.node-continue:hover {
+.node-continue:hover,
+.node-window:hover {
   background: var(--accent-dim);
   border-color: var(--accent-dim);
   color: var(--bg);
@@ -1606,14 +1643,17 @@ button.icon-btn {
 /* The same `⧉` entry, offered as a *suggestion* (§4.3): from 90% of the card's
    window the user may open a fresh one, but nothing is broken and nothing is
    forced — so it is dashed and quiet instead of the warning shape the hard
-   trigger (a provider refusal) uses. */
-.node-continue.node-near {
+   trigger (a provider refusal) uses. `.node-window` always wears this shape: it
+   only ever appears as that suggestion, beside a repair. */
+.node-continue.node-near,
+.node-window.node-near {
   color: var(--text);
   border-color: var(--accent-dim);
   border-style: dashed;
 }
 
-.node-continue.node-near:hover {
+.node-continue.node-near:hover,
+.node-window.node-near:hover {
   background: var(--accent-dim);
   border-color: var(--accent-dim);
   color: var(--bg);

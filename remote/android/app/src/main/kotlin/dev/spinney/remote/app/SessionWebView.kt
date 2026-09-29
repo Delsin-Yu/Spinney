@@ -161,48 +161,6 @@ class SessionWebHost(
             val queued = held.toList()
             held.clear()
             for (messageJson in queued) push(messageJson)
-            // TEMPORARY DIAGNOSTIC — delete before committing. Reads the renderer's *DOM* (its
-            // internals are inside an IIFE and unreachable from here) two seconds after the
-            // release, to tell "the tree never arrived" apart from "the tree arrived and was
-            // laid out off-screen".
-            webView.postDelayed(
-                {
-                    webView.evaluateJavascript(
-                        "(function(){var c=document.getElementById('tree-canvas');" +
-                            "var w=document.getElementById('tree-wrap');var n=document.querySelector('.node');" +
-                            "var r=n?n.getBoundingClientRect():null;return JSON.stringify({" +
-                            "wrap:w?w.clientWidth+'x'+w.clientHeight:'none'," +
-                            "mode:document.compatMode," +
-                            "chain:(function(){function f(el){if(!el)return 'none';var s=getComputedStyle(el);" +
-                            "return el.tagName+(el.id?'#'+el.id:'')+'='+el.clientHeight+'/'+s.height+'/'+s.display+'/'+s.position;}" +
-                            "return [f(document.documentElement),f(document.body),f(document.getElementById('tree-toolbar'))," +
-                            "f(document.getElementById('tree-wrap')),f(document.getElementById('composer'))].join(' | ');})()," +
-                            "win:window.innerWidth+'x'+window.innerHeight," +
-                            "body:document.body.clientWidth+'x'+document.body.clientHeight," +
-                            "wrapCss:w?getComputedStyle(w).height+'/'+getComputedStyle(w).overflow:'none'," +
-                            "canvas:c?c.clientWidth+'x'+c.clientHeight+' scroll='+c.scrollWidth+'x'+c.scrollHeight:'none'," +
-                            "transform:c?c.style.transform:'none',cards:document.querySelectorAll('.node').length," +
-                            "first:r?[Math.round(r.x),Math.round(r.y),Math.round(r.width),Math.round(r.height)]:null," +
-                            // EXPERIMENT: apply the candidate fix in the *live* page and re-measure. If the
-                            // tree becomes visible, the cause is the html/percentage chain and the fix
-                            // belongs in the CSS; if `100vh` is also 0, the WebView's *layout viewport* is
-                            // itself broken and the fix belongs in Kotlin.
-                            "afterFix:(function(){document.body.style.height='100vh';" +
-                            "var f=document.getElementById('fit-btn');if(f)f.click();" +
-                            "var w=document.getElementById('tree-wrap');var n=document.querySelector('.node');" +
-                            "var r=n?n.getBoundingClientRect():null;var c=document.getElementById('tree-canvas');" +
-                            "return 'body='+document.body.clientHeight+' wrap='+(w?w.clientWidth+'x'+w.clientHeight:'none')+" +
-                            "' transform='+(c?c.style.transform:'none')+' first='+" +
-                            "(r?[Math.round(r.x),Math.round(r.y),Math.round(r.width),Math.round(r.height)].join(','):'none');})()" +
-                            "});})()",
-                    ) { value -> android.util.Log.i("SpinneyProbe", "after-release $value") }
-                    // The native half of the same question: is the WebView *view* tall? If it is,
-                    // the page's layout viewport is the broken thing; if it is 0, the Compose slot
-                    // never gave it a height and no page-side fix can help.
-                    android.util.Log.i("SpinneyProbe", "webview view = ${webView.width}x${webView.height}")
-                },
-                2000,
-            )
         }
     }
 
@@ -262,7 +220,18 @@ class SessionWebHost(
             // *ignores* the meta and computes the layout viewport itself — and on API 28 that
             // came out 393x**0** while the view was 393x719, so `html{height:100%}`, `100vh` and
             // `#tree-wrap` all resolved to 0 and the tree was drawn and then clipped away
-            // entirely (measured; the page was correct all along).
+            // entirely (measured). This setting is what makes the API-28 emulator right.
+            //
+            // It is not the whole story, and the difference matters. The phone (HarmonyOS, WebView
+            // 114) *does* honour the meta — its layout viewport is the full 764x268 CSS px and its
+            // `documentElement.clientHeight` agrees — and still resolves `height: 100%`, `100vh`,
+            // `100dvh`, `100svh` and `100lvh` to **0** for the document it is given, so the tree
+            // is laid out 0 tall and paints nothing while the toolbar above it draws. No setting
+            // here reaches that: the fix is the shell's own stylesheet,
+            // `assets/shell/session-viewport.css`, which anchors `body` to the viewport instead of
+            // to the percentage chain (generated with the shell by
+            // `remote/android/tools/gen-shell.js`; difference 4 in the shell's banner carries the
+            // measurement). Do not delete it as a duplicate of `media/style.css`: it is the fix.
             useWideViewPort = true
             loadWithOverviewMode = false // honour the meta; never zoom out to fit content
             // The page is a control surface, not a document: it must not be able to navigate

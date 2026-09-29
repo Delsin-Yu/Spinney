@@ -11,9 +11,11 @@
  * pins the crypto; this one pins the transport).
  *
  * So it does not stub the transport out. It stands up a **real relay** on an ephemeral
- * loopback port (`node:http`, no dependency) that speaks the four routes of
- * `remote/PROTOCOL.md` §7 — `join`, `down` (SSE), `up`, and the `: ping` comment — and
- * then drives the **real compiled** transport (`out/remote/relayClient.js`) against it,
+ * loopback port (`node:http`, no dependency) that speaks the routes of
+ * `remote/PROTOCOL.md` §7 — `join` (`/v2` for a client of this vintage, `/v1` for one built
+ * before it, since §5 puts a changed contract in a new route), `down` (SSE), `up`, and the
+ * `: ping` comment — and then drives the **real compiled** transport
+ * (`out/remote/relayClient.js`) against it,
  * with the real key schedule (`out/remote/rooms.js`) and the real frame envelope
  * (`out/remote/frames.js`). Both ends seal and open with the same `encKey`, so what the
  * stub decodes is what a peer in the room would decode.
@@ -61,10 +63,20 @@
  *  12. a relay that stops writing (socket open, no bytes) is noticed by the
  *      silent-stream watchdog, which is the same clock that keeps undici's 300 s body
  *      timeout away;
- *  13. a non-2xx `join` is a status and never a throw: a 404 (the relay's answer to a
- *      malformed room id) is an `error` that is not retried, a 5xx is a `backoff` with a
- *      `retryAt`, and the scheduled retry joins;
- *  14. `stop()` releases the stream, cancels every timer, leaves no post behind, and
+ *  13. a non-2xx `join` is a status and never a throw: a 404 `invalid_room_id` (the relay's
+ *      answer to a malformed room id) is an `error` that is not retried, a 5xx is a `backoff`
+ *      with a `retryAt`, and the scheduled retry joins;
+ *  14. `/v2`'s `mode` is honoured, not echoed: a `join` connect to a room nobody created is a
+ *      terminal `error` — `cause: 'room-unknown'`, no `retryAt` and no second attempt, with a
+ *      reason that names the token — because that is what a mistyped token looks like from
+ *      this side;
+ *  15. the same room answers `created: true` to a `create` connect (`roomCreated`, the
+ *      publisher's half of that same legible failure) and then admits a `join` connect with no
+ *      `roomCreated` at all, the relay's own answer saying `created: false`;
+ *  16. a relay that predates `/v2` — a bare 404 with no error body to classify — is
+ *      `cause: 'relay-too-old'`: terminal and unretried, because waiting cannot add a route,
+ *      while the same relay still answers `/v1` in the legacy shape;
+ *  17. `stop()` releases the stream, cancels every timer, leaves no post behind, and
  *      `start()` after `stop()` works — and the run **exits on its own**, which is the
  *      only honest proof that no timer outlived the transport.
  *
@@ -143,13 +155,19 @@ const sum = (counts) => Object.values(counts).reduce((a, b) => a + b, 0);
 const activeTimers = () => process.getActiveResourcesInfo().filter((kind) => kind === 'Timeout').length;
 
 // ---------------------------------------------------------------------------------------
-// The relay stub: the four routes of remote/PROTOCOL.md §7, on an ephemeral port
+// The relay stub: the routes of remote/PROTOCOL.md §7, on an ephemeral port
 // ---------------------------------------------------------------------------------------
 /**
  * A real HTTP relay, small but not fake: it mints peer ids, validates that the caller
  * joined, fans a verbatim `up` body out to the other peers as one SSE `data:` line, writes
  * the `: ping` comment, and can be told to misbehave in the specific ways the transport
  * claims to survive (429, no answer at all, a stream that ends, a stream that goes silent).
+ *
+ * It also keeps the relay's own room bookkeeping, because the acceptance run has to meet the
+ * real semantics rather than a friendly stub: `/v2`'s `mode` decides whether a join may enter
+ * (a `join` for a room nobody created is `404 room_unknown`, a `create` records the room and
+ * says so), and a join whose body names no mode at all is refused — a defaulted mode would be
+ * the old silent behaviour wearing a new route's name.
  *
  * Per-peer state, not global, because several transports are in this room at once and a
  * 429 forced for one of them must not be eaten by another's heartbeat.
@@ -158,10 +176,27 @@ function startStub(encKey) {
   const state = {
     joinRoomIds: [],
     joins: [],
+    /** Every join the relay saw, in order: `{roomId, version, mode}`; `mode` is null for a `/v2` body that named an unknown one. */
+    joinModes: [],
     joinAttempts: 0,
+    /** The room ids this relay has on record — what `/v2`'s `mode` is enforced against. */
+    rooms: new Set(),
+    /**
+     * Set by `pretendOldRelay()`: a relay built before `/v2` has no such route. `preV2Hits`
+     * counts the `/v2` requests that met it, which is how a case proves no retry happened
+     * when there is no join handler left to count the attempt.
+     */
+    preV2: false,
+    preV2Hits: 0,
     ups: [],
     downs: new Map(),
     comments: 0,
+    /**
+     * Forced join answers, consumed in order: a bare status (`404`), or `{status, error}` when
+     * the case needs the relay's own error code — a 404 `invalid_room_id` and a 404
+     * `room_unknown` are one status and two very different outcomes, which is the point of the
+     * error body.
+     */
     joinStatuses: [],
     forced: new Map(),
     stalled: new Set(),
@@ -190,33 +225,69 @@ function startStub(encKey) {
       req.on('end', () => resolve(Buffer.concat(parts)));
       req.on('error', () => resolve(Buffer.concat(parts)));
     });
+  /** `/v2`'s body names the mode and has no default; `/v1` has no body contract at all. */
+  const modeOf = (raw) => {
+    try {
+      const mode = (JSON.parse(raw.toString('utf8')) ?? {}).mode;
+      return mode === 'create' || mode === 'join' ? mode : null;
+    } catch {
+      return null;
+    }
+  };
 
   const server = http.createServer(async (req, res) => {
     const url = new URL(req.url, 'http://127.0.0.1');
     const parts = url.pathname.split('/').filter(Boolean);
     const peer = url.searchParams.get('peer');
+    const version = parts[0];
 
     if (req.method === 'GET' && parts[0] === 'healthz') {
       json(res, 200, { ok: true, rooms: 1, peers: state.joins.length, uptimeMs: 1 });
       return;
     }
-    if (parts[0] !== 'v1' || parts[1] !== 'room' || parts.length !== 4) {
+    if (!((version === 'v1' || version === 'v2') && parts[1] === 'room' && parts.length === 4)) {
       json(res, 404, { error: 'no-such-route' });
+      return;
+    }
+    if (state.preV2 && version === 'v2') {
+      // A relay built before `/v2` does not have the route, so it answers its own plain 404 and
+      // never gets as far as a join: no JSON, nothing to classify. That is exactly the signal
+      // the transport reads as "too old" rather than as a refusal of this room (see
+      // `joinRefusal`), and the only way to tell the two 404s apart.
+      state.preV2Hits += 1;
+      res.writeHead(404, { 'content-type': 'text/plain' });
+      res.end('Not Found');
       return;
     }
     state.joinRoomIds.push(parts[2]);
 
     if (req.method === 'POST' && parts[3] === 'join') {
-      await readBody(req);
+      const raw = await readBody(req);
       state.joinAttempts += 1;
       const forced = state.joinStatuses.shift();
       if (forced && forced !== 200) {
-        json(res, forced, { error: 'forced' });
+        const status = typeof forced === 'number' ? forced : forced.status;
+        json(res, status, { error: typeof forced === 'number' ? 'forced' : forced.error ?? 'forced' });
         return;
       }
+      // `/v1` is the legacy shape: any well-formed id is accepted, the room is created if
+      // nobody had used it, and the answer is `{peer}` — no `created`, because §5 leaves the old
+      // route's contract alone. `/v2` is the one that says what it is allowed to do.
+      const mode = version === 'v2' ? modeOf(raw) : 'create';
+      state.joinModes.push({ roomId: parts[2], version, mode });
+      if (mode === null) {
+        json(res, 400, { error: 'bad_mode' });
+        return;
+      }
+      if (version === 'v2' && mode === 'join' && !state.rooms.has(parts[2])) {
+        json(res, 404, { error: 'room_unknown' });
+        return;
+      }
+      const created = !state.rooms.has(parts[2]);
+      state.rooms.add(parts[2]);
       const minted = randomBytes(4).toString('hex');
-      state.joins.push({ at: Date.now(), peer: minted });
-      json(res, 200, { peer: minted });
+      state.joins.push({ at: Date.now(), peer: minted, version, mode, created });
+      json(res, 200, version === 'v2' ? { peer: minted, created } : { peer: minted });
       return;
     }
 
@@ -325,6 +396,14 @@ function startStub(encKey) {
         /** Stop answering this peer's POSTs at all, and record what was left hanging. */
         stall(peer2) {
           state.stalled.add(peer2);
+        },
+        /**
+         * Be a relay built before `/v2`: every `/v2` request meets a bare 404 with no error body,
+         * the way a server without the route answers. Turned off again with `false`, so the cases
+         * after this one talk to the route again.
+         */
+        pretendOldRelay(on = true) {
+          state.preV2 = on;
         },
         release(peer2) {
           state.stalled.delete(peer2);
@@ -498,7 +577,9 @@ function isStatusShaped(status) {
     status.inboundRefused &&
     ['malformed', 'slice', 'size', 'replay', 'auth', 'envelope'].every((kind) => typeof status.inboundRefused[kind] === 'number') &&
     (status.retryAt === undefined || typeof status.retryAt === 'number') &&
-    (status.error === undefined || typeof status.error === 'string')
+    (status.error === undefined || typeof status.error === 'string') &&
+    (status.roomCreated === undefined || typeof status.roomCreated === 'boolean') &&
+    (status.cause === undefined || typeof status.cause === 'string')
   );
 }
 
@@ -546,12 +627,16 @@ process.on('exit', (code) => {
   const statuses = [];
   const received = [];
   let onlineAt = 0;
+  // `joinMode` defaults to `create`, which is what the transports in the earlier cases are: a
+  // window is the thing that brings a room into being, so it is also what every other transport
+  // here joins *into* — the `join` side has cases of its own.
   const make = (overrides) =>
     new RelayTransport({
       relayUrl: stub.url,
       roomId: keys.roomId,
       encKey: keys.encKey,
       deviceId: 'device-0000000000000000',
+      joinMode: 'create',
       heartbeatMs: HB,
       onFrame: (frame) => received.push(frame),
       onStatus: (status) => {
@@ -580,6 +665,11 @@ process.on('exit', (code) => {
   ok('start() published `connecting` before `online`', statuses.some((s) => s.phase === 'connecting') && statuses.findIndex((s) => s.phase === 'online') > 0, statuses.map((s) => s.phase).join(' → '));
   ok('the relay saw exactly one join', stub.joinAttempts() === 1, `${stub.joinAttempts()} join request(s)`);
   ok('the join used the derived room id as the URL path segment', stub.state.joinRoomIds.every((id) => id === keys.roomId), stub.state.joinRoomIds[0]);
+  ok(
+    'the join was a `/v2` POST that declared its mode in the body',
+    stub.state.joinModes[0].version === 'v2' && stub.state.joinModes[0].mode === 'create',
+    JSON.stringify(stub.state.joinModes[0]),
+  );
   ok('the peer id is the 8 lowercase hex characters §2 promises', /^[0-9a-f]{8}$/.test(onlineOne.peerId), onlineOne.peerId);
   ok('status.peerId and get peerId() agree', main.peerId === onlineOne.peerId && main.status.peerId === onlineOne.peerId, String(main.peerId));
   ok('online carries no retryAt, no error, no drops', onlineOne.retryAt === undefined && onlineOne.error === undefined && onlineOne.dropped === 0 && sum(onlineOne.inboundRefused) === 0);
@@ -1057,7 +1147,9 @@ process.on('exit', (code) => {
   console.log('-- 13. a non-2xx join is a status, never a throw into the caller --');
   const refusedTransport = make({ heartbeatMs: 60000 });
   const joinsBeforeRefusal = stub.joinAttempts();
-  stub.state.joinStatuses.push(404);
+  // The relay's own word for it: a malformed room id is a 404 `invalid_room_id`, which is *not*
+  // one of the two causes a user can act on.
+  stub.state.joinStatuses.push({ status: 404, error: 'invalid_room_id' });
   let startThrew = false;
   try {
     refusedTransport.start();
@@ -1065,8 +1157,9 @@ process.on('exit', (code) => {
     startThrew = true;
   }
   const errorStatus = await waitFor('the transport reports the refused join', () => (refusedTransport.status.phase === 'error' ? refusedTransport.status : null), 5000);
-  ok('a 404 on join (the relay\'s answer for a malformed room id) is an `error`, never a throw', startThrew === false && errorStatus.phase === 'error' && /404/.test(errorStatus.error ?? ''), errorStatus.error);
+  ok('a 404 `invalid_room_id` on join (the relay\'s answer for a malformed room id) is an `error`, never a throw', startThrew === false && errorStatus.phase === 'error' && /refused this room id/i.test(errorStatus.error ?? ''), errorStatus.error);
   ok('  … with no retryAt: it will not retry a refusal on its own', errorStatus.retryAt === undefined && errorStatus.peerId === null);
+  ok('  … and no `cause`: a malformed id is neither a wrong token nor an old relay', errorStatus.cause === undefined, JSON.stringify(errorStatus.cause));
   await sleep(HB * 2);
   ok('  … and it really did not retry', stub.joinAttempts() === joinsBeforeRefusal + 1, `${stub.joinAttempts() - joinsBeforeRefusal} join request(s)`);
   ok('  … every status it published still has the documented shape', statuses.every(isStatusShaped));
@@ -1082,8 +1175,76 @@ process.on('exit', (code) => {
   ok('  … and that connection seals with its own fresh salt', recoveredFrame.salt !== saltBeforeDrop && frames.decodeSalt(recoveredFrame.slice.s) === recoveredFrame.salt, `s=${recoveredFrame.slice.s}`);
   refusedTransport.stop();
 
-  // ---------------------------------------------------------------- 14. stop, start, exit
-  console.log('-- 14. stop() releases everything, and start() after stop() works --');
+  // ---------------------------------------------------------------- 14. /v2's mode: join
+  console.log('-- 14. a `join` connect to a room nobody created is refused, and is not retried --');
+  // A second token on purpose: `room_unknown` is about *this* token naming nothing on *this*
+  // relay, which is exactly what a mistyped token on the phone looks like — the first room
+  // exists by now, so a wrong id is the only way to reach the branch under test.
+  const stray = rooms.deriveRoom('relay acceptance token — nobody created this one');
+  const replica = make({ roomId: stray.roomId, encKey: stray.encKey, joinMode: 'join' });
+  const joinsBeforeStray = stub.joinAttempts();
+  replica.start();
+  const unknownRoom = await waitFor('the replica is refused', () => (replica.status.phase === 'error' ? replica.status : null), 5000);
+  ok('a `join` for a room nobody created is a terminal `error`, not a silent empty room', unknownRoom.phase === 'error' && unknownRoom.peerId === null, unknownRoom.error);
+  ok('  … with the cause a user can act on: `room-unknown`', unknownRoom.cause === 'room-unknown', String(unknownRoom.cause));
+  ok('  … and the reason names the token, because the token is what is wrong', /token/i.test(unknownRoom.error ?? ''), unknownRoom.error);
+  ok('  … and no retryAt: a wrong token is not a transient failure', unknownRoom.retryAt === undefined);
+  ok(
+    '  … and the mode really reached the relay as `join` in a `/v2` body',
+    (() => {
+      const last = stub.state.joinModes[stub.state.joinModes.length - 1];
+      return last.version === 'v2' && last.mode === 'join' && last.roomId === stray.roomId;
+    })(),
+    JSON.stringify(stub.state.joinModes[stub.state.joinModes.length - 1]),
+  );
+  await sleep(HB * 2);
+  ok('  … and it really did not retry the wrong token', stub.joinAttempts() === joinsBeforeStray + 1, `${stub.joinAttempts() - joinsBeforeStray} join request(s)`);
+  replica.stop();
+
+  // ---------------------------------------------------------------- 15. /v2's mode: create
+  console.log('-- 15. a `create` connect makes that room, and the replica then joins it --');
+  const creator = make({ roomId: stray.roomId, encKey: stray.encKey, joinMode: 'create' });
+  creator.start();
+  const creatorOnline = await waitFor('the creator goes online', () => (creator.status.phase === 'online' ? creator.status : null), 6000);
+  ok('a `create` connect to the room nobody had used goes online', creatorOnline.phase === 'online', creatorOnline.peerId);
+  ok('  … and says it made one: `roomCreated` is the publisher\'s half of that same legible failure', creatorOnline.roomCreated === true, String(creatorOnline.roomCreated));
+  ok('  … and the relay has the room on record', stub.state.rooms.has(stray.roomId), `${stub.state.rooms.size} room(s) on record`);
+  const latecomer = make({ roomId: stray.roomId, encKey: stray.encKey, joinMode: 'join' });
+  latecomer.start();
+  const latecomerOnline = await waitFor('the replica joins it', () => (latecomer.status.phase === 'online' ? latecomer.status : null), 6000);
+  ok('the same room now admits a `join` connect', latecomerOnline.phase === 'online' && latecomerOnline.peerId !== creatorOnline.peerId, latecomerOnline.peerId);
+  ok('  … with no `roomCreated`: the field belongs to the connection that created the room', latecomerOnline.roomCreated === undefined, JSON.stringify(latecomerOnline.roomCreated));
+  const lastJoin = stub.state.joins[stub.state.joins.length - 1];
+  ok('  … and the relay\'s own answer to it said `created: false`', lastJoin.mode === 'join' && lastJoin.created === false, `mode ${lastJoin.mode}, created ${lastJoin.created}`);
+  creator.stop();
+  latecomer.stop();
+
+  // ---------------------------------------------------------------- 16. a relay older than /v2
+  console.log('-- 16. a relay that predates `/v2` has no route to refuse, and no retry adds one --');
+  stub.pretendOldRelay();
+  const oldRelayTransport = make({ roomId: stray.roomId, encKey: stray.encKey, joinMode: 'join', heartbeatMs: 60000 });
+  oldRelayTransport.start();
+  const tooOld = await waitFor('the transport gives up on the old relay', () => (oldRelayTransport.status.phase === 'error' ? oldRelayTransport.status : null), 5000);
+  ok('a 404 with nothing to parse is `relay-too-old`, not a wrong token', tooOld.cause === 'relay-too-old', String(tooOld.cause));
+  ok('  … and the reason says the relay is older than this window', /older/i.test(tooOld.error ?? ''), tooOld.error);
+  ok('  … terminal, with no retryAt', tooOld.retryAt === undefined && tooOld.peerId === null);
+  ok('  … and the stub really answered a bare 404, with no error body to classify', stub.state.preV2Hits === 1, `${stub.state.preV2Hits} /v2 request(s) met the missing route`);
+  await sleep(HB * 2);
+  ok('  … and it really did not retry a route that cannot appear', stub.state.preV2Hits === 1, `${stub.state.preV2Hits} /v2 request(s)`);
+  // The contrast that makes that 404 legible: the same relay still serves `/v1`, which is why §5
+  // keeps the old route — the client built before `/v2` is not the one that breaks.
+  const legacy = await fetch(`${stub.url}/v1/room/${stray.roomId}/join`, { method: 'POST' });
+  const legacyBody = await legacy.json();
+  ok(
+    '  … while `/v1` still answers the legacy shape: a peer id and no `created`',
+    legacy.status === 200 && /^[0-9a-f]{8}$/.test(legacyBody.peer ?? '') && legacyBody.created === undefined,
+    JSON.stringify(legacyBody),
+  );
+  stub.pretendOldRelay(false);
+  oldRelayTransport.stop();
+
+  // ---------------------------------------------------------------- 17. stop, start, exit
+  console.log('-- 17. stop() releases everything, and start() after stop() works --');
   const countsFor = (peer) => stub.state.ups.filter((up) => up.peer === peer).length;
   const peerBeforeStop = main.peerId;
   const upsBeforeStop = countsFor(peerBeforeStop);
@@ -1124,7 +1285,8 @@ process.on('exit', (code) => {
   }
   console.log(
     `PASS relay-acceptance: ${checks}/${checks} checks — a real relay on an ephemeral port drove the compiled transport through ` +
-      'a clean join, slicing and interleaved reassembly, replay/tamper/malformed refusals, a 429, pacing, backpressure, ' +
+      'a clean join, `/v2`\'s join contract (a room created, a wrong token refused, a relay too old for the route), ' +
+      'slicing and interleaved reassembly, replay/tamper/malformed refusals, a 429, pacing, backpressure, ' +
       'a refused join, a reconnect with fresh key material, and its silent-stream watchdog',
   );
   // Deliberately no `process.exit(0)`: the run has to end on its own, and a timer or a

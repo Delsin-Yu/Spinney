@@ -81,11 +81,14 @@ A turn can end without an answer in two ways: the user pressed Stop
 call failed (`node.status = 'error'`, the turn rolled back). Either way the user
 used to have to type "continue" themselves. Now the card offers a button — and in
 the ordinary cases it resumes **that node in place**: no new card, no visible node
-split. One button, one meaning at a time. Two further states share the slot, and
-both are about the *context*, not about the failure: a provider refusal that no
-retry can fix (the request is too big) offers a rollover instead — whose whole point
-is a *new* card — and a chain that is merely **near** full offers the same entry as
-a suggestion. What that does is `context-rollover.md`.
+split. One meaning per button, and at most two of them. Two further states are
+about the *context*, not about the failure: a provider refusal that no retry can fix
+(the request is too big) offers a rollover instead — whose whole point is a *new*
+card — and a chain that is merely **near** full offers the same entry as a
+suggestion. Only the *refusal* takes the repair's place; a failure at `near` shows
+both (see the show rules below). What a rollover does is `context-rollover.md`.
+A mid-answer stall (`request-stall`, §1b) is the case that asked for this: the turn
+ends in `error`, and the card is the way back in.
 
 - **Webview → host**: `{ type: 'continueTurn', id: <nodeId> }`
   (`main.js` `syncContinueButton`). The host routes it straight into
@@ -139,20 +142,23 @@ a suggestion. What that does is `context-rollover.md`.
   `⧉ Continue in a new window` for `context === 'full'` (that variant also adds
   `node-rollover` and `data-action="rollover"`, and its click posts
   `{ type: 'rolloverTurn', id }` instead of `{ type: 'continueTurn', id }`). The
-  **`near` suggestion is the one rule that hangs off the context state instead of a
+  **`near` entry is the one rule that hangs off the context state instead of a
   failure**: `context === 'near'` shows the same `⧉` (plus the softening `node-near`
   class and the percentage in the title) on a `done` tip too — the long
-  conversation that just finished above 90 % is exactly its case. Retry is
-  **replaced**, never offered
-  beside it: the request it would re-send is the same oversized one, so it is
-  guaranteed to fail again, and a second button for one failure would make the
-  card claim two possible outcomes where there is one. It is synced from both
+  conversation that just finished above 90 % is exactly its case. The two are
+  **replaced only by a refusal, never by a size**: `full` means the provider refused
+  *this* request, so `↻ Retry` would re-send the same refused bytes and the `⧉` takes
+  the slot alone; a failure at `near` (a stall, a network error, a 4xx) keeps `↻
+  Retry` **and** shows the `⧉` beside it, on its own `.node-window` element — nothing
+  was rejected, the retry is a real repair, and the `⧉` entry has no other way in, so
+  neither may hide the other. It is synced from both
   entry points of a status change (`renderTree` and `applyNodeUpdate`) — a turn
   that ends after the tree was drawn arrives as `nodeUpdate`, so both must call it
   (and `applyNodeUpdate` must merge `context` / `contextPct` into `treeNodes[id]`
-  *before* it re-syncs, or that entry point would show the wrong variant). The
-  button is one reused element whose text, class list and `dataset.action` are
-  re-synced, and the click handler reads the action at click time.
+  *before* it re-syncs, or that entry point would show the wrong variant). Each
+  entry is one reused element (`.node-continue`, `.node-window`) whose text, class
+  list and `dataset.action` are re-synced, and every click handler reads the action
+  at click time.
 - **Honest transcript**: the harness text is a `kind:'harness'` display item,
   pushed into the node's own items and rendered inline by `addHarnessNote` as a
   badged (`HARNESS`) block — never a fabricated user bubble, and never the pinned

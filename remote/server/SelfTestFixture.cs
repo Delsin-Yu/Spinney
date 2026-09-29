@@ -17,11 +17,11 @@ internal sealed class SelfTestFixture : IAsyncDisposable
     private readonly List<string> _roomIds = new();
     private readonly List<string> _peerIds = new();
 
-    private SelfTestFixture(WebApplication app, RecordingLoggerProvider recorder, string baseAddress)
+    private SelfTestFixture(WebApplication app, RecordingLoggerProvider recorder, string baseAddress, Limits limits)
     {
         _app = app;
         _recorder = recorder;
-        Limits = Limits.SelfTest;
+        Limits = limits;
         BaseAddress = baseAddress;
         Http = new HttpClient { BaseAddress = new Uri(baseAddress), Timeout = TimeSpan.FromSeconds(60) };
     }
@@ -36,10 +36,16 @@ internal sealed class SelfTestFixture : IAsyncDisposable
 
     public IReadOnlyList<string> PeerIds => _peerIds;
 
-    public static async Task<SelfTestFixture> StartAsync()
+    /// <summary>
+    /// Start a relay in process. <paramref name="limits"/> defaults to the shared self-test
+    /// limits; a case that needs a different shape (a tight join brake, a tiny ledger) starts its
+    /// own relay rather than making every other case live with that shape.
+    /// </summary>
+    public static async Task<SelfTestFixture> StartAsync(Limits? limits = null)
     {
+        var effective = limits ?? Limits.SelfTest;
         var recorder = new RecordingLoggerProvider();
-        var app = RelayApp.Build(Limits.SelfTest, Limits.SelfTest.Urls, configureLogging: logging =>
+        var app = RelayApp.Build(effective, effective.Urls, configureLogging: logging =>
         {
             logging.SetMinimumLevel(LogLevel.Debug);
             logging.AddFilter<ConsoleLoggerProvider>(null, LogLevel.Warning);
@@ -50,7 +56,7 @@ internal sealed class SelfTestFixture : IAsyncDisposable
 
         var addresses = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>();
         var baseAddress = addresses?.Addresses.FirstOrDefault() ?? app.Urls.First();
-        return new SelfTestFixture(app, recorder, baseAddress);
+        return new SelfTestFixture(app, recorder, baseAddress, effective);
     }
 
     public string NewRoomId()
@@ -75,6 +81,49 @@ internal sealed class SelfTestFixture : IAsyncDisposable
         }
 
         return ((int)response.StatusCode, peerId);
+    }
+
+    /// <summary>
+    /// `POST /v2/room/{roomId}/join` with a mode. Returns the whole answer, because the mode cases
+    /// care about all of it: the status, the peer, whether the room was *created*, and the error.
+    /// </summary>
+    public async Task<(int Status, string? PeerId, bool Created, string? Error)> JoinV2Async(string roomId, string mode)
+    {
+        var content = new StringContent($"{{\"mode\":\"{mode}\"}}", Encoding.UTF8, "application/json");
+        using var response = await Http.PostAsync($"/v2/room/{roomId}/join", content);
+        return await ReadJoinV2Async(response);
+    }
+
+    /// <summary>A raw v2 join body, for the cases that send something other than a mode.</summary>
+    public async Task<(int Status, string? PeerId, bool Created, string? Error)> PostJoinV2RawAsync(string roomId, byte[] body, bool omitContentType = false)
+    {
+        var content = new ByteArrayContent(body);
+        if (!omitContentType) content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+        using var response = await Http.PostAsync($"/v2/room/{roomId}/join", content);
+        return await ReadJoinV2Async(response);
+    }
+
+    private async Task<(int Status, string? PeerId, bool Created, string? Error)> ReadJoinV2Async(HttpResponseMessage response)
+    {
+        var body = await response.Content.ReadAsStringAsync();
+        string? peerId = null;
+        var created = false;
+        string? error = null;
+        using (var document = JsonDocument.Parse(body))
+        {
+            if (response.IsSuccessStatusCode)
+            {
+                peerId = document.RootElement.GetProperty("peer").GetString();
+                created = document.RootElement.GetProperty("created").GetBoolean();
+                if (peerId is not null) _peerIds.Add(peerId);
+            }
+            else
+            {
+                error = document.RootElement.GetProperty("error").GetString();
+            }
+        }
+
+        return ((int)response.StatusCode, peerId, created, error);
     }
 
     public async Task<int> PostUpAsync(string roomId, string peerId, byte[] body)
@@ -125,6 +174,25 @@ internal sealed class SelfTestFixture : IAsyncDisposable
         Http.Dispose();
         await _app.StopAsync();
         await _app.DisposeAsync();
+
+        // The ledger is a file the relay writes; a test process must not leave one behind (and must
+        // not inherit the next run's). Only the temp paths the self-test presets use are removed —
+        // a fixture pointed at a real path keeps its hands off it.
+        var ledger = Path.IsPathRooted(Limits.RoomRecordsFile)
+            ? Limits.RoomRecordsFile
+            : Path.Combine(AppContext.BaseDirectory, Limits.RoomRecordsFile);
+        if (!ledger.Contains("spinney-selftest-", StringComparison.Ordinal)) return;
+
+        foreach (var path in new[] { ledger, ledger + ".tmp" })
+        {
+            try
+            {
+                if (File.Exists(path)) File.Delete(path);
+            }
+            catch (IOException)
+            {
+            }
+        }
     }
 }
 

@@ -3,7 +3,7 @@
   The Android WebView shell for a replicated remote session.
 
   This is NOT a second renderer. It is the DOM the extension host renders in
-  `src/chat/ChatViewProvider.ts` `getHtml()`, with exactly three differences:
+  `src/chat/ChatViewProvider.ts` `getHtml()`, with exactly four differences:
 
     1. the asset URLs point at the app's own assets (`assets/webview/**`, copied from
        `media/**` by `tools/sync-remote-assets.js` and guarded byte for byte by
@@ -17,12 +17,21 @@
        `media/main.js` — its tag says why;
     3. the CSP carries a per-load nonce for that one injected inline script and pins
        `connect-src 'none'` — the session view talks to the publisher through the Kotlin host,
-       never through a fetch of its own.
+       never through a fetch of its own;
+    4. it links one more stylesheet after the shared one, `assets/shell/session-viewport.css`,
+       because this host hands the page a **0-height initial containing block**: the shell's
+       `html, body { height: 100% }` (and `100vh` with it) resolves to 0, so `#tree-wrap` is laid
+       out 0 tall and the replicated session draws an empty canvas on the phone while the same
+       document is correct on the desktop. That file anchors `body` to the viewport instead —
+       the same box on a host that is not broken — and carries the measurement in its header.
 
   Everything else here is a copy of the host's shell and must stay one: a DOM id that
   `media/main.js` looks up and does not find on the phone would fail in a way the desktop tab
   cannot, and that would be a renderer divergence by the back door. When `getHtml()` grows an
   element, this file grows it too — there is no guard for that pairing, and the README says so.
+  Difference 4 is a stylesheet, not an element, and the box it renders is the host's own number
+  rather than a second opinion about the document: a fifth difference that changed what the
+  document *is* would have to be argued for here, not slipped in.
 -->
 
 <html lang="en">
@@ -31,6 +40,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self' 'nonce-<!--SPINNEY_NONCE-->'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'none';" />
   <link rel="stylesheet" href="/assets/webview/style.css" />
+  <link rel="stylesheet" href="/assets/shell/session-viewport.css" />
   <title>Spinney</title>
   <!--SPINNEY_L10N-->
   <!-- The host half of the message protocol: acquireVsCodeApi(), window.__spinneyHost.receive

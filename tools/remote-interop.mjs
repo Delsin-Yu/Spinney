@@ -311,6 +311,10 @@ try {
     roomId,
     encKey: keys.encKey,
     deviceId: 'interop-device-typescript',
+    // This peer is the publisher side of the interop run (it is the one announcing instances), so
+    // it is the side that may bring the room into being on the relay (`/v2`'s `mode=create`). The
+    // Kotlin peer below joins, and must not be able to create the room at all.
+    joinMode: 'create',
     heartbeatMs: 5_000,
     onFrame: (frame) => received.push(frame),
     onStatus: (status) => statuses.push(status),

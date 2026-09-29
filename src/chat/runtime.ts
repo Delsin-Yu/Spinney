@@ -2144,11 +2144,14 @@ export class SessionRuntime {
       // to ask) renders as the plain record it is. `shared` is not a delivery marker:
       // `delivered` stays the D1 field for "the agent has been told".
       bgDetached: node.kind === 'bg' && this.backgroundTaskDetached(node.bgTaskId) ? true : undefined,
-      // A sub-agent card carries only its **count**: its transcript is fetched when
-      // the card is actually expanded (`onAgentItems`), because shipping every
-      // sidecar's items made one session's tree 2.3 MB and 10 k DOM elements for 8
-      // cards (see docs/agents/invariants/streaming-perf.md).
-      itemCount: node.kind === 'agent' ? node.displayItems.length : undefined,
+      // The row's item half, built in the one place both payloads build it
+      // (`nodeRowItems`): a **finished** turn leaves as its two-item **summary**, a
+      // running one in the shape it always had. A sub-agent card still carries only its
+      // **count** and fetches its transcript when the card is actually expanded
+      // (`onAgentItems`), because shipping every sidecar's items made one session's tree
+      // 2.3 MB and 10 k DOM elements for 8 cards
+      // (see docs/agents/invariants/streaming-perf.md).
+      ...this.nodeRowItems(node, 'tree'),
       // Where a remote-originated turn came from, when it came from the room.
       origin: nodeOrigin(node),
     }));
@@ -2165,7 +2168,14 @@ export class SessionRuntime {
     };
   }
 
-  /** The checked-out branch's transcript, grouped by node (for the tree view). */
+  /**
+   * The checked-out branch's transcript, grouped by node (for the tree view).
+   *
+   * `items` comes from the same builder `treeMessage` uses (`nodeRowItems`), so a finished
+   * node leaves as its two-item summary here too: a `path` for a long session used to ship
+   * every node's whole transcript, and one node's full log now crosses only when its card is
+   * expanded (`loadNodeItems` → `nodeItems`, `onNodeItems`).
+   */
   postPath(): void {
     const session = this.session;
     const ids = pathIds(session, session.activeNodeId);
@@ -2174,12 +2184,97 @@ export class SessionRuntime {
       return {
         id,
         status: node.status,
-        items: node.displayItems.map(clipDisplayItem),
+        ...this.nodeRowItems(node, 'path'),
       };
     });
     const message = { type: 'path', ids, nodes, ...opTag(this.sessionId) };
     opPayload('post-path', message);
     this.post(message);
+  }
+
+  /**
+   * The two items a finished turn is summarised by: its **first `user` item** (what was
+   * asked) and its **last assistant item with text** (what came back), in that order.
+   *
+   * `undefined` when that pair is not a *proper* subset of the log, which is the rule that
+   * keeps the flag honest in both directions:
+   *
+   *  - a node with **no items**, or with items carrying neither half, must gain no empty
+   *    summary at all — a renderer reads a summary row as "this card is rendered", so an
+   *    empty one would stop the card from ever asking for the log it has not got (the
+   *    measured symptom: a phone card next to a `preview` that promised a full session and
+   *    showed nothing);
+   *  - a pair that **is** the whole log (a two-item turn) needs no flag either: the row
+   *    would carry the same bytes either way, and without the flag nothing is fetched
+   *    again for a log already in hand.
+   *
+   * Both halves at most, never a third item: the summary is what a *collapsed* card shows.
+   * The last assistant item **with text** is the answer because that is the same rule the
+   * collapsed `preview` uses (`nodePreview`) — an assistant item that carries only usage or
+   * thinking is not something to show as the result.
+   *
+   * Two incidental rules, both of which this file holds to on purpose: it names **nothing**
+   * but its argument and the one clipper (no `this`, no second helper), and its body carries
+   * no type annotation — that is what lets `tools/check-remote.js` run it from this source
+   * and pin the picks by value rather than by shape.
+   */
+  private summaryItems(items: DisplayItem[]): DisplayItem[] | undefined {
+    const ask = items.find((item) => item.kind === 'user');
+    const answer = items.filter((item) => item.kind === 'assistant' && item.text).pop();
+    const picked = ask ? (answer ? [ask, answer] : [ask]) : answer ? [answer] : [];
+    // The one clipper (`clipDisplayItem`) — a summary must not ship bytes a `path` would
+    // have clipped, or a tool item's 16 MiB dump would ride the tree after all.
+    return picked.length > 0 && picked.length < items.length ? picked.map(clipDisplayItem) : undefined;
+  }
+
+  /**
+   * The item half of one node row, built **here** for both payloads so `tree` and `path`
+   * cannot disagree about what a row is: `{ items?, summary?, itemCount? }`, spread into the
+   * row by the caller.
+   *
+   * A **finished** turn (`status !== 'running'`) leaves as its {@link summaryItems} summary
+   * and says so with `summary: true`, plus its true `itemCount` — the count is on the row
+   * for *every* finished node (before this, only an `agent` row carried one), which is what
+   * lets a card say how much log it is not showing. A **running** turn's row is unchanged:
+   * its card is filled by its own stream, and a summary built mid-turn would be overwritten
+   * by the next delta anyway.
+   *
+   * Why this exists: a replica that attached to a session used to receive structure only —
+   * `treeMessage` carried `itemCount` for `agent` nodes alone and a 120-char `preview`, and
+   * `path` is posted only for the owner's own view chain — so a phone showed three cards
+   * with `work: 0 ans: 0` and nothing but the preview text. The other fix (ship the
+   * transcript in `tree`) is the one that made a session's tree 2.3 MB and 10 k DOM
+   * elements; two items per finished node keep that off, and one node's full log crosses
+   * only when its card is expanded (`loadNodeItems` → `nodeItems`, `onNodeItems`).
+   *
+   * A `kind: 'agent'` row stays summary-less on purpose: its card's contract is `itemCount`
+   * plus `loadAgentItems` (the lazy sidecar rule above), its transcript is a sidecar log
+   * rather than a conversation turn, and a `summary: true` row would tell a renderer the
+   * transcript is already in hand — exactly what that rule says is not true. The two items
+   * a summary would pick are already carried where they belong, as the sub-agent's own
+   * `agentDone` summary. A `kind: 'bg'` card has no items at all (its body mirrors the live
+   * job), so it is simply an `itemCount: 0` row.
+   *
+   * `payload` is the one difference between the two rows: a `path` is the owner's own view
+   * and always carried a log, so a row that is not a summary keeps shipping one; a `tree`
+   * never carried a log at all (`itemCount` only), so there the same row leaves with the
+   * count alone and its card fetches what it needs.
+   */
+  private nodeRowItems(
+    node: TreeNode,
+    payload: 'tree' | 'path',
+  ): { items?: DisplayItem[]; summary?: true; itemCount?: number } {
+    const all = node.displayItems;
+    const finished = node.status !== 'running';
+    const summary = finished && node.kind !== 'agent' ? this.summaryItems(all) : undefined;
+    if (summary) {
+      return { items: summary, summary: true, itemCount: all.length };
+    }
+    if (payload === 'path') {
+      const items = all.map(clipDisplayItem);
+      return finished ? { items, itemCount: all.length } : { items };
+    }
+    return finished || node.kind === 'agent' ? { itemCount: all.length } : {};
   }
 
   /**
@@ -2193,16 +2288,53 @@ export class SessionRuntime {
     if (!node || node.kind !== 'agent') {
       return;
     }
+    this.postItems(node, 'agentItems');
+  }
+
+  /**
+   * One **regular** node asked for its items (`loadNodeItems`, sent by a remote peer's
+   * replica). No local path needs it: a local card is filled from the `path` message, which
+   * `postPath` only sends for the owner's own view chain. A replica that attached to an idle
+   * session receives the structural `tree` and nothing else — one node's summary per finished
+   * card, and no log. The measured symptom behind this request is a phone showing three cards
+   * with a `preview` each and no log; the summary is what an *expanded* card renders while its
+   * full log is on the way; a collapsed card shows the row's `preview` and asks for nothing.
+   *
+   * An id this session does not have answers nothing, exactly like the `agentItems` half
+   * above: there is no node to clip and no `items` to invent.
+   */
+  onNodeItems(nodeId: string): void {
+    const node = this.session.nodes[nodeId];
+    if (!node) {
+      return;
+    }
+    this.postItems(node, 'nodeItems');
+  }
+
+  /**
+   * The one on-demand answer shape: a node's **full** `displayItems`, clipped by the one
+   * clipper (`clipDisplayItem`), plus the `[perf]` line that says the fetch fired. Both
+   * requests (`loadAgentItems` / `loadNodeItems`) go through here, so the two answers cannot
+   * drift apart in clipping or in what the replica renders.
+   *
+   * It is deliberately **not** the summary a row carries (`nodeRowItems`): this is the
+   * answer to a card that was expanded, so it is the whole log — the summary is what makes
+   * the row useful *before* anyone asks, and asking is what replaces it.
+   */
+  private postItems(node: TreeNode, messageType: 'agentItems' | 'nodeItems'): void {
     const items = node.displayItems.map(clipDisplayItem);
+    // The `[perf]` label keeps the word the log already used for the sidecar half
+    // (`agent-items`) and gives this sibling its own, so an existing grep stays true.
+    const label = messageType === 'agentItems' ? 'agent-items' : 'node-items';
     // Logged unconditionally: this is the on-demand half of the lazy sidecar
     // contract, and `[perf]` is the only place a real window can confirm it fired
     // (and how big the answer was) without a debugger.
     perf(
       () =>
-        `agent-items ${nodeId} items=${items.length} ` +
+        `${label} ${node.id} items=${items.length} ` +
         `chars=${items.reduce((n, it) => n + (it.text?.length ?? 0) + (it.content?.length ?? 0) + (it.args?.length ?? 0), 0)}`,
     );
-    this.post({ type: 'agentItems', id: nodeId, items });
+    this.post({ type: messageType, id: node.id, items });
   }
 
   /** First line of the turn's answer, used as a collapsed card preview. */

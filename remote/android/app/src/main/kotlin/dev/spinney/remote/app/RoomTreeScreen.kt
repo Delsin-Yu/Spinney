@@ -29,6 +29,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import dev.spinney.remote.core.JoinRefusal
 import dev.spinney.remote.core.RoomModel
 import dev.spinney.remote.core.RemoteClient
 
@@ -60,18 +61,7 @@ fun RoomTreeScreen(
         ConnectionHeader(room, state, l10n, onResync, onDisconnect)
 
         if (room.devices.isEmpty()) {
-            Column(Modifier.padding(24.dp)) {
-                Text(
-                    text = l10n.t("No window in this room has published a session yet."),
-                    style = MaterialTheme.typography.bodyMedium,
-                )
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    text = l10n.t("A room is empty when a token is wrong: a wrong token is not an error, it is an empty room."),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
+            EmptyRoomNotice(room, state, l10n)
             return@Column
         }
 
@@ -81,6 +71,73 @@ fun RoomTreeScreen(
             }
         }
     }
+}
+
+/**
+ * What this screen says when the room tree has no device row in it.
+ *
+ * The sentence that used to stand here — "a room is empty when a token is wrong: a wrong token is
+ * not an error, it is an empty room" — was §3's axiom read out to the user, and `/v2` retired it:
+ * the phone asks for `mode=join`, so a token that names no room is *refused*
+ * ([JoinRefusal.ROOM_UNKNOWN]) instead of being answered with an empty room that looks exactly like
+ * one nobody is publishing in. So the state below is the true one — in a room, alone in it — and it
+ * carries the action that can settle it: compare the room fingerprint with the other device.
+ */
+@Composable
+private fun EmptyRoomNotice(
+    room: RemoteClient.RoomSnapshot,
+    state: RemoteClient.ConnectionState,
+    l10n: L10n,
+) {
+    Column(Modifier.padding(24.dp)) {
+        when (state) {
+            is RemoteClient.ConnectionState.Connected -> {
+                Text(
+                    text = l10n.t("No window in this room has published a session yet."),
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    text = l10n.t(EXPECTED_DEVICE),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Spacer(Modifier.height(8.dp))
+                Fingerprint(room, l10n)
+            }
+
+            is RemoteClient.ConnectionState.Failed -> when (state.refusal) {
+                JoinRefusal.ROOM_UNKNOWN -> {
+                    Text(l10n.t(NO_ROOM), style = MaterialTheme.typography.bodyMedium)
+                    Spacer(Modifier.height(8.dp))
+                    Fingerprint(room, l10n)
+                }
+
+                JoinRefusal.RELAY_TOO_OLD ->
+                    Text(l10n.t(RELAY_TOO_OLD), style = MaterialTheme.typography.bodyMedium)
+
+                // Any other terminal refusal is already named by the header, in the transport's own
+                // words. This notice exists for the two answers a person can act on, and inventing a
+                // third sentence for "the relay refused this room id" would be prose, not a fix.
+                else -> Unit
+            }
+
+            // Connecting, reconnecting, or idle with no client: the header says which, and "nobody
+            // is publishing in here" would be a claim about a room this phone is not in yet.
+            else -> Unit
+        }
+    }
+}
+
+@Composable
+private fun Fingerprint(room: RemoteClient.RoomSnapshot, l10n: L10n) {
+    if (room.fingerprint.isEmpty()) return
+    Text(
+        text = l10n.t("Room · {0}…", room.fingerprint),
+        style = MaterialTheme.typography.bodySmall,
+        fontFamily = FontFamily.Monospace,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+    )
 }
 
 @Composable
@@ -221,3 +278,29 @@ private fun SessionRow(
     }
     Spacer(Modifier.height(4.dp))
 }
+
+/**
+ * The one user-visible string this change adds: what is true when the phone is *in* a room and alone
+ * in it, and what the user can do about it. Ahead of it the header prints the peer count, and behind
+ * it the room fingerprint — the value this sentence tells the reader to compare.
+ */
+private const val EXPECTED_DEVICE =
+    "If you expected a device here, it is either not publishing a session, or it holds a different " +
+        "token — and a different token is a different room. Compare the room fingerprint with the one " +
+        "that device shows."
+
+/**
+ * The two terminal refusals, word for word from the extension's own catalogs (both are already in
+ * `l10n/bundle.l10n.zh-Hans.json` and `zh-Hant.json`, because the desktop puts the same two facts to
+ * a person). Reusing them means a Chinese phone reads the same sentence the desktop shows, and one
+ * wire answer is described one way on both surfaces. The second says "this window" where a phone
+ * would say "this app" — the price of one wording for one fact, and cheaper than a second catalog
+ * entry for a sentence a phone reads once.
+ */
+private const val NO_ROOM =
+    "No room on this relay answers to this token. A wrong token is a different room, and nobody has " +
+        "created that one — compare the token with the other device."
+
+private const val RELAY_TOO_OLD =
+    "This relay does not answer /v2 joins yet: it is older than this window, so it cannot tell a room " +
+        "that does not exist from one that is merely empty. Update the relay."

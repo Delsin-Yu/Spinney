@@ -19,6 +19,13 @@ dependencies {
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.7.3")
 
+    // The QR *decoder* the phone reads a pairing code with (`QrScan.kt`). zxing-core is pure Java
+    // with no Play Services, no AAR and no native code, so it is legal in a plain JVM module on
+    // Android as well as on the desktop JVM the tests run on — which is what lets the same
+    // `QrScan.decode` read the committed fixture in `src/test/resources/pairing-fixture.png`.
+    // See `QrScan.kt`'s header for why a hand-rolled decoder was not an option.
+    implementation("com.google.zxing:core:3.5.3")
+
     testImplementation("org.junit.jupiter:junit-jupiter:5.11.4")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }

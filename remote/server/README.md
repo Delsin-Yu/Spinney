@@ -14,7 +14,10 @@ C# on .NET 10, ASP.NET Core Minimal API, Native AOT, published `linux-x64` from 
   a public address of its own.
 - A dumb byte pipe: `POST .../up` hands the relay a body, and the relay hands that body to the
   other peers of the room inside one SSE `data:` line. The bytes are forwarded verbatim.
-- Ephemeral: a room exists only while peers are in it.
+- Ephemeral where it routes: a live room exists only while peers are in it. It does remember
+  **which room ids exist** - an id and its last use in a small ledger file, no token, no content,
+  no peer, no room name - so that a client which asks to *enter* a room nobody ever created is
+  told so instead of being handed a silent, empty one (`POST /v2/room/{roomId}/join`).
 
 ## What it is not
 
@@ -36,6 +39,7 @@ C# on .NET 10, ASP.NET Core Minimal API, Native AOT, published `linux-x64` from 
 | Route | Success | Body |
 | --- | --- | --- |
 | `GET /healthz` | 200 | `{"ok":true,"rooms":<int>,"peers":<int>,"uptimeMs":<int>}` |
+| `POST /v2/room/{roomId}/join` | 200 | `{"peer":"<8 lowercase hex chars>","created":<bool>}` - body `{"mode":"create"\|"join"}` |
 | `POST /v1/room/{roomId}/join` | 200 | `{"peer":"<8 lowercase hex chars>"}` (4 random bytes) |
 | `GET /v1/room/{roomId}/down?peer=<id>` | 200 | `text/event-stream`, `Cache-Control: no-store`, buffering disabled |
 | `POST /v1/room/{roomId}/up?peer=<id>` | 202 | `{"ok":true}` |
@@ -45,9 +49,10 @@ Failures, all with a small `{"error":"<code>"}` body:
 | Status | When |
 | --- | --- |
 | 404 | `roomId` is not exactly 26 characters of `A-Z2-7`; the peer is unknown (never joined, evicted or dropped); the room does not exist |
-| 400 | the up body contains a CR (0x0D) or an LF (0x0A) byte, or is empty |
-| 413 | the up body is longer than `--max-frame-bytes` |
-| 429 | the room is at `--max-peers-per-room`; `--max-rooms` live rooms exist and this room is new; the peer exceeded its token bucket |
+| 404 `room_unknown` | `/v2` with `mode=join`: this relay has no record of that room and no peer is in it - the answer a wrong token gets |
+| 400 | the up body contains a CR (0x0D) or an LF (0x0A) byte, or is empty; `/v2`'s body names no usable mode |
+| 413 | the up body is longer than `--max-frame-bytes`; a `/v2` join body is longer than 256 bytes |
+| 429 | the room is at `--max-peers-per-room`; `--max-rooms` live rooms exist and this room is new; `--max-room-records` rooms are on record and this id is new; the peer exceeded its token bucket; a source address exceeded its join bucket |
 
 `down` details:
 
@@ -74,9 +79,59 @@ to redo it: a maximally filled line - a full 48000 base64 characters of slice, p
 `seq`, a 3-digit `idx` and the 8-character `s` - is 48103 bytes, which is 17 KB inside the 65536
 default.
 
+### The join contract: `/v1` and `/v2`
+
+`/v2` exists because the join *contract* changed, and `PROTOCOL.md` §5 puts a changed contract in
+a new route rather than in a flag on the old one. The body names the mode, and the mode has **no
+default**: a default would be the old silent behaviour wearing a new route's name, so a body that
+names neither value is `400 bad_mode`.
+
+- `{"mode":"create"}`: the publisher's mode. The room is recorded if this relay has never seen
+  that id, and the answer carries `created`. A desktop that expected to *find* a room and reads
+  `created:true` has just learned that it made one, which is the publisher's half of the same
+  legible failure.
+- `{"mode":"join"}`: the replica's mode. The room must be on record, or live because a peer is in
+  it, and otherwise the answer is `404 room_unknown`. **This is the fix:** a wrong token derives a
+  different room id, that id names nothing anybody has created, and the caller is told so instead
+  of being handed a fresh empty room that looks exactly like "nobody is publishing right now".
+  "Record **or** live" also keeps the fix from becoming an outage: a room that is live but
+  unrecorded is one an older client made.
+- `{"mode":"create"}` is not a privilege. The mode is a client's declaration and **not an
+  authentication mechanism**: the relay cannot tell a phone from a desktop, anyone may ask to
+  create, and in this design the token is the whole authority - whoever holds it *is* the room.
+- `/v1` keeps its old meaning for clients built before `/v2`: any well-formed id is accepted, the
+  room is created implicitly, and the answer has no `created`. It *does* record the room it
+  created, because a new client must be able to join a room an old one made.
+- Because `room_unknown` is an answer a candidate token can be tested against, joins are braked
+  per source address (`--join-rate-per-second`, `--join-rate-burst`), and the derivation costs the
+  guesser 600000 PBKDF2 iterations (`PROTOCOL.md` §3) per candidate. Those two are what keep a
+  dictionary walk expensive. They are the mitigation, not the removal of the risk: the relay
+  answers the question, so the honest statement is that the question is priced, not forbidden.
+
 ## Rooms, peers and eviction
 
-- A room is created on the first `join` and destroyed when its last peer is gone.
+- A **live** room is created by a join that may create it, and destroyed when its last peer is gone.
+  Every peer, drop and eviction rule below is about a live room.
+- A **record** is the id and the unix time it was last used by a join, and nothing else: no token
+  (the relay has never seen one), no content, no peer, no room name. It is kept in memory and in a
+  file (`--room-records-file`, default `rooms.json`, written atomically), so a relay restart does
+  not turn every room that exists into an unknown one - a restart that forgot them would refuse
+  every replica until a publisher connected again.
+- A record **lives on after its last peer**, so a replica can still enter a room whose publisher is
+  asleep, and **expires** after `--room-record-ttl-days` (default 30 days) with no join. That TTL,
+  not the cap, is what keeps this metadata from accumulating: the next desktop connect re-creates
+  the record.
+- `--max-room-records` (default 1024) is the ledger's backstop. Once it is full, a `create` for a
+  room that is not already on record is `429 too_many_rooms`, which is why it is worth sizing it
+  above the number of rooms you really use. The relay also prunes the oldest records down to the
+  cap on its sweep.
+- The ledger is read once at startup and written by the sweeper (and forced on shutdown). A file
+  that cannot be read is logged as an **error**, because that failure is otherwise invisible: every
+  room would look unknown until a publisher re-created it. A file that cannot be *written* is
+  logged too, and the relay keeps running with records in memory only.
+- A source address gets `--join-rate-per-second` (default 1) refills and `--join-rate-burst`
+  (default 5) joins in a row; over that it is `429 rate_limited`. The table is bounded (an attacker
+  cycling addresses cannot grow it), and a device that joins once when it opens never notices.
 - A peer is evicted when it has had no `up` and no live `down` for `--idle-timeout-seconds`.
 - Every peer has a bounded outbound queue (`--peer-queue-bytes`). When a frame would push a
   peer's queue over that bound, THE PEER IS DROPPED: its queue is discarded, its SSE stream is
@@ -102,10 +157,15 @@ Configuration below. A one room session by hand, with a room id of 26 characters
 
 ```
 ROOM=PAI7J75R52MFNAJYKHRT4H3HGJ
-PEER=$(curl -s -X POST http://127.0.0.1:8787/v1/room/$ROOM/join | sed 's/.*"peer":"\([^"]*\)".*/\1/')
+PEER=$(curl -s -X POST http://127.0.0.1:8787/v2/room/$ROOM/join -d '{"mode":"create"}' | sed 's/.*"peer":"\([^"]*\)".*/\1/')
 curl -sN "http://127.0.0.1:8787/v1/room/$ROOM/down?peer=$PEER" &   # the receiving side
 curl -s -X POST "http://127.0.0.1:8787/v1/room/$ROOM/up?peer=$PEER" --data-binary '{"m":1}'
 ```
+
+A second peer is `-d '{"mode":"join"}'` on the same `/v2` route, and it is refused with
+`{"error":"room_unknown"}` if the room above was never created. `POST /v1/room/$ROOM/join` with no
+body still works and still creates the room implicitly, which is the one thing to be careful about
+when you are probing by hand: a mistyped room id on `/v1` answers `200`, not `404`.
 
 The selftest drives the whole contract in process on an ephemeral loopback port and prints a
 PASS/FAIL table; the exit code is non-zero when any case fails:
@@ -116,15 +176,27 @@ echo $?     # 0 = all cases passed, 1 = a case failed
 ```
 
 It uses a compressed limit set so the run takes seconds instead of minutes: idle timeout 6 s,
-heartbeat 1 s, peer queue 256 KiB, everything else at its default. The mechanics under test are
-the same ones the defaults use. The set printed in the run header is authoritative for the run.
-The selftest never reads `appsettings.json` and never reads the environment: its limit set is
+heartbeat 1 s, peer queue 256 KiB, the join brake effectively off, and one ledger file per test
+process in the temporary directory, so a run never writes into the working tree and never inherits
+a ledger a previous run left behind. Everything else is at its default, and the mechanics under
+test are the same ones the defaults use. The set printed in the run header is authoritative for the
+run. The selftest never reads `appsettings.json` and never reads the environment: its limit set is
 hard-coded, so a run is deterministic whatever sits next to the binary.
+
+Three cases cannot be tested on one relay with one limit set - the brake, the ledger cap and the
+idle teardown each need limits the other cases would be flaky under - so those three start their
+own relay on their own port with their own ledger file, and the case says so in its comment.
 
 | Selftest case | Contract bullet it covers |
 | --- | --- |
 | healthz shape | `GET /healthz` status, content type and the exact key set `ok,rooms,peers,uptimeMs`; join moves `peers` and `rooms` by one |
 | join: valid id, invalid ids, peer cap | 200 + 8 hex chars; 404 for 25/27 chars, lowercase, `0`, punctuation, empty; 429 at `--max-peers-per-room` |
+| join v2: an unknown room is refused and creates nothing | `mode=join` on a room nobody created is 404 `room_unknown`, hands out no peer id and reports no creation; healthz moves neither counter; the same id is accepted the moment `create` records it, and the `join` that follows reports `created:false` |
+| join v2: a missing or bad mode is refused | 400 `bad_mode` for a missing mode, an unknown one, an empty body and a malformed one; 413 `body_too_large` over the 256-byte cap; no room and no peer from any refusal |
+| join v1: still creates, and the room it made is joinable after its peers | `/v1` creates and returns `{peer}`; a `/v2` `join` enters that room; once both peers idle out the live room is gone (0 rooms, 0 peers) and the `join` still succeeds, because the record outlived them |
+| room records survive a reload and age out | the ledger file is written and read back by a fresh instance (a restart does not forget a room); a record whose last use is past the TTL stops being a room, for every record, and loading prunes what it read |
+| join routes are rate limited per source | on a relay whose brake is on: two joins in a row are allowed, the third is 429 `rate_limited` - including one that would otherwise have been answered - and the bucket refills after its window |
+| room records are capped | on a relay with a 4-record ledger: exactly `--max-room-records` creates are accepted and the one over the cap is 429 `too_many_rooms` |
 | up forwards verbatim to peers, never to the sender | fan-out to the second peer, exclusion of the sender, `text/event-stream`, `Cache-Control: no-store`, heartbeat |
 | CR, LF and empty bodies are refused | 400 on CR, LF, trailing LF and empty body; nothing reaches the room; the stream still works after |
 | oversize body is refused | 202 at exactly `--max-frame-bytes`, 413 one byte over |
@@ -142,7 +214,7 @@ not observable over the wire; the selftest asserts the observable half (`text/ev
 
 ## Configuration
 
-Nine settings. Each has one flag, one environment variable and one `appsettings.json` key, and
+Fourteen settings. Each has one flag, one environment variable and one `appsettings.json` key, and
 they resolve **per key**, highest source first:
 
     command line  >  environment variable  >  appsettings.json  >  built-in default
@@ -163,6 +235,11 @@ the file provider, so it wins where both name the same key) and the flags are fo
 | `Relay:PeerQueueBytes` | `--peer-queue-bytes` | `Relay__PeerQueueBytes` | `4194304` | 1024..1099511627776 |
 | `Relay:IdleTimeoutSeconds` | `--idle-timeout-seconds` | `Relay__IdleTimeoutSeconds` | `90` | 1..86400 |
 | `Relay:HeartbeatSeconds` | `--heartbeat-seconds` | `Relay__HeartbeatSeconds` | `15` | 1..3600 |
+| `Relay:RoomRecordTtlDays` | `--room-record-ttl-days` | `Relay__RoomRecordTtlDays` | `30` | 1..3650 |
+| `Relay:MaxRoomRecords` | `--max-room-records` | `Relay__MaxRoomRecords` | `1024` | 1..1000000 |
+| `Relay:RoomRecordsFile` | `--room-records-file` | `Relay__RoomRecordsFile` | `rooms.json` | a non-empty file name |
+| `Relay:JoinRatePerSecond` | `--join-rate-per-second` | `Relay__JoinRatePerSecond` | `1` | 0.001..1000000 |
+| `Relay:JoinRateBurst` | `--join-rate-burst` | `Relay__JoinRateBurst` | `5` | 1..1000000 |
 
 The key is the PascalCase of the flag name and the environment form replaces every `:` with `__`
 (the standard ASP.NET mapping), which is the whole mapping: `--max-peers-per-room` is
@@ -173,6 +250,15 @@ accepted. `--selftest` and `--help` are not settings.
 an operator can trade a longer run of back-to-back posts against a shorter one. Keep
 `Relay:HeartbeatSeconds` well below `Relay:IdleTimeoutSeconds`, and keep the reverse proxy's read
 timeout well above `Relay:HeartbeatSeconds`.
+
+`Relay:JoinRateBurst` and `Relay:JoinRatePerSecond` are the join brake, per source address; they
+are separate from the frame rate above on purpose, because they bound a different thing (see the
+join contract). `Relay:RoomRecordsFile` is resolved beside the executable the way `appsettings.json`
+is - a relative name, not a relative path - so the ledger of which rooms exist lands in the
+directory holding the binary unless you root it (`--room-records-file /var/lib/spinney/rooms.json`).
+The process needs write access to that directory. If it does not have it, the relay starts, logs
+`room records could not be written …`, and keeps the records in memory only, which means a restart
+forgets every room until a publisher connects again.
 
 `appsettings.json` in this folder is the file that ships: the project copies it to the output and
 the publish directory, and its values are the built-in defaults, so installing it changes nothing.
@@ -245,7 +331,9 @@ integers and hex.
 ## Deployment run-book (VPS)
 
 Terminate TLS in a reverse proxy and keep the relay on loopback. The relay itself speaks plain
-HTTP only: it has no TLS, no auth and no per-IP rate limit of its own.
+HTTP only: it has no TLS, no auth, and no per-IP limit of its own on frames. The join routes are
+the one address-keyed exception, and it is a brake on token guessing rather than a substitute for
+the proxy's own limits.
 
 1. Install the binary and a service account.
 
@@ -259,6 +347,15 @@ HTTP only: it has no TLS, no auth and no per-IP rate limit of its own.
    unusual for a configuration file. If you would rather keep configuration in `/etc`, pass the
    values as systemd `Environment=` lines instead - see the unit below.
 
+   The ledger of which rooms exist (`rooms.json`) is resolved the same way, so the unit below
+   passes `--room-records-file /var/lib/spinney/rooms.json` and creates that directory with
+   `StateDirectory=spinney`. A ledger left beside the executable is the thing to avoid:
+   `/usr/local/bin` is read-only under `ProtectSystem=strict`, so the relay logs
+   `room records could not be written` and forgets every room on the next restart. A ledger on a
+   `tmpfs`, or inside `PrivateTmp`, is forgotten by every restart just as silently.
+   `Environment=Relay__RoomRecordsFile=…` is the equivalent when you configure through the
+   environment.
+
 2. Run it under systemd (`/etc/systemd/system/spinney-relay.service`):
 
    ```ini
@@ -268,9 +365,10 @@ HTTP only: it has no TLS, no auth and no per-IP rate limit of its own.
    Wants=network-online.target
 
    [Service]
-   ExecStart=/usr/local/bin/spinney-relay --urls http://127.0.0.1:8787
+   ExecStart=/usr/local/bin/spinney-relay --urls http://127.0.0.1:8787 --room-records-file /var/lib/spinney/rooms.json
    User=spinney
    Group=spinney
+   StateDirectory=spinney
    Restart=always
    RestartSec=2
    NoNewPrivileges=true
@@ -291,7 +389,11 @@ HTTP only: it has no TLS, no auth and no per-IP rate limit of its own.
    ```
 
    The unit binds a port above 1024, so no capability is needed. `Restart=always` is safe: the
-   relay holds no state, so a restart only costs the live connections (clients reconnect).
+   relay's only durable state is the ledger of room ids, which it writes as it goes, so a restart
+   costs the live connections (clients reconnect) and nothing else. Look for
+   `room records: N loaded from …` in the journal to confirm the ledger was found: when that line
+   says `0`, or a `room records could not be read` error follows it, every replica is refused until
+   a publisher connects again.
 
    Two things that bite during setup, both measured rather than guessed:
 
@@ -394,13 +496,17 @@ HTTP only: it has no TLS, no auth and no per-IP rate limit of its own.
 ## Observability
 
 Logged (counts and lifecycle only): startup and the effective limits, room created/destroyed with
-the live room count, peer joined/left/dropped with the room's peer count, request failures as
-status + method + route template.
+the live room count, peer joined/left/dropped with the room's peer count, the room records as they
+are loaded, created, aged out, capped or refused, and request failures as status + method + route
+template.
 
-Never logged: a frame body, a request or query string, a room id in full, a peer id. A room id
-appears only as an 8-hex-character SHA-256 tag, which is what lets an operator correlate the lines
-of one room without the log holding a credential. The `--selftest` run asserts this against every
-room id and peer id it used.
+Never logged: a frame body, a request or query string, a room id in full, a peer id, a source
+address. A room id appears only as an 8-hex-character SHA-256 tag, which is what lets an operator
+correlate the lines of one room without the log holding a credential. The `--selftest` run asserts
+this against every room id and peer id it used.
+
+The ledger file path *is* logged - it is the one path an operator has to know about, and it holds
+no credential - but not the ids inside it.
 
 `Microsoft.AspNetCore` logging is filtered to Warning, because the framework's own request logging
 would print the request path - and the path holds the room id.
@@ -411,24 +517,26 @@ would print the request path - and the path holds the room id.
 | --- | --- |
 | `Program.cs` | entry point: parse, dispatch to selftest or host, load the file before the host exists |
 | `CommandLine.cs` | flag parsing, key-by-key precedence resolution, usage text, limit summary |
-| `RelayKeys.cs` | the nine settings in one place: key, flag, environment form, accepted range, and raw-value parsing |
+| `RelayKeys.cs` | the fourteen settings in one place: key, flag, environment form, accepted range, and raw-value parsing |
 | `ConfigurationSources.cs` | the `appsettings.json` and environment layers, and their error shaping |
-| `Limits.cs` | the limit values, defaults, selftest set |
+| `Limits.cs` | the limit values, defaults, selftest sets |
 | `appsettings.json` | the shipped configuration file: the defaults, documented by being them |
-| `RelayApp.cs` | host wiring, logging providers, request-error middleware |
+| `RelayApp.cs` | host wiring, logging providers, request-error middleware, ledger load and final flush |
 | `RelayEndpoints.cs` | the route table |
-| `HealthEndpoint.cs`, `JoinEndpoint.cs`, `DownEndpoint.cs`, `UpEndpoint.cs` | one route family each |
-| `HttpJson.cs` | the small JSON writer and the route/query readers |
-| `JsonContracts.cs` | response records and the source-generated `JsonSerializerContext` |
-| `RoomRegistry.cs` | room/peer admission, eviction, drop, counts |
+| `HealthEndpoint.cs`, `JoinEndpoint.cs`, `JoinV2Endpoint.cs`, `DownEndpoint.cs`, `UpEndpoint.cs` | one route family each |
+| `HttpJson.cs` | the small JSON writer and the route/query/source-address readers |
+| `JsonContracts.cs` | response records, the join body and ledger records, and the source-generated `JsonSerializerContext` |
+| `RoomRegistry.cs` | room/peer admission, the join modes, eviction, drop, counts |
 | `Room.cs` | one room's peer set and its admission cap |
+| `RoomRecords.cs` | which rooms exist: the ledger in memory and in its file, its TTL and its cap |
+| `JoinLimiter.cs` | the per-source-address brake on the join routes |
 | `Peer.cs` | one peer's liveness, bounded queue, bucket and down-stream lifetime |
 | `PeerOutbox.cs` | the byte-bounded outbound queue |
-| `TokenBucket.cs` | the per-peer rate limit |
+| `TokenBucket.cs` | the per-peer (and per-address) rate limit |
 | `RoomId.cs`, `Ids.cs` | room-id validation, peer-id generation |
 | `FrameReader.cs` | read one up body, refuse CR/LF, empty or oversize, render the SSE line |
 | `RelayLog.cs` | source-generated log events, and the room-id tag |
-| `RelaySweeper.cs` | the 1 s eviction/teardown sweep |
+| `RelaySweeper.cs` | the 1 s sweep: eviction, teardown, record aging, quiet join sources |
 | `SelfTest.cs`, `SelfTestCases.cs`, `SelfTestFixture.cs`, `SseTestClient.cs`, `SilentDown.cs`, `Check.cs`, `RecordingLoggerProvider.cs` | the in-process contract run and its helpers |
 
 No reflection, no dynamic code, no `System.Text.Json` without the source-generated context, no
@@ -467,8 +575,9 @@ Verified on this machine (.NET SDK 10.0.201, zig 0.16.0 on PATH, Windows x64):
 ## Security
 
 - The relay learns traffic shape and room ids: how many peers a room has, how large the frames are,
-  how often they flow. It learns nothing about their content, because it never parses one. If that
-  metadata matters, run your own relay; that is what self-hosting is for.
+  how often they flow. It learns nothing about their content, because it never parses one. It also
+  now **stores** which room ids exist, in the ledger file, until each ages out. If that metadata
+  matters, run your own relay; that is what self-hosting is for.
 - The room id is the credential. Anyone who knows it can join the room, read every frame and inject
   their own. Treat it like a password: share it over a channel you already trust, and rotate by
   starting a new room. 26 characters of base32 is 130 bits, so it is not guessable, but it is not
@@ -478,10 +587,15 @@ Verified on this machine (.NET SDK 10.0.201, zig 0.16.0 on PATH, Windows x64):
 - End-to-end confidentiality is the client's job. The relay is a byte pipe by design, so the frames
   should already be encrypted and authenticated by the peers; the relay's guarantees end at "the
   bytes arrived".
+- **`/v2`'s mode is not a security boundary.** `mode=create` is open to anyone, and the relay
+  cannot tell a phone from a desktop: whoever holds the token *is* the room. What `mode=join` buys
+  is a legible answer, not a closed door.
 - What the relay resists on its own: SSE injection (CR/LF refusal makes a forged event line
-  impossible), oversize bodies, per-peer floods (token bucket), one peer starving the others
-  (bounded queues drop the slow peer), and a socket held open forever (idle eviction).
-- What it does not: `join` is not rate limited, so an attacker can fill `--max-rooms` with empty
-  rooms and deny new rooms for up to the idle timeout; cap it at the proxy if that matters. There
-  is no ban list, no IP allowlist, no per-IP concurrency limit; do those at the proxy or the
-  firewall.
+  impossible), oversize bodies, per-peer floods (token bucket), repeated joins from one address
+  (the join brake), one peer starving the others (bounded queues drop the slow peer), and a socket
+  held open forever (idle eviction).
+- What it does not: `room_unknown` is an answer a candidate token can be tested against, so the
+  join routes are an oracle - a priced one, since each guess costs the asker 600000 PBKDF2
+  iterations and the brake slows the asking down, but an oracle all the same. An attacker can still
+  fill `--max-rooms` with rooms and `--max-room-records` with records and deny new ones. There is no
+  ban list, no IP allowlist, no per-IP concurrency limit; do those at the proxy or the firewall.

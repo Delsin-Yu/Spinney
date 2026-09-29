@@ -412,22 +412,23 @@ A stalled request is bounded. Spinney waits 20 s for the first byte, 20 s for th
 
 ### 10.2 The card buttons
 
-A finished card can carry one of three buttons. The button depends on the state of the node.
+A card can carry one of three buttons, or two of them at once. The buttons depend on the state of the node.
 
 | Node state | Button | What it does |
 |---|---|---|
 | `interrupted` | **▶ Continue** | Sends a harness message and resumes the turn in the same card. The partial output stays. |
 | `error` | **↻ Retry** | Sends a harness message and runs the turn again from that node. The partial output of the failed turn is discarded. |
-| `interrupted` or `error`, context at or above 90% | **⧉ Continue in a new window** | Offers a new context window. The tooltip shows the percentage. See section 10.3. |
+| `error`, context at or above 90%, but not full | **↻ Retry** and **⧉ Continue in a new window** | Two buttons. Retry runs the turn again in this window. The other one offers a new window. Its tooltip shows the percentage. See section 10.3. |
+| `interrupted`, context at or above 90% | **⧉ Continue in a new window** | Offers a new context window. The tooltip shows the percentage. See section 10.3. |
 | `error`, context full | **⧉ Continue in a new window** | Starts a new context window. The window can be full by tokens or by image bytes. See section 10.3. |
 
-The button carries the work. You do not type the instruction yourself.
+A button carries the work. You do not type the instruction yourself.
 
 ### 10.3 A full context window
 
 A context window is full when the provider answers with a context-length error. A request also carries its images as uploaded bytes, and the provider caps these bytes at 200 MB for one request. A refusal for that reason is also a full window. For example, the message reads `Total image size exceeds the limit: max 200 MB per request, got 203 MB`. Spinney does not guess a limit from the `ctx` readout. The card shows a **⚠️** message, and the button becomes **⧉ Continue in a new window**.
 
-Spinney offers this button before a failure too. A card whose turn ended without an answer offers it from about 90% of the `contextWindow` of the card. The tooltip carries the number, for example `Context 93% full - continue in a new window`. This offer is a suggestion, not a repair. Nothing failed yet.
+Spinney offers this button before a failure too. A card whose turn ended without an answer offers it from about 90% of the `contextWindow` of the card. The tooltip carries the number, for example `Context 93% full - continue in a new window`. This offer is a suggestion, not a repair. Nothing failed, so the button stands alone. A card that failed at or above 90% shows it beside **↻ Retry** instead: the provider refused nothing, so both actions stay open.
 
 In both cases, Spinney asks which setup the new node must start with (section 3.4):
 
@@ -506,6 +507,7 @@ Every command lives in the Command Palette under `Spinney: `.
 | `Spinney: Reload Chat Webview` | Builds the chat tab again from the state of the session. |
 | `Spinney: Test Web Search Backends` | Sends one test query to every search backend, and opens a table of the results. |
 | `Spinney: Manage Remote Rooms` | Adds, changes and removes rooms, and their tokens. See section 20. |
+| `Spinney: Show Room Pairing Code` | Shows the room token as a QR code that a phone can read. See section 20.8. |
 | `Spinney: Open the Remote Session` | Opens a copy of a session that another window publishes. |
 | `Spinney: Send a Message to a Remote Session…` | Sends one message into a session on another machine. |
 | `Spinney: Stop the Remote Session` | Stops the turn of a session on another machine. |
@@ -668,6 +670,12 @@ Spinney does not run a relay. Use your own: this project ships the source of a r
 5. Type the token. Give every machine in the room the same token.
 6. In the message `Remote control is off — no window publishes itself until you enable it.`, click **Enable remote control**.
 
+Every room also has an id. Spinney derives the id from the token alone. Two machines with the same token derive the same id. A different token derives a different id, so those machines are in two different rooms. The status bar shows the first eight characters of the id (section 20.7). Compare those characters on the two machines. Equal characters mean one room and one token. If the characters differ, set the same token on both machines.
+
+To give the token to a phone without typing it, show the pairing code (section 20.8).
+
+The relay keeps a record of the rooms that exist. The first window that connects with a token creates the room that the token names. The relay keeps the record for 30 days by default. A window that created a room reports it (section 20.7).
+
 Spinney keeps the token in the secret storage of the operating system, one entry per room. The token never goes into `settings.json`.
 
 The same command changes a room that exists: **Connect** and **Disconnect** set `autoConnect`, **Rename…** moves the token with the name, **Set token…** and **Clear token** change the secret, **Copy room name** copies the label, and **Remove** deletes the room and its token.
@@ -707,6 +715,7 @@ A window in one room shows that room open. A window in two or more rooms starts 
 | Connect a room | Right-click the room row, then `Spinney: Connect this Room`. It connects the room in every window that holds the token. |
 | Disconnect a room | Right-click the room row, then `Spinney: Disconnect this Room`. |
 | Edit the rooms | Right-click the room row, then `Spinney: Manage Remote Rooms`. |
+| Show the pairing code | Right-click the room row, then `Spinney: Show Room Pairing Code`. See section 20.8. |
 | Focus the tree | Click the status bar item, or run `Spinney: Focus the Room Tree`. |
 
 `Spinney: Send a Message to a Remote Session…` opens one input box. The turn runs in that window, on that machine. The session does not have to be open anywhere.
@@ -759,10 +768,49 @@ The one way to remove a device from a room is a new token. Set the new token on 
 
 ### 20.7 The status bar item, and how to turn the feature off
 
-While the feature is on and a room exists, the status bar shows one item. It holds a tower, the name of the room, and the number of peers, for example `home · 2 peers`. With two or more rooms it shows `2 rooms · 3 peers` instead. The tooltip names each room and its state, and it adds `Not connected.` while no room is online. A click on the item focuses the room tree.
+While the feature is on and a room exists, the status bar shows one item. The item holds a tower, the name of the room, the first eight characters of the room id, and the number of peers. For example: `home · room LTKXZ4EW… · 2 peers`. With two or more rooms the item shows `2 rooms · 3 peers` instead, and no room id. A click on the item focuses the room tree.
+
+The tooltip of the item names every room, its state, and its full 26-character id, for example `home: online · room LTKXZ4EW52MFNAJYKHRT4H3HGJ`. It adds `Not connected.` while no room is online.
+
+The tooltip also reports two facts that a user can act on.
+
+- Your window created the room on that relay. The line is `Room {0} was created just now: no other device had used this token on this relay. If you expected to find a room here, that device holds a different token.` Read that line. It is the one warning that the other machine holds a different token.
+- The relay is older than this window, so it does not answer the new join route. The line is `This relay does not answer /v2 joins yet: it is older than this window, so it cannot tell a room that does not exist from one that is merely empty. Update the relay.` The window does not join the room while that line is there. Update the relay.
+
+Turn the feature off in one of these ways.
 
 1. Set `spinney.remote.enabled` to `false` to stop every room of this window at once. The **Remote Rooms** view and the status bar item go away.
 2. Or right-click one room row and run `Spinney: Disconnect this Room` to stop that room alone.
 
 The rows of the rooms stay in `spinney.remote.rooms`, and the tokens stay in the secret storage. Nothing is published while the feature is off. To delete a room and its token, run `Spinney: Manage Remote Rooms` and pick **Remove**.
+
+### 20.8 Pair a phone with a QR code
+
+A phone gets a room from a picture. The desktop shows the room as a QR code, and the phone reads that code out of a photo. The token goes from the screen, through the camera, and into the phone. It never goes through the relay.
+
+Run **`Spinney: Show Room Pairing Code`** from the Command Palette. The command is also in the menu of a room row: right-click the room row in the **Remote Rooms** view.
+
+Spinney reads the token of the room and builds one pairing string. It draws the string as a QR code, writes the image into its own storage, and opens the image in an editor tab.
+
+The image carries three facts: the relay address of the room, the room name, and the room token. Spinney then shows one message:
+
+`This code contains the token of room "{0}": anyone who photographs it can control the room, so show it to the device you are pairing and close it afterwards.`
+
+Read that message. The image is as secret as the token itself, because the image carries the token. Show the image to the phone that you pair, and to no other device. Close the tab after the pairing.
+
+The file name is fixed. A new pairing overwrites the image of the pairing before it.
+
+With more than one room, Spinney asks which room to pair. The description of each row is the relay URL, never the token.
+
+On the phone, take a photo of the code, then pick that photo in the app. The phone reads the three facts out of the photo. The photo comes from the photo app of the phone, so the Spinney app needs no camera permission.
+
+Spinney refuses the command in three cases.
+
+| Situation | Message |
+|---|---|
+| The room has no relay URL | `Room "{0}" has no relay URL, so a device paired with it would have nowhere to connect.` |
+| The room has no token | `Room "{0}" has no token yet, so there is nothing to pair.` |
+| The token cannot go into a QR code | `The token of room "{0}" cannot be encoded for a QR code.` |
+
+With no room at all, the message is `No remote room is configured yet — add one with "Spinney: Manage Remote Rooms".`
 

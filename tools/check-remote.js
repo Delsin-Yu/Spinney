@@ -1,10 +1,11 @@
 /*
  * check-remote — the transport-independent core of remote control, as a build-time guard.
  *
- * WHAT IT GUARDS. `src/remote/rooms.ts`, `src/remote/frames.ts` and
- * `src/remote/allowlist.ts` are the half of the feature that has no socket in it: the key
- * schedule, the frame envelope (seal / slice / reassemble / open), the replay window and
- * the two deny-by-default message tables. None of that is visible in the UI when it goes
+ * WHAT IT GUARDS. `src/remote/rooms.ts`, `src/remote/frames.ts`, `src/remote/allowlist.ts` and
+ * `src/remote/pairing.ts` are the half of the feature that has no socket in it: the key
+ * schedule, the frame envelope (seal / slice / reassemble / open), the replay window, the two
+ * deny-by-default message tables and the payload that carries the token to a second device.
+ * None of that is visible in the UI when it goes
  * wrong — a wrong HKDF `info` string or a shifted nonce still "works" against itself and
  * only breaks when a *second* implementation (the C# relay's peers, the Kotlin app) or a
  * *later* release talks to this one. So the contract is pinned here, in the open, by value:
@@ -27,7 +28,18 @@
  *      `openExternal`, `pickImage`, `openModelTree` and `ready` are refused, `userMessage`
  *      and `stop` are accepted, and an unknown type is refused in both directions;
  *   8. `remote/vectors/vectors.json` — **when it exists and carries the post-fix shape** —
- *      every derivation, every sealed frame and every slice set reproduced from the file.
+ *      every derivation, every sealed frame and every slice set reproduced from the file;
+ *   9. the **pairing payload** (`pairing.ts`) — the three shared vectors by literal (the same
+ *      strings the Kotlin tests assert), read back through a strict RFC 3986 `%XX` decoder
+ *      rather than a form decoder, plus the refusals (empty relay/room/token, an unpaired
+ *      surrogate). The `+`/`%20` trap lives here: a literal `+` must leave as `%2B`, and a
+ *      space as `%20`, or the phone joins a different room;
+ *  10. the **summary that rides the tree** (`src/chat/runtime.ts`) — the row builder of
+ *      `treeMessage` / `postPath` is one builder, a finished turn's row is its two chosen
+ *      items plus `summary: true` plus its true `itemCount`, a **running** turn's row keeps
+ *      the fields it had, and the on-demand `nodeItems` answer stays the whole log. This one
+ *      is read as **source text** rather than as a compiled module, and section 11 says
+ *      exactly what that can and cannot prove.
  *
  * The vectors file is written by the M0 milestone (`docs/agents/plans/remote-control.md`
  * §10-12) and may not be there yet: its absence is reported, never failed. The same is
@@ -51,6 +63,7 @@ const OUT = {
   rooms: path.join(root, 'out', 'remote', 'rooms.js'),
   frames: path.join(root, 'out', 'remote', 'frames.js'),
   allowlist: path.join(root, 'out', 'remote', 'allowlist.js'),
+  pairing: path.join(root, 'out', 'remote', 'pairing.js'),
 };
 for (const [name, file] of Object.entries(OUT)) {
   if (!fs.existsSync(file)) {
@@ -61,6 +74,7 @@ for (const [name, file] of Object.entries(OUT)) {
 const rooms = require(OUT.rooms);
 const frames = require(OUT.frames);
 const allowlist = require(OUT.allowlist);
+const pairing = require(OUT.pairing);
 
 const problems = [];
 let checks = 0;
@@ -524,7 +538,7 @@ fails('a window width below 1 is refused', () => new frames.ReplayWindow(0), fra
 // ---------------------------------------------------------------------------------------
 console.log('-- allowlist: deny by default, in both directions --');
 
-const CONTROL = ['userMessage', 'forkTurn', 'stop', 'continueTurn', 'rolloverTurn', 'checkout', 'killAgent', 'killBackground', 'deleteBranch', 'loadAgentItems', 'setModel', 'setThinkingEffort'];
+const CONTROL = ['userMessage', 'forkTurn', 'stop', 'continueTurn', 'rolloverTurn', 'checkout', 'killAgent', 'killBackground', 'deleteBranch', 'loadAgentItems', 'loadNodeItems', 'setModel', 'setThinkingEffort'];
 ok('every seeded control type is accepted from a peer', CONTROL.every((type) => allowlist.mayAcceptFromPeer(type)) && allowlist.ACCEPT_FROM_PEER.size === CONTROL.length, `${allowlist.ACCEPT_FROM_PEER.size} type(s)`);
 for (const type of ['perfDiag', 'layoutDiagnostic', 'openExternal', 'pickImage', 'copyNodeId', 'setNodeSize']) {
   ok(`a peer may not submit "${type}"`, !allowlist.mayAcceptFromPeer(type));
@@ -537,7 +551,12 @@ ok('an empty / non-string type is refused', !allowlist.mayAcceptFromPeer('') && 
 ok('every type in MIRROR_TO_PEER may be mirrored', [...allowlist.MIRROR_TO_PEER].every((type) => allowlist.mayMirrorToPeer(type)), `${allowlist.MIRROR_TO_PEER.size} type(s)`);
 ok(
   'the session, the stream and the chrome are on the mirror list',
-  ['state', 'tree', 'path', 'nodeUpdate', 'agentItems', 'reset', 'delta', 'thinkingDelta', 'toolCallDelta', 'toolStart', 'toolEnd', 'usage', 'done', 'interrupted', 'error', 'agentStart', 'agentDone', 'user', 'notice', 'harnessNote', 'backgroundNotice', 'context', 'sessionStats', 'status', 'backgrounds'].every((type) => allowlist.mayMirrorToPeer(type)),
+  ['state', 'tree', 'path', 'nodeUpdate', 'agentItems', 'nodeItems', 'reset', 'delta', 'thinkingDelta', 'toolCallDelta', 'toolStart', 'toolEnd', 'usage', 'done', 'interrupted', 'error', 'agentStart', 'agentDone', 'user', 'notice', 'harnessNote', 'backgroundNotice', 'context', 'sessionStats', 'status', 'backgrounds'].every((type) => allowlist.mayMirrorToPeer(type)),
+);
+ok(
+  'one node\'s items are a request/answer pair (a peer asks with `loadNodeItems`, the host answers with `nodeItems`)',
+  allowlist.mayAcceptFromPeer('loadNodeItems') && allowlist.mayMirrorToPeer('nodeItems'),
+  'loadNodeItems → nodeItems',
 );
 ok(
   '`config` and `balance` are mirrored whole (the model lists and the owner\'s credit line are session surface)',
@@ -994,6 +1013,275 @@ function pickObject(value, names) {
   }
   return null;
 }
+
+// ---------------------------------------------------------------------------------------
+// 10. pairing: the payload that carries the token to the phone
+// ---------------------------------------------------------------------------------------
+console.log('-- pairing: the three shared vectors, by literal, plus the encoder trap --');
+
+/**
+ * A strict RFC 3986 `%XX` decoder, written here as the Android side is told to write it: the
+ * bytes are percent-decoded first and only then read as UTF-8, and a `+` is a literal plus
+ * (it is refused outright here, because no payload may contain one). The vectors below are
+ * checked through it as well as by literal, so a payload that only round-trips under JS's own
+ * decoder would still fail — the phone's decoder is the one that has to agree.
+ */
+function strictDecode(value) {
+  const bytes = [];
+  for (let i = 0; i < value.length; i++) {
+    const char = value[i];
+    if (char === '%') {
+      bytes.push(parseInt(value.slice(i + 1, i + 3), 16));
+      i += 2;
+    } else {
+      if (char === '+') {
+        throw new Error('strictDecode: a bare + is not a space in RFC 3986');
+      }
+      bytes.push(char.charCodeAt(0));
+    }
+  }
+  return Buffer.from(bytes).toString('utf8');
+}
+
+const PAIRING_VECTORS = [
+  {
+    relayUrl: 'https://relay.example.com:8787',
+    roomName: 'home + lab',
+    token: 'a b+c/d?',
+    // The trap, in one literal: the space is %20 (never a bare +), and the literal + is %2B.
+    payload:
+      'spinney-pair:1?relay=https%3A%2F%2Frelay.example.com%3A8787&room=home%20%2B%20lab&token=a%20b%2Bc%2Fd%3F',
+  },
+  {
+    relayUrl: 'http://120.79.122.240:8787',
+    roomName: 'home',
+    token: 'spinney-emulator-token-01',
+    payload: 'spinney-pair:1?relay=http%3A%2F%2F120.79.122.240%3A8787&room=home&token=spinney-emulator-token-01',
+  },
+  {
+    relayUrl: 'https://relay.example.com',
+    roomName: '\u623f\u95f4',
+    token: '\u53e3\u4ee4 a',
+    payload:
+      'spinney-pair:1?relay=https%3A%2F%2Frelay.example.com&room=%E6%88%BF%E9%97%B4&token=%E5%8F%A3%E4%BB%A4%20a',
+  },
+];
+
+for (const [index, vector] of PAIRING_VECTORS.entries()) {
+  const label = `vector ${index + 1}`;
+  const payload = pairing.buildPairingPayload(vector);
+  ok(`${label}: the payload is the literal both sides assert`, payload === vector.payload, payload);
+  ok(`${label}: no bare + or space is ever emitted`, !/[ +]/.test(payload), payload.slice(payload.indexOf('?')));
+  // Through the phone's decoder: the three values come back exactly as they went in, which is
+  // the property a form-style decoder would break on the first vector's `+`.
+  const params = new Map(payload.slice(payload.indexOf('?') + 1).split('&').map((part) => {
+    const cut = part.indexOf('=');
+    return [part.slice(0, cut), strictDecode(part.slice(cut + 1))];
+  }));
+  ok(
+    `${label}: a strict %XX decoder reads relay/room/token back verbatim`,
+    params.get('relay') === vector.relayUrl && params.get('room') === vector.roomName && params.get('token') === vector.token,
+    `[${[...params.keys()].join(', ')}]`,
+  );
+  // UTF-8: the non-ASCII vector above is checked as bytes, not as code units.
+  ok(`${label}: params are the three names, in order`, [...params.keys()].join(',') === 'relay,room,token');
+}
+
+const pairPrefixOk = pairing.PAIRING_PREFIX === 'spinney-pair' && pairing.PAIRING_VERSION === 1;
+ok('the prefix and version are the contract literals', pairPrefixOk, `${pairing.PAIRING_PREFIX}:${pairing.PAIRING_VERSION}`);
+fails('an empty relay is refused (the phone refuses an empty parameter)', () => pairing.buildPairingPayload({ relayUrl: '', roomName: 'home', token: 'x'.repeat(16) }), Error);
+fails('an empty room is refused', () => pairing.buildPairingPayload({ relayUrl: 'https://relay.example.com', roomName: '', token: 'x'.repeat(16) }), Error);
+fails('an empty token is refused', () => pairing.buildPairingPayload({ relayUrl: 'https://relay.example.com', roomName: 'home', token: '' }), Error);
+fails('an unpaired surrogate is refused (it has no UTF-8 bytes)', () => pairing.buildPairingPayload({ relayUrl: 'https://relay.example.com', roomName: 'home', token: 'a\uD800b' }), Error);
+
+// ---------------------------------------------------------------------------------------
+// 11. the payload: a summary always rides the tree, the full log arrives on demand
+// ---------------------------------------------------------------------------------------
+console.log('-- the tree/path summary, read off `src/chat/runtime.ts` --');
+
+/**
+ * The one check in this file that reads a **source file** instead of a compiled module, and
+ * it says so plainly rather than pretending otherwise. `SessionRuntime` cannot be built in
+ * this guard: requiring `out/chat/runtime.js` pulls in `vscode`, the agent and the whole
+ * tool registry, which is a lot of machinery to drag into a file whose subject is the
+ * transport — and none of it would make the *row* assertable, because `treeMessage()` needs
+ * a session, a host and a model registry to run at all.
+ *
+ * So what is pinned here is the **shape** of the two builders — the ways the rule gets
+ * undone: a second, hand-built row in one of the two payloads, the flag drifting out of the
+ * builder, a running turn being summarised, an item-less node gaining an empty summary
+ * (which a renderer reads as "this card is rendered" and never fetches the log for), the
+ * on-demand answer being summarised too — **plus the summary's own values**, by running it:
+ * `summaryItems` is a pure function of its argument, so it is evaluated below from this
+ * source text (the trick `tools/check-webview.js` uses on `media/main.js`) and fed fixtures.
+ * What no check here can do is build a *row* (that needs a session, a host and a card), so
+ * `tree` vs `path`, finished vs running, is a source-shape assertion only, and a green run is
+ * not a whole-row measurement. What it must not do is go vacuous: every check below is a
+ * property a wrong change breaks, and the method bodies are extracted by name — a rename is
+ * a FAIL that asks for this file to be updated, never a silent pass.
+ *
+ * The row builder was measured by hand against the compiled runtime (a session with a
+ * four-item finished node, a running one, an empty one, a two-item one and a sub-agent):
+ * the summary is `[first user, last assistant-with-text]` in that order, `summary: true`,
+ * `itemCount: 4`, the running row field for field what it was, and `nodeItems` the whole
+ * log. The renderer's end of the same contract is pinned by the items section of
+ * `tools/check-webview.js`.
+ *
+ * An explicit path argument overrides which source is read, for checking the checker itself
+ * (mutate a copy and watch it fail); the build always reads the repo's own `runtime.ts`.
+ */
+const RUNTIME_SRC = process.argv[2]
+  ? path.resolve(process.argv[2])
+  : path.join(root, 'src', 'chat', 'runtime.ts');
+
+/** The body of method `name` in `source`: the block that opens on the line declaring it. */
+function methodBody(source, name) {
+  const lines = source.split('\n');
+  const at = lines.findIndex((line) => new RegExp(`^\\s*(?:private\\s+)?${name}\\(`).test(line));
+  if (at < 0) {
+    return null;
+  }
+  const rest = lines.slice(at).join('\n');
+  // The opening brace is the one at the end of a line: a multi-line signature's return type
+  // (`): { items?… } {`) keeps its own braces on the inside of that line.
+  const open = rest.indexOf(' {\n');
+  if (open < 0) {
+    return null;
+  }
+  let depth = 0;
+  for (let i = open; i < rest.length; i++) {
+    if (rest[i] === '{') {
+      depth += 1;
+    } else if (rest[i] === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        return rest.slice(open, i + 1);
+      }
+    }
+  }
+  return null;
+}
+
+const runtimeSrc = fs.existsSync(RUNTIME_SRC) ? fs.readFileSync(RUNTIME_SRC, 'utf8').replace(/\r\n/g, '\n') : '';
+const sourceBody = (name) => methodBody(runtimeSrc, name) || '';
+const BODIES = {
+  summaryItems: sourceBody('summaryItems'),
+  nodeRowItems: sourceBody('nodeRowItems'),
+  treeMessage: sourceBody('treeMessage'),
+  postPath: sourceBody('postPath'),
+  postItems: sourceBody('postItems'),
+};
+const missingBodies = Object.keys(BODIES).filter((name) => !BODIES[name]);
+ok(
+  'the summary builder, the row builder and the three row/answer methods are all found',
+  runtimeSrc.length > 0 && missingBodies.length === 0,
+  runtimeSrc.length === 0 ? `${RUNTIME_SRC} is missing` : missingBodies.length ? `not found: ${missingBodies.join(', ')}` : 'src/chat/runtime.ts',
+);
+
+// The flag: emitted once, in one body. Two emissions — in two bodies or twice in one — are
+// two rows that can disagree about what "this is a summary" means.
+const flagSites = Object.entries(BODIES)
+  .filter(([, body]) => /summary:\s*true/.test(body))
+  .map(([name]) => name);
+const flagCount = Object.values(BODIES).reduce((n, body) => n + (body.match(/summary:\s*true/g) || []).length, 0);
+ok(
+  '`summary: true` is emitted exactly once — by the row builder',
+  flagSites.join(',') === 'nodeRowItems' && flagCount === 1,
+  `${flagSites.join(',') || 'nowhere'} ×${flagCount}`,
+);
+
+// The two chosen items: checked **by value**, not by shape. `summaryItems` is a pure
+// function of its argument — the body names nothing but `items` and the one clipper, which
+// is why it can be run here from its own source text, the way `tools/check-webview.js`
+// evaluates `media/main.js` in a DOM stub. The clipper is a spy, so "every returned item went
+// through `clipDisplayItem`" is asserted rather than "the call is somewhere in the body".
+// (A body that stops being self-contained — a `this`, a second import, a type annotation —
+// makes this FAIL and asks for the section to be updated; it never silently stops checking.)
+const summarize = (() => {
+  try {
+    return new Function('clipDisplayItem', `return function summaryItems(items) ${BODIES.summaryItems}`)((item) => ({ ...item, clipped: true }));
+  } catch (err) {
+    return null;
+  }
+})();
+ok(
+  'the summary builder runs from its own source (it names nothing but its argument and the clipper)',
+  typeof summarize === 'function',
+  typeof summarize === 'function' ? 'evaluated' : `it no longer does (${BODIES.summaryItems ? 'the body changed shape' : 'not found'}) — update this section`,
+);
+if (typeof summarize === 'function') {
+  // One `try` around the fixtures: a body that throws when it runs (a call into something
+  // this guard did not pass in) is a FAIL of this section, never the death of the run —
+  // every later check in this file has to still happen.
+  try {
+    const ask = { kind: 'user', text: 'the ask' };
+    const firstAnswer = { kind: 'assistant', text: 'a first answer' };
+    const tool = { kind: 'tool', name: 'read_file', args: 'a', content: 'x'.repeat(64) };
+    const finalAnswer = { kind: 'assistant', text: 'the final result' };
+    const picked = summarize([ask, firstAnswer, tool, finalAnswer]);
+    ok(
+      'a finished log summarises to [first user, last assistant], in that order, each clipped',
+      Array.isArray(picked) &&
+        picked.length === 2 &&
+        picked[0].text === 'the ask' &&
+        picked[1].text === 'the final result' &&
+        picked.every((item) => item.clipped === true),
+      JSON.stringify((picked || []).map((item) => item.text)),
+    );
+    ok(
+      'a later `user` item is not the ask (the first one is)',
+      summarize([ask, { kind: 'user', text: 'a second ask' }, firstAnswer, tool, finalAnswer])?.[0]?.text === 'the ask',
+    );
+    // The text-less assistant item sits *last* on purpose: it is the one case where "the last
+    // assistant item" and "the last assistant item with text" pick different items.
+    ok(
+      'an assistant item with no text is not the answer (the last one WITH text is)',
+      summarize([ask, firstAnswer, { kind: 'assistant', text: '', thinking: 'x' }])?.[1]?.text === 'a first answer',
+    );
+    ok('an empty node gains no summary at all (it must not read as a rendered card)', summarize([]) === undefined);
+    ok(
+      'a node with items but neither half gains no summary (no empty summary row)',
+      summarize([{ kind: 'notice', text: 'n' }, { kind: 'tool', name: 't' }]) === undefined,
+    );
+    ok(
+      'a pair that would be the whole log gains no summary (nothing is fetched twice)',
+      summarize([ask, finalAnswer]) === undefined && summarize([ask]) === undefined,
+    );
+    ok(
+      'with one half missing the other still rides (the ask alone is worth the row)',
+      summarize([ask, tool, tool])?.length === 1 && summarize([tool, finalAnswer])?.[0]?.text === 'the final result',
+    );
+    ok(
+      'the clipper is the only one (`clipDisplayItem`, never a second text cap)',
+      /picked\.map\(clipDisplayItem\)/.test(BODIES.summaryItems),
+    );
+  } catch (err) {
+    ok('the summary builder runs its fixtures without throwing', false, err && err.message);
+  }
+}
+
+// A running turn: never summarised, and its row keeps the fields it had (no `items` in the
+// tree, no `itemCount` on a non-agent row — its card is filled by its own stream).
+ok('a running turn is never summarised (`status !== \'running\'` gates the summary)', /const finished = node\.status !== 'running';/.test(BODIES.nodeRowItems) && /\bsummary = finished\b/.test(BODIES.nodeRowItems));
+ok('a running row falls back to the fields it always had', /finished \|\| node\.kind === 'agent' \? \{ itemCount: all\.length \} : \{\}/.test(BODIES.nodeRowItems) && /finished \? \{ items, itemCount: all\.length \} : \{ items \}/.test(BODIES.nodeRowItems));
+// `itemCount` for every finished node, not only a sub-agent's: the old agent-only
+// expression is gone from `treeMessage`, and the count is the node's true `displayItems.length`.
+ok('`itemCount` is the true length on every finished row, not only a sub-agent\'s', /itemCount: all\.length/.test(BODIES.nodeRowItems) && !/node\.kind === 'agent' \? node\.displayItems\.length/.test(BODIES.treeMessage));
+ok('a sub-agent row keeps its own contract (`itemCount` + `loadAgentItems`, no summary)', /node\.kind !== 'agent'/.test(BODIES.nodeRowItems));
+// One builder, both payloads — a row built by hand in either one is the fork this forbids.
+ok('`tree` and `path` spread the same builder', /\.\.\.this\.nodeRowItems\(node, 'tree'\)/.test(BODIES.treeMessage) && /\.\.\.this\.nodeRowItems\(node, 'path'\)/.test(BODIES.postPath));
+// A `path` row that is *not* a summary still ships a log (a node the summary declined, or a
+// running one): an empty `items` there is the same trap as an empty summary — a renderer
+// reads it as a rendered, empty card and never asks for what it has not got.
+ok('a `path` row that is not a summary still carries the clipped log', /const items = all\.map\(clipDisplayItem\);/.test(BODIES.nodeRowItems));
+// The on-demand half: the answer to a card that was expanded is still the whole log, and
+// never the summary — asking is what the summary is for.
+ok('the on-demand answer (`nodeItems` / `agentItems`) stays the whole log', /node\.displayItems\.map\(clipDisplayItem\)/.test(BODIES.postItems) && !/summaryItems|summary:\s*true/.test(BODIES.postItems));
+
+// Not a check — the honest limit of this section, printed so a green run is never read as a
+// whole-row measurement (see the comment above): the summary itself is checked by value, the
+// row that carries it is checked by shape.
+console.log('  [note] source-level: the two chosen items are computed here; the row that carries them (`tree` vs `path`, running vs finished) is pinned by shape only — building a row needs a session and a host.');
 
 // ---------------------------------------------------------------------------------------
 // The verdict. Printed after every check, so a PASS always means "all of them ran".

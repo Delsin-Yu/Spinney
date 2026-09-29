@@ -95,24 +95,3 @@ class SseParser {
         return null
     }
 }
-
-/**
- * §7's two POST/GET targets, built in one place so a URL is never assembled by string
- * concatenation at a call site. The room id is a path segment and therefore a routing
- * credential; it is not escaped because it is base32 by construction (§3).
- */
-object RelayRoutes {
-
-    fun join(relayBaseUrl: String, roomId: String): String = "${base(relayBaseUrl)}/v1/room/$roomId/join"
-
-    fun down(relayBaseUrl: String, roomId: String, peerId: String): String =
-        "${base(relayBaseUrl)}/v1/room/$roomId/down?peer=$peerId"
-
-    fun up(relayBaseUrl: String, roomId: String, peerId: String): String =
-        "${base(relayBaseUrl)}/v1/room/$roomId/up?peer=$peerId"
-
-    fun healthz(relayBaseUrl: String): String = "${base(relayBaseUrl)}/healthz"
-
-    /** A trailing slash in a setting is a typo, not a different host. */
-    private fun base(relayBaseUrl: String): String = relayBaseUrl.trimEnd('/')
-}

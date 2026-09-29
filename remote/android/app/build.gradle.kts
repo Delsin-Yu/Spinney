@@ -55,6 +55,17 @@ dependencies {
     // (`RemoteClient.kt`) so a plain JVM can drive it (`tools/remote-interop.mjs`). OkHttp now
     // arrives transitively with `:core`, which is where it belongs.
 
+    // CameraX: the live "point the phone at the desktop's code" gesture (`CameraScanScreen.kt`).
+    // `camera-view` brings `PreviewView`; `camera-camera2` is the backend, the only one that exists
+    // on the API 26+ devices this app targets and the one that needs no Google Play Services — the
+    // test phone is a Huawei device without them, which is why CameraX and not ML Kit or GMS's
+    // barcode scanner. Every module the screen uses is declared here, none is implied.
+    val camerax = "1.4.1"
+    implementation("androidx.camera:camera-core:$camerax")
+    implementation("androidx.camera:camera-camera2:$camerax")
+    implementation("androidx.camera:camera-lifecycle:$camerax")
+    implementation("androidx.camera:camera-view:$camerax")
+
     // WebViewCompat.addWebMessageListener: the origin-checked, big-payload bridge to the page.
     implementation("androidx.webkit:webkit:1.12.1")
 

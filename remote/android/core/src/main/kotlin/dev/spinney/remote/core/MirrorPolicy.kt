@@ -26,6 +26,8 @@ object MirrorPolicy {
     val MIRROR_TO_PEER: Set<String> = linkedSetOf(
         // Session structure and view focus.
         "state", "tree", "path", "nodeUpdate", "agentItems", "reset",
+        // One card's own body, on demand (`loadNodeItems`): the items live in the owner's session.
+        "nodeItems",
         // One running turn.
         "delta", "thinkingDelta", "toolCallDelta", "toolStart", "toolEnd", "usage", "done",
         "interrupted", "error", "agentStart", "agentDone",
@@ -40,8 +42,11 @@ object MirrorPolicy {
     /** Webview→host types a replica may submit. Mirrors `ACCEPT_FROM_PEER`. */
     val ACCEPT_FROM_PEER: Set<String> = linkedSetOf(
         "userMessage", "forkTurn", "stop", "continueTurn", "rolloverTurn", "checkout",
-        "killAgent", "killBackground", "deleteBranch", "loadAgentItems", "setModel",
-        "setThinkingEffort",
+        "killAgent", "killBackground", "deleteBranch",
+        // The ask for one card's items — the same lazy read `loadAgentItems` is: the items are the
+        // publisher's, so their absence has to be said to it rather than filled in here.
+        "loadAgentItems", "loadNodeItems",
+        "setModel", "setThinkingEffort",
     )
 
     /**

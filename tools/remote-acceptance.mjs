@@ -871,6 +871,10 @@ async function main(argv) {
         roomId: roomKeys.roomId,
         encKey: roomKeys.encKey,
         deviceId,
+        // A member is a replica: it joins the room the window created, and cannot bring one into
+        // being (`PROTOCOL.md` §3, `/v2`'s `mode`). A member that could create rooms would hide
+        // exactly the failure this run is here to see.
+        joinMode: 'join',
         onFrame: (frame) => framesSeen.push({ at: Date.now(), frame }),
         onStatus: () => {},
       });
@@ -1276,6 +1280,7 @@ async function main(argv) {
       roomId: roomKeys.roomId,
       encKey: roomKeys.encKey,
       deviceId: 'remote-acceptance-third',
+      joinMode: 'join', // a member joins the window's room; it does not create one
       onFrame: (frame) => thirdFrames.push(frame),
       onStatus: () => {},
     });

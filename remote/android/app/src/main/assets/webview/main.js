@@ -2945,8 +2945,14 @@
     answerWrap.appendChild(answer);
     const excerpt = el('div', 'node-excerpt');
     excerpt.textContent = meta.preview || meta.title || '';
-    // Order matters: log, answer, collapsed preview — the preview is what a
-    // collapsed card shows *instead* of the two scrollers above it.
+    // The "its content is on its way" strip (see `setCardLoading`): the one place a
+    // card says it is waiting rather than done. It is created with the card and never
+    // rebuilt, its label is the one user-visible string this adds, and the CSS shows it
+    // only on an *expanded* card that is loading — a collapsed card is its preview.
+    const loading = el('div', 'node-loading', tr('Loading…'));
+    // Order matters: loading, log, answer, collapsed preview — the preview is what a
+    // collapsed card shows *instead* of the three things above it.
+    body.appendChild(loading);
     body.appendChild(workWrap);
     body.appendChild(answerWrap);
     body.appendChild(excerpt);
@@ -2982,40 +2988,105 @@
     return card;
   }
 
-  // ---- Lazy sidecar transcripts: only a few requests in flight at once --------
-  // A `kind: 'agent'` node carries no transcript in the `tree` / `path` payload
-  // (only `itemCount`), so each expanded card asks for it once — `_itemsRequested`
-  // is the one-shot contract, and this queue changes only *when* that one request
-  // is posted. A cold repaint re-expands every sidecar card of a session at once,
-  // and that used to fire every request in the same burst: one measured session
-  // (15 sub-agent cards) asked for 152 items each — ~5.35 M chars of answers and
-  // 2692 DOM nodes in one frame, with the webview's handlers stuck at 900–999 ms
-  // while they landed. So the requests are queued: at most
-  // `AGENT_ITEMS_CONCURRENCY` are in flight, and an `agentItems` answer releases
-  // the next one.
+  // ---- Lazy items: only a few requests in flight at once ----------------------
+  // An expanded card whose content is not in hand asks for it once — `_itemsRequested`
+  // is the one-shot contract, and this queue changes only *when* that one request is
+  // posted. Three kinds of card can be left without their log:
+  //
+  //  - a `kind: 'agent'` node ships no transcript in the `tree` / `path` payload (only
+  //    `itemCount`), so its card fetches it with `loadAgentItems`;
+  //  - a **regular** node's items normally ride in the `path`, but a replica never gets
+  //    one: `mirrorTree` answers an `attach` with the structural `tree` and nothing else.
+  //    Every one of its cards used to stay `work:0 ans:0` next to a `preview` that
+  //    promised a full session — the measured symptom on a real phone, three cards, and
+  //    a card with nothing in it is indistinguishable from an empty, finished node. That
+  //    card now asks with `loadNodeItems` and the host answers `nodeItems` (the same
+  //    clipped `displayItems` the `path` would have carried, `SessionRuntime.postItems`).
+  //  - a **finished regular** node's row carries a *summary* of its log instead of the log
+  //    (`summary: true`, see `itemsSource`), on the local surface and the replica alike:
+  //    the card renders what it has, and asks for the rest with that same `loadNodeItems`
+  //    the first time it is expanded. So `_itemsRendered` no longer means "the real items
+  //    are here" on its own — `_itemsSummary` is the other half of that pair, and it is
+  //    what `itemsWanted` reads to keep this request from being dropped as redundant.
+  //    A card the turn's own stream wrote into is not one of these: `_itemsRendered` is set
+  //    where that append lands (`routeTo`), so the summary of a finished row never replaces
+  //    a log that is already on screen, and there is nothing to ask for.
+  //
+  // A burst is what the cap is for. A cold repaint re-expands every sidecar card of a
+  // session at once, and that used to fire every request in the same burst: one measured
+  // session (15 sub-agent cards) asked for 152 items each — ~5.35 M chars of answers and
+  // 2692 DOM nodes in one frame, with the webview's handlers stuck at 900–999 ms while
+  // they landed. A local session switch has the same shape for regular cards (`tree`
+  // first, the `path` that describes them a task later), so all of it is queued: at most
+  // `ITEMS_CONCURRENCY` are in flight, and an answer releases the next one. A summarised
+  // card goes through the same queue: the `path` that lands after the `tree` renders its
+  // summary, which is *not* an answer to the request, so the queue must keep it (see
+  // `itemsWanted`) and post it — while the plain replica card's request is still dropped
+  // unposted the moment a `path` really fills it.
   //
   // Two rules keep the burst honest:
-  //  - a repaint that needs exactly one transcript is not a burst: that request
+  //  - a repaint that needs exactly one *agent* transcript is not a burst: that request
   //    still goes out immediately (the contract the sidecar section of
   //    `tools/check-webview.js` pins);
-  //  - where there *is* a layout (`IntersectionObserver`) only a card the user can
-  //    see is worth a multi-hundred-KB answer: a card that enters the viewport is
-  //    promoted ahead of the queue, and a card that is off-screen is never asked
-  //    for — panning/zooming to it is what makes it ask.
+  //  - where there *is* a layout (`IntersectionObserver`) only a card the user can see
+  //    is worth a multi-hundred-KB answer: a card that enters the viewport is promoted
+  //    ahead of the queue, and a card that is off-screen is never asked for —
+  //    panning/zooming to it is what makes it ask. A regular card always goes through
+  //    the queue, which is what also lets the `path` of a session switch fill it before
+  //    the request is posted (`itemsWanted` drops it unasked).
   //
-  // `agentItemsInFlight` counts every posted request, immediate ones included, so
-  // every answer releases a slot. `reset` (a new session) drops the queue: those
-  // cards are gone with the old tree.
-  const AGENT_ITEMS_CONCURRENCY = 3;
+  // `itemsInFlight` counts every posted request, immediate ones included, so every
+  // answer releases a slot. `reset` (a new session) drops the queue: those cards are
+  // gone with the old tree.
+  const ITEMS_CONCURRENCY = 3;
 
-  let agentItemsQueue = [];
-  let agentItemsInFlight = 0;
+  let itemsQueue = [];
+  let itemsInFlight = 0;
   /** Cards queued *and* on screen — the ones the queue promotes. */
-  const agentItemsVisible = new Set();
-  const agentItemsObserver =
+  const itemsVisible = new Set();
+  const itemsObserver =
     typeof IntersectionObserver === 'function'
-      ? new IntersectionObserver(onAgentItemsVisible, { root: null, rootMargin: '200px', threshold: 0 })
+      ? new IntersectionObserver(onItemsVisible, { root: null, rootMargin: '200px', threshold: 0 })
       : null;
+
+  // How long a waiting card may claim its content is on its way (see `setCardLoading`).
+  // It is the only end a *refused* request gets, as well as one nobody answers: a refusal
+  // is an `error` frame between peers (`remote/PROTOCOL.md`), and nothing about a refused or
+  // dropped `loadNodeItems` reaches this webview — "answered" and "answered with nothing"
+  // are the same silence here. There is no measurement behind the number: it has to cover a
+  // relay round trip plus the host's serialization of a long transcript, and be short enough
+  // that a card nobody is going to fill stops claiming it — a card that showed nothing *was*
+  // the measured symptom, and a spinner with no end is that same lie with more motion. The
+  // timeout does not cancel anything: a late answer still renders (`applyFetchedItems` only
+  // asks whether the log is already in hand — a summary on screen is not).
+  const ITEMS_WAIT_MS = 5000;
+
+  /**
+   * The "its content is on its way" state of one card: `items-loading` is what the
+   * `.node-loading` strip (`createNodeCard`) is displayed for — an *expanded*,
+   * still-waiting card and nothing else — and `aria-busy` is the same fact for a screen
+   * reader. Both go on when the request is queued and off when the **log** renders — a
+   * summary on screen is not the log (`_itemsSummary`), so it does not end the wait — or
+   * when the wait above is up.
+   */
+  function setCardLoading(card, on) {
+    if (!card) return;
+    if (card._itemsTimer) {
+      clearTimeout(card._itemsTimer);
+      card._itemsTimer = null;
+    }
+    card.classList.toggle('items-loading', !!on);
+    if (!on) {
+      card.removeAttribute('aria-busy');
+      return;
+    }
+    card.setAttribute('aria-busy', 'true');
+    card._itemsTimer = setTimeout(() => {
+      card._itemsTimer = null;
+      card.classList.remove('items-loading');
+      card.removeAttribute('aria-busy');
+    }, ITEMS_WAIT_MS);
+  }
 
   // ---- Off-screen cards: the same tree, less to raster ------------------------
   // `#tree-canvas` is one layer sized to the WHOLE tree — measured in a real session at
@@ -3084,18 +3155,25 @@
     }
   }
 
-  /** Does this card still want (and may still receive) its transcript? */
-  function agentItemsWanted(id) {
+  /** Does this card still want (and may still receive) its items? */
+  function itemsWanted(id) {
     const card = nodeEls[id];
-    return !!(card && card._itemsRequested && !card._itemsRendered);
+    // A summarised card is still waiting: it has content on screen (`_itemsRendered`),
+    // but that content is the summary, and the request it posted must not be dropped by
+    // this queue's own hygiene check as if the items had arrived.
+    return !!(card && card._itemsRequested && (!card._itemsRendered || card._itemsSummary));
   }
 
   /**
-   * How many expanded cards of *this* repaint still need a transcript — the "is
-   * this a burst?" question `requestAgentItems` asks. It counts the card asking
-   * right now (`_itemsRequested` is already set for it, `_itemsRendered` is not)
+   * How many expanded cards of *this* repaint still need an *agent* transcript — the
+   * "is this a burst?" question `requestAgentItems` asks. It counts the card asking
+   * right now (`_itemsRequested` is already set for it, its items are not in yet)
    * and uses the same expansion predicate the repaint loops use, so it answers
    * with the sidecar cards that are actually on screen in the tree.
+   *
+   * A regular card does not ask this question: it always goes through the queue (see
+   * `requestNodeItems`), because what it is waiting for is a `tree` that a `path` may
+   * follow in the same burst.
    */
   function pendingAgentCards() {
     let n = 0;
@@ -3104,92 +3182,220 @@
       const count = meta && (meta.itemCount || (pathNodes[id] && pathNodes[id].itemCount));
       if (!count || meta.kind !== 'agent') continue;
       const card = nodeEls[id];
-      if (!card || card._itemsRendered) continue;
+      // A summarised agent card counts too: it has its summary rendered and has not been
+      // answered, so the burst rule must see it exactly like a card with nothing at all.
+      if (!card || (card._itemsRendered && !card._itemsSummary)) continue;
       if (!activePathSet.has(id) && !agentExpanded(id)) continue;
       n++;
     }
     return n;
   }
 
-  /** Post one `loadAgentItems`; every posted request holds one in-flight slot. */
-  function postAgentItems(id, card) {
-    agentItemsInFlight++;
-    if (agentItemsObserver && card) agentItemsObserver.unobserve(card);
-    vscode.postMessage({ type: 'loadAgentItems', id });
+  /** Post one on-demand items request; every posted request holds one slot. */
+  function postItems(id, card) {
+    itemsInFlight++;
+    if (itemsObserver && card) itemsObserver.unobserve(card);
+    // Which of the two requests goes out follows the node's own kind, recorded on the
+    // card by the caller: the host keeps the answers apart (`onAgentItems` refuses a
+    // node that is not a sub-agent, `onNodeItems` answers any node of the session), so a
+    // card must not ask for the wrong one — and the lookup is on the *card* because a
+    // live sub-agent's card can exist before the `tree` describes its node.
+    vscode.postMessage({ type: (card && card._itemsMessage) || 'loadNodeItems', id });
   }
 
-  /** Drop a queued card (its node is gone, or its transcript arrived elsewhere). */
-  function forgetAgentItems(id) {
-    const at = agentItemsQueue.indexOf(id);
-    if (at >= 0) agentItemsQueue.splice(at, 1);
-    agentItemsVisible.delete(id);
+  /** Drop a queued card (its node is gone, or its items arrived elsewhere). */
+  function forgetItems(id) {
+    const at = itemsQueue.indexOf(id);
+    if (at >= 0) itemsQueue.splice(at, 1);
+    itemsVisible.delete(id);
     const card = nodeEls[id];
-    if (agentItemsObserver && card) agentItemsObserver.unobserve(card);
+    if (itemsObserver && card) itemsObserver.unobserve(card);
   }
 
   /** Fill the free slots, the cards in the viewport first; stop when none is. */
-  function pumpAgentItems() {
-    for (let i = 0; i < agentItemsQueue.length; i++) {
-      if (!agentItemsWanted(agentItemsQueue[i])) forgetAgentItems(agentItemsQueue[i--]);
+  function pumpItems() {
+    for (let i = 0; i < itemsQueue.length; i++) {
+      if (!itemsWanted(itemsQueue[i])) forgetItems(itemsQueue[i--]);
     }
-    while (agentItemsInFlight < AGENT_ITEMS_CONCURRENCY && agentItemsQueue.length > 0) {
-      const at = agentItemsQueue.findIndex((id) => agentItemsVisible.has(id));
+    while (itemsInFlight < ITEMS_CONCURRENCY && itemsQueue.length > 0) {
+      const at = itemsQueue.findIndex((id) => itemsVisible.has(id));
       // Nothing on screen: the queue waits for the viewport to come to it (the
       // observer promotes the card when it does).
       if (at < 0) return;
-      const id = agentItemsQueue.splice(at, 1)[0];
-      agentItemsVisible.delete(id);
-      postAgentItems(id, nodeEls[id]);
+      const id = itemsQueue.splice(at, 1)[0];
+      itemsVisible.delete(id);
+      postItems(id, nodeEls[id]);
     }
   }
 
   /** A card entered or left the viewport: promote what the user is looking at. */
-  function onAgentItemsVisible(entries) {
+  function onItemsVisible(entries) {
     let arrived = false;
     for (const entry of entries || []) {
       const id = entry && entry.target && entry.target.dataset ? entry.target.dataset.id : '';
       if (!id) continue;
       if (entry.isIntersecting) {
-        agentItemsVisible.add(id);
+        itemsVisible.add(id);
         arrived = true;
       } else {
-        agentItemsVisible.delete(id);
+        itemsVisible.delete(id);
       }
     }
-    if (arrived) pumpAgentItems();
+    if (arrived) pumpItems();
   }
 
   /**
-   * Ask the host for one card's transcript — the *one* request `expandedCard`
+   * Ask the host for one agent card's transcript — the *one* request `expandedCard`
    * documents (see `_itemsRequested`). A lone request goes out right away; a
-   * repaint that re-expands many sidecar cards queues them behind the cap.
+   * repaint that re-expands many sidecar cards queues them behind the cap. The card
+   * says it is waiting while it does (`setCardLoading`): a sub-agent's transcript is as
+   * absent from the tree as a replica card's items are, and "nothing yet" must not read
+   * as "nothing there".
    */
   function requestAgentItems(id, card) {
     card._itemsRequested = true;
-    if (agentItemsObserver && pendingAgentCards() > 1) {
-      agentItemsQueue.push(id);
-      agentItemsObserver.observe(card);
-      pumpAgentItems();
+    card._itemsMessage = 'loadAgentItems';
+    setCardLoading(card, true);
+    if (itemsObserver && pendingAgentCards() > 1) {
+      itemsQueue.push(id);
+      itemsObserver.observe(card);
+      pumpItems();
       return;
     }
-    postAgentItems(id);
+    postItems(id, card);
+  }
+
+  /**
+   * Ask the host for one **regular** card's items (`loadNodeItems`) — the same one-shot
+   * contract, for the card whose items never arrived at all: a replica holds the `tree`
+   * and never a `path` (see the block above), and a card with no items in hand is a card
+   * that shows nothing. Unlike the agent half this always goes through the queue, which
+   * is what keeps it cheap in the local case it is not for: a session switch posts the
+   * `tree` before the `path`, a `tree`-only card asks, and the `path` that lands a task
+   * later fills it before the observer has had a frame to promote it — the queue's own
+   * `itemsWanted` check drops the request unposted. An off-screen card stays queued until
+   * it is panned to, exactly like a sidecar's transcript.
+   */
+  function requestNodeItems(id, card) {
+    card._itemsRequested = true;
+    card._itemsMessage = 'loadNodeItems';
+    setCardLoading(card, true);
+    if (itemsObserver) {
+      itemsQueue.push(id);
+      itemsObserver.observe(card);
+      pumpItems();
+      return;
+    }
+    postItems(id, card);
   }
 
   /** A new session: the queued cards are gone with the old tree. */
-  function resetAgentItems() {
-    for (const id of agentItemsQueue) {
+  function resetItems() {
+    for (const id of itemsQueue) {
       const card = nodeEls[id];
-      if (agentItemsObserver && card) agentItemsObserver.unobserve(card);
+      if (itemsObserver && card) itemsObserver.unobserve(card);
     }
-    agentItemsQueue = [];
-    agentItemsVisible.clear();
-    agentItemsInFlight = 0;
+    itemsQueue = [];
+    itemsVisible.clear();
+    itemsInFlight = 0;
+    // The waiting flags go with those cards: `reset` removes every card right after this,
+    // and a timer left behind would hold one for its whole 5 s wait with nothing to show
+    // for it (`setCardLoading`).
+    for (const id in nodeEls) setCardLoading(nodeEls[id], false);
   }
 
-  /** An `agentItems` answer (or a card the tree dropped) frees its slot. */
-  function releaseAgentItems() {
-    if (agentItemsInFlight > 0) agentItemsInFlight--;
-    pumpAgentItems();
+  /** An `agentItems` / `nodeItems` answer frees its slot for the next queued card. */
+  function releaseItems() {
+    if (itemsInFlight > 0) itemsInFlight--;
+    pumpItems();
+  }
+
+  /**
+   * One on-demand items answer rendered into the card it was asked for. Both wire types
+   * land here on purpose: the host builds `agentItems` and `nodeItems` in one place
+   * (`SessionRuntime.postItems`, the same clipped `displayItems` and the same `id`), so
+   * a difference between them here would be a difference the host cannot make.
+   */
+  function applyFetchedItems(id, items) {
+    const card = nodeEls[id];
+    // The answer is also what frees a slot for the next queued request, so that happens
+    // *first*: an answer for a card the tree has dropped (the `return` below) releases it
+    // just the same.
+    releaseItems();
+    // A summarised card is the one card an answer is still *for* while `_itemsRendered`
+    // is already true: it rendered its summary (so a repaint will not touch it) and the
+    // fetch it posted on expansion is what this message is. The early return that
+    // protects a `path`-filled card must not swallow the log here.
+    if (!card || (card._itemsRendered && !card._itemsSummary)) {
+      // A `path` (or an earlier answer) already filled this card: the wait is over, so
+      // the strip must not keep claiming the content is on its way.
+      if (card) setCardLoading(card, false);
+      return;
+    }
+    // The work log is the scroller this path opens at its end; the answer zone
+    // is filled — and opened at its top — by `renderNodeItems` itself.
+    const itemsEl = card.querySelector('.node-work');
+    const finished = (treeNodes[id] || {}).status !== 'running';
+    renderNodeItems(card, items || [], finished);
+    card._itemsRendered = true;
+    // The log is here and this card is no longer a summary of anything. Both halves are
+    // written together because every render gate reads them as a pair: leaving this set
+    // would make the next repaint fetch the same node all over again.
+    card._itemsSummary = false;
+    setCardLoading(card, false);
+    // Same finished-node default as in `expandedCard` / `renderPath`: the
+    // thinking blocks only exist now, and this path skips their render branch.
+    if (finished) {
+      setCardScrollLock(card, false);
+      card._needsBottomScroll = true;
+    }
+    // Open the just-filled card at its newest content (a locked card is pinned
+    // there anyway, an unlocked one takes the flag `expandedCard` would) — but
+    // only while the log is really showing: a folded log has nothing to scroll,
+    // and the flag waits for `setWorkFold` to unfold it (same rule as there).
+    if (card._itemScroll && card._itemScroll.locked) {
+      card._itemScroll.scrollToBottom();
+      card._needsBottomScroll = false;
+    } else if (card._needsBottomScroll && itemsEl && !card.classList.contains('work-folded')) {
+      itemsEl.scrollTop = itemsEl.scrollHeight;
+      card._needsBottomScroll = false;
+    }
+    // The items are what gives this card its height, and the card's height
+    // feeds the layout, so re-place the tree like any other card that changed
+    // size (debounced, so a burst of answers coalesces into one relayout).
+    scheduleLayout();
+  }
+
+  /**
+   * Which of a card's two sources to render from, and whether what it holds is a
+   * **summary** rather than the log. `pnode` used to win whenever it merely *existed*,
+   * and that is the second half of the measured replica symptom: a `path` / `tree` node
+   * carrying `items: []` (or no `items` at all) hid the real items next to it on the row.
+   * So a source that *has* items beats one that does not, a real transcript beats a
+   * summary of the same node (a repaint can hold both — the `tree` row and the `path`
+   * row of one node are built by different callers), and when neither has any the old
+   * precedence stands: `[]` keeps marking `_itemsRendered`, because a *running* node is
+   * filled incrementally by its own stream and that flag is what stops the next repaint
+   * from wiping it.
+   *
+   * A row describing a **finished** node now carries `items` = its first `user` item and
+   * its last answer, `summary: true`, and the node's real `itemCount` — the full log is
+   * what the `tree` used to ship for every card, and it is the cost the lazy-sidecar
+   * contract exists to avoid. The flag rides *with* the items because the card has to
+   * know that what it rendered is not everything (that pair is `_itemsRendered` +
+   * `_itemsSummary`), and because how much of a node is worth sending is the host's call,
+   * never a count this side re-derives.
+   */
+  function itemsSource(pnode, meta) {
+    // A row that carries the summary flag is a source even when its `items` is empty: a whole
+    // turn of one `user` item summarises to nothing at all, and the flag is then the only
+    // thing that says the log is somewhere else. Without it the card would render an empty
+    // log and never ask — the "card with nothing in it" symptom this file has fought before.
+    const isSource = (row) => !!row && !!((row.items && row.items.length) || row.summary);
+    const candidates = [pnode, meta].filter(isSource);
+    const chosen = candidates.find((row) => !row.summary) || candidates[0];
+    if (chosen) return { items: chosen.items, summary: !!chosen.summary };
+    return { items: pnode ? pnode.items : meta && meta.items, summary: false };
   }
 
   function expandedCard(id, meta, pnode) {
@@ -3203,14 +3409,27 @@
     const answerEl = card.querySelector('.node-answer');
     const excerptEl = card.querySelector('.node-excerpt');
     // Populate from the path items, or (agent nodes) their own transcript; a
-    // freshly-streamed node is filled incrementally, so never wipe it here.
-    const source = pnode ? pnode.items : meta.items;
-    if (source && !card._itemsRendered) {
+    // freshly-streamed node is filled incrementally, so never wipe it here. A source
+    // that is a *summary* renders exactly like the log and is recorded as one
+    // (`_itemsSummary`): the card then knows the rest is missing, and the ask below is
+    // what brings it. Real items supersede a summary — a repaint can hold both (the
+    // `tree` row summarised and the `path` row of the same node full, or the reverse) —
+    // and re-rendering there costs less than a round trip for items already in hand.
+    const src = itemsSource(pnode, meta);
+    const source = src.items;
+    const supersedesSummary = card._itemsRendered && card._itemsSummary && !src.summary;
+    if (source && (!card._itemsRendered || supersedesSummary)) {
       // A finished card with a long transcript renders a window of it (see
       // `renderNodeItems`); a running node keeps the full render, because its
       // items are appended in place as they arrive.
       renderNodeItems(card, source, meta.status !== 'running');
       card._itemsRendered = true;
+      card._itemsSummary = !!src.summary;
+      // Whatever was waited for is here now — unless what arrived is a *summary*: that is
+      // not an answer to the request this card may already have out (the ask below posts
+      // one, and a previous pass may have posted it), so the strip must keep saying the
+      // content is on its way.
+      if (!src.summary || !card._itemsRequested) setCardLoading(card, false);
       // Thinking blocks only exist once the items are rendered, so apply the
       // finished-node default here (once, so a manual lock is not clobbered by
       // later re-renders).
@@ -3226,10 +3445,30 @@
     // re-expands it — asks the host once, not once per expand. *When* that one
     // request is posted is `requestAgentItems`'s call: a cold repaint that
     // re-expands a whole sidecar grid queues them instead of firing them all.
+    //
+    // A summarised card is the same one-shot ask for the other half of the same
+    // contract, and this is the *only* trigger for it — a card that is never expanded
+    // never asks, so a cold repaint pays for what the reader actually opened. The ask
+    // is here rather than at render time because "expanded" and "the items arrived" are
+    // different moments for every card that is not on the view path.
     const pendingItems = (pnode && pnode.itemCount) || meta.itemCount || 0;
     const pendingKind = (pnode && pnode.kind) || meta.kind;
-    if (pendingItems > 0 && pendingKind === 'agent' && !card._itemsRendered && !card._itemsRequested) {
-      requestAgentItems(id, card);
+    const wantsLog = !card._itemsRendered || card._itemsSummary;
+    if (wantsLog && !card._itemsRequested) {
+      if (pendingItems > 0 && pendingKind === 'agent') {
+        requestAgentItems(id, card);
+      } else if (!isSidecarKind(pendingKind) && !runningNodes.has(id) && (!source || card._itemsSummary)) {
+        // The same one-shot ask for a **regular** card whose log is not in hand: either
+        // it has no items at all — a replica holds the `tree` and never a `path` (see the
+        // block above), so this is the only way such a card is ever filled — or what it
+        // holds is a summary the host sent (`summary: true`). The gates are the card's:
+        // no log to render (the `pnode` trap — an empty `items` on the path used to win
+        // over real ones, and `itemsSource` has already preferred whichever has any), not
+        // a sidecar (`agent` has its own request, `bg` its own body), and not *running* —
+        // a live card is being filled by its own stream, and rendering a snapshot under
+        // it would rebuild the log the next delta is still appending to.
+        requestNodeItems(id, card);
+      }
     }
     askEl.classList.remove('hidden');
     // Zone 2 shows when it has a log to show. Un-hiding it unconditionally would
@@ -3341,32 +3580,39 @@
   }
 
   /**
-   * The ▶ Continue (or ↻ Retry, or ⧉ Continue in a new window) button on a card
-   * whose turn ended without an answer: interrupted by the user, or failed — an
-   * API error that outlived the client's transparent retries. Clicking it asks the
-   * harness to run a turn from that node with a message the harness writes itself,
-   * so the user never has to type "continue".
+   * The ▶ Continue / ↻ Retry / ⧉ Continue in a new window entries on a card whose
+   * turn ended without an answer: interrupted by the user, or failed — an API error
+   * that outlived the client's transparent retries. Clicking one asks the harness to
+   * run a turn from that node with a message the harness writes itself, so the user
+   * never has to type "continue".
    *
-   * One button, one meaning at a time — the *variant* follows the node's state:
-   *  - `error` + context `full` → rollover: the turn died because the provider
-   *    refused an oversized request, which retrying cannot fix, so the harness
-   *    opens a new, empty context window and continues there (`rolloverTurn`).
-   *  - context `near` (>= 90% of the card's window) → the same `⧉` entry, but as a
-   *    *suggestion*: the `node-near` class softens it and the tooltip carries the
+   * One meaning per element — the *variant* follows the node's state:
+   *  - `error` + context `full` → the rollover replaces the repair: the turn died
+   *    because the provider refused an oversized request, which retrying cannot fix,
+   *    so the harness opens a new, empty context window and continues there
+   *    (`rolloverTurn`), on the one `.node-continue` element.
+   *  - `error` + context `near` → **both**: `↻ Retry` on `.node-continue` and the `⧉`
+   *    entry beside it, on its own `.node-window` element. A `near` window is a
+   *    *size*, not a refusal — nothing about this request was rejected — so the retry
+   *    is a real repair and must not hide the suggestion; and the `⧉` entry has no
+   *    other way in, so the retry must not be hidden by it either. The second element
+   *    wears `node-rollover node-near`, the quiet dashed shape of a suggestion.
+   *  - context `near` with no failure (`done`, `interrupted`) → the `⧉` entry alone,
+   *    as a *suggestion*: the `node-near` class softens it and the tooltip carries the
    *    percentage, because this one is the user's call, not a failure to repair.
    *  - `error` (any other failure) → `↻ Retry`, in place.
    *  - `interrupted` → `▶ Continue`, in place.
    * The context state itself is the host's judgement and is never derived here.
-   * The element is created once and only its text used to change; a sync now also
+   * Each element is created once and only its text used to change; a sync now also
    * fixes its class list and `dataset.action`, so a card that goes Retry → rollover
-   * (or back) is correct, and the click handler reads the action at click time.
+   * (or back) is correct, and every click handler reads the action at click time.
    *
    * Shown only where continuing makes sense: a conversational turn node (never a
    * sidecar — a sub-agent window or job card has no conversation of its own here),
    * not currently running, and a *tip* of its branch (a node that already has a
    * turn child has been continued; the new failure, if any, shows on that child).
    * A `full` window is a *failure* mode, so it keeps the old gate — it only ever
-   * arrives on an `error`. The `near` suggestion does not: a long conversation that
+   * arrives on an `error`. The `near` entry does not: a long conversation that
    * just *finished* above 90% is exactly the case it is for, so it shows on a `done`
    * tip as well.
    */
@@ -3375,6 +3621,7 @@
     // `byClass`, not `querySelector`: a miss must be observable (the offline
     // webview checker's DOM stub answers a plain-class miss with a shared stub).
     const btn = byClass(card, 'node-continue');
+    const alt = byClass(card, 'node-window');
     const terminal = !!meta && (meta.status === 'interrupted' || meta.status === 'error');
     const hasTurnChild = !!meta && (meta.children || []).some((c) => {
       const child = treeNodes[c];
@@ -3382,59 +3629,91 @@
     });
     // The host's context state (§4.3): `full` — the provider refused an oversized
     // request; `near` — the latest prompt usage is at least 90% of the card's
-    // window; `ok` — otherwise. `contextPct` only ever reaches the tooltip.
+    // window; `ok` — otherwise. `contextPct` only ever reaches a tooltip.
     const context = meta ? meta.context : undefined;
-    const rollover = !!meta && meta.status === 'error' && context === 'full';
-    // A suggestion, not a repair: it hangs off the context state alone, never off
-    // the status, so a finished tip gets the entry too.
-    const near = !rollover && context === 'near';
+    const failed = !!meta && meta.status === 'error';
+    // `full` is the provider's refusal of *this* request, so retrying it is pointless
+    // and the rollover takes the only slot.
+    const full = failed && context === 'full';
+    // The 90% entry is about the size of the chain, never a failure mode.
+    const near = !full && context === 'near';
+    // A failure that still has a repair *and* the 90% entry: both, side by side.
+    const beside = failed && near;
+    // True while the rollover is the whole button rather than the entry beside one.
+    const rollover = full || (near && !beside);
     const pct = meta && typeof meta.contextPct === 'number' ? Math.round(meta.contextPct) : 0;
-    const label = rollover || near
+    const label = rollover
       ? tr('⧉ Continue in a new window')
-      : meta && meta.status === 'error'
+      : failed
         ? tr('↻ Retry')
         : tr('▶ Continue');
-    const title = rollover
+    const title = full
       ? tr('Ask the harness to continue this turn in a new, empty context window (the current one is full)')
-      : near
+      : rollover
         ? tr('Context is {0}% full - continue in a new window', pct)
-        : meta && meta.status === 'error'
+        : failed
           ? tr('Ask the harness to retry this turn (it sends the message for you)')
           : tr('Ask the harness to continue from here (it sends the message for you)');
-    const action = rollover || near ? 'rollover' : meta && meta.status === 'error' ? 'retry' : 'continue';
+    const action = rollover ? 'rollover' : failed ? 'retry' : 'continue';
     const show = !!id && (terminal || near) && !hasTurnChild && !isSidecarKind(meta.kind) && !runningNodes.has(id);
     if (!show) {
       if (btn) btn.remove();
+      if (alt) alt.remove();
       return;
     }
+    // Created on demand, into the head and before the delete button (the far right
+    // is the delete button's). The action is read at *click* time: the same element
+    // is reused as the node's state changes (Retry ⇄ rollover), so a captured action
+    // would go stale and post the wrong request.
+    const create = (className, text, tooltip, act) => {
+      const button = el('button', className, text);
+      button.title = tooltip;
+      button.dataset.action = act;
+      button.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        const kind = button.dataset.action;
+        vscode.postMessage(kind === 'rollover' ? { type: 'rolloverTurn', id } : { type: 'continueTurn', id });
+      });
+      const head = byClass(card, 'node-head');
+      // Keep the delete button at the far right of the head.
+      const del = head ? byClass(head, 'node-del') : null;
+      if (!head) {
+        card.appendChild(button);
+      } else if (del && head.insertBefore) {
+        head.insertBefore(button, del);
+      } else {
+        head.appendChild(button);
+      }
+      return button;
+    };
+    // The repair — or the rollover itself, when it owns the slot.
     if (btn) {
       btn.textContent = label;
       btn.title = title;
-      btn.classList.toggle('node-rollover', rollover || near);
-      btn.classList.toggle('node-near', near);
+      btn.classList.toggle('node-rollover', rollover);
+      btn.classList.toggle('node-near', near && !beside);
       btn.dataset.action = action;
-      return;
-    }
-    const button = el('button', 'node-continue' + (rollover || near ? ' node-rollover' : '') + (near ? ' node-near' : ''), label);
-    button.title = title;
-    button.dataset.action = action;
-    button.addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      // Read the variant *now*: this one element is reused as the node's state
-      // changes (Retry ⇄ rollover), so a captured action would go stale and post
-      // the wrong request.
-      const kind = button.dataset.action;
-      vscode.postMessage(kind === 'rollover' ? { type: 'rolloverTurn', id } : { type: 'continueTurn', id });
-    });
-    const head = byClass(card, 'node-head');
-    // Keep the delete button at the far right of the head.
-    const del = head ? byClass(head, 'node-del') : null;
-    if (!head) {
-      card.appendChild(button);
-    } else if (del && head.insertBefore) {
-      head.insertBefore(button, del);
     } else {
-      head.appendChild(button);
+      create(
+        'node-continue' + (rollover ? ' node-rollover' : '') + (near && !beside ? ' node-near' : ''),
+        label,
+        title,
+        action,
+      );
+    }
+    // The `⧉` entry beside a repair: its own element, always in the suggestion's
+    // shape, created after the repair so the head reads `↻ Retry`, `⧉ …`, delete.
+    if (beside) {
+      const altLabel = tr('⧉ Continue in a new window');
+      const altTitle = tr('Context is {0}% full - continue in a new window', pct);
+      if (alt) {
+        alt.textContent = altLabel;
+        alt.title = altTitle;
+      } else {
+        create('node-window node-rollover node-near', altLabel, altTitle, 'rollover');
+      }
+    } else if (alt) {
+      alt.remove();
     }
   }
 
@@ -3552,6 +3831,15 @@
     promptEl = card.querySelector('.node-ask');
     routingSubAgent = true;
     routingNodeId = nodeId;
+    // Does this append add an item of its own to the card's log? Then the card owns this
+    // node's items: they are the ones the turn's own stream wrote, and `_itemsRendered` is
+    // the flag every render gate reads as "this DOM is the node's items, do not rebuild it"
+    // (see the `[]` case in `itemsSource`). Counted before the callback because a summary
+    // row now rides every finished node's `tree` / `path` entry (`itemsSource`): without
+    // this, the repaint that follows a turn would replace the log the turn just streamed
+    // with the two-item summary and ask the host for what is already on screen — the one
+    // card the contract says must behave exactly as it did before summaries existed.
+    const itemsBefore = itemsEl.children.length;
     try {
       fn();
     } finally {
@@ -3560,6 +3848,7 @@
       routingSubAgent = prevRouting;
       routingNodeId = prevNode;
     }
+    if (itemsEl.children.length > itemsBefore) card._itemsRendered = true;
     if (card && card._itemScroll) card._itemScroll.scrollToBottom();
     // The append this routed may have been a tool call: the header's step count is
     // the one piece of the log that lives *outside* it, so it is refreshed here —
@@ -4058,9 +4347,12 @@
     }
     for (const id in nodeEls) {
       if (!treeNodes[id]) {
-        // The card is going, so a transcript still queued for it can never arrive:
-        // it leaves the queue (and the viewport watcher) with the card.
-        forgetAgentItems(id);
+        // The card is going, so items still queued for it can never arrive: it leaves
+        // the queue (and the viewport watcher) with the card.
+        forgetItems(id);
+        // A waiting card's timer goes with it: a card removed while its 5 s wait is still
+        // ticking would otherwise be held (and re-classed) after the tree dropped it.
+        setCardLoading(nodeEls[id], false);
         nodeEls[id].remove();
         delete nodeEls[id];
         // The card is gone, so its stretch record has nothing to restore — and a
@@ -4142,9 +4434,18 @@
       const pnode = pathNodes[id];
       if (!pnode) continue;
       const card = nodeEls[id];
-      // An agent node carries no `items` any more (only `itemCount`): its
-      // transcript arrives via `agentItems` after `expandedCard` below asks for
-      // it, so there is nothing to render from the path.
+      // A card whose items did not ride the `path` (`itemCount`-only sidecars, and a
+      // regular node for a surface that never got a `path` at all) is filled by its own
+      // fetch: `agentItems` / `nodeItems` land in `applyFetchedItems` after
+      // `expandedCard` below asks for them, so there is nothing to render here.
+      //
+      // A `path` row that is a *summary* (`summary: true`, a finished node) still renders
+      // here: it is content, and `_itemsSummary` records that the log behind it is missing —
+      // which is what makes `expandedCard` below post the one `loadNodeItems`. A *full* row
+      // landing on a card that already rendered a summary is not rendered here either: the
+      // second loop below calls `expandedCard` for every id of this same message, and the
+      // one place that prefers a real row over a summary is `itemsSource`.
+      const pathSummary = !!pnode.summary;
       if (pnode.items && !card._itemsRendered) {
         renderNodeItems(
           card,
@@ -4152,6 +4453,12 @@
           (treeNodes[id] || {}).status !== 'running',
         );
         card._itemsRendered = true;
+        card._itemsSummary = pathSummary;
+        // The path answered the card before any fetch could: stop claiming otherwise.
+        // A *summary* is not that answer — if the card has a request out (the `tree` pass
+        // posted the same one-shot ask), it is still unanswered and `itemsWanted` keeps
+        // it, so clearing the strip here would say the log had arrived.
+        if (!pathSummary) setCardLoading(card, false);
         // Same finished-node default as in expandedCard: the thinking blocks only
         // exist now, and this path skips expandedCard's render branch.
         if ((treeNodes[id] || {}).status !== 'running') {
@@ -4318,12 +4625,29 @@
   function startResize(id, card, e) {
     e.preventDefault();
     e.stopPropagation();
+    try { e.target.setPointerCapture(e.pointerId); } catch { /* noop */ }
+    beginResize(id, card, e.clientX, e.clientY);
+  }
+
+  /**
+   * The resize gesture's state and its wireframe, from a **point** rather than from an event.
+   *
+   * WHY IT TAKES COORDINATES. A mouse drags `.node-resize` through `pointerdown`, and a finger
+   * goes through the touch layer (`touchGesture.kind === 'resize'`). The pointer path alone is
+   * not enough on a touch screen: the browser claims the drag as its own gesture and answers the
+   * page with `pointercancel`, and the window's handler above reads that as "the resize was
+   * abandoned" — the wireframe vanished a few pixels into every finger drag and nothing was ever
+   * committed. One state machine with two entry points is what keeps the two inputs from drifting
+   * apart; only the parts that are genuinely pointer-specific (the capture, the default action of
+   * a mouse event) stay with the caller.
+   */
+  function beginResize(id, card, clientX, clientY) {
     const meta = treeNodes[id];
     const draggedH = meta && meta.size && meta.size.h ? meta.size.h : 0;
     resizing = {
       id,
-      startX: e.clientX,
-      startY: e.clientY,
+      startX: clientX,
+      startY: clientY,
       startW: card.offsetWidth,
       startH: card.offsetHeight,
       // The drag's own ceiling. `MAX_H` is the base, but a card can legitimately be
@@ -4343,7 +4667,6 @@
       floorH: Math.max(MIN_H, cardFixedHeight(card) + SPLIT_FLOOR_PX),
       target: { w: card.offsetWidth, h: card.offsetHeight },
     };
-    try { e.target.setPointerCapture(e.pointerId); } catch { /* noop */ }
     resizePreview = el('div', 'resize-preview');
     resizePreview.appendChild(el('span', 'resize-label', card.offsetWidth + ' × ' + card.offsetHeight));
     resizePreview.style.left = card.style.left;
@@ -4403,6 +4726,13 @@
     // Resizing is a left-button gesture: RMB belongs to autoscroll, and MMB to
     // pan, so neither must grab the handle.
     if (e.button !== 0) return;
+    // A finger does not resize through this path. The browser claims a touch drag as
+    // its own gesture and answers with `pointercancel` a few pixels in — which the
+    // window handler below reads as "the resize was abandoned", tearing the wireframe
+    // down mid-drag and never committing it. Touch resizes through the touch layer's
+    // `resize` gesture instead (same `beginResize`, same outcome), so the two entry
+    // points must not both fire for one finger.
+    if (e.pointerType === 'touch') return;
     const handle = e.target.closest('.node-resize');
     if (!handle) return;
     const card = handle.closest('.node');
@@ -4413,7 +4743,19 @@
 
   // ---- Pan / zoom ----
   let dragging = null;
+  // The touch layer's live gesture (see "Touch" below) or null. It lives up here
+  // because the pointer pan below has to stand down while a finger owns the camera.
+  let touchGesture = null;
   treeWrap.addEventListener('pointerdown', (e) => {
+    // A finger never pans through the pointer path: its `pointerdown` is dispatched
+    // *before* its `touchstart`, so the touch layer's flag cannot be set yet — the
+    // pointer type is the only thing known this early. Belt and braces, because the
+    // same guard has to hold for every later event of that gesture too: the flag
+    // catches a compatibility pointer stream that arrives once a touch gesture is
+    // already running, which is the stream the touch layer's `preventDefault()`
+    // silences (that cancellation, not this line, is what keeps the browser from
+    // synthesising the mouse events behind the finger).
+    if (e.pointerType === 'touch' || touchGesture) return;
     const isMmb = e.button === 1;
     if (!isMmb && e.target.closest('.node')) {
       // Left-click on a card is handled by the checkout click handler; do not pan.
@@ -4694,6 +5036,12 @@
     applyTransform();
   }
 
+  // The zones that own their own native scrolling, shared by the wheel delegate below
+  // and the touch layer after it: `.node-work` (the log) / `.node-answer` (the final
+  // answer) / `.node-ask` (the pinned ask) / `.thinking-body` all have their own
+  // scrollbar, and the composer lives inside a card now and owns its own wheel.
+  const NATIVE_SCROLL_ZONES = '.node-work, .node-answer, .node-ask, .thinking-body, #composer';
+
   treeWrap.addEventListener('wheel', (e) => {
     // Never zoom/scroll while a pan or resize gesture is in progress — an
     // accidental mouse scroll must not fling the view around.
@@ -4710,12 +5058,9 @@
       setFollow(false);
       return;
     }
-    // Requirement: wheeling on top of a node scrolls that node's content; the
-    // .node-work (the log) / .node-answer (the final answer) / .node-ask (the
-    // pinned ask) / .thinking-body handle it natively — all three zones have their
-    // own scrollbar. The composer is excluded too — it lives inside a card now and
-    // owns its own wheel.
-    const scrollable = e.target && e.target.closest ? e.target.closest('.node-work, .node-answer, .node-ask, .thinking-body, #composer') : null;
+    // Requirement: wheeling on top of a node scrolls that node's content natively
+    // (see NATIVE_SCROLL_ZONES above).
+    const scrollable = e.target && e.target.closest ? e.target.closest(NATIVE_SCROLL_ZONES) : null;
     if (scrollable) {
       return; // native scroll
     }
@@ -4730,6 +5075,174 @@
     zoomAt(e.clientX, e.clientY, e.deltaY < 0 ? 1.1 : 0.9);
     setFollow(false);
   }, { passive: false });
+
+  // ---- Touch: one finger pans, two fingers pinch ----
+  // Neither gesture above can reach a finger. The pan is pointer-based, and the browser
+  // classifies a one-finger drag as *its* pan first: `touch-action` is `auto` throughout
+  // this subtree, so the compositor claims the drag and fires `pointercancel` — and the
+  // handler above faithfully stops the drag it was told to stop, which is why nothing
+  // ever moves. The zoom only ever hears `wheel`, and a pinch is not a wheel (the
+  // Android host's `setSupportZoom(false)` means the WebView does not do it either). So
+  // both are read off the touch stream here, driving the same camera the mouse drives —
+  // `pan`, `applyTransform()`, `setFollow(false)` and, for the pinch, `zoomAt()`.
+  //
+  // Deliberately NOT `#tree-wrap { touch-action: none }`, which is the recipe that would
+  // be wrong here: `touch-action` is resolved as the intersection along the *whole*
+  // ancestor chain — a descendant can only ever be more restrictive than its ancestor,
+  // never more permissive — so a `none` on this wrapper switches off touch scrolling
+  // inside every card's log and answer, and no rule on those elements can take it back.
+  // What keeps the browser's own pan out of the way instead is `preventDefault()` on the
+  // `touchmove` of a gesture we have claimed (below); that cancellation is also what
+  // suppresses the compatibility mouse events for the rest of the gesture, so a pan can
+  // never end as a `click` on the card the finger started on.
+  const TOUCH_SLOP_PX = 6;      // travel that separates a tap from a drag
+  const PINCH_STEP_MAX = 1.25;  // per-event cap on a pinch's scale factor
+
+  /** Midpoint of two touches, in viewport coordinates: the pinch's anchor. */
+  function touchMid(a, b) {
+    return { x: (a.clientX + b.clientX) / 2, y: (a.clientY + b.clientY) / 2 };
+  }
+
+  /** Distance between two touches, in viewport pixels: the pinch's scale input. */
+  function touchSpan(a, b) {
+    return Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+  }
+
+  treeWrap.addEventListener('touchstart', (e) => {
+    if (e.touches.length === 1) {
+      const target = e.target;
+      const t = e.touches[0];
+      // The corner resizes the card. It is the one gesture the touch layer *takes over* rather
+      // than leaving to the pointer path: a finger drag on the handle would be claimed by the
+      // browser a few pixels in (`pointercancel`), and the window handler reads that as
+      // "abandoned" — the wireframe disappeared mid-drag and the lift committed nothing. The
+      // same `beginResize` the mouse uses is entered here instead.
+      const resizeHandle = target && target.closest ? target.closest('.node-resize') : null;
+      if (resizeHandle) {
+        // The corner owns the finger whether or not a resize can actually start: a handle
+        // whose card carries no id is a card this renderer cannot size, and falling through
+        // to the pan below would move the camera under a finger that meant to drag a corner.
+        touchGesture = null;
+        const card = resizeHandle.closest('.node');
+        const id = card && card.dataset.id;
+        if (id) {
+          beginResize(id, card, t.clientX, t.clientY);
+          touchGesture = { kind: 'resize', x0: t.clientX, y0: t.clientY, claimed: false };
+        }
+        return;
+      }
+      // The scroll zones belong to themselves: a finger there scrolls the log/answer/ask
+      // natively, never the camera. A *card* is fair game, unlike the mouse rule above which
+      // leaves cards to the checkout click — on a phone the tree fills the screen and there is
+      // no empty background left to grab, and the tap-vs-drag threshold below is what still
+      // keeps a tap a tap.
+      if (target && target.closest && target.closest(NATIVE_SCROLL_ZONES)) {
+        touchGesture = null;
+        return;
+      }
+      touchGesture = { kind: 'pan', x0: t.clientX, y0: t.clientY, px: pan.x, py: pan.y, claimed: false };
+      return;
+    }
+    if (e.touches.length === 2) {
+      // A second finger promotes a pan to a pinch, but it *cancels* a resize: the wireframe
+      // belongs to a corner, and the corner is not where the pinch is happening.
+      if (touchGesture && touchGesture.kind === 'resize') {
+        endResize(false);
+      }
+      // The pan's origin says nothing about a pinch, and `zoomAt()` anchors on the midpoint it
+      // is handed, so the anchor is read fresh from the two touches that are down right now.
+      touchGesture = { kind: 'pinch', span: touchSpan(e.touches[0], e.touches[1]), claimed: false };
+      return;
+    }
+    // Three fingers are not a gesture we read: drop whatever was running rather than
+    // let it keep tracking a finger that has already left the screen.
+    if (touchGesture && touchGesture.kind === 'resize') {
+      endResize(false);
+    }
+    touchGesture = null;
+  }, { passive: false });
+
+  treeWrap.addEventListener('touchmove', (e) => {
+    const g = touchGesture;
+    if (!g) return;
+    if (g.kind === 'resize') {
+      if (e.touches.length !== 1) return;
+      const t = e.touches[0];
+      if (!g.claimed) {
+        // The same slop as the pan: a tap on the corner is a tap, not a one-pixel resize, and
+        // until the finger has travelled the event stays uncancelled.
+        if (Math.hypot(t.clientX - g.x0, t.clientY - g.y0) < TOUCH_SLOP_PX) return;
+        g.claimed = true;
+      }
+      e.preventDefault();
+      // The same motion handler the mouse drives: it owns the clamp, the ceiling the commit
+      // will use, and the one-paint-per-frame wireframe.
+      onResizeMove({ clientX: t.clientX, clientY: t.clientY });
+      return;
+    }
+    if (g.kind === 'pan') {
+      if (e.touches.length !== 1) return;
+      const dx = e.touches[0].clientX - g.x0;
+      const dy = e.touches[0].clientY - g.y0;
+      if (!g.claimed) {
+        // Under the slop this is still a tap: leave the event uncancelled, or the
+        // browser drops the compatibility `click` that checks a node out.
+        if (Math.hypot(dx, dy) < TOUCH_SLOP_PX) return;
+        g.claimed = true;
+      }
+      e.preventDefault();
+      // The whole travel from the origin, not just the part past the slop: the pan
+      // must not lose its first pixels to the threshold.
+      pan.x = g.px + dx;
+      pan.y = g.py + dy;
+      applyTransform();
+      setFollow(false);
+      return;
+    }
+    if (e.touches.length < 2) return;
+    const span = touchSpan(e.touches[0], e.touches[1]);
+    if (!g.span || span <= 0) {
+      g.span = span;
+      return;
+    }
+    if (!g.claimed) {
+      // The same slop, measured on the span: two fingers resting on the screen are a
+      // tap, not a zoom, and until they spread the event stays uncancelled so the
+      // browser keeps its own options.
+      if (Math.abs(span - g.span) < TOUCH_SLOP_PX) return;
+      g.claimed = true;
+    }
+    e.preventDefault();
+    // The change *since the last event*, never since the pinch started: `zoomAt()` is
+    // multiplicative and anchored on the current midpoint, so each frame only has to
+    // carry the fingers' own delta — and capping that delta is what stops one jittery
+    // frame from jumping the zoom.
+    const factor = clamp(span / g.span, 1 / PINCH_STEP_MAX, PINCH_STEP_MAX);
+    g.span = span;
+    const mid = touchMid(e.touches[0], e.touches[1]);
+    zoomAt(mid.x, mid.y, factor);
+    setFollow(false);
+  }, { passive: false });
+
+  function endTouchGesture(e) {
+    // Never `preventDefault()` here: a cancelled `touchend` is a tap that never
+    // reaches the `click` handler (the checkout), and a gesture that travelled has
+    // already cancelled its own `touchmove`s, which is what silences the
+    // compatibility mouse events behind it.
+    //
+    // A resize is the one gesture with something to finish: a travelled drag commits (the same
+    // `endResize(true)` the mouse's `pointerup` calls), an untouched corner and a cancelled
+    // gesture commit nothing. Its wireframe is torn down either way.
+    if (touchGesture && touchGesture.kind === 'resize') {
+      endResize(touchGesture.claimed === true && (!e || e.type !== 'touchcancel'));
+    }
+    touchGesture = null;
+  }
+  // Any finger leaving ends the gesture. A pinch that lost an anchor cannot become a
+  // pan — that finger is mid-flight — and the pan's next frame would come from a
+  // finger that is already gone, so a fresh gesture needs a fresh `touchstart`.
+  treeWrap.addEventListener('touchend', endTouchGesture);
+  treeWrap.addEventListener('touchcancel', endTouchGesture);
 
   if (fitBtn) fitBtn.addEventListener('click', () => fitToView());
   if (followBtn) followBtn.addEventListener('click', () => setFollow(!follow));
@@ -5510,48 +6023,18 @@
       case 'nodeUpdate':
         applyNodeUpdate(msg);
         break;
-      case 'agentItems': {
-        // The host's answer to `loadAgentItems`: an agent node's transcript, which
-        // the `tree` / `path` payload no longer carries (only its `itemCount`).
-        // It renders exactly like the full-render path in `expandedCard`, once: a
-        // second answer for a card that already has its items — or one for a node
-        // a tree rebuild has dropped — is ignored (rendering twice would duplicate
-        // the whole transcript).
-        const card = nodeEls[msg.id];
-        // The answer is also what frees a slot for the next queued request, so that
-        // happens *first*: an answer for a card the tree has dropped (the `break`
-        // below) releases it just the same.
-        releaseAgentItems();
-        if (!card || card._itemsRendered) break;
-        // The work log is the scroller this path opens at its end; the answer zone
-        // is filled — and opened at its top — by `renderNodeItems` itself.
-        const itemsEl = card.querySelector('.node-work');
-        const finished = (treeNodes[msg.id] || {}).status !== 'running';
-        renderNodeItems(card, msg.items || [], finished);
-        card._itemsRendered = true;
-        // Same finished-node default as in `expandedCard` / `renderPath`: the
-        // thinking blocks only exist now, and this path skips their render branch.
-        if (finished) {
-          setCardScrollLock(card, false);
-          card._needsBottomScroll = true;
-        }
-        // Open the just-filled card at its newest content (a locked card is pinned
-        // there anyway, an unlocked one takes the flag `expandedCard` would) — but
-        // only while the log is really showing: a folded log has nothing to scroll,
-        // and the flag waits for `setWorkFold` to unfold it (same rule as there).
-        if (card._itemScroll && card._itemScroll.locked) {
-          card._itemScroll.scrollToBottom();
-          card._needsBottomScroll = false;
-        } else if (card._needsBottomScroll && itemsEl && !card.classList.contains('work-folded')) {
-          itemsEl.scrollTop = itemsEl.scrollHeight;
-          card._needsBottomScroll = false;
-        }
-        // The items are what gives this card its height, and the card's height
-        // feeds the layout, so re-place the tree like any other card that changed
-        // size (debounced, so a burst of answers coalesces into one relayout).
-        scheduleLayout();
+      case 'agentItems':
+      case 'nodeItems':
+        // The host's answer to `loadAgentItems` / `loadNodeItems`: one node's items,
+        // which the `tree` / `path` payload did not carry — a sub-agent's transcript
+        // (`itemCount` only, see `SessionRuntime.postTree`) or a regular card's items
+        // for a surface that holds the `tree` and never a `path` (a replica, see
+        // `requestNodeItems`). Both are one shape and one code path (`applyFetchedItems`):
+        // a second answer for a card that already has its items — or one for a node a tree
+        // rebuild has dropped — is ignored, never thrown (a webview callback that throws
+        // is silent in the real UI) and renders nothing twice.
+        applyFetchedItems(msg.id, msg.items);
         break;
-      }
       case 'panTo':
         panToNode(String(orElse(msg.id, '')));
         break;
@@ -5738,7 +6221,7 @@
         break;
       case 'reset':
         clearLiveTools();
-        resetAgentItems();
+        resetItems();
         for (const id in nodeEls) { nodeEls[id].remove(); }
         for (const id in nodeEls) delete nodeEls[id];
         pathNodes = Object.create(null);
