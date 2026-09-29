@@ -65,7 +65,9 @@ Side layers:
    completion-signal queues — lives in `SessionRuntime` (`src/chat/runtime.ts`),
    reached through `ChatViewProvider.runtimes` (`Map<sessionId, SessionRuntime>`).
    The `Agent` is per **node** (`SessionRuntime.workerFor`), not per session.
-   Each session persists its own state and is restored from `vscode.Memento`.
+   Each session persists its own state in the file-backed store — one file per node
+   under the session data folder — and is restored from it; the Memento is a
+   migration source only (`invariants/session-persistence.md`).
 4. Window recovery: `extension.ts` registers a `WebviewPanelSerializer` for the
    `spinney.chatTree` viewType. VS Code serializes the chat tab at shutdown
    and hands it back on the next activation → `ChatViewProvider.restorePanel`

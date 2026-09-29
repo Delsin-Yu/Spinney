@@ -381,6 +381,8 @@ Only a card with `vision.enabled` accepts an image. Spinney ships `deepseek-flas
 
 An image can be up to 64 MiB. The formats are JPEG, PNG, GIF, and WebP. Spinney reads the format from the content, not from the file name.
 
+An image of 4000 px costs the same as a small one. The agent reads an image with the `read_image` tool. Spinney crops the image and makes it smaller before the upload, so the model sees a longest side of 1024 px. The argument `rect` keeps one region at full detail. If the request already carries too many image bytes, the tool refuses the image. The tool then tells the agent to let a sub-agent look at the image.
+
 An uploaded image cannot move to another provider. The `file_id` is private to the provider that made it. The card shows `[image hidden: it was uploaded to a provider that this model cannot read from]`. An `openai` transport has no such problem.
 
 ## 10. Errors, retries, and Continue
@@ -526,7 +528,7 @@ The extension keeps no copy of the uploaded image bytes.
 
 | What | Where |
 |---|---|
-| Conversations | The VS Code state database, not a file. One row for the workspace, or one for the profile with no folder open. |
+| Conversations | Files, in the session data folder of the extension: one folder for each session and one file for each node. `spinney.dataDir` moves that folder. An older build's state database is a migration source only. |
 | Transcripts | JSONL files, one per finished turn and one per sub-agent. Folder: the extension storage, or `spinney.subAgentTranscriptDir`. |
 | A large tool result | `<agent root>/.spinney/tool-output/`. |
 | API keys | VS Code secret storage, encrypted by the operating system. Never in `settings.json`. |
@@ -534,7 +536,7 @@ The extension keeps no copy of the uploaded image bytes.
 
 Spinney writes nothing into your `.gitignore`. Add the `.spinney/` folder yourself if you do not want the spilled tool output in a commit.
 
-The conversations stay in the state database after an uninstall. Section 15 removes them.
+The conversations stay on disk after an uninstall. They are in the data folder of the extension. Section 15 removes them.
 
 ### 14.1 The HTTP control plane
 
@@ -548,12 +550,12 @@ With the plane on, Spinney writes the port and the token to `<extension storage>
 
 1. Run **`Spinney: Clear API Key`** for each provider, or accept that the secrets stay.
 2. Uninstall Spinney from the Extensions view.
-3. Delete the folder `<extension storage>/de-yu.spinney` by hand. It holds the transcripts, the backups, and the control-plane file.
-4. Delete the conversation rows too. In the state database, the key is `DE-YU.spinney`. One row sits in `globalStorage/state.vscdb`, and one in each `<workspaceStorage>/<hash>/state.vscdb`.
+3. Delete the folder `<extension storage>/de-yu.spinney` by hand. It holds the conversations, the transcripts, the backups, the diagnostics logs, and the control-plane file.
+4. Delete the rows of an older build, if you ever ran one. That build kept the conversations in the state database. The key is `DE-YU.spinney`: one row in `globalStorage/state.vscdb`, and one in each `<workspaceStorage>/<hash>/state.vscdb`. The current build keeps the conversations in files, so step 3 removes them.
 
 Note the two spellings: the folder name is lower case, and the row key keeps the case of the extension id.
 
-Files that you directed to your own folders are outside these steps. Check `spinney.subAgentTranscriptDir` and any `.spinney/` folder.
+Files that you directed to your own folders are outside these steps. Check `spinney.dataDir`, `spinney.subAgentTranscriptDir`, and any `.spinney/` folder.
 
 ## 16. No-folder mode
 
@@ -581,6 +583,7 @@ Open a folder in the same window, or close one, and Spinney switches the mode at
 | A turn waits before it starts | A concurrency gate. The status line names the wait. Raise `concurrency` on the provider or on the card, or wait. |
 | The model dropdown is grey | A turn runs in this session. Stop it or wait for it. |
 | The view stops at an old card | A manual pan or zoom switched the follow mode off. Click **Follow the active node**. |
+| Spinney is absent from the Activity Bar | The window is in Restricted Mode. Spinney does not support an untrusted workspace, so VS Code keeps it disabled. Trust the folder, then reload the window. |
 
 The **Spinney** output channel holds the diagnostics. Open it with View → Output, then select `Spinney` in the list. It names the display language, the model configuration problems, and the layout and performance lines.
 

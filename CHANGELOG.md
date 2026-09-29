@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-09-29
+
 ### Added
 
 - **`web_search` and `web_fetch`** — a web search that needs no API key and no setting. `web_search`
@@ -83,16 +85,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **⧉ Continue in a new window** is offered on a card that used to be a dead end (its context read
   `ok` while its images filled the request). A new window does not carry attachments, so that is the
   right way out.
-
-### Removed
-
-- **The remote-control experiment was removed** — the self-hosted relay and its rooms, the desktop
-  replica (the room tree, the replicated session panel and the status bar item), the pairing flow
-  (the QR code and `Spinney: Show Room Pairing Code`) and the Android app, together with every
-  command, setting and secret it owned (`spinney.remote.enabled`, `spinney.remote.rooms`, the
-  per-room entry in the secret storage) and the `docs/agents/plans/remote-control.md` plan it was
-  built from. No window publishes itself to another machine any more, and the manual loses its
-  remote-control chapter (the old section 20) on every page.
 
 ### Fixed
 
@@ -614,5 +606,8 @@ everything the extension contains — the baseline the project had reached at th
   `request-timeout` and `request-stall` lines, so a request that has not produced
   its first byte is now visible *while* it waits.
 
-[Unreleased]: https://github.com/Delsin-Yu/Spinney/compare/v0.0.2...HEAD
+[Unreleased]: https://github.com/Delsin-Yu/Spinney/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Delsin-Yu/Spinney/releases/tag/v0.2.0
+[0.1.0]: https://github.com/Delsin-Yu/Spinney/releases/tag/v0.1.0
+[0.0.3]: https://github.com/Delsin-Yu/Spinney/releases/tag/v0.0.3
 [0.0.2]: https://github.com/Delsin-Yu/Spinney/releases/tag/v0.0.2

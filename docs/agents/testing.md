@@ -12,7 +12,8 @@ gitignored, so a leftover is harmless). Before a release, confirm `npm run compi
 `npm run vscode:prepublish` — on a push to `main`, on a `v*` tag, on a pull request and on
 demand, so a red workflow and a red gate are the same thing instead of two lists that drift.
 
-Twenty build-time guards are the exception, all run by `vscode:prepublish` so a
+Sixteen build-time guards are the exception (`check:image` runs the `check:png` /
+`check:resample` / `check:jpeg` scripts with it), all run by `vscode:prepublish` so a
 regression fails *packaging* instead of the user's session:
 
 - `npm run check:models` (`tools/check-models.js`) — the model configuration:

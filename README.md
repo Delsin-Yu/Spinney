@@ -12,6 +12,8 @@ Install Spinney from the [Visual Studio Marketplace](https://marketplace.visuals
 
 Spinney works with a folder open and with no folder open. With no folder, a relative path resolves against a scratch folder in the extension storage.
 
+The window must be trusted. Spinney declares that it does not support an untrusted workspace, so VS Code keeps it disabled in Restricted Mode until you trust the folder.
+
 ## Start
 
 1. Run **`Spinney: Set API Key`** and paste a key. Spinney keeps it in VS Code secret storage, never in `settings.json`. The built-in provider also accepts the `DEEPSEEK_API_KEY` environment variable.
@@ -55,7 +57,7 @@ If the workspace root holds an `AGENTS.md` file, Spinney reads it once at start 
 
 Spinney sends no telemetry. It connects only to the provider endpoints you configure. A request carries your messages, the tool results, and the images.
 
-The conversations are not files: they are rows in the VS Code state database. What does reach disk is a finished turn's transcript (JSONL), an oversized tool result, and the optional http file. Uninstall, and the steps to delete the conversations too, are in the manual.
+The conversations are files: one folder for each session and one file for each node, under the data folder of the extension. `spinney.dataDir` moves that folder. A finished turn's transcript (JSONL), an oversized tool result, the diagnostics logs, and the optional http file sit beside them. Uninstall, and the steps to delete the conversations too, are in the manual.
 
 The local HTTP control plane is off by default. Turn it on only if you need it. It then listens on `127.0.0.1` and needs a bearer token. The `/continue` endpoint makes the agent run an instruction, so treat it as a local trust boundary.
 
@@ -108,6 +110,8 @@ Spinney 是一个 VS Code 扩展。它把智能体放进一个编辑器标签页
 
 打开文件夹和未打开文件夹时，Spinney 都能工作。未打开文件夹时，相对路径会解析到扩展存储中的一个临时文件夹。
 
+窗口必须处于受信任状态。Spinney 声明它不支持未受信任的工作区，所以在你信任该文件夹之前，VS Code 会在受限模式下禁用它。
+
 ## 开始
 
 1. 运行 **`Spinney: 设置 API 密钥`** 并粘贴密钥。Spinney 把密钥保存在 VS Code 密钥存储中，绝不保存在 `settings.json` 中。内置服务商也接受 `DEEPSEEK_API_KEY` 环境变量。
@@ -151,7 +155,7 @@ Spinney 是一个 VS Code 扩展。它把智能体放进一个编辑器标签页
 
 Spinney 不发送任何遥测。它只连接你配置的服务商端点。一个请求会携带你的消息、工具结果和图像。
 
-对话不是文件：它们是 VS Code 状态数据库中的记录。真正会落到磁盘上的是：已完成回合的转写（JSONL）、过大的工具结果，以及可选的 http 文件。卸载的步骤，以及连对话一起删除的步骤，都在手册里。
+对话就是文件：在扩展的数据文件夹下，每个会话一个文件夹，每个节点一个文件。`spinney.dataDir` 可以改这个位置。已完成回合的转写（JSONL）、过大的工具结果、诊断日志，以及可选的 http 文件都在它们旁边。卸载的步骤，以及连对话一起删除的步骤，都在手册里。
 
 本地 HTTP 控制面默认关闭。只在需要时打开。打开后它监听 `127.0.0.1`，并需要一个 bearer token。`/continue` 端点会让智能体执行一条指令，因此请把它视为本地信任边界。
 

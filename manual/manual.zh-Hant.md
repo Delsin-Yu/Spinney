@@ -381,6 +381,8 @@ Spinney 會在這些情況下終止正在執行的工作：
 
 影像最大可達 64 MiB。格式有 JPEG、PNG、GIF 和 WebP。Spinney 從內容讀取格式，不從檔名讀取。
 
+一張 4000 px 的影像和小圖片花費相同。代理用 `read_image` 工具讀取影像。Spinney 在上傳之前裁切影像並把它變小，所以模型看到的最長邊是 1024 px。參數 `rect` 會把其中一塊區域保留為原始細節。如果要求已經攜帶太多影像位元組，工具會拒絕這張影像。工具接著會讓代理交給子代理去看。
+
 已上傳的影像無法移到另一個供應商。`file_id` 只屬於產生它的供應商。卡片會顯示 `[image hidden: it was uploaded to a provider that this model cannot read from]`。`openai` 傳輸方式沒有這個問題。
 
 ## 10. 錯誤、重試與繼續
@@ -526,7 +528,7 @@ Spinney 不傳送任何遙測。它只連線到你設定的供應商端點。
 
 | 內容 | 位置 |
 |---|---|
-| 對話 | VS Code 狀態資料庫，不是檔案。工作區一列，未開啟資料夾時則為設定檔一列。 |
+| 對話 | 檔案，位於擴充功能的工作階段資料資料夾中：每個工作階段一個資料夾，每個節點一個檔案。`spinney.dataDir` 可以改該資料夾。舊版本的狀態資料庫只是移轉來源。 |
 | 逐字稿 | JSONL 檔案，每個已結束的回合一個，每個子代理一個。資料夾：擴充功能儲存區，或 `spinney.subAgentTranscriptDir`。 |
 | 大型工具結果 | `<agent root>/.spinney/tool-output/`。 |
 | API 金鑰 | VS Code 密鑰儲存區，由作業系統加密。絕不寫入 `settings.json`。 |
@@ -534,7 +536,7 @@ Spinney 不傳送任何遙測。它只連線到你設定的供應商端點。
 
 Spinney 不寫入你的 `.gitignore`。如果你不想讓寫入磁碟的工具輸出進入提交，請自行加入 `.spinney/` 資料夾。
 
-解除安裝後，對話仍留在狀態資料庫中。第 15 節會移除它們。
+解除安裝後，對話仍留在磁碟上。它們位於擴充功能的工作階段資料資料夾中。第 15 節會移除它們。
 
 ### 14.1 HTTP 控制平面
 
@@ -548,12 +550,12 @@ Spinney 不寫入你的 `.gitignore`。如果你不想讓寫入磁碟的工具�
 
 1. 為每個供應商執行 **`Spinney: 清除 API 金鑰`**，或接受密鑰會保留。
 2. 從擴充功能檢視解除安裝 Spinney。
-3. 手動刪除資料夾 `<extension storage>/de-yu.spinney`。它包含逐字稿、備份和控制平面檔案。
-4. 也刪除對話的列。在狀態資料庫中，設定鍵是 `DE-YU.spinney`。一列位於 `globalStorage/state.vscdb`，另一列位於每個 `<workspaceStorage>/<hash>/state.vscdb`。
+3. 手動刪除資料夾 `<extension storage>/de-yu.spinney`。它包含對話、逐字稿、備份、診斷記錄和控制平面檔案。
+4. 如果你執行過舊版本，再刪除它的列。舊版本把對話保存在狀態資料庫中。設定鍵是 `DE-YU.spinney`：一列位於 `globalStorage/state.vscdb`，另一列位於每個 `<workspaceStorage>/<hash>/state.vscdb`。目前版本把對話保存在檔案中，所以第 3 步就會移除它們。
 
 注意這兩種拼法：資料夾名稱是小寫，而列設定鍵保留擴充功能 id 的大小寫。
 
-你導向自己資料夾的檔案不在這些步驟範圍內。請檢查 `spinney.subAgentTranscriptDir` 和任何 `.spinney/` 資料夾。
+你導向自己資料夾的檔案不在這些步驟範圍內。請檢查 `spinney.dataDir`、`spinney.subAgentTranscriptDir` 和任何 `.spinney/` 資料夾。
 
 ## 16. 無資料夾模式
 
@@ -581,6 +583,7 @@ Spinney 可以在未開啟資料夾的視窗中運作。
 | 回合在開始前等待 | 並行閘門。狀態列會說明等待的原因。調高供應商或卡片上的 `concurrency`，或等待。 |
 | 模型下拉式選單是灰色的 | 本工作階段有回合正在執行。停止它或等它結束。 |
 | 檢視停在舊卡片上 | 手動平移或縮放關閉了跟隨模式。點選 **跟隨作用中節點**。 |
+| 活動列中沒有 Spinney | 視窗處於受限模式。Spinney 不支援未受信任的工作區，所以 VS Code 保持停用它。信任該資料夾，然後重新載入視窗。 |
 
 **Spinney** 輸出通道包含診斷資訊。用 View → Output 開啟它，然後在清單中選取 `Spinney`。它會列出顯示語言、模型設定問題，以及版面和效能相關的行。
 

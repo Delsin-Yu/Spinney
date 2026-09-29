@@ -381,6 +381,8 @@ Spinney 在以下情况下终止正在运行的任务：
 
 一张图片最大 64 MiB。格式为 JPEG、PNG、GIF 和 WebP。Spinney 从内容读取格式，而不是从文件名。
 
+一张 4000 px 的图片和小图片花费相同。智能体用 `read_image` 工具读取图片。Spinney 在上传之前裁切图片并把它变小，所以模型看到的最长边是 1024 px。参数 `rect` 会把其中一块区域保留为原始细节。如果请求已经携带太多图片字节，工具会拒绝这张图片，并让智能体交给子智能体去看。
+
 已上传的图片不能移到另一个服务商。`file_id` 只属于生成它的服务商。卡片显示 `[image hidden: it was uploaded to a provider that this model cannot read from]`。`openai` 传输没有这个问题。
 
 ## 10. 错误、重试与继续
@@ -526,7 +528,7 @@ Spinney 不发送遥测。它只连接你配置的服务商端点。
 
 | 内容 | 位置 |
 |---|---|
-| 对话 | VS Code 状态数据库，不是文件。工作区一行，或未打开文件夹时配置档案一行。 |
+| 对话 | 文件，位于扩展的会话数据文件夹中：每个会话一个文件夹，每个节点一个文件。`spinney.dataDir` 可以改该文件夹。旧版本的状态数据库只是迁移来源。 |
 | 转写 | JSONL 文件，每个已结束的回合一个，每个子智能体一个。文件夹：扩展存储，或 `spinney.subAgentTranscriptDir`。 |
 | 大的工具结果 | `<agent root>/.spinney/tool-output/`。 |
 | API 密钥 | VS Code 密钥存储，由操作系统加密。绝不在 `settings.json` 中。 |
@@ -534,7 +536,7 @@ Spinney 不发送遥测。它只连接你配置的服务商端点。
 
 Spinney 不会向你的 `.gitignore` 写入任何内容。如果你不想让溢出的工具输出进入提交，请自己添加 `.spinney/` 文件夹。
 
-卸载后对话仍留在状态数据库中。第 15 节会移除它们。
+卸载后对话仍留在磁盘上。它们位于扩展的数据文件夹中。第 15 节会移除它们。
 
 ### 14.1 HTTP 控制平面
 
@@ -548,12 +550,12 @@ Spinney 不会向你的 `.gitignore` 写入任何内容。如果你不想让溢�
 
 1. 为每个服务商运行 **`Spinney: 清除 API 密钥`**，或接受密钥仍然保留。
 2. 在扩展视图中卸载 Spinney。
-3. 手动删除文件夹 `<extension storage>/de-yu.spinney`。它保存转写、备份和控制平面文件。
-4. 同时删除对话行。在状态数据库中，键为 `DE-YU.spinney`。一行位于 `globalStorage/state.vscdb`，另外每个 `<workspaceStorage>/<hash>/state.vscdb` 中各有一行。
+3. 手动删除文件夹 `<extension storage>/de-yu.spinney`。它保存对话、转写、备份、诊断日志和控制平面文件。
+4. 如果你运行过旧版本，再删除它的行。旧版本把对话保存在状态数据库中。键为 `DE-YU.spinney`：一行位于 `globalStorage/state.vscdb`，另外每个 `<workspaceStorage>/<hash>/state.vscdb` 中各有一行。当前版本把对话保存在文件中，所以第 3 步就会移除它们。
 
 注意两种拼写：文件夹名是小写，而行键保留扩展 id 的大小写。
 
-你指定到自己文件夹的文件不在这些步骤之内。检查 `spinney.subAgentTranscriptDir` 和任何 `.spinney/` 文件夹。
+你指定到自己文件夹的文件不在这些步骤之内。检查 `spinney.dataDir`、`spinney.subAgentTranscriptDir` 和任何 `.spinney/` 文件夹。
 
 ## 16. 无文件夹模式
 
@@ -581,6 +583,7 @@ Spinney 在未打开任何文件夹的窗口中也能工作。
 | 回合开始前要等待 | 并发闸门。状态行会说明等待原因。提高服务商或卡片上的 `concurrency`，或者等待。 |
 | 模型下拉列表是灰色 | 本会话中有回合在运行。停止它或等待它。 |
 | 视图停在旧卡片上 | 手动平移或缩放关闭了跟随模式。点击 **跟随活动节点**。 |
+| 活动栏里没有 Spinney | 窗口处于受限模式。Spinney 不支持未受信任的工作区，所以 VS Code 保持禁用它。信任该文件夹，然后重新加载窗口。 |
 
 **Spinney** 输出通道保存诊断信息。用 View → Output 打开它，然后在列表中选择 `Spinney`。它会说明显示语言、模型配置问题，以及布局和性能行。
 

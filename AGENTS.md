@@ -65,7 +65,7 @@ A change to anything under `src/`, `media/`, or `package.json` is not finished u
 
 - The version follows SemVer. We are at `0.x`, which is pre-1.0: a breaking change bumps the minor version only.
 - Tag every release as `vX.Y.Z`.
-- `vscode:prepublish` (compile plus the twenty guards) is the release gate: a release does not ship when that script fails.
+- `vscode:prepublish` (compile plus the sixteen guards) is the release gate: a release does not ship when that script fails.
 - `CHANGELOG.md` uses the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
 ## Hard invariants (read before you touch code)
@@ -107,4 +107,4 @@ A change to anything under `src/`, `media/`, or `package.json` is not finished u
 - No-workspace mode (no folder open): `no-repo-mode` (root, session storage, behavior differences)
 - Acceptance and artifacts: `testing` · `scratch-space`
 - Being implemented: `plans/image-budget` — the image budget is **bytes, not tokens**: `read_image` transforms before the upload (crop to `rect`, downscale to `IMAGE_TARGET_MAX_SIDE`), a per-request brake delegates instead of attaching, and a window can be full by bytes and roll over.
-- Planned, not implemented: `plans/session-epoch` (session context epochs — one frozen request envelope per node, so the provider's prefix cache keeps hitting)
+- Implemented in 0.1.0 (the plan stays as the design record): `plans/session-epoch` — session context epochs, one frozen request envelope per node, so the provider's prefix cache keeps hitting. The rules it produced live in `invariants/system-prompt.md` and `invariants/context-rollover.md`.
