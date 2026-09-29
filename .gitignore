@@ -12,9 +12,8 @@ dist/
 # Packaged VS Code extension
 *.vsix
 
-# Build artifacts: the collected output of the three builds — the extension package,
-# the cross-compiled relay and the Android APK. `tools/collect-artifacts.mjs` owns this
-# directory and fills it on demand; nothing here is committed or hand-edited. It is not
+# Build artifacts: the collected output of the extension package. `tools/collect-artifacts.mjs`
+# owns this directory and fills it on demand; nothing here is committed or hand-edited. It is not
 # scratch: `.spinney/` is disposable, this is the deliverable (see
 # docs/agents/scratch-space.md).
 artifacts/

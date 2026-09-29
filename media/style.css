@@ -1201,7 +1201,7 @@ button.icon-btn {
 }
 
 /* Zone 0 — "the content of this node is on its way" — is the strip a waiting card wears
-   (see `setCardLoading` in main.js). It exists because the measured replica symptom was
+   (see `setCardLoading` in main.js). It exists because the symptom this exists for was
    a card with *nothing at all* in it: three cards measured `work:0 ans:0` next to a
    `preview` that promised a full session, which is indistinguishable from an empty,
    finished node. It is only displayed for an expanded card that is still waiting
