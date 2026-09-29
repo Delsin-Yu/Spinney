@@ -2942,6 +2942,11 @@
     card._nodeId = id;
     treeCanvas.appendChild(card);
     if (cvObserver) cvObserver.observe(card);
+    // Every card is watched by the one card observer as well (see `cardResizeObserver`):
+    // any card that grows after the last layout pass leaves the tree with stale boxes,
+    // whatever grew it. Observed after `_nodeId` is set, because the observer's loop guard
+    // reads a card's id back off its element (`layoutStretch[id]`).
+    cardObserve(card);
     return card;
   }
 
@@ -3722,18 +3727,28 @@
     return false;
   }
 
-  // rAF-throttled relayout for a growing sub-agent card: its transcript grows as
-  // it streams but followActive (which schedules the main layout) is suppressed
-  // while routingSubAgent, so cards could overlap until agentDone. Throttle to
-  // one relayout per frame so a fast stream repositions siblings without jank.
-  let subAgentRelayoutRaf = null;
-  function scheduleSubAgentRelayout() {
-    if (subAgentRelayoutRaf != null) return;
-    subAgentRelayoutRaf = requestAnimationFrame(() => {
-      subAgentRelayoutRaf = null;
+  // rAF-throttled relayout for ANY card whose own box changed (see
+  // `cardResizeObserver`, its main caller). It began as the sub-agent case and that is
+  // still the loudest one: a streaming card's transcript grows while `followActive`
+  // (which schedules the main layout) is suppressed as `routingSubAgent`, so cards could
+  // overlap until agentDone. A card that grows outside a repaint — a log unfolded, an
+  // image that landed, a window that re-wrapped — is the same event, so the throttle is
+  // the shared one. One relayout per frame is what it exists for: `relayout()` measures
+  // every card and re-runs the whole tidy-tree pass, so a burst of card resizes has to
+  // coalesce into a single pass per frame or a fast stream repositions siblings on
+  // every tick.
+  let cardRelayoutRaf = null;
+  function scheduleCardRelayout() {
+    if (cardRelayoutRaf != null) return;
+    cardRelayoutRaf = requestAnimationFrame(() => {
+      cardRelayoutRaf = null;
       relayout();
     });
   }
+
+  // The name the streaming path reads by (`routeTo`): one case of the throttle above,
+  // kept as its own name so that call site and its comment stay true.
+  const scheduleSubAgentRelayout = scheduleCardRelayout;
 
   // Route a streaming callback to a specific node's work log (its zone 2): every
   // streaming message carries the `nodeId` it belongs to (spec §2.1), so the
@@ -4309,6 +4324,9 @@
         // A waiting card's timer goes with it: a card removed while its 5 s wait is still
         // ticking would otherwise be held (and re-classed) after the tree dropped it.
         setCardLoading(nodeEls[id], false);
+        // A card that leaves the tree is unobserved with it: the one card observer holding
+        // a detached element would keep a dead card (and its id) alive between sessions.
+        cardUnobserve(nodeEls[id]);
         nodeEls[id].remove();
         delete nodeEls[id];
         // The card is gone, so its stretch record has nothing to restore — and a
@@ -4480,6 +4498,10 @@
       head.addEventListener('click', () => inputEl.focus());
       composerCard.appendChild(head);
       treeCanvas.appendChild(composerCard);
+      // The placeholder is a card like any other for the layout — it grows and shrinks
+      // with the composition area — so the one card observer watches it too (see
+      // `cardResizeObserver`).
+      cardObserve(composerCard);
       centerComposerCard = true;
     }
     setComposerVisible(true);   // before mounting: autoGrow() needs a rendered input
@@ -4488,6 +4510,10 @@
 
   function hideComposerCard() {
     if (!composerCard) return;
+    // It leaves the tree here, so the observer lets go of it in the same breath: an
+    // observed card that is detached from the canvas is one record about a card that no
+    // longer exists (see `cardResizeObserver`).
+    cardUnobserve(composerCard);
     composerCard.remove();
     composerCard = null;
   }
@@ -4521,8 +4547,14 @@
       keepActiveInView();
       const card = treeActiveId ? nodeEls[treeActiveId] : null;
       if (card && card._itemScroll) card._itemScroll.scrollToBottom();
-      const active = treeActiveId ? treeNodes[treeActiveId] : null;
-      if (active && active.children && active.children.length) scheduleLayout();
+      // The debounced layout is scheduled for EVERY turn whose content changed, whichever
+      // card grew. This used to be gated on the focused node having children, which is the
+      // case that was missed: the focused card's own height is what the placement has to
+      // follow, and a focused node with no children grows its card exactly like any other
+      // — nothing scheduled a pass for it, so it kept its old box and painted over the
+      // expanded card above it (the case `cardResizeObserver` now also covers from the other
+      // end — the card's own resize).
+      scheduleLayout();
     });
   }
 
@@ -4540,6 +4572,76 @@
       layoutDebounce = null;
       relayout();
     }, 150);
+  }
+
+  // ---- One ResizeObserver, every card ----------------------------------------
+  // The canvas places its cards absolutely from the heights `relayout()` measured, so a
+  // card that grows AFTER a pass keeps its old box and paints over its neighbours: the
+  // focused card (`.node.active`, z-index 3) then covers an expanded card above it —
+  // exactly 163px of spacing under a 317px sidecar card, reported as `OVERLAP` on the
+  // channel. Every re-layout today is scheduled site by site (a repaint, a routed append,
+  // an agent starting or finishing, a fold, a drag commit), and each of those sites names
+  // the card it expects to change. One observer over the cards themselves closes that gap
+  // at the source: a card is re-placed because *its own box* changed, whatever changed it.
+  //
+  // It only SCHEDULES (`scheduleCardRelayout`, one layout per frame). Running
+  // `relayout()` here would measure cards and write inline heights while the browser is
+  // still delivering resize records, which is the one place a layout pass may not run.
+  //
+  // Feature-guarded: a real browser always has `ResizeObserver`, and the offline webview
+  // checker's DOM stub has a no-op one. A platform that has none must still run this file,
+  // so both entry points below do nothing at all when the observer is absent — nothing
+  // here may throw. There is exactly ONE instance for the whole webview, never one per
+  // card: an observer per card would report the same growth through N callbacks and hold
+  // N objects alive.
+  const cardResizeObserver =
+    typeof ResizeObserver !== 'undefined' ? new ResizeObserver(onCardResize) : null;
+
+  /** Watch this card's box (see `cardResizeObserver`). */
+  function cardObserve(card) {
+    if (cardResizeObserver && card) cardResizeObserver.observe(card);
+  }
+
+  /** Stop watching a card that leaves the tree (removed, or the session reset). */
+  function cardUnobserve(card) {
+    if (cardResizeObserver && card) cardResizeObserver.unobserve(card);
+  }
+
+  /**
+   * A card's own box changed (see `cardResizeObserver`). Two entries are ignored:
+   *
+   *  - the height the last pass forced on this card (`layoutStretch[id]`, compared with
+   *    the same 0.5px tolerance `relayout` uses to decide a target is a stretch at all):
+   *    the inline height the layout writes IS itself a resize, so an unguarded observer
+   *    would see its own layout's output, schedule again, and relayout forever;
+   *  - a height of 0 — a card that is hidden, not measured yet, or skipped by the engine
+   *    with no remembered box to size it by. There is no size there for a layout to use,
+   *    and the skipping itself is `cvObserver`'s business, not this one's.
+   *
+   * Anything else is a real change of size, and the answer to one is a *scheduled*
+   * re-layout — never a `relayout()` in here.
+   */
+  function onCardResize(entries) {
+    try {
+      for (const entry of entries) {
+        const card = entry.target;
+        // `offsetHeight`, not the entry's content box: it is the measure `relayout()`
+        // reads and the one `layoutStretch` records, so only this number can be compared
+        // with what the last pass forced (a card's padding and border are part of its
+        // size here).
+        const h = card.offsetHeight || 0;
+        if (!h) continue;
+        const id = card._nodeId;
+        // The placeholder composer card has no node id, so it has no stretch record
+        // either — it only ever passes the height check above.
+        const forced = id ? layoutStretch[id] : undefined;
+        if (typeof forced === 'number' && Math.abs(h - forced) <= 0.5) continue;
+        scheduleCardRelayout();
+        return;
+      }
+    } catch (err) {
+      /* a layout aid must never break the UI */
+    }
   }
 
   function fitToView() {
@@ -6171,7 +6273,13 @@
       case 'reset':
         clearLiveTools();
         resetItems();
-        for (const id in nodeEls) { nodeEls[id].remove(); }
+        for (const id in nodeEls) {
+          // A new session's cards are all going: the one card observer lets go of each
+          // before it is detached (same rule as in `renderTree`), or the dead elements
+          // would stay observed across sessions.
+          cardUnobserve(nodeEls[id]);
+          nodeEls[id].remove();
+        }
         for (const id in nodeEls) delete nodeEls[id];
         pathNodes = Object.create(null);
         treeNodes = Object.create(null);
