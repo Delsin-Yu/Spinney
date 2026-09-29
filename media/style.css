@@ -1870,28 +1870,6 @@ button.icon-btn {
   border: 1px solid var(--border);
 }
 
-/* Remote-origin badge (§13): this turn was started from another window in the room, and
-   the badge names that device. Same compact 9px box as `CTX` / `Delivered`, but tinted with
-   the accent so a remote turn is distinguishable at a glance from a local one without
-   relying on the text — and it is text after all, because naming the device is the point.
-   `max-width` + ellipsis: a long hostname must not push the status chip out of the head. */
-.node-origin-badge {
-  flex: 0 1 auto;
-  max-width: 160px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  padding: 1px 5px;
-  border-radius: 4px;
-  font-family: "Consolas", monospace;
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.03em;
-  color: var(--accent);
-  background: var(--bg3);
-  border: 1px solid var(--accent);
-}
-
 .node-agent-info {
   flex: 0 0 auto;
   min-width: 0;

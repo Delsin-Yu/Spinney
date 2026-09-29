@@ -1,30 +1,20 @@
 /**
- * webviewShell.ts — the **one** HTML shell of the chat surface, shared by both places a
- * `media/main.js` document is opened.
+ * webviewShell.ts — the **one** HTML shell of the chat surface, the document `media/main.js`
+ * renders.
  *
- * There are two of them, and there is exactly one renderer (`remote/PROTOCOL.md` §5, §11):
- *
- *  - the **local chat tab** (`ChatViewProvider.getHtml()` → `ChatPanel`), and
- *  - the **replicated session panel** (`src/remote/remoteSessionPanel.ts`), which renders
- *    the `mirror` frames of another window's session with the very same `media/main.js`.
- *
- * The two shells therefore cannot be two files: `media/main.js` fetches its whole fixed
- * surface by element id at boot, and a second template that drifted by one id would leave
- * the replica frozen on stale values with nothing in the product able to say why. So the
- * template lives here, once, and both callers hand it a `webview` and their own
- * `mediaVersion`.
+ * The local chat tab opens it (`ChatViewProvider.getHtml()` → `ChatPanel`), and the caller
+ * hands it a `webview` and its own `mediaVersion`.
  *
  * What this module deliberately does **not** own: the panel lifecycle, the message
- * routing, the held-before-`ready` queue. Those live in `ChatPanel` / `remoteSessionPanel`
- * and are about *a* panel, not about the document.
+ * routing, the held-before-`ready` queue. Those live in `ChatPanel` and are about *a*
+ * panel, not about the document.
  *
  * Behaviour-preserving is the requirement: this is the byte-for-byte template
  * `ChatViewProvider.getHtml()` used to render — same script set and order (the vendored
  * layout engine, `markdown-it`, `media/tree.js`, `media/main.js`), same CSP, same
  * per-document nonce, same `window.__spinneyL10n` injection, same element ids, same
- * localized shell strings. `npm run check:webview` (the renderer) and
- * `node tools/check-remote-assets.js` (the shell's DOM against the Android mirror) are the
- * two guards that decide whether it still is.
+ * localized shell strings. `npm run check:webview` (the renderer) is the guard that decides
+ * whether it still is.
  */
 import * as vscode from 'vscode';
 import { displayLocale, webviewL10n } from '../i18n';
@@ -44,8 +34,7 @@ export interface ChatShellOptions {
  * The chat surface's HTML document.
  *
  * A `ready` handshake, not a snapshot: the document renders itself from the messages the
- * host posts after the webview says `ready` (see `ChatPanel.markReady` /
- * `remoteSessionPanel.ts`), which is why the same shell serves a local tab and a replica.
+ * host posts after the webview says `ready` (see `ChatPanel.markReady`).
  */
 export function buildChatShell(webview: vscode.Webview, opts: ChatShellOptions): string {
   // A cache-busting version suffix so the webview re-fetches media files when

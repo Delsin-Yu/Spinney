@@ -42,8 +42,7 @@
   ],
   "activationEvents": [
     "onWebviewPanel:spinney.chatTree",
-    "onWebviewPanel:spinney.modelTree",
-    "onWebviewPanel:spinney.remoteSession"
+    "onWebviewPanel:spinney.modelTree"
   ],
   "main": "./out/extension.js",
   "l10n": "./l10n",
@@ -63,27 +62,9 @@
           "id": "spinney.sessions",
           "name": "%view.sessions.name%",
           "contextualTitle": "Spinney"
-        },
-        {
-          "id": "spinney.remote",
-          "name": "%view.remote.name%",
-          "contextualTitle": "Spinney",
-          "when": "config.spinney.remote.enabled"
         }
       ]
     },
-    "viewsWelcome": [
-      {
-        "view": "spinney.remote",
-        "when": "!config.spinney.remote.enabled",
-        "contents": "%viewsWelcome.remote.disabled%"
-      },
-      {
-        "view": "spinney.remote",
-        "when": "config.spinney.remote.enabled && !spinney.remote.hasRooms",
-        "contents": "%viewsWelcome.remote.noRooms%"
-      }
-    ],
     "commands": [
       {
         "command": "spinney.openSession",
@@ -124,66 +105,6 @@
         "command": "spinney.openModelCards",
         "title": "%command.spinney.openModelCards.title%",
         "icon": "$(settings-gear)"
-      },
-      {
-        "command": "spinney.remoteRooms",
-        "title": "%command.spinney.remoteRooms.title%",
-        "icon": "$(radio-tower)"
-      },
-      {
-        "command": "spinney.remotePairingCode",
-        "title": "%command.spinney.remotePairingCode.title%",
-        "icon": "$(device-camera)"
-      },
-      {
-        "command": "spinney.remoteOpenSession",
-        "title": "%command.spinney.remoteOpenSession.title%",
-        "icon": "$(link-external)"
-      },
-      {
-        "command": "spinney.remoteSendMessage",
-        "title": "%command.spinney.remoteSendMessage.title%",
-        "icon": "$(comment-discussion)"
-      },
-      {
-        "command": "spinney.remoteStopSession",
-        "title": "%command.spinney.remoteStopSession.title%",
-        "icon": "$(debug-stop)"
-      },
-      {
-        "command": "spinney.remoteNewSession",
-        "title": "%command.spinney.remoteNewSession.title%",
-        "icon": "$(add)"
-      },
-      {
-        "command": "spinney.remoteKick",
-        "title": "%command.spinney.remoteKick.title%",
-        "icon": "$(circle-slash)"
-      },
-      {
-        "command": "spinney.remoteUnblock",
-        "title": "%command.spinney.remoteUnblock.title%",
-        "icon": "$(check)"
-      },
-      {
-        "command": "spinney.remoteCopyDeviceName",
-        "title": "%command.spinney.remoteCopyDeviceName.title%",
-        "icon": "$(copy)"
-      },
-      {
-        "command": "spinney.remoteConnect",
-        "title": "%command.spinney.remoteConnect.title%",
-        "icon": "$(plug)"
-      },
-      {
-        "command": "spinney.remoteDisconnect",
-        "title": "%command.spinney.remoteDisconnect.title%",
-        "icon": "$(debug-disconnect)"
-      },
-      {
-        "command": "spinney.remoteFocus",
-        "title": "%command.spinney.remoteFocus.title%",
-        "icon": "$(radio-tower)"
       },
       {
         "command": "spinney.clear",
@@ -259,61 +180,6 @@
           "command": "spinney.copySessionId",
           "when": "view == spinney.sessions",
           "group": "2_copy"
-        },
-        {
-          "command": "spinney.remoteOpenSession",
-          "when": "view == spinney.remote && viewItem == remoteSession",
-          "group": "inline"
-        },
-        {
-          "command": "spinney.remoteSendMessage",
-          "when": "view == spinney.remote && viewItem == remoteSession",
-          "group": "1_remote@1"
-        },
-        {
-          "command": "spinney.remoteStopSession",
-          "when": "view == spinney.remote && viewItem == remoteSession",
-          "group": "1_remote@2"
-        },
-        {
-          "command": "spinney.remoteNewSession",
-          "when": "view == spinney.remote && viewItem == remoteInstance",
-          "group": "1_remote@1"
-        },
-        {
-          "command": "spinney.remoteKick",
-          "when": "view == spinney.remote && viewItem == remoteDevice",
-          "group": "1_remote@1"
-        },
-        {
-          "command": "spinney.remoteUnblock",
-          "when": "view == spinney.remote && viewItem == remoteDeviceBlocked",
-          "group": "1_remote@1"
-        },
-        {
-          "command": "spinney.remoteCopyDeviceName",
-          "when": "view == spinney.remote && viewItem =~ /^remoteDevice/",
-          "group": "2_copy"
-        },
-        {
-          "command": "spinney.remoteConnect",
-          "when": "view == spinney.remote && viewItem == remoteRoom",
-          "group": "1_remote@1"
-        },
-        {
-          "command": "spinney.remoteDisconnect",
-          "when": "view == spinney.remote && viewItem == remoteRoom",
-          "group": "1_remote@2"
-        },
-        {
-          "command": "spinney.remoteRooms",
-          "when": "view == spinney.remote && viewItem == remoteRoom",
-          "group": "1_remote@3"
-        },
-        {
-          "command": "spinney.remotePairingCode",
-          "when": "view == spinney.remote && viewItem == remoteRoom",
-          "group": "1_remote@4"
         }
       ]
     },
@@ -606,39 +472,6 @@
             "scope": "window"
           }
         }
-      },
-      {
-        "title": "%spinney.config.remote.title%",
-        "properties": {
-          "spinney.remote.enabled": {
-            "type": "boolean",
-            "default": false,
-            "markdownDescription": "%spinney.remote.enabled.markdownDescription%",
-            "scope": "window"
-          },
-          "spinney.remote.rooms": {
-            "type": "object",
-            "default": {},
-            "additionalProperties": {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "relayUrl": {
-                  "type": "string",
-                  "default": "",
-                  "description": "%spinney.remote.rooms.relayUrl.description%"
-                },
-                "autoConnect": {
-                  "type": "boolean",
-                  "default": false,
-                  "description": "%spinney.remote.rooms.autoConnect.description%"
-                }
-              }
-            },
-            "markdownDescription": "%spinney.remote.rooms.markdownDescription%",
-            "scope": "window"
-          }
-        }
       }
     ]
   },
@@ -669,16 +502,9 @@
     "check:resample": "node tools/check-resample.js",
     "check:image": "node tools/check-png.js && node tools/check-resample.js && node tools/check-image.js && node tools/check-jpeg.js",
     "check:jpeg": "node tools/check-jpeg.js",
-    "check:remote": "node tools/check-remote.js",
-    "check:qr": "node tools/check-qr.js",
-    "check:relay": "node tools/relay-acceptance.js",
-    "check:remote-assets": "node tools/check-remote-assets.js",
-    "check:remote-surfaces": "node tools/remote-surfaces-acceptance.js",
-    "check:remote-e2e": "node tools/remote-acceptance.mjs",
-    "check:interop": "node tools/remote-interop.mjs",
     "sim": "node tools/sim/run.mjs",
     "sim:selftest": "node tools/sim/run.mjs --selftest",
-    "vscode:prepublish": "npm run compile && npm run sync:l10n && npm run check:models && npm run check:webview && npm run check:modeltree && npm run check:signals && npm run check:l10n && npm run check:rollover && npm run check:grid && npm run check:docs && npm run check:cwd && npm run check:shell && npm run check:kill && npm run check:timeout && npm run check:budget && npm run check:websearch && npm run check:image && npm run check:remote && npm run check:qr && npm run check:relay && npm run check:remote-surfaces && npm run check:remote-assets && npm run check:unicode"
+    "vscode:prepublish": "npm run compile && npm run sync:l10n && npm run check:models && npm run check:webview && npm run check:modeltree && npm run check:signals && npm run check:l10n && npm run check:rollover && npm run check:grid && npm run check:docs && npm run check:cwd && npm run check:shell && npm run check:kill && npm run check:timeout && npm run check:budget && npm run check:websearch && npm run check:image && npm run check:unicode"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

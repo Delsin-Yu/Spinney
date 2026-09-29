@@ -70,8 +70,8 @@
   background terminal's output tail — `tailText` (`src/chat/runtime.ts`, the `BackgroundInfo`
   tail and `node.bgOutputTail`) — where the danger is the same half on the other side: text
   that begins on a low surrogate. Log-only, on a string that leaves through a log line:
-  `ApiClient.clipReason` (`src/agent/apiClient.ts`), `src/redact.ts`, `src/perf.ts`, and the
-  12-unit device id in `src/remote/remoteService.ts`. The belt-and-braces boundary is
+  `ApiClient.clipReason` (`src/agent/apiClient.ts`), `src/redact.ts` and `src/perf.ts`.
+  The belt-and-braces boundary is
   `ApiClient.stream` / `ApiClient.complete` (`src/agent/apiClient.ts`), which put the **whole
   request body** of *every* `/chat/completions` request through `wellFormedDeep`
   (`JSON.stringify(wellFormedDeep(body))` — the messages, the card-supplied `model` /

@@ -5,7 +5,7 @@ The settings are contributed in **groups**: `contributes.configuration` is an ar
 (`commandMaxForegroundDuration`, `maxInlineToolOutput`) · Sub-agents
 (`maxConcurrentSubagents`, `maxLevel2Subagents`) · Sessions & Transcripts (`autoSessionTitles`,
 `saveSessionTranscripts`, `saveSubAgentTranscripts`, `subAgentTranscriptDir`) ·
-Control Plane (`httpApi.*`) · Remote Control (`remote.enabled`, `remote.rooms`). The
+Control Plane (`httpApi.*`). The
 Settings UI renders one section per entry and keeps
 the order the properties are declared in, so the array *is* the grouping and the
 order; the keys themselves never move, which is why `getConfiguration('spinney')`,
@@ -88,10 +88,7 @@ the title; the one-time historical backfill is keyed by the Memento marker
 tool result spills to `<agentRoot>/.spinney/tool-output/`). `SubAgentPool` clamps `maxConcurrentSubagents`
 to **≥ 1** (a non-positive limit would otherwise deadlock every sub-agent).
 `httpApi.enabled` (default `false` — the local control plane) and `httpApi.port`
-(default `0` = ephemeral), `remote.enabled` (default `false` — the **master kill switch** of
-remote control: while it is off no room is opened, no token is read, no key material is
-derived and no status-bar item exists) and `remote.rooms` (object of **room name** →
-`{ relayUrl, autoConnect }`, default `{}`).
+(default `0` = ephemeral).
 - **Models are cards.** Exactly one card is built in — `deepseek-flash` (the
   fallback, used before anything is configured). Everything else is the user's
   `spinney.providers` + `spinney.modelCards`, structured data: the Model Card Tree
@@ -118,22 +115,6 @@ derived and no status-bar item exists) and `remote.rooms` (object of **room name
   literal `none` (`none` omits the parameter and keeps the effort sentence out of
   the prompt). A session's level that its card does not offer is clamped to the
   card's `defaultEffort` (`normalizeEffort`).
-- **A remote room is keyed by its local name.** `spinney.remote.rooms` is an object of
-  `{"<room name>": { relayUrl, autoConnect }}`, and it is an object rather than a list for
-  one reason: the **name is the key** — it is the row's identity, the key of its
-  SecretStorage entry (`spinney.remote.password.<roomName>`) and the label the room UI
-  draws, and a rename is a move of both. The name is a **local label** and never travels:
-  two machines meet in a room purely because their tokens match
-  (`docs/agents/plans/remote-control.md` §11). `relayUrl` is the room's self-hosted relay
-  (http/https); `autoConnect` is "connect this room in every window", which is exactly what
-  the command's Connect / Disconnect writes. A row that cannot be parsed is skipped and
-  logged to the output channel (`parseRooms`), never repaired. The editor is
-  `Spinney: Manage Remote Rooms` (`spinney.remoteRooms`), which writes these rows through
-  `configuration.update` — so a change reaches the live path exactly like a hand edit of
-  `settings.json` — adds a room, renames one (moving its token: read, store under the new
-  name, delete the old, refusing to overwrite an existing room), sets or clears a token, and
-  copies a room name.
-
 ### When a change takes effect (no reload required)
 `extension.ts` listens to `onDidChangeConfiguration` and routes an
 `spinney.*` change to `ChatViewProvider.onConfigurationChanged(event)`. The
@@ -150,8 +131,6 @@ no handling.
 | `foldToolCalls`, `foldThinking`, `foldWork` | immediately, incl. cards already on screen | pushed: `postConfig()` → the webview re-applies the default to existing cards (`foldWork` re-runs the card's automatic work-log fold after the push, which is how a finished card folds or unfolds without a repaint) |
 | `promptSections` | immediately, incl. a chat tab already open | pushed: `postConfig()` → the webview rebuilds the snippet menu from `snippets` (it keeps no copy of the list, and the shipped rows are merged in again on every push, so a renamed or emptied row shows up at once) |
 | `httpApi.enabled`, `httpApi.port` | immediately | pushed: `ControlServer.restart()` (rebind the listener; disabling just leaves `start()` a no-op) |
-| `remote.enabled` | immediately | pushed: `RemoteService.apply()` — one `RelayTransport` is opened per room whose row says `autoConnect` (token read from SecretStorage, keys derived, outbound only) and every one of them is torn down when the switch goes off; the status-bar item exists only while it is on and a room is configured |
-| `remote.rooms` | immediately, and only for the room that moved (a row added, removed, re-pointed at another `relayUrl`, or switched `autoConnect` on/off) | pushed: the same `RemoteService.apply()` reconciles the live rooms against the rows — a room whose `relayUrl` changed is restarted, `autoConnect: false` or a deleted row tears it down. A **token** is a secret, not a setting, so `Set token` / `Clear token` write SecretStorage and call `RemoteService.restartRoom` |
 | `commandMaxForegroundDuration`, `maxInlineToolOutput`, `maxLevel2Subagents`, `saveSessionTranscripts`, `saveSubAgentTranscripts`, `subAgentTranscriptDir`, `autoSessionTitles` | immediately | pulled at the point of use (they already were — no listener needed; the limit is read **per call** — an `exec_command` invocation, a join, a spawn — and never cached, so a change applies to the next call and never to a call already waiting) |
 
 - **`model` / `thinkingEffort` arbitration (P4):** the selection belongs to the **node**.
@@ -189,8 +168,4 @@ from the page's per-provider key fields, and set or cleared with the
 optional provider id (the palette defaults to the built-in provider). `refreshKeys`
 invalidates the cache and re-reads, so a new key is live without a reload. It is
 therefore **not** part of the "every `spinney.*` change applies immediately" rule.
-A remote-control room's token is the same kind of exception, one entry per room:
-`spinney.remote.password.<roomName>` (`roomSecretName` in `src/remote/roomsStore.ts`),
-written only by `Spinney: Manage Remote Rooms`, read only when that room connects, and
-never a setting — it never goes to the relay, a log or a tooltip.
 Every other `spinney.*` setting still applies at the moment you change it.

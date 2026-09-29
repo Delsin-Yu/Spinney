@@ -4,8 +4,6 @@ Spinney is a VS Code extension. It puts an agent in an editor tab, and it keeps 
 
 Version: 0.0.2.
 
-Remote control is **off by default**. While it is on, a room token gives the other machines in the room full control of this window (section 20).
-
 ## 1. Install and first run
 
 1. Install **Spinney** from the Visual Studio Marketplace.
@@ -477,8 +475,6 @@ All keys start with `spinney.`. Open the Settings UI, or edit `settings.json`.
 | `spinney.diagnostics.log` | `true` | Write a diagnostics log for this window. It holds timings, counters and paths — never your conversation. Every line ends with a timestamp. A command also writes one line when it starts, a heartbeat line every 30 seconds, and one line when it ends. One file per window, oldest removed, rotating at 2 MiB. |
 | `spinney.httpApi.enabled` | `false` | Turn on the local HTTP control plane. See section 14. |
 | `spinney.httpApi.port` | `0` | The port of that control plane. `0` lets the system pick one. |
-| `spinney.remote.enabled` | `false` | Publish this window into the rooms, and accept input from their members. **Off by default.** See section 20. |
-| `spinney.remote.rooms` | `{}` | The rooms, keyed by the room name. One row holds the relay address and `autoConnect`. The token stays in the secret storage, and never in this file. Edit the rows with `Spinney: Manage Remote Rooms`. |
 
 A change applies at once, with one exception: `AGENTS.md` needs a window reload (section 13).
 
@@ -506,18 +502,6 @@ Every command lives in the Command Palette under `Spinney: `.
 | `Spinney: Show User Manual` | Opens this manual in an editor tab. |
 | `Spinney: Reload Chat Webview` | Builds the chat tab again from the state of the session. |
 | `Spinney: Test Web Search Backends` | Sends one test query to every search backend, and opens a table of the results. |
-| `Spinney: Manage Remote Rooms` | Adds, changes and removes rooms, and their tokens. See section 20. |
-| `Spinney: Show Room Pairing Code` | Shows the room token as a QR code that a phone can read. See section 20.8. |
-| `Spinney: Open the Remote Session` | Opens a copy of a session that another window publishes. |
-| `Spinney: Send a Message to a Remote Session…` | Sends one message into a session on another machine. |
-| `Spinney: Stop the Remote Session` | Stops the turn of a session on another machine. |
-| `Spinney: New Session on a Remote Window…` | Creates a session in another window. |
-| `Spinney: Kick this Device` | Stops this window from mirroring to one device. It is not a revocation (section 20.6). |
-| `Spinney: Unblock this Device` | Talks to a kicked device again. |
-| `Spinney: Copy Device Name` | Copies the name of a device to the clipboard. |
-| `Spinney: Connect this Room` | Connects a room in every window that holds its token. |
-| `Spinney: Disconnect this Room` | Stops connecting a room in every window. |
-| `Spinney: Focus the Room Tree` | Shows the **Remote Rooms** view. |
 
 Spinney adds no default keyboard shortcut.
 
@@ -648,169 +632,3 @@ Run **`Spinney: Test Web Search Backends`** when a search returns nothing. Spinn
 `web_fetch` follows a redirect, reads at most 2 MB, and uses the character set of the page. It runs no JavaScript. A page that builds its content in the browser returns little text, and the result says so. `web_fetch` refuses private addresses, such as `localhost` and `127.0.0.1`.
 
 The text of a page is not an order to Spinney. Spinney treats it as information from a stranger. If a page tries to give Spinney an order, Spinney reports it to you.
-
-## 20. Remote control
-
-Remote control joins this window to a room. The feature is **off by default**.
-
-A room token grants **full control** of every window that is configured with it. Full control includes the creation of sessions. Everything a peer does runs on the machine where the window is open, and the agent of that window can change files and run commands there. Treat a token as you treat physical access to that machine.
-
-While the feature is on, every connected window publishes its sessions to the room, with the work logs and the images of those sessions. Turn the feature on only on a machine where you accept that.
-
-### 20.1 Set up a room
-
-A room is one relay address and one token. Every machine in a room holds the same token.
-
-Spinney does not run a relay. Use your own: this project ships the source of a relay in `remote/server/`.
-
-1. Run **`Spinney: Manage Remote Rooms`**.
-2. Pick **Add room…**.
-3. Type a room name. The name is a local label. Two machines meet in a room because their tokens match, not because of this name.
-4. Type the relay URL, for example `https://relay.example.com`. It must start with `http://` or `https://`.
-5. Type the token. Give every machine in the room the same token.
-6. In the message `Remote control is off — no window publishes itself until you enable it.`, click **Enable remote control**.
-
-Every room also has an id. Spinney derives the id from the token alone. Two machines with the same token derive the same id. A different token derives a different id, so those machines are in two different rooms. The status bar shows the first eight characters of the id (section 20.7). Compare those characters on the two machines. Equal characters mean one room and one token. If the characters differ, set the same token on both machines.
-
-To give the token to a phone without typing it, show the pairing code (section 20.8).
-
-The relay keeps a record of the rooms that exist. The first window that connects with a token creates the room that the token names. The relay keeps the record for 30 days by default. A window that created a room reports it (section 20.7).
-
-Spinney keeps the token in the secret storage of the operating system, one entry per room. The token never goes into `settings.json`.
-
-The same command changes a room that exists: **Connect** and **Disconnect** set `autoConnect`, **Rename…** moves the token with the name, **Set token…** and **Clear token** change the secret, **Copy room name** copies the label, and **Remove** deletes the room and its token.
-
-With the feature on and no room yet, the view shows `No room is configured yet.` and a link to the command.
-
-### 20.2 The room tree
-
-The **Remote Rooms** view appears in the Spinney container of the Activity Bar while the feature is on. With the feature off, the view does not exist, and no window publishes itself.
-
-The tree holds four levels.
-
-| Level | Row |
-|---|---|
-| Room | The name of the room, the state of its connection, and the number of peers, for example `online · 2 peers`. |
-| Device | A machine in the room. The label is the name of that machine. |
-| Window | One VS Code window of that machine. The label is the name of its folder, or `no folder open`. The row also names the model and the number of sessions. |
-| Session | One conversation of that window. The label is its title, or `untitled`. The row also names the state and the number of nodes. |
-
-The state of a room is `online`, `connecting`, `reconnecting`, `error`, `no token`, or `off`. An icon shows it: a tower for `online`, a spinner for `connecting`, a warning for `error`, and a key for a room with no token.
-
-A device row also carries `blocked`, `not here`, or `different protocol version` when one of those applies. A session row names one of `idle`, `running`, `waiting for background work`, or `background terminals running`. A spinner beside a window or a session means that a turn runs there.
-
-A machine that runs two VS Code windows appears two times in the tree, because each window joins the room on its own.
-
-A window in one room shows that room open. A window in two or more rooms starts with them folded.
-
-| Action | How |
-|---|---|
-| Open a session | Click the session row, or run `Spinney: Open the Remote Session`. |
-| Send a message to a session | Right-click the session row, then `Spinney: Send a Message to a Remote Session…`. |
-| Stop a session | Right-click the session row, then `Spinney: Stop the Remote Session`. |
-| Create a session on a window | Right-click the window row, then `Spinney: New Session on a Remote Window…`. |
-| Stop talking to a device | Right-click the device row, then `Spinney: Kick this Device`. See section 20.6. |
-| Talk to a device again | Right-click the blocked device row, then `Spinney: Unblock this Device`. |
-| Copy a device name | Right-click a device row, then `Spinney: Copy Device Name`. |
-| Connect a room | Right-click the room row, then `Spinney: Connect this Room`. It connects the room in every window that holds the token. |
-| Disconnect a room | Right-click the room row, then `Spinney: Disconnect this Room`. |
-| Edit the rooms | Right-click the room row, then `Spinney: Manage Remote Rooms`. |
-| Show the pairing code | Right-click the room row, then `Spinney: Show Room Pairing Code`. See section 20.8. |
-| Focus the tree | Click the status bar item, or run `Spinney: Focus the Room Tree`. |
-
-`Spinney: Send a Message to a Remote Session…` opens one input box. The turn runs in that window, on that machine. The session does not have to be open anywhere.
-
-`Spinney: New Session on a Remote Window…` asks for a title, and it creates the session in that window. An empty title is allowed, and you can name the session later.
-
-These commands work on one row of the tree. A run from the Command Palette without a row does nothing. A window that is not in the room now answers `That window is not reachable in this room right now.`
-
-### 20.3 A replicated session
-
-A click on a session row opens a normal conversation view. The view belongs to the other window. Its tab title is the title of the session and the name of the machine, for example `Fix the parser — DESKTOP-7`.
-
-The view works like a local session. You can read the conversation, stop the turn, fork from a turn, or delete a branch. You can write in the composer and change the model or the thinking effort. You can also kill a sub-agent or a background terminal, continue a failed turn, and open a new context window. Every one of those actions runs on the other machine.
-
-A branch delete asks you first, in your window. The question names the turn.
-
-A turn that another window started carries a badge: `Remote: {0}`, where `{0}` is the name of the device. The tooltip of the badge is `This turn was started from another window in the room.`
-
-When the other window leaves the room, the view stops. A message says `“{0}” left the room; nothing is being mirrored any more.` A refused change shows `The other window refused: {0}`, or `The other window is read-only, so it refused that change. Nothing was sent to the agent.`
-
-### 20.4 Send an image to a remote session
-
-An image is the one file that comes from your side in a session that runs elsewhere.
-
-1. Open the remote session (section 20.3).
-2. Click **Attach image** in the composer of that view.
-3. Pick the file in the dialog of the machine you are sitting at.
-
-Spinney reads the file on your machine and sends it to the other window. The agent there receives the image as an attachment of your message. The image then goes to the provider through that window.
-
-The model card of that session must accept images (section 9).
-
-### 20.5 Your machine and the other machine
-
-Some actions in a remote session belong to your machine, and some information stays where it was made.
-
-- A link opens on the machine where you clicked it, not on the other one.
-- `Copy node ID` puts the node id on your clipboard, so you can paste it into a message to the other machine.
-- A resize of a card and a zoom or pan of the tree apply to your window only, and never change the view of the other machine.
-- The gear beside the model dropdown opens your Model Cards page, not the page of the other machine.
-- The performance and layout diagnostics stay on the machine that produced them, and neither machine sees the diagnostics of the other one.
-
-### 20.6 Stop talking to a device
-
-**`Spinney: Kick this Device`** stops two things in this window. This window stops sending its sessions to that device, and it ignores the messages and the commands that come from it. The message is `This window stopped talking to {0}. It is not a revocation: that device can still reach every other window.` The device row then shows `blocked`. `Spinney: Unblock this Device` talks to it again.
-
-A kick is not a revocation. The device keeps the token, so it can still reach every other window in the room, and it can join again at any time. A kick is a decision of this window alone, and a reload of the window lifts it.
-
-The one way to remove a device from a room is a new token. Set the new token on the room, then on every machine that must stay in it. A machine with the old token no longer reaches that room.
-
-### 20.7 The status bar item, and how to turn the feature off
-
-While the feature is on and a room exists, the status bar shows one item. The item holds a tower, the name of the room, the first eight characters of the room id, and the number of peers. For example: `home · room LTKXZ4EW… · 2 peers`. With two or more rooms the item shows `2 rooms · 3 peers` instead, and no room id. A click on the item focuses the room tree.
-
-The tooltip of the item names every room, its state, and its full 26-character id, for example `home: online · room LTKXZ4EW52MFNAJYKHRT4H3HGJ`. It adds `Not connected.` while no room is online.
-
-The tooltip also reports two facts that a user can act on.
-
-- Your window created the room on that relay. The line is `Room {0} was created just now: no other device had used this token on this relay. If you expected to find a room here, that device holds a different token.` Read that line. It is the one warning that the other machine holds a different token.
-- The relay is older than this window, so it does not answer the new join route. The line is `This relay does not answer /v2 joins yet: it is older than this window, so it cannot tell a room that does not exist from one that is merely empty. Update the relay.` The window does not join the room while that line is there. Update the relay.
-
-Turn the feature off in one of these ways.
-
-1. Set `spinney.remote.enabled` to `false` to stop every room of this window at once. The **Remote Rooms** view and the status bar item go away.
-2. Or right-click one room row and run `Spinney: Disconnect this Room` to stop that room alone.
-
-The rows of the rooms stay in `spinney.remote.rooms`, and the tokens stay in the secret storage. Nothing is published while the feature is off. To delete a room and its token, run `Spinney: Manage Remote Rooms` and pick **Remove**.
-
-### 20.8 Pair a phone with a QR code
-
-A phone gets a room from a picture. The desktop shows the room as a QR code, and the phone reads that code out of a photo. The token goes from the screen, through the camera, and into the phone. It never goes through the relay.
-
-Run **`Spinney: Show Room Pairing Code`** from the Command Palette. The command is also in the menu of a room row: right-click the room row in the **Remote Rooms** view.
-
-Spinney reads the token of the room and builds one pairing string. It draws the string as a QR code, writes the image into its own storage, and opens the image in an editor tab.
-
-The image carries three facts: the relay address of the room, the room name, and the room token. Spinney then shows one message:
-
-`This code contains the token of room "{0}": anyone who photographs it can control the room, so show it to the device you are pairing and close it afterwards.`
-
-Read that message. The image is as secret as the token itself, because the image carries the token. Show the image to the phone that you pair, and to no other device. Close the tab after the pairing.
-
-The file name is fixed. A new pairing overwrites the image of the pairing before it.
-
-With more than one room, Spinney asks which room to pair. The description of each row is the relay URL, never the token.
-
-On the phone, take a photo of the code, then pick that photo in the app. The phone reads the three facts out of the photo. The photo comes from the photo app of the phone, so the Spinney app needs no camera permission.
-
-Spinney refuses the command in three cases.
-
-| Situation | Message |
-|---|---|
-| The room has no relay URL | `Room "{0}" has no relay URL, so a device paired with it would have nowhere to connect.` |
-| The room has no token | `Room "{0}" has no token yet, so there is nothing to pair.` |
-| The token cannot go into a QR code | `The token of room "{0}" cannot be encoded for a QR code.` |
-
-With no room at all, the message is `No remote room is configured yet — add one with "Spinney: Manage Remote Rooms".`
-

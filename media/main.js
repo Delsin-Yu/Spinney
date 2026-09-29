@@ -1429,14 +1429,7 @@
   }
 
   /**
-   * Nullish coalescing, for an engine that may not have it.
-   *
-   * This file is rendered twice: by the desktop's Electron Chromium, and inside the Android
-   * app's WebView, which can be far older — API 28 ships Chromium 69, and the two-question-mark
-   * operator needs Chromium 80. There the whole script fails to PARSE, so nothing renders: the
-   * shell's static HTML is still on screen while every card is missing. The syntax floor is
-   * therefore the older of the two engines, and a guard fails packaging when a modern-syntax
-   * operator returns (tools/check-remote-assets.js).
+   * Nullish coalescing: the fallback unless the value is `undefined` or `null`.
    */
   function orElse(value, fallback) {
     return value === undefined || value === null ? fallback : value;
@@ -2821,39 +2814,6 @@
     }
   }
 
-  /**
-   * The **remote-origin badge**: this turn was started by a peer in a room, and the badge
-   * names the device it came from (`docs/agents/plans/remote-control.md` §13). Source marking
-   * is deliberately node metadata and never message text — the bytes sent to the provider do
-   * not change, and the model is not told it is being driven from elsewhere — so the mark is
-   * *rendered* here and nowhere else.
-   *
-   * Created/removed lazily and placed like every other head badge (just before the status
-   * chip), so a repaint can never stack two of them, and a node that has no origin — every
-   * ordinary local turn — carries no badge at all. `origin` arrives on each `tree` row (the
-   * host reads it from the node) and survives a reload because the node persists it.
-   */
-  function syncOriginBadge(card, meta) {
-    if (!card) return;
-    const origin = meta && meta.origin;
-    // A mark with no device and no peer id would be a badge saying nothing: the host's own
-    // reader (`nodeOrigin`) drops those, and this does the same for a hand-made payload.
-    const wanted = !!(origin && (origin.deviceName || origin.peerId));
-    let badge = byClass(card, 'node-origin-badge');
-    if (wanted && !badge) {
-      const device = origin.deviceName || origin.peerId;
-      badge = el('span', 'node-origin-badge', tr('Remote: {0}', device));
-      badge.title = tr('This turn was started from another window in the room.');
-      const head = card.querySelector('.node-head');
-      const status = head.querySelector('.node-status');
-      if (status) head.insertBefore(badge, status); else head.appendChild(badge);
-      card.classList.add('remote-origin');
-    } else if (!wanted && badge) {
-      badge.remove();
-      card.classList.remove('remote-origin');
-    }
-  }
-
   function pathIdsFromTree(nodes, activeId) {
     const out = [];
     const seen = new Set();
@@ -2904,9 +2864,6 @@
     // A window-starting node carries the `CTX` marker from the moment its card
     // exists (it is created once, here, and never rebuilt).
     syncCtxBadge(card, meta);
-    // The remote-origin badge has the same life: created with the card from the node's
-    // own meta, so a repaint never has to add it later (and never adds a second one).
-    syncOriginBadge(card, meta);
 
     // Zone 1: the pinned user ask (sticky at the top of an expanded card).
     const ask = el('div', 'node-ask');
@@ -4342,7 +4299,6 @@
         // still has to pick the `CTX` marker up here (never in a streaming patch:
         // the head exists once).
         syncCtxBadge(card, n);
-        syncOriginBadge(card, n);
       }
     }
     for (const id in nodeEls) {
@@ -4374,9 +4330,6 @@
       // whole life, not to one repaint, and this pass may have created the card
       // before the node's own `tree` entry described it.
       syncCtxBadge(nodeEls[id], meta);
-      // A node's remote-origin badge is derived from the same meta, and this pass can be
-      // the one that created the card (a `path` render of a node the tree has not drawn).
-      syncOriginBadge(nodeEls[id], meta);
       // A job card has no conversation: its body mirrors the live job.
       if (meta.kind === 'bg') {
         renderBgBody(nodeEls[id], meta);
@@ -4480,9 +4433,6 @@
       // Same story as in `renderTree`: the `CTX` marker belongs to the card, not to
       // one repaint — and this pass can be the one that creates the card.
       syncCtxBadge(nodeEls[id], meta);
-      // A node's remote-origin badge is derived from the same meta, and this pass can be
-      // the one that created the card (a `path` render of a node the tree has not drawn).
-      syncOriginBadge(nodeEls[id], meta);
       // A job card has no conversation: its body mirrors the live job.
       if (meta.kind === 'bg') {
         renderBgBody(nodeEls[id], meta);

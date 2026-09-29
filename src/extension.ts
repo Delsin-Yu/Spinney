@@ -5,29 +5,10 @@ import { ChatViewProvider } from './chat/ChatViewProvider';
 import { SessionsProvider } from './chat/SessionsProvider';
 import { ControlServer } from './http/controlServer';
 import { showManual } from './manual';
-import { RemoteService } from './remote/remoteService';
-import { RoomsStore } from './remote/roomsStore';
-import { manageRemoteRooms } from './remote/roomsCommand';
-import { RemoteSessionPanels, REMOTE_SESSION_VIEW_TYPE } from './remote/remoteSessionPanel';
-import { showRoomPairingCode } from './remote/pairingCode';
-import {
-  RemoteTreeContext,
-  RemoteTreeProvider,
-  RemoteTreeNode,
-  copyRemoteDeviceName,
-  kickRemoteDevice,
-  newRemoteSession,
-  openRemoteSession,
-  sendRemoteMessage,
-  setRemoteRoomConnected,
-  stopRemoteSession,
-  unblockRemoteDevice,
-} from './remote/remoteTreeView';
 import { setHarnessStorageDir } from './tools';
 import { runWebSearchSelfTest } from './tools/webSearchDiagnostics';
 
 let chatProvider: ChatViewProvider | undefined;
-let remoteService: RemoteService | undefined;
 
 /** A command arg may be a session id (string) or the clicked tree item (has `.id`). */
 function toSessionId(arg: unknown): string {
@@ -89,18 +70,6 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
 
-  // A replicated session tab has the same recovery contract (`spinney.remoteSession`): the
-  // serializer state names the peer and the session it was attached to, and the panel
-  // re-`attach`es when it is adopted — a reload must not silently leave the tab empty.
-  context.subscriptions.push(
-    vscode.window.registerWebviewPanelSerializer(REMOTE_SESSION_VIEW_TYPE, {
-      deserializeWebviewPanel: (panel, state) => {
-        remotePanels.restore(panel, state);
-        return Promise.resolve();
-      },
-    }),
-  );
-
   // Optional local control plane (off by default) for the external supervisor.
   const controlServer = new ControlServer(
     chatProvider,
@@ -108,26 +77,6 @@ export function activate(context: vscode.ExtensionContext): void {
     (line) => chatProvider?.outputLog(line),
   );
   void controlServer.start();
-
-  // Remote control (off by default): the publisher half — the rooms this window joins,
-  // the mirror of the sessions a peer attached to, and the peers' input. It is created
-  // here so its status bar item is window-scoped like every other piece of this window's
-  // UI, and it connects nothing until `spinney.remote.enabled` is on and a room says
-  // `autoConnect` — a window that never enables the feature runs no timer, opens no
-  // socket and shows no UI.
-  const remoteRooms = new RoomsStore(context.secrets);
-  remoteService = new RemoteService({
-    host: chatProvider,
-    store: remoteRooms,
-    log: (line) => chatProvider?.outputLog(line),
-    appVersion: context.extension.packageJSON?.version ?? '',
-  });
-  chatProvider.attachRemote(remoteService);
-  remoteService.start();
-  // The module-level `let` is what `deactivate` disposes; inside activation the value is
-  // definitely there, so the two surfaces below and their commands hold it directly (a
-  // `RemoteService` is never replaced within one activation, only disposed at the end).
-  const remote = remoteService;
 
   // Sidebar lists sessions; it asks the provider for items on every refresh so it
   // never caches session state itself.
@@ -142,62 +91,9 @@ export function activate(context: vscode.ExtensionContext): void {
     canSelectMany: true,
   });
 
-  // Remote control's two surfaces (M2). The **room tree** is native (`spinney.remote`):
-  // a room → device → instance → session tree of the same snapshot the status bar reads,
-  // re-drawn from `RemoteService.onDidChange` — no polling, and nothing at all while the
-  // feature is off. The **replicated session panel** is the second place the shipped
-  // `media/main.js` runs (`src/remote/remoteSessionPanel.ts`), one tab per remote session.
-  const remotePanels = new RemoteSessionPanels({
-    extensionUri: context.extensionUri,
-    mediaVersion: chatProvider?.mediaVersion ?? '',
-    service: remote,
-    log: (line) => chatProvider?.outputLog(line),
-    // The gear in the shell is a *local* settings page (`remote/PROTOCOL.md` §6), so a
-    // replica opens this window's own Model Cards page.
-    openModelCards: () => chatProvider?.openModelTree(),
-  });
-  const remoteTreeCtx: RemoteTreeContext = {
-    service: remote,
-    store: remoteRooms,
-    panels: remotePanels,
-    log: (line) => chatProvider?.outputLog(line),
-    manageRooms: () =>
-      void manageRemoteRooms({
-        store: remoteRooms,
-        service: remote,
-        log: (line) => chatProvider?.outputLog(line),
-      }),
-  };
-  const remoteTreeProvider = new RemoteTreeProvider(remoteTreeCtx);
-  // The view is contributed with `when: config.spinney.remote.enabled`, so it does not exist
-  // until the feature is on. `createTreeView` on a hidden view is fine, but a failure here
-  // must never take activation down with it: a window that never turns the feature on has to
-  // be unaffected by this code existing, so the error is reported and the feature degrades.
-  let remoteTree: vscode.TreeView<RemoteTreeNode> | null = null;
-  const ensureRemoteTree = (): void => {
-    if (remoteTree) {
-      return;
-    }
-    try {
-      remoteTree = vscode.window.createTreeView('spinney.remote', {
-        treeDataProvider: remoteTreeProvider,
-        showCollapseAll: true,
-      });
-      context.subscriptions.push(remoteTree);
-    } catch (err) {
-      chatProvider?.outputLog(
-        `[remote] the room tree view could not be created: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    }
-  };
-  ensureRemoteTree();
-
   context.subscriptions.push(
     sessionsTree,
     controlServer,
-    remoteService,
-    remotePanels,
-    remoteTreeProvider,
     // AGENTS.md is otherwise read once per activation: re-read it (and log the
     // new mode + agent root) whenever a folder is added or removed.
     vscode.workspace.onDidChangeWorkspaceFolders(() => chatProvider?.onWorkspaceFoldersChanged()),
@@ -212,10 +108,6 @@ export function activate(context: vscode.ExtensionContext): void {
       if (event.affectsConfiguration('spinney.httpApi')) {
         void controlServer.restart();
       }
-      // Remote control applies its own keys: a room brought up or torn down here, with
-      // no reload — the same event that carries a hand edit of `settings.json` carries
-      // the Room-Names command's writes, because that command only ever writes settings.
-      remoteService?.onConfigurationChanged(event);
     }),
     // The API key lives in SecretStorage: these two commands are the only way it
     // is read or written. Both take an optional provider id — the Model Card Tree
@@ -230,71 +122,6 @@ export function activate(context: vscode.ExtensionContext): void {
     // The Model Card Tree page: the command and the gear beside the chat's model
     // dropdown both land on the same window-owned tab.
     vscode.commands.registerCommand('spinney.openModelCards', () => chatProvider?.openModelTree()),
-    // Remote control: the one editor of the room table and the per-room tokens. The
-    // status bar item's click lands here too (`RemoteService.refreshStatusBar`).
-    vscode.commands.registerCommand('spinney.remoteRooms', () =>
-      remoteService
-        ? manageRemoteRooms({
-            store: remoteRooms,
-            service: remote,
-            log: (line) => chatProvider?.outputLog(line),
-          })
-        : undefined,
-    ),
-    // The room tree's own actions (M2). Every one of them is either a `cmd` frame the
-    // publisher runs (the same control-plane routes the local HTTP plane answers) or a local
-    // action of this window — the split lives in `src/remote/remoteTreeView.ts`, and the
-    // replica's own split in `src/remote/replicaRouting.ts`.
-    vscode.commands.registerCommand('spinney.remoteOpenSession', (arg) =>
-      openRemoteSession(remoteTreeCtx, arg),
-    ),
-    // The M1 status bar item's click lands here now: the room tree is the remote surface, and
-    // the room *editor* is one of its own actions. The view's focus command is generated from
-    // its id (`<viewId>.focus`); when the view does not exist — the feature is off — the
-    // reveal fails and the editor opens instead, which is where the feature is turned on.
-    vscode.commands.registerCommand('spinney.remoteFocus', () => {
-      ensureRemoteTree();
-      void vscode.commands.executeCommand('spinney.remote.focus').then(
-        () => undefined,
-        () => remoteTreeCtx.manageRooms(),
-      );
-    }),
-    vscode.commands.registerCommand('spinney.remoteSendMessage', (arg) =>
-      void sendRemoteMessage(remoteTreeCtx, arg),
-    ),
-    vscode.commands.registerCommand('spinney.remoteStopSession', (arg) =>
-      stopRemoteSession(remoteTreeCtx, arg),
-    ),
-    vscode.commands.registerCommand('spinney.remoteNewSession', (arg) =>
-      void newRemoteSession(remoteTreeCtx, arg),
-    ),
-    vscode.commands.registerCommand('spinney.remoteKick', (arg) => kickRemoteDevice(remoteTreeCtx, arg)),
-    vscode.commands.registerCommand('spinney.remoteUnblock', (arg) => unblockRemoteDevice(remoteTreeCtx, arg)),
-    vscode.commands.registerCommand('spinney.remoteCopyDeviceName', (arg) =>
-      void copyRemoteDeviceName(arg),
-    ),
-    vscode.commands.registerCommand('spinney.remoteConnect', (arg) =>
-      void setRemoteRoomConnected(remoteTreeCtx, arg, true),
-    ),
-    vscode.commands.registerCommand('spinney.remoteDisconnect', (arg) =>
-      void setRemoteRoomConnected(remoteTreeCtx, arg, false),
-    ),
-    // Pairing a phone: the desktop draws the room token as a QR code, the phone photographs it.
-    // The token never reaches the relay, so this is the only channel that can hand it over, and
-    // it is why the PNG lands in the extension's own storage rather than in the workspace
-    // (`context.storageUri`; a no-folder window has no workspace-scoped storage, so it falls
-    // back to the global one — see `src/remote/pairingCode.ts`).
-    vscode.commands.registerCommand('spinney.remotePairingCode', (arg) =>
-      void showRoomPairingCode(
-        {
-          service: remote,
-          store: remoteRooms,
-          storage: context.storageUri ?? context.globalStorageUri,
-          log: (line) => chatProvider?.outputLog(line),
-        },
-        arg,
-      ),
-    ),
     // Export/import of the session data folder: the user's own copy of their history, and the
     // way a rename or a new machine recovers it (see invariants/session-persistence.md).
     vscode.commands.registerCommand('spinney.exportData', () => chatProvider?.exportSessionData()),
@@ -385,11 +212,6 @@ export function activate(context: vscode.ExtensionContext): void {
 }
 
 export function deactivate(): Thenable<void> | void {
-  // Stop publishing this window first: the room connection is outbound I/O, and a window
-  // that is going away must not leave a peer waiting on frames that will never come. (It
-  // is also in `context.subscriptions`, which VS Code disposes after this returns.)
-  remoteService?.dispose();
-  remoteService = undefined;
   // Flush a coalesced write before the host goes away — a window close is exactly
   // when the newest state may still be pending (see `ChatViewProvider.shutdown`).
   return chatProvider?.shutdown();

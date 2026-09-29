@@ -1,22 +1,12 @@
 /**
  * imagePick.ts — "pick one image and turn it into an attachment", once.
  *
- * Two surfaces need exactly this, and they must not drift:
- *
- *  - the **local chat tab**: `SessionRuntime.handlePickImage()` (the + button in the
- *    composer), and
- *  - the **replicated session panel**: `src/remote/remoteSessionPanel.ts`, where the picker
- *    opens on *your* machine and the resulting bytes travel to the publisher inside
- *    `userMessage` (`docs/agents/plans/remote-control.md` §3, §4).
- *
- * The 1:1 rule decides where it runs, not what it does: choosing a file is "interacting with
- * your own device", so the picker always opens where the click was — but the attachment it
- * produces is the *same* `{ dataUrl, name }` the local path builds, which is what makes a
- * remote image indistinguishable from a local one on the other side.
+ * The local chat tab's composer (+ button) needs exactly this:
+ * `SessionRuntime.handlePickImage()` opens the picker, and the file it reads becomes the
+ * `{ dataUrl, name }` attachment the turn carries.
  *
  * The result is a value, not a message: `SessionRuntime` posts it as `imagePicked` to its
- * own webview, the replica panel posts the same message to its own. Neither caller owns a
- * second copy of the mime table or of the read.
+ * own webview, so the caller owns no second copy of the mime table or of the read.
  */
 import * as fs from 'fs';
 import * as path from 'path';

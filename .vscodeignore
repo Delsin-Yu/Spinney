@@ -1,10 +1,6 @@
 .vscode/**
 .vscode-test/**
 tools/**
-# The remote-control side: the relay (C#) and the Android app live here. Neither
-# is part of the extension package — the .vsix ships only the TypeScript host,
-# the webviews and the user manual.
-remote/**
 .spinney/**
 .agent-harness/**
 .github/**

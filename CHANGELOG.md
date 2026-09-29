@@ -84,6 +84,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `ok` while its images filled the request). A new window does not carry attachments, so that is the
   right way out.
 
+### Removed
+
+- **The remote-control experiment was removed** — the self-hosted relay and its rooms, the desktop
+  replica (the room tree, the replicated session panel and the status bar item), the pairing flow
+  (the QR code and `Spinney: Show Room Pairing Code`) and the Android app, together with every
+  command, setting and secret it owned (`spinney.remote.enabled`, `spinney.remote.rooms`, the
+  per-room entry in the secret storage) and the `docs/agents/plans/remote-control.md` plan it was
+  built from. No window publishes itself to another machine any more, and the manual loses its
+  remote-control chapter (the old section 20) on every page.
+
 ### Fixed
 
 - **An unlocked work log is no longer thrown back to the top by every token.** Releasing a card's

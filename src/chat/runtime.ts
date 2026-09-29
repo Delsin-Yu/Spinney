@@ -33,9 +33,6 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { Agent, ImageAccounting } from '../agent/agent';
-// The remote-origin mark of a turn a peer started (`docs/agents/plans/remote-control.md` §13):
-// the node metadata itself is written here, where the node is created.
-import { RemoteOrigin, nodeOrigin, setNodeOrigin } from '../remote/remoteService';
 import { DEFAULT_REPLY_LANGUAGE, SYSTEM_PROMPT_TEMPLATE, currentAgentsMd } from '../agent/prompt';
 import { Balance, emptyBalance } from '../agent/balance';
 import { ClientRegistry } from '../agent/clients';
@@ -2073,9 +2070,7 @@ export class SessionRuntime {
   /**
    * Structural summary of the session tree + the view/stream ids (no items).
    *
-   * The message is built by {@link treeMessage} and posted unchanged, so the *same* object
-   * can also answer a remote peer's `attach` (`ChatViewProvider.remoteTreeMessage`) without
-   * repainting this session's own tab.
+   * The message is built by {@link treeMessage} and posted unchanged.
    */
   postTree(): void {
     const message = this.treeMessage();
@@ -2084,12 +2079,7 @@ export class SessionRuntime {
   }
 
   /**
-   * The `tree` message of this session, built but **not** posted.
-   *
-   * `origin` is on each node row for the reason node metadata is: a turn a remote peer
-   * started is marked where the turn is (`RemoteOrigin`,
-   * `docs/agents/plans/remote-control.md` §13), and the mark is rendered as a badge rather
-   * than written into the conversation — the bytes the provider receives never change.
+   * The `tree` message of this session, built but **not** posted (`postTree` is the poster).
    */
   treeMessage(): Record<string, unknown> {
     const session = this.session;
@@ -2152,8 +2142,6 @@ export class SessionRuntime {
       // 2.3 MB and 10 k DOM elements for 8 cards
       // (see docs/agents/invariants/streaming-perf.md).
       ...this.nodeRowItems(node, 'tree'),
-      // Where a remote-originated turn came from, when it came from the room.
-      origin: nodeOrigin(node),
     }));
     return {
       type: 'tree',
@@ -2202,7 +2190,7 @@ export class SessionRuntime {
    *  - a node with **no items**, or with items carrying neither half, must gain no empty
    *    summary at all — a renderer reads a summary row as "this card is rendered", so an
    *    empty one would stop the card from ever asking for the log it has not got (the
-   *    measured symptom: a phone card next to a `preview` that promised a full session and
+   *    measured symptom: a card next to a `preview` that promised a full session and
    *    showed nothing);
    *  - a pair that **is** the whole log (a two-item turn) needs no flag either: the row
    *    would carry the same bytes either way, and without the flag nothing is fetched
@@ -2215,8 +2203,7 @@ export class SessionRuntime {
    *
    * Two incidental rules, both of which this file holds to on purpose: it names **nothing**
    * but its argument and the one clipper (no `this`, no second helper), and its body carries
-   * no type annotation — that is what lets `tools/check-remote.js` run it from this source
-   * and pin the picks by value rather than by shape.
+   * no type annotation.
    */
   private summaryItems(items: DisplayItem[]): DisplayItem[] | undefined {
     const ask = items.find((item) => item.kind === 'user');
@@ -2239,13 +2226,12 @@ export class SessionRuntime {
    * its card is filled by its own stream, and a summary built mid-turn would be overwritten
    * by the next delta anyway.
    *
-   * Why this exists: a replica that attached to a session used to receive structure only —
-   * `treeMessage` carried `itemCount` for `agent` nodes alone and a 120-char `preview`, and
-   * `path` is posted only for the owner's own view chain — so a phone showed three cards
-   * with `work: 0 ans: 0` and nothing but the preview text. The other fix (ship the
-   * transcript in `tree`) is the one that made a session's tree 2.3 MB and 10 k DOM
-   * elements; two items per finished node keep that off, and one node's full log crosses
-   * only when its card is expanded (`loadNodeItems` → `nodeItems`, `onNodeItems`).
+   * Why this exists: a session's `tree` carries structure only — `itemCount` for `agent`
+   * nodes alone and a 120-char `preview` — so a card drawn from a `tree` row that carried no
+   * log would show nothing but the preview text. The other fix (ship the transcript in
+   * `tree`) is the one that made a session's tree 2.3 MB and 10 k DOM elements; two items per
+   * finished node keep that off, and one node's full log crosses only when its card is
+   * expanded (`loadNodeItems` → `nodeItems`, `onNodeItems`).
    *
    * A `kind: 'agent'` row stays summary-less on purpose: its card's contract is `itemCount`
    * plus `loadAgentItems` (the lazy sidecar rule above), its transcript is a sidecar log
@@ -2292,13 +2278,12 @@ export class SessionRuntime {
   }
 
   /**
-   * One **regular** node asked for its items (`loadNodeItems`, sent by a remote peer's
-   * replica). No local path needs it: a local card is filled from the `path` message, which
-   * `postPath` only sends for the owner's own view chain. A replica that attached to an idle
-   * session receives the structural `tree` and nothing else — one node's summary per finished
-   * card, and no log. The measured symptom behind this request is a phone showing three cards
-   * with a `preview` each and no log; the summary is what an *expanded* card renders while its
-   * full log is on the way; a collapsed card shows the row's `preview` and asks for nothing.
+   * One **regular** node asked for its items (`loadNodeItems`, sent by a card whose items
+   * never arrived — see `media/main.js`). A card is normally filled from the `path` message,
+   * which `postPath` only sends for the owner's own view chain, so a card drawn from a `tree`
+   * row alone holds no log: it says it is waiting and asks once. The summary is what an
+   * *expanded* card renders while its full log is on the way; a collapsed card shows the
+   * row's `preview` and asks for nothing.
    *
    * An id this session does not have answers nothing, exactly like the `agentItems` half
    * above: there is no node to clip and no `items` to invent.
@@ -2315,7 +2300,7 @@ export class SessionRuntime {
    * The one on-demand answer shape: a node's **full** `displayItems`, clipped by the one
    * clipper (`clipDisplayItem`), plus the `[perf]` line that says the fetch fired. Both
    * requests (`loadAgentItems` / `loadNodeItems`) go through here, so the two answers cannot
-   * drift apart in clipping or in what the replica renders.
+   * drift apart in clipping or in what a card renders.
    *
    * It is deliberately **not** the summary a row carries (`nodeRowItems`): this is the
    * answer to a card that was expanded, so it is the whole log — the summary is what makes
@@ -2900,7 +2885,7 @@ export class SessionRuntime {
     }
   }
 
-  async onUserMessage(text: string, attachments: UserAttachment[] = [], origin?: RemoteOrigin): Promise<void> {
+  async onUserMessage(text: string, attachments: UserAttachment[] = []): Promise<void> {
     // P3: only the node this turn would continue from must be free — another
     // branch of this session may stream meanwhile. (This mirrors the composer's
     // Stop-not-Send rule; `beginTurn` re-checks the same condition once the basis
@@ -3113,13 +3098,6 @@ export class SessionRuntime {
     const run = this.beginTurn(titleFromPrompt(userText || attachments[0]?.name || ''), { parentId: basis });
     if (!run) {
       return;
-    }
-    // A turn a remote peer started is marked as such **on its node** (§13): the room's
-    // UI can badge the card, and the transcript dump records where the turn came from.
-    // Deliberately not part of `content` below — the bytes the provider receives, and
-    // therefore the prompt cache, must be exactly what a local send would have produced.
-    if (origin) {
-      setNodeOrigin(run.node, origin);
     }
     if (sources.length > 0) {
       run.node.imageSources = sources;
