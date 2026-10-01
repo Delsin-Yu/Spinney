@@ -29,6 +29,7 @@
  */
 
 import { ApiError } from './apiClient';
+import { describeFetchError } from './netError';
 
 /**
  * How a provider's wallet is read. Named after the vendor whose dialect it is —
@@ -114,7 +115,7 @@ export async function fetchBalance(request: BalanceRequest): Promise<Balance> {
     if (request.signal?.aborted) {
       throw new ApiError('Balance request aborted.');
     }
-    throw new ApiError(`Network error fetching the balance: ${err instanceof Error ? err.message : String(err)}`);
+    throw new ApiError(`Network error fetching the balance: ${describeFetchError(err)}`);
   }
   if (!response.ok) {
     const text = await response.text().catch(() => '');

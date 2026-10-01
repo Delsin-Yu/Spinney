@@ -1,6 +1,6 @@
 import * as dns from 'dns';
 import { AgentTool } from '../agent/types';
-import { sliceText } from '../text';
+import { describeFetchError } from '../agent/netError';
 import { ensureNotAborted, limitInline } from './index';
 import { decodeBody, htmlToMarkdown, mainHtml, stripChrome, textOf } from './webHtml';
 
@@ -212,22 +212,6 @@ interface Fetched {
   bytes: Uint8Array;
   /** True when the body hit the byte cap. */
   truncated: boolean;
-}
-
-/**
- * Turn a failed `fetch` into something diagnosable. Node puts the real reason in
- * `error.cause` (`ENOTFOUND`, `ECONNRESET`, `UND_ERR_*`, a TLS code) and leaves
- * `message` as the useless "fetch failed" — which is what the first live
- * acceptance run hit on three huggingface.co URLs: ten seconds each, and no way
- * to tell a DNS failure from a reset connection from a blocked site. The cause is
- * therefore surfaced verbatim.
- */
-function describeFetchError(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  const cause = (error as { cause?: { code?: string; message?: string } } | undefined)?.cause;
-  const code = cause?.code ? ` ${cause.code}` : '';
-  const detail = cause?.message && cause.message !== message ? `: ${cause.message}` : '';
-  return sliceText(`${message}${code}${detail}`, 200);
 }
 
 /** Follow redirects by hand so every hop can be checked before it is requested. */

@@ -2,6 +2,7 @@ import * as path from 'path';
 import { ChatMessage, StreamChunk, ThinkingEffort, ToolDefinition, UploadedFile, Usage, detectImageMime, imageIntegrityError } from './types';
 import { perf } from '../perf';
 import { clipText, wellFormedDeep } from '../text';
+import { describeFetchError } from './netError';
 
 /**
  * Transparent retry policy for one chat-completions request: the initial attempt
@@ -231,8 +232,7 @@ export class ApiClient {
       if (signal?.aborted) {
         throw new ApiError('Upload aborted.');
       }
-      const message = err instanceof Error ? err.message : String(err);
-      throw new ApiError(`Network error uploading image: ${message}`);
+      throw new ApiError(`Network error uploading image: ${describeFetchError(err)}`);
     }
     if (!response.ok) {
       const text = await response.text().catch(() => '');
@@ -311,7 +311,7 @@ export class ApiClient {
         readError = opened.watch.stalled
           ? new ApiError(`Stream stalled: ${opened.watch.stalled}.`)
           : new ApiError(
-              `Network error reading the response stream: ${err instanceof Error ? err.message : String(err)}`,
+              `Network error reading the response stream: ${describeFetchError(err)}`,
             );
         if (opened.watch.stalled) {
           // A post-yield stall is fatal (no retry line will follow), so record it.
@@ -488,7 +488,7 @@ export class ApiClient {
         if (opts.signal?.aborted) {
           throw new ApiError('Request aborted.');
         }
-        const message = err instanceof Error ? err.message : String(err);
+        const message = describeFetchError(err);
         last = watch.stalled
           ? new ApiError(`${watch.stalled} (attempt ${attempt}).`)
           : new ApiError(`Network error calling the API: ${message}`);

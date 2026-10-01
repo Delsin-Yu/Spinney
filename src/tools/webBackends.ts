@@ -1,3 +1,4 @@
+import { describeFetchError } from '../agent/netError';
 import { sliceText } from '../text';
 import { absoluteUrl, decodeBody, decodeEntities, hasClass, scanTags, textOf } from './webHtml';
 
@@ -656,7 +657,7 @@ export async function attemptBackend(
     if (options.signal?.aborted) {
       return done('aborted', [], 'turn aborted');
     }
-    const message = error instanceof Error ? error.message : String(error);
+    const message = describeFetchError(error);
     if (controller.signal.aborted && !/cap|exceeded/i.test(message)) {
       return done('timeout', [], `${timeoutMs}ms`);
     }
