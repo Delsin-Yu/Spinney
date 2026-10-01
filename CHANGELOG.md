@@ -7,27 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Changed
-
-- **A sub-agent card or a job card is a compact monitor, and the cards beside a node
-  stack into columns of three.** A sub-agent card or a job card is 200 pixels high. It
-  shows the live progress of that sub-agent — its status, its counters and the tail of
-  its work log — instead of its whole transcript. The sub-agent card that you are
-  reading opens at its full height and shows everything; the other cards stay compact.
-  Spinney puts three cards to a column, and the cards of the sub-agents that those
-  sub-agents spawned stand in their own columns to the right. The conversation below a
-  node is therefore never pushed far down by the sub-agents it spawned.
-
-### Added
-
-- **Sub-agent cards are colour-coded, and so are the cards their sub-agents spawned.** A
-  sub-agent card and the cards below it share one colour; each level down is more saturated
-  and darker, so a card is recognisable as "that family, one step deeper". Sub-agent cards
-  use warm colours and background job cards use cold ones, so the two kinds are never
-  confused. The colour of a sub-agent is fixed by its position in the session, and it stays
-  the same after a reload.
-
-## [0.2.0] - 2026-09-29
+## [0.2.0] - 2026-10-02
 
 ### Added
 
@@ -70,6 +50,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `bytes` and the transform that produced it: the bytes make the budget exact, and the transform is
   the record a faithful copy would need — today a copied chain whose source carried one keeps the
   placeholder instead, and the replay is an open item (`docs/agents/plans/image-budget.md` §2.4).
+- **Sub-agent cards are colour-coded, and so are the cards their sub-agents spawned.** A
+  sub-agent card and the cards below it share one colour; each level down is more saturated
+  and darker, so a card is recognisable as "that family, one step deeper". Sub-agent cards
+  use warm colours and background job cards use cold ones, so the two kinds are never
+  confused. The colour of a sub-agent is fixed by its position in the session, and it stays
+  the same after a reload.
 
 ### Changed
 
@@ -95,16 +81,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is refused before the spawn (an unbounded *node* job holds its node forever — that lifetime
   belongs to `start_detached`, which is why only it may omit a `timeout`), and
   `join_background` refuses a detached job outright (no deadline, no notice, nothing to wait for).
-- A tool's failure to fetch now names the cause. Node leaves a failed `fetch` as `fetch failed` and
-  puts the real reason in `error.cause`, so a `web_fetch` result reads
-  `request failed (fetch failed UND_ERR_CONNECT_TIMEOUT: …)`. An HTML page that yields no readable
-  text is reported as such instead of coming back as an empty success.
+- **A failed request names the cause, wherever it failed.** Node reports every network failure as
+  `TypeError: fetch failed` and keeps the real reason in `error.cause`, so a failure used to reach
+  the log, the retry card and the chat bubble as `Network error calling the API: fetch failed` — and
+  on 2026-09-30 that exact sentence, 39 times across two endpoints at 2–7 ms each, left nothing to
+  diagnose. Chat completions, the image upload, the response-stream read, the balance read,
+  `web_fetch` and every search backend now go through one `describeFetchError`
+  (`src/agent/netError.ts`), which walks the cause tree — an undici failure nests an
+  `AggregateError` whose `errors` array holds one entry per address tried — and reports the code,
+  the message and the host it was talking to: `fetch failed (ENOTFOUND · getaddrinfo ENOTFOUND
+  <host>)`. The
+  line is clipped through `clipText`, so a long provider message cannot flood a bubble and no clip
+  can leave a lone surrogate in it. An HTML page that yields no readable text is reported as such
+  instead of coming back as an empty success.
 - **A window can be full by bytes as well as by tokens, and `⧉` is the way out.** The provider's
   per-request image-size refusal is classified alongside the context-length refusal by
   `windowFullReason()` in `src/agent/models.ts`, and both make `nodeContextFull()` true — so
   **⧉ Continue in a new window** is offered on a card that used to be a dead end (its context read
   `ok` while its images filled the request). A new window does not carry attachments, so that is the
   right way out.
+- **A sub-agent card or a job card is a compact monitor, and the cards beside a node
+  stack into columns of three.** A sub-agent card or a job card is 200 pixels high. It
+  shows the live progress of that sub-agent — its status, its counters and the tail of
+  its work log — instead of its whole transcript. The sub-agent card that you are
+  reading opens at its full height and shows everything; the other cards stay compact.
+  Spinney puts three cards to a column, and the cards of the sub-agents that those
+  sub-agents spawned stand in their own columns to the right. The conversation below a
+  node is therefore never pushed far down by the sub-agents it spawned.
+- **The agent reaches for its own tools before the shell.** Nothing stated the preference, while two
+  texts invited the opposite: the prompt's "harmless read-only commands are expected" line and
+  `exec_command`'s "Use for builds, tests, git, npm, etc.". A greeting turn read back after the fact
+  held one `list_dir`, two `search_transcripts` and forty-odd shell calls. The prompt's
+  `## Calling conventions` now carries a bullet that names the kinds of work a tool already covers,
+  and four descriptions state their own half — `exec_command` says what the shell is for, while
+  `read_file` / `list_dir` / `search_files` say what their result reports that piping through the
+  shell cannot (a bounded range and a line count, a bounded entry cap with the heavy directories
+  skipped, and *excluded* told apart from *absent*). No tool list and no workspace fact enters the
+  prompt, and the duplication between the prompt and the schemas is deliberate
+  (`docs/agents/tools.md`). The prompt and the schemas are frozen per epoch, so a branch that already
+  exists keeps the bytes it was built with and the composer marks the drift — only a new epoch picks
+  the rule up.
 
 ### Fixed
 
@@ -130,6 +146,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sets, so the automatic rule may refresh the header's label but never folds or unfolds that card's
   log again; re-engaging follow is a scrolling gesture and claims nothing. The three manual pages and
   the `spinney.foldWork` setting description say so.
+- **A card is re-placed when its own box changes, so it no longer paints over its neighbours.** The
+  canvas places every card absolutely from the heights `relayout()` measured, and each re-layout was
+  scheduled site by site — every site naming the card it expected to change. A card that grew after a
+  pass therefore kept its old box, and the focused card, at `z-index` 3, ended up covering the card
+  the reader was looking at; the layout diagnostic had been reporting it all along
+  (`OVERLAP area=86240`). One `ResizeObserver` over the cards closes the gap at the source: a card is
+  re-placed because its own box changed, whatever changed it, through the same rAF throttle the
+  streaming path already used. It ignores the two entries that are not a real growth — the height the
+  last pass itself forced on the card (an unguarded observer would re-layout forever) and a height of
+  zero — and `followActive` no longer gates its debounced pass on the focused node having children.
+  The engine and the geometry rules are untouched: what changed is when they are re-run, and the
+  debounced pass now runs during a turn.
+- **The status row no longer takes the top off an ideographic glyph.** `#status-text` ellipsizes with
+  `overflow: hidden` inside a readout that set `line-height: 1` on a 10px font: a line box shorter
+  than the font's own content area leaves negative half-leading, so the ink of "思考中…" rose above
+  the box and the clip cut the head off every character. Latin never showed it — `#metrics` beside it
+  is digits, and the model line above it already carried `1.35`. That same value is the readout's
+  now, so the two read as one block, and every `setStatus` string in zh-Hans is fixed by the one
+  number.
 
 ## [0.1.0] - 2026-09-22
 
