@@ -47,9 +47,13 @@ function asErrorish(value: unknown): Errorish | undefined {
   return typeof value === 'object' && value !== null ? (value as Errorish) : undefined;
 }
 
-/** `value` as a string, or '' when it is not one (or is empty). */
+/** `value` as a string, or '' when it is not one (or is empty). A number counts too: a
+ *  driver puts `port` on its error as a number, and it is part of the host phrase. */
 function text(value: unknown): string {
-  return typeof value === 'string' ? value.trim() : '';
+  if (typeof value === 'string') {
+    return value.trim();
+  }
+  return typeof value === 'number' && Number.isFinite(value) ? String(value) : '';
 }
 
 /** One short phrase for one error: its code, address, port and message. */
@@ -61,7 +65,10 @@ function phrase(error: unknown): string {
   }
   const code = text(err.code);
   const message = text(err.message);
-  const host = [text(err.address), text(err.port)].filter(Boolean).join(':');
+  const address = text(err.address);
+  // A host phrase needs an address; the port joins it when the driver gave one (it
+  // arrives as a number).
+  const host = address ? [address, text(err.port)].filter(Boolean).join(':') : '';
   const parts: string[] = [];
   if (code) {
     parts.push(code);
@@ -72,7 +79,10 @@ function phrase(error: unknown): string {
   if (useful) {
     parts.push(message);
   }
-  if (host && !parts.some((part) => part.includes(host))) {
+  // The address is what the message usually carries already ("getaddrinfo ENOTFOUND
+  // api.example.com"); the port is the part it never does. So the host is added when the
+  // message does not name the address at all, and never twice.
+  if (host && !parts.some((part) => part.includes(address))) {
     parts.push(host);
   }
   return parts.join(' · ');
