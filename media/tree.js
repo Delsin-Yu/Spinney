@@ -133,7 +133,7 @@
    * @param {string} rootId
    * @param {Object} heights    id -> measured pixel height
    * @param {Object} [opts]     { nodeW, hGap, vGap, pad, widths, agentGap, agentVGap,
-   *                              agentColGap, agentMaxRows, agentMaxBlockH, agentTopPad }
+   *                              agentColGap, agentMaxRows, agentMonitorH, agentTopPad }
    * @returns {{ pos: Object<string, {x:number,y:number}>,
    *             cells: Object<string, {x,y,w,h,col,row,index,count,depth,busX,chanX,corrY}>,
    *             width:number, height:number }}

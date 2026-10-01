@@ -27,10 +27,8 @@
  *   C2  the RENDERED gap between two stacked cards is agentVGap plus the box space the
  *       card above left empty (a card is never stretched to its box)
  *   C3  the result carries NO `stretch` key: the contract is `{pos, cells, width, height}`
- *   C4  the row cap and the valve: every column holds <= agentMaxRows cells, every
- *       column's stack <= max(agentMaxBlockH, tallest cell + agentTopPad), the packing is
- *       greedy (a cell opens a column only because the previous one was full or the valve
- *       would have been crossed), and no card is taller than its own box
+ *   C4  the row cap and the slot rule: every column holds <= agentMaxRows cells, a cell
+ *       gets one slot (never a subtree), and no card is taller than its own box
  *   C5  no two RENDERED card rects overlap (every card at its measured height) and no
  *       two sibling boxes overlap
  *   C6  every card/box stays inside the parent's reserved block, the column gap is
@@ -48,7 +46,7 @@
  *       y, no card inset in its box)
  *   C11 the webview half of the same contract, read as text from `media/main.js`:
  *       `relayout()` measures the cards and applies NO rendered height — nothing writes
- *       an inline `height` / `max-height` for layout, and `agentMaxBlockH` is what it
+ *       an inline `height` / `max-height` for layout, and `agentMaxRows` is what it
  *       passes to the layout. A forced height is the one way this layout could creep
  *       every frame, so the guard forbids it outright.
  *
