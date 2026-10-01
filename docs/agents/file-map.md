@@ -250,13 +250,13 @@
   `tools/exec-kill-acceptance.js` · `tools/exec-timeout-acceptance.js` ·
   `tools/bg-budget-acceptance.js` · `tools/websearch-acceptance.js` ·
   `tools/check-png.js` · `tools/check-resample.js` · `tools/check-image.js` ·
-  `tools/check-jpeg.js` · `tools/check-unicode.js` —
+  `tools/check-jpeg.js` · `tools/check-neterror.js` · `tools/check-unicode.js` —
   the packaging guards
   (`npm run check:models` / `check:webview` / `check:signals` / `check:l10n` /
   `check:rollover` / `check:modeltree` / `check:grid` / `check:docs` / `check:cwd` /
   `check:shell` / `check:kill` / `check:timeout` / `check:budget` /
   `check:websearch` / `check:png` / `check:resample` / `check:image` /
-  `check:jpeg` / `check:unicode`, run
+  `check:jpeg` / `check:neterror` / `check:unicode`, run
   by `vscode:prepublish`):
   model-config drift (the default is the fallback card, `providers` / `modelCards`
   exist as object schemas, no `enum` on `model`, no model id in the code or the
@@ -333,6 +333,15 @@
   only: it no longer reads a wallet (that moved to `balance.ts` below), so nothing
   in it names a vendor — the error strings are the client's own (`API error 400: …`,
   `Stream stalled: …`, `Network error calling the API: …`).
+- `src/agent/netError.ts` — `describeFetchError(error)`, the one place a failed `fetch` is
+  turned into a line a human can act on: the message, plus the cause — the code, its own
+  message, and the host it was talking to — walked out of the cause tree (an undici failure
+  nests an `AggregateError` whose `errors` array holds one entry per address tried) and
+  clipped through `clipText`. Node reports every network failure as `TypeError: fetch failed`
+  and keeps the real reason in `error.cause`, so this is what turns a bare `fetch failed`
+  into `fetch failed (ENOTFOUND · getaddrinfo ENOTFOUND <host>)`. Imported by `apiClient.ts`,
+  `balance.ts`, `tools/webFetch.ts` and `tools/webBackends.ts`; it depends on nothing but
+  `../text`, which is what keeps those four from having to import each other.
 - `src/agent/balance.ts` — the wallet readout: `BalanceDialect` (`none` /
   `deepseek` / `openrouter` / `moonshot`), `BALANCE_DIALECTS`, `isBalanceDialect()`,
   the normalized `BalanceEntry` / `Balance`, `emptyBalance()`, and

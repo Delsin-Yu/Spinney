@@ -12,7 +12,7 @@ gitignored, so a leftover is harmless). Before a release, confirm `npm run compi
 `npm run vscode:prepublish` — on a push to `main`, on a `v*` tag, on a pull request and on
 demand, so a red workflow and a red gate are the same thing instead of two lists that drift.
 
-Sixteen build-time guards are the exception (`check:image` runs the `check:png` /
+Seventeen build-time guards are the exception (`check:image` runs the `check:png` /
 `check:resample` / `check:jpeg` scripts with it), all run by `vscode:prepublish` so a
 regression fails *packaging* instead of the user's session:
 
@@ -122,6 +122,27 @@ regression fails *packaging* instead of the user's session:
   only half the contract, the `wellFormedDeep` call at the request boundary
   (`src/agent/apiClient.ts`) the other, and a missing call site leaves no `slice` behind for
   the source scan to find.
+- `npm run check:neterror` (`tools/check-neterror.js`) — the **failed-request describer**
+  (`src/agent/netError.ts`, the module the 2026-09-30 incident produced: 39 retries across two
+  endpoints, every one reading `Network error calling the API: fetch failed` at 2–7 ms, with
+  the one field that named the broken layer discarded on the way to the log and the chat
+  bubble). It drives the compiled `out/agent/netError.js` and pins: the message stays first
+  and unaltered, while a layer that says nothing new (`fetch failed` itself, a message that
+  only repeats its own code, a cause that repeats the message) is never said twice; the **host
+  phrase is added only when the message does not name the address, and never twice**, with the
+  port — which a driver reports as a **number** — travelling with it
+  (`UND_ERR_CONNECT_TIMEOUT · Connect Timeout Error · api.example.com:443`); the cause tree is
+  **walked** rather than assumed (an undici failure nests an `AggregateError` whose `errors`
+  array holds one entry per address tried, a TLS or DNS failure may be one level shallower),
+  depth-bounded and cycle-safe, so a self-referential `cause` returns instead of hanging the
+  host's only thread; and every line goes through `clipText`, so a 5000-character provider
+  sentence cannot flood a bubble and no clip can leave an unpaired surrogate in it
+  (`check:unicode`'s subject). Its last step is a **source-level** read: `src/agent/netError.ts`
+  imports nothing but `../text`, which is what lets `tools/webFetch.ts` import it while
+  `src/agent/*` imports `src/tools/*`, without the two directories having to import each other.
+  Pure node against the compiled module, so like `check:signals` it needs `compile` first. What
+  it can **not** see: a call site that keeps its own `err instanceof Error ? err.message :
+  String(err)` instead of calling the describer — this guard pins the describer, not its use.
 - `npm run check:grid` (`tools/check-tree-grid.js`) — the Chat Tree's sidecar lattice
   (`media/tree.js` plus the vendored tidy-tree engine into node with `vm`, no DOM and no
   VS Code): over ~18 topologies (flat 1..9, nesting two and three levels deep, a card

@@ -58,6 +58,7 @@ A change to anything under `src/`, `media/`, or `package.json` is not finished u
 3. Ask the user to run `Ctrl+Shift+P` → "Developer: Reload Window". The extension host keeps running the old code until then, so do not claim a change is live before the reload, and do not leave this step for the user to guess.
 
 - Automated alternative: when the `hvsc` supervisor is running (a live pid in `tools/hyper-vscode/.state/daemon.json`), drive the reload with `node tools/hyper-vscode/hvsc.mjs reboot <instanceId> --continue "<message>"`; when the current window did not start under hvsc (no instanceId), use `reboot --current`, which adopts the current window (reload only, never kill). Never add `--wait` inside a turn; it deadlocks. A hub-owned background terminal can never drive the reload (`/reload-window` counts it as busy, and a call from inside a turn is refused too) — if no supervisor is running, ask the user to run `Developer: Reload Window` instead of improvising a driver; the gate and the measured failure are in `docs/agents/control-plane.md`.
+- If PowerShell refuses `build-deploy.ps1` with `… is not digitally signed`, the folder's **integrity label** is the cause, not the execution policy and not a missing signature: `docs/agents/commands.md` §"When a script refuses to run". `npm run package` is the closing path that never touches PowerShell.
 - A docs-only change (`README.md` / `AGENTS.md`) does not need `build-deploy`, unless the packaged `.vsix` should be refreshed too. A change under `manual/**` **does**: the user manual is an artifact of the package, so it needs the compile, the package and the reload like code.
 - A reload restarts the extension host; sessions live in `spinney.state`, so the conversation survives it.
 
@@ -65,7 +66,7 @@ A change to anything under `src/`, `media/`, or `package.json` is not finished u
 
 - The version follows SemVer. We are at `0.x`, which is pre-1.0: a breaking change bumps the minor version only.
 - Tag every release as `vX.Y.Z`.
-- `vscode:prepublish` (compile plus the sixteen guards) is the release gate: a release does not ship when that script fails.
+- `vscode:prepublish` (compile plus the seventeen guards) is the release gate: a release does not ship when that script fails.
 - `CHANGELOG.md` uses the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
 ## Hard invariants (read before you touch code)
