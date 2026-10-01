@@ -82,13 +82,19 @@
   // (The engine's own layout pads the right edge by 40px, so the visible channel
   // between the two rightmost/leftmost cards is this plus 40.)
   const ROOT_GAP = 64;
-  // Sub-agent sidecar grid (see media/tree.js): windows are packed into a
-  // column-major lattice right of the parent card, at most AGENT_MAX_ROWS rows
-  // per column; every further window opens a column to the right.
+  // Sub-agent sidecar FOREST (see media/tree.js): a node's windows are grouped into depth
+  // bands — depth 1 is its own windows, depth 2 theirs — each band a lattice of columns
+  // holding at most AGENT_MAX_ROWS cards, and every card is AGENT_MONITOR_H tall (a
+  // "monitor": head + status + the live tail of its work log) except the one window the user
+  // has open, which is as tall as it measures. The block's height is therefore bounded by the
+  // row cap, and a window that spawned windows costs a column band instead of pushing the
+  // conversation below the node down. AGENT_MONITOR_H must match `.node.monitor`'s height in
+  // media/style.css — the layout weighs what the webview measures.
   const AGENT_GAP = 80;
   const AGENT_VGAP = 24;
   const AGENT_COL_GAP = 48;
-  const AGENT_MAX_ROWS = 4;
+  const AGENT_MAX_ROWS = 3;
+  const AGENT_MONITOR_H = 200;
   const AGENT_TOP_PAD = 16;
 
   // The transcript is a pannable tree. `messagesEl` points at the currently
@@ -108,11 +114,9 @@
   // `cells`): id -> { col, row, busX, chanX, corrY, ... }. drawEdges() routes each
   // parent → sub-agent connector through those card-free corridors.
   let layoutCells = Object.create(null);
-  // Sidecar cards the last layout pass stretched (media/tree.js `stretch`): id ->
-  // the height in canvas px `relayout()` forced onto that card. It is the record of
-  // what has to be undone before the next measurement — see `clearStretchHeights()`
-  // and `relayout()`.
-  let layoutStretch = Object.create(null);
+  // The colour a sidecar's connector runs in: id -> { h, s, l, level, idx } (see
+  // `applySubColor`). Kept beside the layout so `drawEdges` can tint an edge like its card.
+  const subColors = Object.create(null);
   let pan = { x: 0, y: 0 };
   let zoom = 1;
   let follow = true;
@@ -2077,6 +2081,12 @@
   function syncAnswerZone(card) {
     if (!card) return;
     if (isCardStreaming(card)) { demoteAnswer(card); return; }
+    // A *monitor* (see `monitorCard`) shows its log and never its answer: the run this
+    // would lift out of the log is exactly the tail a monitor exists to show, so zone 3
+    // stays empty for as long as the card is one — and a run a previous, focused life had
+    // already promoted is brought back into the log here, which is the one moment every
+    // promotion goes through (`promoteAnswer` has no other caller).
+    if (card.classList.contains('monitor')) { demoteAnswer(card); return; }
     const workEl = card.querySelector('.node-work');
     const answerEl = card.querySelector('.node-answer');
     if (!workEl || !answerEl) return;
@@ -2227,11 +2237,12 @@
 
   /**
    * The height this card may reach: what the user dragged, else the stylesheet's cap.
-   * Deliberately NOT `card.style.maxHeight`: the tree layout writes its stretch target
-   * there (`height` + a matching `max-height`, only ever growing a card), so reading the
-   * inline style back would treat the *folded* card's height as a hard cap — unfolding a
-   * log then divided those few pixels and the log came back with no height at all, with
-   * the max-height pinning the card so it could not grow out of it.
+   * Deliberately NOT `card.style.maxHeight`: the only inline size a card can carry is
+   * one that was written on purpose (the user's drag-resize, or the lift
+   * `settleAnswerSplit` applies), so reading the inline style back would treat the
+   * *folded* card's height as a hard cap — unfolding a log then divided those few
+   * pixels and the log came back with no height at all, with the max-height pinning
+   * the card so it could not grow out of it.
    */
   function cardHeightCap(card) {
     const meta = treeNodes[card.dataset.id];
@@ -2335,26 +2346,24 @@
         const others = cardFixedHeight(card);
         // Two things can leave the card unable to *give* the split the room it computes:
         // a stored size the user dragged smaller than the parts need, and an inline
-        // `max-height` the tree layout left behind — its stretch target is measured from
-        // the card as it *was*, so a card unfolded later carries a stale, smaller one.
-        // Either way the card is clipped and the zones are squeezed instead of divided
-        // (the log ended up with no height at all and could not be unfolded). So the cap
-        // is never below the usable minimum, and the card's own inline limit is lifted to
-        // it — in the card's style and in the layout's copy of the size, so a relayout
-        // restores the lift rather than the squeeze. (A relayout re-derives the stretch
-        // from the card's new height anyway, and the stretch only ever grows a card.)
+        // `max-height` written while the card *was* smaller, so a card unfolded later
+        // carries a stale, smaller one. Either way the card is clipped and the zones are
+        // squeezed instead of divided (the log ended up with no height at all and could
+        // not be unfolded). So the cap is never below the usable minimum, and the card's
+        // own inline limit is lifted to it — in the card's style and in the layout's copy
+        // of the size, so a relayout restores the lift rather than the squeeze.
         const cap = Math.max(cardHeightCap(card), others + SPLIT_FLOOR_PX);
         const inlineMax = parseFloat(card.style.maxHeight);
         if (inlineMax > 0 && inlineMax < cap) {
           card.style.maxHeight = cap + 'px';
           lifted = true;
         }
-        // The stretch writes `height` *and* `max-height`: raising only the cap leaves the
-        // card at the stretched height (an inline `height` is not a cap), and the body —
-        // with the log, the one zone that has no height of its own — is squeezed to
+        // An inline size comes as a pair (see `beginResize`): raising only the cap
+        // leaves the card at the old height — an inline `height` is not a cap — and the
+        // body, with the log, the one zone that has no height of its own, is squeezed to
         // nothing while the pinned answer keeps showing. Dropping a too-small inline
-        // height is safe: the next relayout re-derives the stretch from the card's own
-        // height, and a stretch only ever grows a card.
+        // height is safe: the cap above still bounds the card, and the card's own content
+        // decides how tall it gets.
         const inlineH = parseFloat(card.style.height);
         if (inlineH > 0 && inlineH < cap) {
           card.style.height = '';
@@ -2944,8 +2953,8 @@
     if (cvObserver) cvObserver.observe(card);
     // Every card is watched by the one card observer as well (see `cardResizeObserver`):
     // any card that grows after the last layout pass leaves the tree with stale boxes,
-    // whatever grew it. Observed after `_nodeId` is set, because the observer's loop guard
-    // reads a card's id back off its element (`layoutStretch[id]`).
+    // whatever grew it. Observed after `_nodeId` is set, because the observer reads a
+    // card's id back off its element.
     cardObserve(card);
     return card;
   }
@@ -3360,10 +3369,186 @@
     return { items: pnode ? pnode.items : meta && meta.items, summary: false };
   }
 
+  // ---- Sub-agent family colours --------------------------------------------------------
+  //
+  // A sub-agent window's colour says WHICH family it belongs to and HOW DEEP it is. The family
+  // is the level-1 window it descends from; the hue comes from a fixed-seed sequence indexed by
+  // that window's order among its node's windows, and every level down raises the saturation
+  // and lowers the lightness — so a level-2 window reads as "the same family, one step deeper"
+  // rather than as an unrelated card. The sequence is a pure function of the index, so a family
+  // keeps its colour across repaints, reloads and sessions, and it never runs out.
+  const FAMILY_SEED = 0x5EED5EED;
+  const familyJitters = [];
+  let familyState = FAMILY_SEED | 0;
+  // Two arcs of the wheel, one per KIND of sidecar: a sub-agent window is warm (red → orange →
+  // yellow), a background job card is cold (cyan → blue → violet). The two classes can therefore
+  // never share a hue, which is what a glance at the tree needs most; keeping them apart matters
+  // more than spreading every family evenly over the whole wheel.
+  const WARM = { from: 330, span: 100 };
+  const COLD = { from: 170, span: 120 };
+  /**
+   * The jitter for family `i`: a fixed-seed mulberry32 STREAM off `FAMILY_SEED`, one value per
+   * index, kept within ±9 degrees so it only softens the ramp below. Cached, so it is a pure
+   * function of the index.
+   */
+  function familyJitter(i) {
+    while (familyJitters.length <= i) {
+      familyState = (familyState + 0x6D2B79F5) | 0;
+      let t = Math.imul(familyState ^ (familyState >>> 15), 1 | familyState);
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+      familyJitters.push((((t ^ (t >>> 14)) >>> 0) % 19) - 9);
+    }
+    return familyJitters[i];
+  }
+  /**
+   * The hue of family `i` inside its arc. The STEP is the arc's own golden section
+   * (`span * 0.618`), so consecutive families land far apart WITHIN the arc instead of marching
+   * along it (a plain fixed-seed stream measured badly here: the first families came out 144, 144,
+   * 146, 131 — the same colour four times in a row). Pure and endless: a family keeps its colour
+   * across repaints, reloads and sessions.
+   */
+  function familyHue(i, arc) {
+    const step = arc.span * 0.6180339887;
+    return Math.round((((arc.from + ((i * step) % arc.span) + familyJitter(i)) % 360) + 360) % 360);
+  }
+  /** A sidecar's family index and level, from the tree the webview already holds. */
+  function subColorOf(id) {
+    const chain = [];
+    let n = treeNodes[id];
+    while (n && isSidecarKind(n.kind)) { chain.unshift(n); n = treeNodes[n.parentId]; }
+    if (!chain.length) return null;
+    const top = chain[0];                 // the level-1 window: the whole family wears its hue
+    const sibs = n ? (n.children || []).filter((c) => treeNodes[c] && isSidecarKind(treeNodes[c].kind)) : [top.id];
+    const idx = Math.max(0, sibs.indexOf(top.id));
+    const level = chain.length;           // 1 for a top-level window, 2 for its windows, …
+    return {
+      idx,
+      level,
+      // A job card walks the cold arc, a sub-agent window the warm one.
+      h: familyHue(idx, top.kind === 'bg' ? COLD : WARM),
+      s: Math.min(92, 44 + (level - 1) * 16),   // deeper = more saturated
+      l: Math.max(28, 64 - (level - 1) * 13),   // deeper = darker
+    };
+  }
+  /** Paint a sidecar card, and remember the colour its connector runs in. */
+  function applySubColor(id) {
+    const c = subColorOf(id);
+    const card = nodeEls[id];
+    if (!c || !card) return;
+    // ONE property is the card's colour. Everything that shows it — the left stripe, the focused
+    // card's outline, and (computed separately for the SVG, which cannot read a card's custom
+    // property) its connector — reads this one value instead of reassembling a
+    // hue/saturation/lightness triple.
+    if (card.style && card.style.setProperty) {
+      card.style.setProperty('--sub-color', 'hsl(' + c.h + ', ' + c.s + '%, ' + c.l + '%)');
+    }
+    card.dataset.subHue = String(c.h);
+    card.dataset.subLevel = String(c.level);
+    subColors[id] = c;
+  }
+
+  /**
+   * A **sidecar** card (a sub-agent window, or a job card) that is not the focused node
+   * renders as a *monitor*: the fixed 200px window of `.node.monitor` in style.css,
+   * showing its head, the live tail of its own work log — the same `.node-work` scroller
+   * the expanded card uses, so the stream fills it and follows it exactly as it does
+   * there — and its one-line preview. Every sidecar gets a cell of its own from the
+   * layout (media/tree.js); a card whose size followed its content would push the
+   * conversation's spine down and grow its parent's cell instead of sending its own
+   * sub-windows to the next depth band. The one sidecar that *is* the focused node
+   * renders as the ordinary expanded card — see the decision in the `tree` / `path`
+   * passes.
+   *
+   * The zones are the expanded card's, re-aimed: the ask and zone 3 are hidden (a monitor
+   * is a window onto work, not a card being read) and the log is shown whether or not it
+   * holds anything yet — the strip is what "where is this sub-agent" looks like while its
+   * items are still on their way.
+   */
+  function monitorCard(id, meta, pnode) {
+    const card = nodeEls[id];
+    card.classList.add('monitor');
+    card.classList.remove('expanded', 'active');
+    applySubColor(id);
+    // A size a previous drag put on the card is parked first: an inline `max-height`
+    // (from `createNodeCard`'s `meta.size`, or `endResize`) beats every stylesheet rule,
+    // so the class alone could not hold a resized sidecar to its 200px. The focused card
+    // gets it back (see `expandedCard`) — it is the card the user sized.
+    if (card.style.maxHeight) {
+      card._monitorCap = card.style.maxHeight;
+      card.style.maxHeight = '';
+    }
+    const askEl = card.querySelector('.node-ask');
+    const workEl = card.querySelector('.node-work');
+    const workWrap = card.querySelector('.node-work-wrap');
+    const answerWrap = card.querySelector('.node-answer-wrap');
+    const excerptEl = card.querySelector('.node-excerpt');
+    // Zone 3 is not part of what a monitor shows, so a run it is holding belongs back in
+    // the log: a card that was focused (and so promoted) before it became a monitor would
+    // otherwise show its log *minus* its answer. Idempotent, like every other call, and the
+    // log's own visibility comes back with it. The other half of the same rule is in
+    // `syncAnswerZone`, which refuses to promote a monitor — and `routeTo` already demotes
+    // before every append, so a live one is never promoted either.
+    demoteAnswer(card);
+    // The fill path is `expandedCard`'s, for the same reason it is there: a sidecar ships
+    // no transcript in the `tree` / `path` payload (only `itemCount`), and a monitor needs
+    // its tail — so the one-shot ask has to be made from here too. A card that only ever
+    // asked from an expansion would never ask now that a sidecar is usually a monitor, and
+    // the window would stay empty.
+    const src = itemsSource(pnode, meta);
+    const source = src.items;
+    const supersedesSummary = card._itemsRendered && card._itemsSummary && !src.summary;
+    if (source && (!card._itemsRendered || supersedesSummary)) {
+      renderNodeItems(card, source, meta.status !== 'running');
+      card._itemsRendered = true;
+      card._itemsSummary = !!src.summary;
+      if (!src.summary || !card._itemsRequested) setCardLoading(card, false);
+      if (meta.status !== 'running') {
+        setCardScrollLock(card, false);
+        card._needsBottomScroll = true;
+      }
+    }
+    const pendingItems = (pnode && pnode.itemCount) || meta.itemCount || 0;
+    const pendingKind = (pnode && pnode.kind) || meta.kind;
+    const wantsLog = !card._itemsRendered || card._itemsSummary;
+    if (wantsLog && !card._itemsRequested) {
+      if (pendingItems > 0 && pendingKind === 'agent') {
+        requestAgentItems(id, card);
+      } else if (!isSidecarKind(pendingKind) && !runningNodes.has(id) && (!source || card._itemsSummary)) {
+        requestNodeItems(id, card);
+      }
+    }
+    askEl.classList.add('hidden');
+    workWrap.classList.remove('hidden');
+    if (answerWrap) answerWrap.classList.add('hidden');
+    excerptEl.textContent = meta.preview || meta.title || '';
+    excerptEl.classList.remove('hidden');
+    // The tail is the point, so a monitor opens at its newest content — once, like
+    // `expandedCard`'s own case, so a reader who scrolled a window is not yanked back to
+    // the bottom by every repaint — and a *live* one follows its stream through
+    // `_itemScroll`, which `routeTo` pins after each append.
+    if (card._itemScroll && card._itemScroll.locked) {
+      card._itemScroll.scrollToBottom();
+      card._needsBottomScroll = false;
+    } else if (card._needsBottomScroll && workEl && !card.classList.contains('work-folded')) {
+      workEl.scrollTop = workEl.scrollHeight;
+      card._needsBottomScroll = false;
+    }
+  }
+
   function expandedCard(id, meta, pnode) {
     const card = nodeEls[id];
     card.classList.add('expanded');
+    // The focused node is the one card that renders as a full card: the monitor window
+    // (and the class it is spelled with) comes off here, and a size the card carried
+    // before it was a monitor — parked by `monitorCard`, because an inline `max-height`
+    // would win against the 200px rule — goes back on. A turn card has neither.
+    card.classList.remove('monitor');
+    if (card._monitorCap != null) {
+      card.style.maxHeight = card._monitorCap;
+      card._monitorCap = null;
+    }
     card.classList.toggle('active', id === treeActiveId);
+    if (isSidecarKind(meta.kind)) applySubColor(id);
     const askEl = card.querySelector('.node-ask');
     const workEl = card.querySelector('.node-work');
     const workWrap = card.querySelector('.node-work-wrap');
@@ -3937,38 +4122,10 @@
     relayout();
   }
 
-  /**
-   * Undo the stretch the previous layout pass applied, before anything is measured.
-   *
-   * A stretched card carries an inline `height` **and** a matching `max-height`
-   * (`.node` caps every card at 1200px, so `height` alone would be clipped). Both
-   * have to be gone before `relayout()` reads `offsetHeight`: an inline height is
-   * what the browser would report back as the card's height, so measuring it as the
-   * *natural* height and then stretching that card again would add the grid's free
-   * space a second time — the layout would creep taller on every frame.
-   *
-   * `max-height` is restored from `treeNodes[id].size.h` when it exists: that value
-   * is a *manual* resize the user owns (set by `createNodeCard` and committed by
-   * `endResize`, which persists it as `setNodeSize`), not something a layout pass
-   * may wipe. Everything else falls back to the CSS default ('').
-   */
-  function clearStretchHeights() {
-    for (const id of Object.keys(layoutStretch)) {
-      const card = nodeEls[id];
-      if (card) {
-        const meta = treeNodes[id];
-        card.style.height = '';
-        card.style.maxHeight = meta && meta.size && meta.size.h ? meta.size.h + 'px' : '';
-      }
-      delete layoutStretch[id];
-    }
-  }
-
   function relayout() {
-    // Clear first (see `clearStretchHeights`): every pass measures the cards'
-    // NATURAL heights, so no card may still carry the previous pass's stretch when
-    // the measurement below runs.
-    clearStretchHeights();
+    // Nothing has to be cleared before the measurement any more: the layout writes no
+    // inline size onto a card (media/tree.js hands out no rendered height), so every
+    // pass already measures the cards' own, natural heights.
     // No-node mode: the placeholder card is the entire tree.
     if (composerCard) {
       layoutCells = Object.create(null);
@@ -3987,9 +4144,8 @@
       drawEdges();
       return;
     }
-    // Measure the cards' own, natural heights (the clear above took every inline
-    // height off): these are what the layout stretches from, and the baseline a
-    // `stretch` entry has to beat to be applied below.
+    // Measure the cards' own, natural heights: the layout is given these and hands out
+    // no rendered height of its own, so what is measured here is what gets drawn.
     const heights = {};
     const widths = {};
     for (const id in nodeEls) {
@@ -4018,17 +4174,11 @@
       agentVGap: AGENT_VGAP,
       agentColGap: AGENT_COL_GAP,
       agentMaxRows: AGENT_MAX_ROWS,
+      agentMonitorH: AGENT_MONITOR_H,
       agentTopPad: AGENT_TOP_PAD,
     };
     const pos = Object.create(null);
     const cells = Object.create(null);
-    // Stretch the sidecar cells to the heights the layout reserved for them. This
-    // can only run *after* `layoutTree` (the heights are the layout's answer) and it
-    // must run *after* the measurement above (only a card the layout wants taller
-    // than it measured may be stretched). `height` alone is not enough: `.node` caps
-    // every card at 1200px, and a clipped card would leave the grid's column short
-    // again — the inline `max-height` is what lifts that cap for this one card.
-    const stretch = Object.create(null);
     let rootX = 0;
     let canvasW = 0;
     let canvasH = 0;
@@ -4048,7 +4198,6 @@
           busX: c.busX + rootX, chanX: c.chanX + rootX, corrY: c.corrY,
         };
       }
-      for (const id in result.stretch) stretch[id] = result.stretch[id];
       canvasW = Math.max(canvasW, rootX + result.width);
       canvasH = Math.max(canvasH, result.height);
       // `result.width` is the tree's own extent plus the engine's right pad, and the
@@ -4056,18 +4205,6 @@
       rootX += result.width + ROOT_GAP;
     }
     layoutCells = cells;
-    for (const id in stretch) {
-      const card = nodeEls[id];
-      if (!card) continue;
-      const target = stretch[id];
-      // Absent ids and targets at (or below) the card's natural height are left
-      // exactly as they are: the layout only ever grows a card, and a sub-pixel
-      // difference is measurement noise, not a stretch.
-      if (!(target > (heights[id] || 0) + 0.5)) continue;
-      card.style.height = target + 'px';
-      card.style.maxHeight = target + 'px';
-      layoutStretch[id] = target;
-    }
     treeCanvas.style.width = canvasW + 'px';
     treeCanvas.style.height = canvasH + 'px';
     for (const id in pos) {
@@ -4241,7 +4378,9 @@
           const mx = (pr + cx) / 2;
           d = 'M ' + pr + ' ' + pyMid + ' C ' + mx + ' ' + pyMid + ', ' + mx + ' ' + cyMid + ', ' + cx + ' ' + cyMid;
         }
-        parts.push('<path data-agent="' + id + '" class="edge-agent' + cls + '" d="' + d + '" />');
+        const sc = subColors[id];
+        const tint = sc && !cls ? ' stroke="hsl(' + sc.h + ' ' + Math.min(85, sc.s + 12) + '% ' + Math.min(72, sc.l + 16) + '%)"' : '';
+        parts.push('<path data-agent="' + id + '" class="edge-agent' + cls + '"' + tint + ' d="' + d + '" />');
       } else {
         const childMidX = cx + cw / 2;
         const parentBottomX = px + pw / 2;
@@ -4329,16 +4468,23 @@
         cardUnobserve(nodeEls[id]);
         nodeEls[id].remove();
         delete nodeEls[id];
-        // The card is gone, so its stretch record has nothing to restore — and a
-        // record left behind would only keep a dead id alive between passes.
-        delete layoutStretch[id];
       }
     }
 
     for (const id in nodeEls) {
       const meta = treeNodes[id] || { title: '', status: 'done', preview: '' };
       const onPath = activePathSet.has(id) || agentExpanded(id);
-      if (onPath) {
+      // A **sidecar** card — a sub-agent window or a job card — is a monitor unless it
+      // *is* the focused node: only that one renders as the ordinary expanded card (it is
+      // on the active path, so the branch below would expand it anyway), and every other
+      // sidecar is the fixed 200px window. That is the "at most one full card per window
+      // group" rule, and the sidecar branch has to come first: `agentExpanded` keeps a
+      // sub-agent of an expanded parent open, and open now means a monitor. A turn node
+      // keeps the rule it had.
+      const monitor = isSidecarKind(meta.kind) && id !== treeActiveId;
+      if (monitor) {
+        monitorCard(id, meta, pathNodes[id]);
+      } else if (onPath) {
         expandedCard(id, meta, pathNodes[id]);
       } else {
         collapsedCard(id, meta);
@@ -4442,7 +4588,12 @@
     for (const id in nodeEls) {
       const meta = treeNodes[id] || { title: '', status: 'done', preview: '' };
       const onPath = activePathSet.has(id) || agentExpanded(id);
-      if (onPath) {
+      // Same rule as in `renderTree`: a sidecar is a monitor unless it is the focused
+      // node, which is the one card that still renders as the ordinary expanded card.
+      const monitor = isSidecarKind(meta.kind) && id !== treeActiveId;
+      if (monitor) {
+        monitorCard(id, meta, pathNodes[id]);
+      } else if (onPath) {
         expandedCard(id, meta, pathNodes[id]);
       } else {
         collapsedCard(id, meta);
@@ -4608,34 +4759,26 @@
   }
 
   /**
-   * A card's own box changed (see `cardResizeObserver`). Two entries are ignored:
+   * A card's own box changed (see `cardResizeObserver`). One entry is ignored:
    *
-   *  - the height the last pass forced on this card (`layoutStretch[id]`, compared with
-   *    the same 0.5px tolerance `relayout` uses to decide a target is a stretch at all):
-   *    the inline height the layout writes IS itself a resize, so an unguarded observer
-   *    would see its own layout's output, schedule again, and relayout forever;
    *  - a height of 0 — a card that is hidden, not measured yet, or skipped by the engine
    *    with no remembered box to size it by. There is no size there for a layout to use,
    *    and the skipping itself is `cvObserver`'s business, not this one's.
    *
    * Anything else is a real change of size, and the answer to one is a *scheduled*
-   * re-layout — never a `relayout()` in here.
+   * re-layout — never a `relayout()` in here. The layout writes no inline size onto a
+   * card any more (media/tree.js hands out no rendered height), so there is no
+   * self-inflicted resize left to filter out: what grows a card is its own content, a
+   * user's drag, or the answer split.
    */
   function onCardResize(entries) {
     try {
       for (const entry of entries) {
         const card = entry.target;
         // `offsetHeight`, not the entry's content box: it is the measure `relayout()`
-        // reads and the one `layoutStretch` records, so only this number can be compared
-        // with what the last pass forced (a card's padding and border are part of its
-        // size here).
+        // reads, and a card's padding and border are part of its size here.
         const h = card.offsetHeight || 0;
         if (!h) continue;
-        const id = card._nodeId;
-        // The placeholder composer card has no node id, so it has no stretch record
-        // either — it only ever passes the height check above.
-        const forced = id ? layoutStretch[id] : undefined;
-        if (typeof forced === 'number' && Math.abs(h - forced) <= 0.5) continue;
         scheduleCardRelayout();
         return;
       }
@@ -4703,14 +4846,13 @@
       startW: card.offsetWidth,
       startH: card.offsetHeight,
       // The drag's own ceiling. `MAX_H` is the base, but a card can legitimately be
-      // taller than it: the layout stretches a sidecar card to its grid cell
-      // (tree.js `stretch`, set as an inline `max-height`), and a `size.h` the user
-      // dragged earlier is a height they asked for. Clamping to `MAX_H` alone would
-      // snap such a card — and the preview with it — down to 1200 the moment the
-      // handle is touched, and store that 1200 as the card's size. So the ceiling is
-      // the largest of the three: the base, the height the card has right now, and
-      // the drag height it remembers. One number for both the wireframe and the
-      // commit (see `onResizeMove` / `endResize`).
+      // taller than it: a `size.h` the user dragged earlier is a height they asked
+      // for, and the card's content may have grown past it since. Clamping to `MAX_H`
+      // alone would snap such a card — and the preview with it — down to 1200 the
+      // moment the handle is touched, and store that 1200 as the card's size. So the
+      // ceiling is the largest of the three: the base, the height the card has right
+      // now, and the drag height it remembers. One number for both the wireframe and
+      // the commit (see `onResizeMove` / `endResize`).
       ceilH: Math.max(MAX_H, card.offsetHeight, draggedH),
       // The floor is not a flat `MIN_H` either: a card has to keep room for the two
       // zones under its own header, prompt and input pane, or the log is squeezed to

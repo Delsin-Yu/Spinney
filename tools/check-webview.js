@@ -1539,13 +1539,15 @@ if (contextLabel !== 'ctx 50%') {
     if (after !== 1) {
       problems.push(`an agentItems answer produced ${after} item(s) in the card, expected 1`);
     }
-    // That one item is a lone assistant item — the tail of the log and therefore
-    // the sub-agent's final answer, which is *moved* into zone 3 (not copied, not
-    // left behind in the log).
-    if (subItems.children.length !== 0 || subAnswer.children.length !== 1) {
+    // That one item is a lone assistant item — the tail of the log. On a **monitor** card
+    // (this sub-agent is not the focused node: `monitorCard`, media/main.js) it stays
+    // exactly where it streamed: a monitor shows its log and never zone 3, so the tail the
+    // window exists to show is not lifted out of it. The focused card is the one that
+    // promotes, and that path is covered by the turn-card fixtures.
+    if (subItems.children.length !== 1 || subAnswer.children.length !== 0) {
       problems.push(
         `an agentItems answer left ${subItems.children.length} item(s) in .node-work and ` +
-          `${subAnswer.children.length} in .node-answer, expected 0 / 1 (a lone assistant item is the answer)`,
+          `${subAnswer.children.length} in .node-answer, expected 1 / 0 (a monitor keeps its answer in the log)`,
       );
     }
     dispatch({ type: 'agentItems', id: SUB, items: [{ kind: 'assistant', text: '子代理答案' }] });
@@ -3261,9 +3263,13 @@ if (contextLabel !== 'ctx 50%') {
     }
   }
 
-  // (h) A sub-agent card streams while *its own* run is live — `_agentLive`, set by
-  // `agentStart` and cleared by `agentDone` — so it promotes on `agentDone` and not
-  // before, whatever the tree's status says.
+  // (h) A sub-agent card is a **monitor** while it is not the focused node (`monitorCard`,
+  // media/main.js): it shows its own log and never zone 3, so the answer it streams stays
+  // where it streamed. That is true whatever its own run is doing — `_agentLive`, set by
+  // `agentStart` and cleared by `agentDone`, used to be what decided the promotion, and a
+  // monitor now demotes before that decision can matter (`syncAnswerZone`). The promotion
+  // path itself is still covered above, by the turn-card fixtures: the one node that is
+  // focused renders as the ordinary expanded card.
   {
     const R = 'zone-agent-root';
     const SUB = 'zone-agent-sub';
@@ -3280,11 +3286,25 @@ if (contextLabel !== 'ctx 50%') {
     if (!card) {
       problems.push('no card was rendered for the sub-agent of the zone fixture');
     }
+    // The card must carry its FAMILY colour (media/main.js `applySubColor`): the level and the hue
+    // ride on the card's dataset, which is what the left stripe and the focused outline are keyed
+    // on (`media/style.css`). Without them a sidecar silently falls back to `.node.agent`'s plain
+    // border — the defect this assertion exists to catch.
+    if (card && card.dataset.subLevel !== '1') {
+      problems.push('a sub-agent card did not get its family level (`data-sub-level`) — got ' + card.dataset.subLevel);
+    }
+    if (card && !/^\d+$/.test(card.dataset.subHue || '')) {
+      problems.push('a sub-agent card did not get its family hue (`data-sub-hue`) — got ' + card.dataset.subHue);
+    }
+    // `--sub-color` itself is deliberately NOT asserted here: this harness' DOM stub gives every
+    // element a `style` object with a no-op `setProperty`, so a custom property cannot be read
+    // back in it. What the stripe and the outline are keyed on is the dataset above, and that is
+    // observable; the property is checked in the browser by eye.
     dispatch({ type: 'agentStart', id: SUB, name: 'zone agent', instruction: 'x', model: 'm' });
     dispatch({ type: 'delta', nodeId: SUB, text: 'sub answer' });
-    expectNotPromoted(card, 'a sub-agent card whose run is live (`agentStart`, before `agentDone`)');
+    expectNotPromoted(card, 'a sub-agent monitor whose run is live (`agentStart`, before `agentDone`)');
     dispatch({ type: 'agentDone', id: SUB, status: 'done', summary: 'done' });
-    expectPromoted(card, 'a sub-agent card after `agentDone`');
+    expectNotPromoted(card, 'a sub-agent monitor after `agentDone` (its answer stays in the log)');
   }
 
   // (i) A `kind:'bg'` job card has no conversation at all (`isCardStreaming` is

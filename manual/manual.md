@@ -94,6 +94,8 @@ When the card shows an answer and the work log stays open, the answer comes firs
 
 A card can now be up to 1200 pixels high. The limit was 600 pixels before. Dragging the bottom-right corner of a card still resizes it.
 
+A sub-agent card or a background job card is a compact monitor. It is 200 pixels high. It shows the live progress of that sub-agent: the status, the counters and the tail of the work log. It does not show the whole transcript. Spinney opens the sub-agent card that you are reading at its full height, and that card shows everything. The other cards stay compact. Spinney puts three of the cards beside one node into one column, and starts a new column to the right when the column is full. The cards of the sub-agents that those sub-agents spawned stand in their own columns to the right. The conversation below a node is therefore not pushed far down by the sub-agents it spawned. A sub-agent card shows the colour of the family it belongs to. The cards that this sub-agent spawned use the same colour, with more saturation and less lightness. A sub-agent card uses a warm colour. A background job card uses a cold colour.
+
 Press `Ctrl+Alt+D` to write a layout diagnostic to the output channel.
 
 ### 3.3 The status row

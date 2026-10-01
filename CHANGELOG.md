@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **A sub-agent card or a job card is a compact monitor, and the cards beside a node
+  stack into columns of three.** A sub-agent card or a job card is 200 pixels high. It
+  shows the live progress of that sub-agent — its status, its counters and the tail of
+  its work log — instead of its whole transcript. The sub-agent card that you are
+  reading opens at its full height and shows everything; the other cards stay compact.
+  Spinney puts three cards to a column, and the cards of the sub-agents that those
+  sub-agents spawned stand in their own columns to the right. The conversation below a
+  node is therefore never pushed far down by the sub-agents it spawned.
+
+### Added
+
+- **Sub-agent cards are colour-coded, and so are the cards their sub-agents spawned.** A
+  sub-agent card and the cards below it share one colour; each level down is more saturated
+  and darker, so a card is recognisable as "that family, one step deeper". Sub-agent cards
+  use warm colours and background job cards use cold ones, so the two kinds are never
+  confused. The colour of a sub-agent is fixed by its position in the session, and it stays
+  the same after a reload.
+
 ## [0.2.0] - 2026-09-29
 
 ### Added

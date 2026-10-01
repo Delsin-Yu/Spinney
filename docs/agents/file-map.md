@@ -267,11 +267,14 @@
   parse — pure functions, no DOM), and "does the Model Card Tree page still
   understand the host" (`media/modeltree.js` into a stub DOM: the `ready` handshake,
   a snapshot drawn as a tree, a failed save that keeps the draft, an add-card → save
-  round trip), and the Chat Tree's sidecar lattice (`media/tree.js` into node: each
-  column its own stack ending flush and evenly filled, a `stretch` map covering every
-  sidecar card, card-free corridors, over ~18 topologies plus the real session
-  `mu2zn79jlv7b23`; and `relayout()` in `media/main.js` clearing the stretch before
-  measuring and applying the new one after), and the shipped user manual against the
+  round trip), and the Chat Tree's sidecar lattice (`media/tree.js` into node: the depth
+  bands of `agentMaxRows` = 3-card columns, each column its own stack, a deeper band
+  starting to the right so the block stays bounded, the monitor cards and the one focused
+  full card, no height valve and no
+  `stretch` map, card-free corridors, over 19 topologies plus the real session
+  `mu2zn79jlv7b23`; and `relayout()` in `media/main.js` measuring `offsetHeight`, passing
+  the knobs and writing no inline height or max-height for layout), and the shipped user
+  manual against the
   manifest (`manual/**`: a page per catalog language, one shared heading structure, a
   spot for every command title and every `spinney.*` key, and no `.vscodeignore`
   pattern that would keep a page out of the `.vsix`), and the working directory and path
@@ -441,20 +444,26 @@
   is delegated to the vendored, pinned engine (below); this file only maps our two
   child kinds onto it (turn = below, sidecar = right, where a sidecar is a
   `kind:'agent'` sub-agent window or a `kind:'bg'` job card) and reserves each node's
-  sidecar **grid** inside the node's engine box. A node's sidecar children are packed
-  **column-major** into a lattice — at most `agentMaxRows` (4) cells per column, with
-  the next cell opening a new column to the right. Rows are **not** aligned across
-  columns: each column is its own stack of cells, its extent is the sum of its cells'
-  own subtree box heights, and the block's height is the maximum over the columns;
-  the free space of a shorter column (`blockHeight − that column's stack`) is spread
-  **evenly** over that column's cards (the integer remainder to the topmost cards
-  first), so every column ends flush at the block's bottom line and no hole is left
-  between a parent's cards. Returns, in addition to `pos`/`width`/`height`, a
-  `stretch` map (id → pixel height, every sidecar card) that `main.js` applies as the
-  card's exact height (`height` + `max-height`, since `.node` caps at 1200px), and a
+  sidecar **grid** inside the node's engine box. A node's sidecar children are grouped into
+  **depth bands** — depth 1 is the node's own sub-windows, depth 2 theirs — each band a
+  lattice of **column-major** stacks of at most `agentMaxRows` (3) cells (`nodeW` = 320 wide,
+  `agentColGap` apart), and the columns are ordered so that a window's own windows stand
+  directly right of its own column — a window that spawns
+  windows costs a column hop instead of height. Every sidecar card is a **monitor card** —
+  `agentMonitorH` (200) tall, head + status + live tail of its work log + one-line preview —
+  and only the focused node (`id === treeActiveId`) renders as a full expanded card. There is
+  no height valve (`agentMaxBlockH` is deleted): a column ends at the row cap and the cell
+  that breaks it opens a new column inside its own band, so the block is bounded — a full band
+  is `agentTopPad + 3·agentMonitorH + 2·agentVGap` = 664px — and no longer grows with the
+  content a window holds.
+  Rows are **not** aligned across columns: each column is its own stack of cells, its extent
+  is the sum of its cells' own subtree box heights, and the block's height is the maximum
+  over the columns; the columns are **not** flush at the bottom — a shorter one ends earlier
+  and leaves blank canvas inside the parent's reserved box. Returns exactly
+  `{ pos, cells, width, height }` — no `stretch` map, so `main.js` writes no inline height
+  or max-height for layout and every card renders at its measured height — plus a
   `cells` **routing table** (per agent child: `busX` / `chanX` / `corrY`, the
-  card-free corridors `main.js` draws the connectors through). `agentMaxRows: 1`
-  reproduces the old single-column ribbon.
+  card-free corridors `main.js` draws the connectors through).
 - `media/vendor/non-layered-tidy-tree-layout/` — **vendored, pinned** tree layout
   engine (`@2.0.2`, MIT): `dist/` (the file the webview loads), `src/` (readable
   source for offline re-audit), `LICENSE`, `PROVENANCE.md` (hashes + audit record).

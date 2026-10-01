@@ -127,18 +127,22 @@ regression fails *packaging* instead of the user's session:
   VS Code): over ~18 topologies (flat 1..9, nesting two and three levels deep, a card
   taller than its own sub-grid, mixed `agent` / `bg`, plus the real session
   `mu2zn79jlv7b23` as a golden case) it asserts the per-column sums — each column its
-  own stack, ending flush at the block's bottom line, the shorter column's free space
-  spread evenly with the integer remainder to the topmost cells — the `stretch` map
-  (covering every sidecar card, never a turn node, ≥ the card's measured height and
-  filling its slot, the one documented exception aside), no overlapping card rectangles
-  inside the parent's reserved block (≤ `agentMaxRows` cells per column,
-  `col = floor(i / R)`), card-free `busX` / `chanX` / `corrY` corridors (measured from
-  the card's *rendered* bottom), and a strict one-pass fixpoint for every reachable
-  shape. It also pins `media/main.js`'s `relayout()` order — clear the previously
-  applied stretch **before** measuring the cards, apply `result.stretch` after — the one
-  way this layout could creep every frame. Drift in any of the four `media/tree.js`
-  invariants just named — the per-column stacks, the even fill, the `stretch` map, the
-  corridors — fails packaging here instead of shipping.
+  own stack of cells, ending where its last cell ends (the columns are no longer forced
+  flush, and no free space is spread over a column's cards) — the packing knob (every
+  column holds ≤ `agentMaxRows` = 3 cells, the packing greedy: a cell opens a
+  column only because the previous one was full), the depth bands (a node's own
+  sub-windows first, and a window's own windows directly right of its own column, so the
+  block stays bounded and does not grow with what a window holds), the monitor cards
+  (`agentMonitorH` = 200px, only the
+  focused node — `id === treeActiveId` — rendered as a full expanded card),
+  **no** forced height (no `stretch` map, every card rendered at the height it measured),
+  no overlapping card rectangles inside the parent's reserved block (`col` / `row` follow
+  the child order and the row cap, not a fixed row count), card-free `busX` / `chanX` /
+  `corrY` corridors, and a one-pass fixpoint for every reachable shape.
+  It also pins `media/main.js`'s half of the contract — `relayout()` measures `offsetHeight`,
+  passes the knobs, and writes no inline height or max-height for layout. Drift in
+  any of the `media/tree.js` invariants just named — the per-column stacks, the depth bands,
+  the monitor cards, the corridors — fails packaging here instead of shipping.
 - `npm run check:docs` (`tools/check-docs.js`) — the **shipped user manual**
   (`manual/**`, one page per catalog language, English first) against the manifest: a
   language that ships a catalog but no page (the set comes from

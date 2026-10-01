@@ -4,41 +4,56 @@
  * Two kinds of children, two directions:
  *   - turn children hang BELOW their parent (the conversation spine),
  *   - sidecar children — sub-agent windows (`kind: 'agent'`) and background job
- *     cards (`kind: 'bg'`) — sit to the RIGHT of the parent card, packed into a
- *     COLUMN-MAJOR GRID: at most `agentMaxRows` rows per column, and every further
- *     window opens a new column to the right — X0Y0..X0Y3, X1Y0..X1Y3, X2Y0.. — so
- *     "heavily parallel" work fans out sideways instead of turning the canvas into
- *     one long vertical ribbon.
+ *     cards (`kind: 'bg'`) — sit to the RIGHT of the parent card, grouped into DEPTH
+ *     BANDS: each band is a lattice of columns holding at most `agentMaxRows` cards, and
+ *     the bands follow each other to the right — so "heavily parallel" work fans out
+ *     sideways instead of turning the canvas into one long vertical ribbon, and a window
+ *     that spawned windows spends a BAND of its own instead of growing its parent's cell.
  *
- * NO SHARED ROWS. Rows are never aligned across columns: each column is its own
- * stack of windows. A column's natural stack is
+ * NO SHARED ROWS, AND NO STRETCH. Rows are never aligned across columns: each column
+ * is its own stack, every cell occupies exactly its own subtree box, and a column
+ * ends where its last cell ends —
  *
- *   S_c = agentTopPad + Σ (cell subtree height) + (n_c − 1) * agentVGap
+ *   S_c = agentTopPad + Σ (cell extent) + (n_c − 1) * agentVGap
  *
- * the block (the whole grid) is `B = max_c S_c` tall, and a shorter column spreads
- * its free space `L_c = B − S_c` EVENLY over its own cells — `q = L_c / n_c` each,
- * with the integer remainder going to the topmost cells first. Every cell is then
- * STRETCHED to its slot (`extent + share`), so every column ends flush with the
- * block's bottom line and no hole is left anywhere between a parent's windows.
- * Stretching is what closes the gap after a card whose own sub-grid is deeper than
- * the card itself: a sub-agent that spawned sub-agents runs down to the bottom of
- * its own sub-grid instead of ending early next to it. It is a RENDERING height
- * only — it never feeds back into the sums, so a node's own extent stays
- * `max(measuredCardH, itsOwnBlockHeight)`, computed bottom-up from the measured
- * heights the webview hands in (see `stretch` below; no cap). The single exception
- * is a cell that carries material below the card's own extent — a turn child under
- * a sidecar, which no live path builds today — where the room belongs to that
- * material, so the card stops above it.
+ * The block (the whole grid) is `B = max_c S_c` tall, and a shorter column simply
+ * stops earlier: nothing is padded, filled or stretched to make the columns flush,
+ * so the spare space of a shallow column stays visible as blank canvas inside the
+ * parent's reserved box. A card is rendered at exactly the height it measured —
+ * `layoutTree` hands out no rendered height at all — so the *card* is the unit of
+ * height here, never the cell.
  *
- * THE TRADEOFF this buys: a deep branch pays only in its OWN column. A shared row
- * line would let one deep sub-agent push every column down and leave a dead gap in
- * each of them (the price of a shallow column would be somebody else's depth);
- * with the per-column stack above, the shallower columns stay where they are — their
- * cards grow to soak up the difference — and every column still ends flush at the
- * block's bottom. `agentMaxRows: 1` reproduces the old single-column ribbon.
+ * DEPTH BANDS, NOT NESTED CELLS. The windows are not packed as one flat lattice, and a
+ * window that spawned windows does NOT put its own windows inside its cell: they are
+ * grouped by DEPTH — depth 1 is the node's own sidecar children, depth 2 theirs, and so on
+ * — and each depth gets its own BAND of columns, the bands following each other to the
+ * right.
  *
- * A sub-agent's OWN children follow the same rules recursively: its turn children
- * hang below its card and its sub-agents build their own grid to the right of it.
+ * WHY: the parent's engine box is `max(cardH, B)` tall and its turn children — the
+ * conversation's own continuation — start below it, so every pixel of B is paid for by the
+ * spine. Nesting inside a cell made B grow with the forest: a window owning windows
+ * reserved its own stack in its own cell, that cell became huge, it forked the node's
+ * lattice into columns of one, and the canvas turned into a ribbon. With bands a cell
+ * reserves ONE CARD — `agentMonitorH` for a monitor, the measured height for the one window
+ * the user has open — and never another cell's forest, so `B` is a stack of at most
+ * `agentMaxRows` cards no matter how deep or how wide the forest is. What the forest costs
+ * instead is WIDTH: one band per depth.
+ *
+ * A window's card is a MONITOR by default: a fixed-height card that shows its live progress
+ * (its head, its counters, the tail of its work log) instead of its whole transcript. The
+ * one window the user has open measures taller and grows its own column only. `layoutTree`
+ * never forces a card's height — the webview renders a monitor and measures what it
+ * rendered, and that measurement is what this file weighs.
+ *
+ * THE TRADEOFF: a deep forest pays in columns, a shallow one pays nothing, and the spine
+ * pays at most `agentMaxRows` card heights — nothing at all when the parent's own card is
+ * that tall or taller. Rows are never a shared line across bands (each column is its own
+ * stack of cards), but every column starts at the same top pad, and the gaps between rows
+ * are what the connectors cross on.
+ *
+ * A sub-agent's turn children — a shape no live path builds, since `attachNode` never puts a
+ * turn node under a sidecar — hang below its card inside its own slot; its sub-agents occupy
+ * the NEXT depth band, never a grid of their own inside its cell.
  *
  * The tidy-tree geometry is delegated to the vendored, pinned engine
  * `non-layered-tidy-tree-layout@2.0.2` (MIT) — see
@@ -57,16 +72,16 @@
  * The engine then keeps every other card out of that box (contour separation),
  * and starts the node's turn children below the block. The block therefore lives
  * inside the parent's exclusive rectangle (its first card starts `agentTopPad`
- * below the parent card's top, its last row ends on the block's bottom line = the
- * parent card's top + B, and a stretched card still ends no lower than that), which
+ * below the parent card's top, the tallest column ends on the block's bottom line = the
+ * parent card's top + B, and no card is ever rendered below that line), which
  * makes all of these invariants hold by construction:
  *   - no card overlaps a window,
  *   - no card sits between a parent card and its windows,
  *   - no connector crosses a foreign card.
- * The bounded row count is what keeps the price of that reservation affordable: a
- * block is at most `agentMaxRows` card rows tall — the tallest column decides the
- * rest — so the turn children below a node are pushed down by the tallest COLUMN
- * instead of by the sum of every window's height.
+ * The depth bands and the row cap are what keep the price of that reservation affordable: a
+ * column holds at most `agentMaxRows` cards and never another cell's forest, so the turn
+ * children below a node are pushed down by a bounded stack instead of by the sum of every
+ * window's height.
  *
  * THE ROUTING TABLE (`cells` in the result) exists so the webview can draw the
  * parent→window connectors without recomputing (or guessing) the grid geometry:
@@ -75,8 +90,8 @@
  * `corrY` line its crossing of the columns in between runs along. The bus and the
  * channels are gaps between boxes, so they are card-free by construction; the
  * crossing line is the gap directly above the window's own box (the top-pad strip
- * for a column's first row) — the card above it may be stretched, so the gap is
- * measured from that card's RENDERED bottom, never from its box — and it is used
+ * for a column's first row) — no card is ever rendered taller than its own box, so
+ * that gap is card-free by construction — and it is used
  * only when the columns it has to cross leave it alone: a deep branch in a column
  * to its left sticks through it otherwise, and then the line slips below the card
  * that blocks it, which clears the crossing after at most one slip per card — see
@@ -98,9 +113,10 @@
     // Agent (sub-agent) sidecar geometry.
     agentGap: 80,      // card right edge -> grid left edge
     agentVGap: 24,     // gap between two cards of a column
-    agentColGap: 48,   // gap between two columns
-    agentMaxRows: 4,   // rows per column (the bounded axis)
-    agentTopPad: 16,   // strip above a column's first card
+    agentColGap: 48,      // gap between two columns, and between two depth bands
+    agentMaxRows: 3,      // cards in one column, in every depth band
+    agentMonitorH: 200,   // the height of a sub-window card (a "monitor")
+    agentTopPad: 16,      // strip above a band's first row
   };
 
   /** The vendored engine, loaded by a separate <script> tag in the webview. */
@@ -117,16 +133,14 @@
    * @param {string} rootId
    * @param {Object} heights    id -> measured pixel height
    * @param {Object} [opts]     { nodeW, hGap, vGap, pad, widths, agentGap, agentVGap,
-   *                              agentColGap, agentMaxRows, agentTopPad }
+   *                              agentColGap, agentMaxRows, agentMaxBlockH, agentTopPad }
    * @returns {{ pos: Object<string, {x:number,y:number}>,
-   *             cells: Object<string, {x,y,w,h,col,row,index,count,busX,chanX,corrY}>,
-   *             stretch: Object<string, number>,
+   *             cells: Object<string, {x,y,w,h,col,row,index,count,depth,busX,chanX,corrY}>,
    *             width:number, height:number }}
    *          `cells` is keyed by sidecar child id; it is the connector routing table
    *          (absolute coordinates, same space as `pos`: `x`/`y` are the card's own
-   *          slot corner, `w`/`h` the size of its subtree box). `stretch` is keyed by
-   *          sidecar child id as well and gives the card's rendered height, which is
-   *          always >= its measured height; turn nodes never appear in it.
+   *          box corner, `w`/`h` the size of its subtree box). No rendered height is
+   *          returned: every card is rendered at exactly the height it measured.
    */
   function layoutTree(nodesById, rootId, heights, opts) {
     const o = Object.assign({}, DEFAULTS, opts || {});
@@ -140,7 +154,7 @@
     const agentKids = (id) => kidsOf(id).filter((c) => !!nodesById[c] && isSidecar(c));
 
     if (!nodesById[rootId]) {
-      return { pos: {}, cells: {}, stretch: {}, width: o.nodeW + o.pad * 2, height: 120 + o.pad * 2 };
+      return { pos: {}, cells: {}, width: o.nodeW + o.pad * 2, height: 120 + o.pad * 2 };
     }
 
     function bboxOf(rects) {
@@ -163,90 +177,83 @@
     const blocks = new Map();
 
     /**
-     * The sidecar grid of one node. `list[i]` is the memoized subtree layout of the
-     * i-th sidecar child — column-major, `col = floor(i / R)` and `row = i % R` —
-     * and `cells[i]` is its placement inside the block; `w`/`h` are the block's size,
-     * i.e. exactly what the node's engine box reserves for it. See the header for
-     * the per-column-sum + even-fill model.
+     * The sub-agent FOREST of one node: every sidecar below it, grouped into DEPTH BANDS —
+     * `bands[d - 1]` holds depth d, i.e. the node's own sidecar children first, then theirs.
+     * A band is a lattice: columns of at most `agentMaxRows` cards, in child order, and the
+     * bands follow each other to the right.
+     *
+     * A cell is a CARD, never a subtree: its slot is the card's own height (`agentMonitorH`
+     * for a monitor, the measured height for the one window the user has open) plus the room
+     * a turn child under it needs (a shape no live path builds). Nothing ever reserves another
+     * cell's forest, which is what bounds the block. `w`/`h` are the block's size, i.e.
+     * exactly what the node's engine box reserves for it. See the header.
      */
-    const blockOf = (nid) => {
+    const forestOf = (nid) => {
       const hit = blocks.get(nid);
       if (hit) return hit;
-      const list = agentKids(nid).map(layoutSub);
-      const n = list.length;
-      if (!n) {
-        const empty = { list: [], cells: [], nCols: 0, w: 0, h: 0 };
-        blocks.set(nid, empty);
-        return empty;
-      }
 
-      const R = Math.max(1, o.agentMaxRows | 0);
-      const nCols = Math.ceil(n / R);
-
-      // Columns: a column's x is where the previous column ended and its width is
-      // the widest subtree box in it (nothing of a column reaches past that, so the
-      // next column's boxes can never touch it); `colNat` is the column's natural
-      // stack, i.e. its cells' own subtree box heights plus the gaps between them.
-      const colX = new Array(nCols);
-      const colCount = new Array(nCols);
-      const colNat = new Array(nCols);
-      let blockW = 0;
+      const rows = Math.max(1, o.agentMaxRows | 0);
+      const cells = [];
+      const spawner = new Map();   // forest member -> the card that spawned it
+      let x = 0;
       let B = 0;
-      for (let c = 0; c < nCols; c++) {
-        const cnt = Math.min(R, n - c * R);
-        let colw = 0;
-        let sum = 0;
-        for (let i = c * R; i < c * R + cnt; i++) {
-          const s = list[i];
-          if (s.w > colw) colw = s.w;
-          sum += s.h;
-        }
-        const nat = o.agentTopPad + sum + (cnt - 1) * o.agentVGap;
-        colX[c] = blockW;
-        colCount[c] = cnt;
-        colNat[c] = nat;
-        if (nat > B) B = nat;
-        blockW += colw + o.agentColGap;
-      }
-      blockW -= o.agentColGap;
+      let nCols = 0;
 
-      // Even fill: a shorter column spreads its free space over its own cells (the
-      // remainder to the topmost ones), which stretches those cards. Every column
-      // then ends exactly at `B`, so nothing is left over anywhere.
-      const cells = new Array(n);
-      for (let c = 0; c < nCols; c++) {
-        const cnt = colCount[c];
-        const free = B - colNat[c];
-        const q = Math.floor(free / cnt);
-        const rem = free - q * cnt;
-        let y = o.agentTopPad;   // a column starts at the block's top + top pad
-        for (let r = 0; r < cnt; r++) {
-          const i = c * R + r;
-          const s = list[i];
-          const slotH = s.h + (r < rem ? q + 1 : q);
-          cells[i] = { s, col: c, row: r, boxX: colX[c], boxY: y, slotH, corrY: 0 };
-          y += slotH + o.agentVGap;
+      // Lay `list` out in columns of `rows` cards, and DIRECTLY AFTER EACH COLUMN lay out the
+      // group formed by that column's cells' own windows. That is what keeps a family together:
+      // a window's own windows stand one column hop right of its own column instead of after the
+      // whole level, so a connector never crosses a sibling's subtree on its way to its child.
+      // The total number of columns is the same either way; only their ORDER changes.
+      const placeGroup = (list, depth) => {
+        for (let start = 0; start < list.length; start += rows) {
+          const col = list.slice(start, start + rows);
+          // A column is as wide as the WIDEST card in it: a monitor is `nodeW` wide, and the one
+          // card the user has open measures wider (`.node.expanded` is 560px), so the pitch has
+          // to follow the cards instead of a fixed `nodeW`.
+          let colW = 0;
+          for (const id of col) colW = Math.max(colW, size(id).w);
+          const colX = x;
+          x += colW + o.agentColGap;
+          nCols++;
+          let y = o.agentTopPad;   // every column starts at its own group's top pad
+          const kids = [];
+          for (let r = 0; r < col.length; r++) {
+            const id = col[r];
+            const own = Math.max(o.agentMonitorH, size(id).h);
+            const turn = turnKids(id).map(layoutSub);
+            let slotH = own;
+            for (let i = 0; i < turn.length; i++) slotH += o.agentVGap + turn[i].h;
+            cells.push({
+              id, subs: turn, boxX: colX, boxY: y, slotW: colW, slotH,
+              depth, col: Math.floor(start / rows), row: r,
+              index: start + r, count: list.length, corrY: 0,
+            });
+            if (y + slotH > B) B = y + slotH;
+            y += slotH + o.agentVGap;
+            for (const k of agentKids(id)) { kids.push(k); spawner.set(k, id); }
+          }
+          if (kids.length) placeGroup(kids, depth + 1);
         }
-        // `y - agentVGap === B`: the column is flush with the block's bottom line.
-      }
+      };
+      placeGroup(agentKids(nid), 1);
+      const W = x ? x - o.agentColGap : 0;
 
-      // The connector's crossing line: the gap directly above the cell's own box —
-      // the top-pad strip for a column's first cell, the gap below the card above it
-      // otherwise (that card may be stretched, so the gap starts at its *rendered*
-      // bottom, not at its box). The line is card-free inside the cell's own column,
-      // but a column to the left may reach through it; the line then slips below the
-      // card that blocks it, which clears the column-by-column crossing after at most
-      // one slip per card.
-      for (let i = 0; i < n; i++) {
+      // The connector's crossing line: the gap directly above the cell's own box — the
+      // top-pad strip for a column's first cell, the gap below the box above it otherwise.
+      // A card is never rendered taller than its own slot, so that gap is free of the cell's
+      // own column; a column to the LEFT may still reach through it, and the line then slips
+      // below the box that blocks it, which clears the column-by-column crossing after at
+      // most one slip per cell.
+      for (let i = 0; i < cells.length; i++) {
         const cell = cells[i];
-        const above = cell.row > 0 ? cells[i - 1] : null;   // the card above, same column
+        const above = cell.row > 0 ? cells[i - 1] : null;
         const gapTop = above ? above.boxY + above.slotH : cell.boxY - o.agentTopPad;
         let y = (gapTop + cell.boxY) / 2;
-        for (let guard = 0; guard < n; guard++) {
+        for (let guard = 0; guard < cells.length; guard++) {
           let blocked = null;
-          for (let j = 0; j < n; j++) {
+          for (let j = 0; j < cells.length; j++) {
             const other = cells[j];
-            if (other.col < cell.col && y > other.boxY && y < other.boxY + other.slotH) { blocked = other; break; }
+            if (other.boxX < cell.boxX && y > other.boxY && y < other.boxY + other.slotH) { blocked = other; break; }
           }
           if (!blocked) break;
           y = blocked.boxY + blocked.slotH + o.agentVGap / 2;
@@ -254,7 +261,7 @@
         cell.corrY = y;
       }
 
-      const blk = { list, cells, nCols, w: blockW, h: B };
+      const blk = { cells, spawner, nCols, w: W, h: B };
       blocks.set(nid, blk);
       return blk;
     };
@@ -262,14 +269,14 @@
     /**
      * Lay out the subtree rooted at `id` (turn spine + its sidecar blocks),
      * normalized so its own bounding box starts at (0, 0).
-     * @returns {{ rootId, pos, cells, stretch, rects, box, w, h }}
+     * @returns {{ rootId, pos, cells, rects, box, w, h }}
      */
     function layoutSub(id) {
       if (memo.has(id)) return memo.get(id);
 
-      // Engine tree over the turn spine, with boxes inflated to reserve the blocks.
+      // Engine tree over the turn spine, with boxes inflated to reserve each node's forest.
       const build = (nid) => {
-        const blk = blockOf(nid);
+        const blk = forestOf(nid);
         return {
           id: nid,
           width: size(nid).w + (blk.w ? o.agentGap + blk.w : 0),
@@ -285,76 +292,72 @@
       const pos = {};
       const rects = [];
       const cells = {};     // sidecar child id -> connector routing record
-      const stretch = {};   // sidecar child id -> rendered card height
       (function walk(n) {
         pos[n.id] = { x: n.x, y: n.y };
         rects.push({ x: n.x, y: n.y, w: size(n.id).w, h: size(n.id).h });
 
-        // The grid sits at the parent card's right edge, inside the reserved box and
-        // flush with the card's top: the block's first `agentTopPad` strip is the
-        // row-0 corridor and the block's bottom line is the card's top + B.
-        const blk = blockOf(n.id);
-        if (blk.list.length) {
+        // The forest sits at the parent card's right edge, inside the reserved box and flush
+        // with the card's top: the block's first `agentTopPad` strip is the row-0 corridor and
+        // the block's bottom line is the card's top + B.
+        const blk = forestOf(n.id);
+        if (blk.cells.length) {
           const cardW = size(n.id).w;
           const bx = n.x + cardW + o.agentGap;
           const by = n.y;
-          const busX = n.x + cardW + o.agentGap / 2;
+          const placed = {};   // forest member id -> where its card was put
           for (let i = 0; i < blk.cells.length; i++) {
             const cell = blk.cells[i];
-            const s = cell.s;
-            const a = s.pos[s.rootId];
-            // Place the cell's box at its slot's top-left corner; the cell's own card
-            // ends up where the cell's layout put it inside that box.
-            const dx = bx + cell.boxX - a.x;
-            const dy = by + cell.boxY - a.y;
-            const cardX = a.x + dx;
-            const cardY = a.y + dy;
-            for (const sid in s.pos) pos[sid] = { x: s.pos[sid].x + dx, y: s.pos[sid].y + dy };
-            for (let k = 0; k < s.rects.length; k++) {
-              const r = s.rects[k];
-              rects.push({ x: r.x + dx, y: r.y + dy, w: r.w, h: r.h });
+            const id = cell.id;
+            const x = bx + cell.boxX;
+            const y = by + cell.boxY;
+            placed[id] = { x, y };
+            pos[id] = { x, y };
+            rects.push({ x, y, w: size(id).w, h: size(id).h });
+
+            // Whatever hangs under this card — a turn child under a sidecar, a shape no live
+            // path builds — lives inside the slot, below the card.
+            let ty = y + Math.max(o.agentMonitorH, size(id).h) + o.agentVGap;
+            for (const s of cell.subs) {
+              for (const sid in s.pos) pos[sid] = { x: s.pos[sid].x + x, y: s.pos[sid].y + ty };
+              for (let k = 0; k < s.rects.length; k++) {
+                const r = s.rects[k];
+                rects.push({ x: r.x + x, y: r.y + ty, w: r.w, h: r.h });
+              }
+              for (const cid in s.cells) {
+                const c = s.cells[cid];
+                cells[cid] = {
+                  x: c.x + x, y: c.y + ty, w: c.w, h: c.h,
+                  col: c.col, row: c.row, index: c.index, count: c.count,
+                  depth: c.depth,
+                  busX: c.busX + x, chanX: c.chanX + x, corrY: c.corrY + ty,
+                };
+              }
+              ty += s.h + o.agentVGap;
             }
-            // A nested sub-agent's OWN grid: its routing records shift with it, its
-            // stretches (heights) come along unchanged.
-            for (const cid in s.cells) {
-              const c = s.cells[cid];
-              cells[cid] = {
-                x: c.x + dx, y: c.y + dy, w: c.w, h: c.h,
-                col: c.col, row: c.row, index: c.index, count: c.count,
-                busX: c.busX + dx, chanX: c.chanX + dx, corrY: c.corrY + dy,
-              };
-            }
-            for (const tid in s.stretch) stretch[tid] = s.stretch[tid];
-            // Corridors the connector may use: the bus in the gap between the parent
-            // card and the grid, the channel in the gap left of this cell's column,
-            // and `corrY`, the line it crosses the columns in between at (`blockOf`
-            // picked it card-free).
+
+            // The corridors the connector may use: the bus in the gap right of the card that
+            // SPAWNED this window — the node itself for depth 1, another window for a deeper
+            // band — the channel in the gap immediately left of this card's own column, and
+            // `corrY`, the line it crosses every column in between on (`forestOf` picked it
+            // card-free). The rect below is the CARD's own box, size and all: a cell is a card
+            // here, never a subtree, so there is no inset to worry about.
+            const spId = blk.spawner.get(id) || n.id;
+            const sp = placed[spId] || { x: n.x, y: n.y };
             const colStart = bx + cell.boxX;
-            const prevColEnd = colStart - o.agentColGap;
-            cells[s.rootId] = {
-              x: cardX,
-              y: cardY,
-              w: s.w,
-              h: s.h,
+            cells[id] = {
+              x,
+              y,
+              w: size(id).w,
+              h: cell.slotH,
               col: cell.col,
               row: cell.row,
-              index: i,
-              count: blk.cells.length,
-              busX,
-              chanX: cell.col === 0 ? busX : (prevColEnd + colStart) / 2,
+              index: cell.index,
+              count: cell.count,
+              depth: cell.depth,
+              busX: sp.x + size(spId).w + o.agentGap / 2,
+              chanX: colStart - o.agentColGap / 2,
               corrY: by + cell.corrY,
             };
-            // The card fills its whole slot — except when the cell holds material
-            // below the card's own extent: a turn child hanging under a sidecar (a
-            // shape no live path builds today, but a session file could carry) needs
-            // the room above it, so the card stops at its own extent and the slot's
-            // spare space stays empty instead of being swallowed by the card. The
-            // clamp is a no-op for every reachable shape: there the box IS the card's
-            // own extent and `tail` is 0, so the card soaks up the whole slot.
-            const ownH = Math.max(size(s.rootId).h, blockOf(s.rootId).h);
-            const tail = s.h - (a.y + ownH);
-            const room = tail > 0 ? ownH - a.y : cell.slotH;
-            stretch[s.rootId] = Math.max(size(s.rootId).h, room);
           }
         }
 
@@ -371,6 +374,7 @@
         outCells[k] = {
           x: c.x - box.left, y: c.y - box.top, w: c.w, h: c.h,
           col: c.col, row: c.row, index: c.index, count: c.count,
+          depth: c.depth,
           busX: c.busX - box.left, chanX: c.chanX - box.left, corrY: c.corrY - box.top,
         };
       }
@@ -378,7 +382,6 @@
         rootId: id,
         pos: outPos,
         cells: outCells,
-        stretch,
         rects: rects.map((r) => ({ x: r.x - box.left, y: r.y - box.top, w: r.w, h: r.h })),
         box: { left: 0, top: 0, right: box.right - box.left, bottom: box.bottom - box.top },
         w: box.right - box.left,
@@ -392,7 +395,6 @@
     return {
       pos: res.pos,
       cells: res.cells,
-      stretch: res.stretch,
       width: res.box.right + o.pad * 2,
       height: res.box.bottom + o.pad * 2,
     };

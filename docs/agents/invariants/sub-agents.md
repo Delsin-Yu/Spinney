@@ -125,28 +125,47 @@
   the sidecar reservation are owned by the vendored engine: each
   node's box is inflated by its sidecar grid (`agentGap + blockW` wide, `max(cardH, blockH)` tall), so no
   other card can overlap a window or sit between a parent card and its own sub-agents. The grid is
-  **column-major with a bounded row count** (`agentMaxRows`, 4): at most 4 cells per column and the
-  next cell opens a new column to the right, with `agentVGap` between cells and `agentColGap` between
-  columns. Rows are **not** aligned across columns: each column is its own stack of cells, its extent
-  is each cell's own subtree box height, and the column's natural stack is
-  `agentTopPad + Σ extent + (n−1)·agentVGap` — the block is as tall as its tallest column. The free
-  space of a shorter column (`blockHeight − that column's stack`) is spread **evenly** over that
-  column's cards (the integer remainder going to the topmost cards first), so every column ends flush
-  at the block's bottom line and no hole is left between a parent's cards; a deep branch therefore
-  costs only its own column, never a dead gap in a shallower one. Each sidecar card is also
-  **stretched** to fill its cell: `layoutTree` returns a `stretch` map (id → pixel height) covering
-  every sidecar card, and `main.js` renders that card at exactly that height (setting `height` and
-  `max-height`, since `.node` caps at 1200px) — a sub-agent that spawned sub-agents therefore has its
-  own card running down to the bottom of its own sub-grid instead of ending early beside it; turn
-  cards are never stretched, and there is deliberately no cap on the stretch. The one exception is a
-  cell that carries material below the card's own extent — a turn child hanging under a sidecar, a
-  shape no live path builds (turn nodes are only created under a non-sidecar basis) — where the card
-  stops at that extent so the child keeps its room and the cell's spare slot space stays empty.
+  A node's sidecar children are grouped into **depth bands**: depth 1 is the node's own
+  sub-windows, depth 2 theirs — and the columns are ordered so that a window's own windows
+  stand **directly right of its own column** (one column hop), never after the whole level. A
+  band
+  is a lattice of columns holding at most `agentMaxRows` = 3 cards (card width `nodeW` = 320,
+  `agentColGap` between columns), filled **column-major** in child order with `agentTopPad`
+  above the first cell and `agentVGap` between cells (`media/tree.js` DEFAULTS and
+  `media/main.js`) — a cell that breaks the row cap opens a new column, and the next depth
+  starts a new band, so a window that spawns windows costs a column band instead of height.
+  Every sidecar card is a **monitor card**: `agentMonitorH` = 200px tall, head + status + live
+  tail of its work log + one-line preview, and only the FOCUSED node (`id === treeActiveId`)
+  renders as a full expanded card. There is no per-column height valve any more
+  (`agentMaxBlockH` is deleted): a column ends at the row cap. So the block is **bounded**
+  rather than proportional to what a window holds — a full band is
+  `agentTopPad + 3·agentMonitorH + 2·agentVGap` = 664px tall (plus the extra height of the
+  focused card when the focused node is itself one of that band's windows) — where the old
+  valve let a column stand as tall as the cards in it. Measured over two real session
+  topologies, node `mumz53k3mwkb89` (5 windows, 2 of which own windows) went from
+  `B` = 1176px / spine push 1128px to `B` = 664px / push 544px, and `muddt3ykxb3tso`
+  (4 windows, one owning 10) from 1004 / 956 to 664 / 544; the guard's fixture
+  `mu2zn79jlv7b23` was 1528×3636 (`B` = 1408) under the previous model. Rows are **not**
+  aligned across columns: each column is its own stack of cells, its extent is each
+  cell's own subtree box height, and the column's stack is
+  `agentTopPad + Σ extent + (n−1)·agentVGap`. The columns are **not** flush at the
+  bottom: a shorter one simply ends earlier and leaves blank canvas inside the parent's
+  reserved box, so a deep branch costs only its own band. No card is ever stretched:
+  `layoutTree` returns exactly `{ pos, cells, width, height }` — there is no `stretch`
+  map any more — and `main.js` writes no inline `height` / `max-height` for layout, so
+  every sidecar card is rendered at exactly the height it measured — `agentMonitorH` for a
+  monitor card, its own measured height for the focused expanded one (turn cards always
+  measured). The block's height is bounded instead of the card's: the parent's engine box is
+  `max(cardH, blockH)` tall and its turn children start below it, and that bound is now
+  structural — a band, not a valve — so the block can never stand as tall as the windows in
+  it.
   Those gaps
   (`agentVGap` / `agentColGap` / `agentTopPad`) are still the only card-free lines, which is what
   makes the `cells` corridors card-free by construction — `main.js drawEdges()` routes every
   parent→sub-agent connector through them (an orthogonal elbow), so no connector crosses a card
-  either. Widening the grid (`agentColGap` / `agentMaxRows`) without updating that routing table
+  either. The `corrY` line directly above a cell's own box is card-free for a structural
+  reason too — no card is ever rendered taller than its own box. Widening the grid
+  (`nodeW` / `agentColGap`) without updating that routing table
   still puts connectors on top of cards.
   `agentExpanded`
   walks up the agent ancestors so a depth-2 sub-agent stays open beside its expanded depth-1 parent.

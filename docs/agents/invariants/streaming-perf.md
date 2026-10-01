@@ -134,16 +134,17 @@ again. `onResizeMove` clamps to the card's own floor, and `settleAnswerSplit` li
 smaller cap (a size stored before this rule) back up, writing it both into the card's
 style and into the layout's copy of the size so a relayout restores the lift.
 `cardHeightCap` reads the user's drag size, else `--node-max-h` from the stylesheet, and
-**never `card.style.maxHeight`**: the tree layout writes its stretch target there, so
-reading it back treated the *folded* card's height as a hard cap and unfolding the log
-divided those few pixels — while the max-height, being a real cap, pinned the card so it
-could not grow out of them. The mirror of that rule is that the card must actually *be
-able* to reach the cap: an inline `max-height` smaller than it (stale, from a stretch
-measured while the card was small) is lifted to the cap by the same pass, in the card's
-style and in the layout's copy of the size, and an inline `height` smaller than it is
-dropped outright — the stretch writes *both*, and an inline `height` is not a cap, so a
-stale one pins the card at the old height and the body is squeezed instead (measured in a
-Chromium fixture: a card pinned at 470px left the log 20px while the pinned answer kept
+**never `card.style.maxHeight`**: the tree layout writes no inline size at all — the only
+inline `height` / `max-height` a card can carry is the user's own drag-resize, or the
+lift `settleAnswerSplit` writes — so reading one back treated the *folded* card's height
+as a hard cap and unfolding the log divided those few pixels — while the max-height,
+being a real cap, pinned the card so it could not grow out of them. The mirror of that
+rule is that the card must actually *be able* to reach the cap: an inline `max-height`
+smaller than it (stale, from a size written while the card was small) is lifted to the
+cap by the same pass, in the card's style and in the layout's copy of the size, and an
+inline `height` smaller than it is dropped outright — an inline `height` is not a cap, so
+a stale one pins the card at the old height and the body is squeezed instead (measured in
+a Chromium fixture: a card pinned at 470px left the log 20px while the pinned answer kept
 its 321px). Without the lift the split is computed for room the card does not have, flex
 squeezes the body, and the log — the only zone without a pinned height — takes the whole
 loss. Settling

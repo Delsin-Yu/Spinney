@@ -1121,6 +1121,36 @@ button.icon-btn {
   border-color: var(--accent-dim);
 }
 
+/* Sub-agent family colours (`applySubColor` in media/main.js): the stripe on the left edge
+   carries the colour of the FAMILY a window belongs to, and each level down is more saturated and
+   darker — so the windows a window spawned read as the same family, one step deeper. The two
+   classes never share an arc of the wheel: a sub-agent window is WARM, a background job card is
+   COLD. `data-sub-level` is what says "this card is a sidecar"; the colour itself arrives as ONE
+   custom property (`--sub-color`) on the same element, which the stripe, the focused card's
+   border and its outline all read. The stripe sits on the left edge on purpose: that is the edge
+   a parent's connector leaves from. */
+.node[data-sub-level] {
+  border-left: 3px solid var(--sub-color, hsl(210, 44%, 64%));
+}
+
+/* The focused card wears its family's colour on its OUTLINE — and nowhere else. `--sub-color` is
+   the card's one colour property (`applySubColor` in media/main.js), so a window's outline, its
+   left stripe and its connector are one value; nothing else about the card changes, and its lift
+   is still the plain `.node.expanded` shadow. A turn card carries no `data-sub-level` and is left
+   alone. */
+.node[data-sub-level].expanded,
+.node[data-sub-level].active {
+  border-color: var(--sub-color, hsl(210, 44%, 64%));
+}
+
+/* The ring around the focused card is `.node.active`'s `outline` (2px `--accent`, the app's
+   blue), NOT its border — so the family colour has to reach the outline too, or the ring keeps
+   the blue whatever the border does. Only the COLOUR is set here: the width, the style and the
+   `-2px` offset stay the base rule's. */
+.node[data-sub-level].active {
+  outline-color: var(--sub-color, hsl(210, 44%, 64%));
+}
+
 .node.expanded {
   /* An expanded node opens as a wider window (content scrolls inside). */
   width: 560px;
@@ -1315,6 +1345,47 @@ button.icon-btn {
   display: none;
 }
 
+/* A **monitor**: the card a sidecar window wears while it is not the focused node (see
+   `monitorCard` in media/main.js). It is the one card whose size is not its content's:
+   the layout gives every sidecar a cell of its own (media/tree.js — 200px per cell, three
+   to a column), so a window's content can neither push the conversation's spine down nor
+   grow the cell of the node that owns it, and the window's own sub-windows go to the next
+   depth band instead. The one sidecar that *is* the focused node is the ordinary expanded
+   card above, at its own cap (`--node-max-h`) — this number is deliberately not that cap.
+   `height` is what makes the card stick to the cell (`max-height` alone still lets a short
+   log shrink the card back to its content); the second line is what holds a long one. The
+   block sits after the fold rule above because it has to win against it: the tail is the
+   whole point of a monitor, so the fold may not take it away. */
+.node.monitor {
+  height: 200px;
+  max-height: 200px;
+}
+
+/* The two zones a *reading* card is made of are out of the picture: the ask belongs to
+   reading a turn, and zone 3 is the answer `promoteAnswer` lifts out of the log — which
+   `syncAnswerZone` refuses to do while the card is a monitor. Hidden rather than emptied,
+   so the focused card gets both back without a re-fill. */
+.node.monitor .node-ask,
+.node.monitor .node-answer-wrap {
+  display: none;
+}
+
+/* The log, always: a monitor is a window onto it, so the fold — the automatic one that
+   follows an answer, or a click on the head — may not close it. `display` here and not in
+   the fold rule's own group because that rule is a `display: none` this has to out-order. */
+.node.monitor .node-work {
+  display: flex;
+}
+
+/* The preview is the monitor's footer: the same element the collapsed card shows
+   (`monitorCard` writes it), one line under the tail — `-webkit-line-clamp` is
+   `.node-excerpt`'s own clamp reduced to what a 200px window has room for — and never the
+   part that gives away when the tail is long: the log above is the flexible one. */
+.node.monitor .node-excerpt {
+  flex: 0 0 auto;
+  -webkit-line-clamp: 1;
+}
+
 /* Zone 3 holds the same bubbles zone 2 does, so both scrollers need the widening:
    without `.node-answer` here the promoted answer falls back to the base
    `.msg.assistant` (`max-width: 92%`, `align-self: flex-start`) and renders as an
@@ -1357,8 +1428,8 @@ button.icon-btn {
 /* Folded log: the answer is the only zone left to fill the body, so it takes what
    it needs (`auto`) rather than a share of a card it no longer shares. */
 .node.has-answer.work-folded .node-answer-wrap { flex: 1 1 auto; }
-/* No free space for the folded strip to share: a card the tree layout stretched (or
-   the user dragged taller) has a definite height, and with `1 1 auto` on both
+/* No free space for the folded strip to share: a card the user dragged taller has a
+   definite height, and with `1 1 auto` on both
    wrappers the free space was split 1:1 between a one-line fold strip and the answer.
    The strip is a handle, not content, so it hugs its own height; the answer keeps the
    `1 1 auto` above. */
