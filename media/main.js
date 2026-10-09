@@ -1272,6 +1272,30 @@
   }
 
   /**
+   * The updating form of `addNotice`: a node-scoped notice the host keeps sending as
+   * its state advances (the silent-retry marker). A `noticeId` names the block, so a
+   * later message carrying the same id rewrites that element's text instead of
+   * appending a second one — one marker per run, however many attempts it takes.
+   * Without an id it is a plain `addNotice`.
+   */
+  function upsertNotice(kind, text, noticeId) {
+    if (noticeId) {
+      const kids = messagesEl ? messagesEl.children : [];
+      for (let i = kids.length - 1; i >= 0; i--) {
+        const node = kids[i];
+        if (node.dataset && node.dataset.noticeId === noticeId) {
+          node.textContent = text;
+          followActive();
+          return node;
+        }
+      }
+    }
+    const node = addNotice(kind, text);
+    if (node && noticeId) node.dataset.noticeId = noticeId;
+    return node;
+  }
+
+  /**
    * A message the *harness* wrote inside this node's own transcript — currently the
    * ▶ Continue turn, which resumes the node in place instead of growing a new card
    * (`SessionRuntime.continueFrom`). It is an inline block, not a user bubble (the
@@ -1518,30 +1542,6 @@
         value = obj[key] || '';
       }
     } catch {
-  /**
-   * The updating form of `addNotice`: a node-scoped notice the host keeps sending as
-   * its state advances (the silent-retry marker). A `noticeId` names the block, so a
-   * later message carrying the same id rewrites that element's text instead of
-   * appending a second one — one marker per run, however many attempts it takes.
-   * Without an id it is a plain `addNotice`.
-   */
-  function upsertNotice(kind, text, noticeId) {
-    if (noticeId) {
-      const kids = messagesEl ? messagesEl.children : [];
-      for (let i = kids.length - 1; i >= 0; i--) {
-        const node = kids[i];
-        if (node.dataset && node.dataset.noticeId === noticeId) {
-          node.textContent = text;
-          followActive();
-          return node;
-        }
-      }
-    }
-    const node = addNotice(kind, text);
-    if (node && noticeId) node.dataset.noticeId = noticeId;
-    return node;
-  }
-
       const m = String(args).match(/"path"\s*:\s*"((?:[^"\\]|\\.)*)"|"command"\s*:\s*"((?:[^"\\]|\\.)*)"/);
       value = m ? (m[1] || m[2] || '') : '';
     }

@@ -70,6 +70,19 @@ const NODE_ID = 'smoke-node';
  * this same string.
  */
 const UNKNOWN_NODE_ID = 'unknown-node-for-drop-test';
+/**
+ * The **one** text the ▶ Continue / ↻ Retry path may still write into a node's own
+ * transcript: the pure fact about a tool call a Stop stranded, which is what
+ * `Agent.resumeTurn` returns (`buildStrandedToolFact` in `src/agent/agent.ts`) and the
+ * host posts only when it got one back. Everything else a resume does is said to
+ * nobody — the webview used to be replayed a `Continue from where you stopped.`
+ * harness note here, and that literal (`CONTINUE_MESSAGE`) is gone from `src/`
+ * (`tools/check-continue.js` asserts that), so no fixture in this file may feed it one
+ * either. Factored out because the three blocks below that replay an in-place continue
+ * (the ▶ section, the answer-zone case and the work-log label) all use it.
+ */
+const HARNESS_FACT_TEXT =
+  '[Harness] Your previous `read_file` tool call that reads `a.ts` was cut off and did not finish; do not assume it completed.';
 const TURN_MESSAGES = [
   // A traced repaint: the host tags the burst of a session switch with the op id
   // the webview has to report back (see media/main.js's perf probes — the
@@ -194,6 +207,11 @@ const TURN_MESSAGES = [
   },
   { type: 'backgroundNotice', nodeId: NODE_ID, item: { id: 'smoke-bg', name: 'smoke', doneText: 'done', content: 'x' } },
   { type: 'notice', kind: 'warning', text: 'smoke' },
+  // The same type, node-scoped: a notice that names a card and a `noticeId` is one
+  // block *updated* as its state advances (the silent-retry marker), not one block per
+  // message. Both shapes have to survive the replay — the updating one is pinned in
+  // its own block further down.
+  { type: 'notice', kind: 'warning', text: 'smoke', nodeId: NODE_ID, noticeId: 'smoke-notice' },
   { type: 'status', text: 'smoke' },
   { type: 'user', text: 'smoke prompt', attachments: [] },
   { type: 'imagePicked', dataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB', name: 'smoke.png' },
@@ -207,11 +225,6 @@ const TURN_MESSAGES = [
   // with: this `delta` names a node id no `tree` ever declared, so there is no card
   // to route it to. That used to be a silent early return — the message simply
   // ceased to exist, in the webview and in the log — and the `kind:'drop'` report it
-  // The same type, node-scoped: a notice that names a card and a `noticeId` is one
-  // block *updated* as its state advances (the silent-retry marker), not one block per
-  // message. Both shapes have to survive the replay — the updating one is pinned in
-  // its own block further down.
-  { type: 'notice', kind: 'warning', text: 'smoke', nodeId: NODE_ID, noticeId: 'smoke-notice' },
   // has to post now is asserted at the bottom of this file ("a message thrown away
   // for a missing card can never be silent again").
   { type: 'delta', nodeId: UNKNOWN_NODE_ID, text: 'x' },
@@ -2403,9 +2416,18 @@ if (contextLabel !== 'ctx 50%') {
   dispatch({ type: 'harnessNote', nodeId: A, text: HARNESS_FACT_TEXT });
   const harnessBlock = findByClass(cards.get(A), 'harness-note');
   if (!harnessBlock) {
-    problems.push('a harness continue message is not rendered in the continued node');
-  } else if (!findByClass(harnessBlock, 'harness-badge')) {
-    problems.push('a harness continue message carries no HARNESS badge');
+    problems.push('the stranded-tool fact of an in-place continue is not rendered in the continued node');
+  } else {
+    if (!findByClass(harnessBlock, 'harness-badge')) {
+      problems.push('a harness continue message carries no HARNESS badge');
+    }
+    const harnessText = findByClass(harnessBlock, 'harness-text');
+    if (!harnessText || String(harnessText.textContent) !== HARNESS_FACT_TEXT) {
+      problems.push(
+        `the harness continue block shows ${JSON.stringify(harnessText && harnessText.textContent)}, expected the one ` +
+          'fact the engine returned',
+      );
+    }
   }
   if (findByClass(cards.get(A), 'node-ask') && findByClass(findByClass(cards.get(A), 'node-ask'), 'harness-note')) {
     problems.push('a harness continue message overwrote the node\'s pinned user prompt (zone 1, .node-ask)');
@@ -2432,6 +2454,7 @@ if (contextLabel !== 'ctx 50%') {
   if (typeof clickOf !== 'function') {
     problems.push('the Retry button has no click handler');
   } else {
+    const blocksBefore = harnessBlocksIn(cards.get(B));
     posted.length = 0;
     clickOf({ stopPropagation() {} });
     const sent = posted.find((message) => message && message.type === 'continueTurn');
@@ -2439,6 +2462,15 @@ if (contextLabel !== 'ctx 50%') {
       problems.push(
         `clicking Retry posted ${JSON.stringify(posted)}, expected { type: 'continueTurn', id: '${B}' }`,
       );
+    }
+    if (posted.some((message) => message && message.type === 'harnessNote')) {
+      problems.push(
+        `clicking Retry posted ${JSON.stringify(posted.filter((m) => m && m.type === 'harnessNote'))} — the resume ` +
+          'says nothing to the model, so the webview cannot write a harness note the model never received',
+      );
+    }
+    if (harnessBlocksIn(cards.get(B)) !== blocksBefore) {
+      problems.push('clicking Retry wrote a HARNESS block into the card by itself (only the engine\'s fact may appear there)');
     }
   }
 
@@ -2489,15 +2521,6 @@ if (contextLabel !== 'ctx 50%') {
     if (!sent || sent.id !== F) {
       problems.push(
         `clicking the rollover button posted ${JSON.stringify(posted)}, expected { type: 'rolloverTurn', id: '${F}' }`,
-    if (posted.some((message) => message && message.type === 'harnessNote')) {
-      problems.push(
-        `clicking Retry posted ${JSON.stringify(posted.filter((m) => m && m.type === 'harnessNote'))} — the resume ` +
-          'says nothing to the model, so the webview cannot write a harness note the model never received',
-      );
-    }
-    if (harnessBlocksIn(cards.get(B)) !== blocksBefore) {
-      problems.push('clicking Retry wrote a HARNESS block into the card by itself (only the engine\'s fact may appear there)');
-    }
       );
     }
     if (posted.some((message) => message && message.type === 'continueTurn')) {
@@ -2799,55 +2822,6 @@ if (contextLabel !== 'ctx 50%') {
   }
 }
 
-// --- The node header's context menu (copy the node id) ------------------------
-// The header is the one strip on a card whose own menu the host cannot draw
-// (`user-select: none`, and webview content cannot add entries to VS Code's menu),
-// so the webview draws it. What is checked here: RMB on the header opens the menu
-// for *that* node, the entry posts the node's id to the host (the host owns the
-// clipboard), the menu closes after the click, and it is gone once the tree is
-// rebuilt for a different session (a menu that outlived its node would copy the id
-// of a node the session no longer has).
-{
-  const NODE = 'menu-node';
-  dispatch({ type: 'reset' });
-  dispatch({
-    type: 'tree',
-    viewId: NODE,
-    activeId: null,
-    rootId: NODE,
-    nodes: [
-      {
-        id: NODE,
-        parentId: null,
-        children: [],
-        title: 'menu smoke',
-        status: 'done',
-        createdAt: 0,
-        preview: 'menu smoke',
-        usage: null,
-        size: null,
-      },
-    ],
-  });
-  dispatch({ type: 'path', ids: [NODE], nodes: [{ id: NODE, status: 'done', items: [] }] });
-
-  const card = Array.from(elementById('tree-canvas').children).find(
-    (child) => child.dataset && child.dataset.id === NODE,
-  );
-  const head = card ? findByClass(card, 'node-head') : null;
-  const rmb = head && head._listeners && head._listeners.contextmenu;
-  if (typeof rmb !== 'function') {
-    problems.push('a node header has no contextmenu handler — the node id cannot be copied from the card');
-  } else {
-    let prevented = false;
-    rmb({ clientX: 40, clientY: 60, preventDefault: () => { prevented = true; }, stopPropagation() {} });
-    if (!prevented) {
-      problems.push("the header's contextmenu handler does not preventDefault — the host's own menu would win");
-    }
-    const menu = findByClass(document.body, 'node-menu');
-    if (!menu) {
-      problems.push('right-clicking a node header opened no menu');
-    } else {
 // --- A node-scoped notice updates ONE block, and belongs to its node -----------
 // A run that keeps saying the same thing while its state advances — the silent-retry
 // marker the host posts per re-issue — must not grow one block per message. So a notice
@@ -3010,6 +2984,55 @@ if (contextLabel !== 'ctx 50%') {
   notes.push('node-scoped notices: one noticeId = one updated block in its own card; a nodeId-less notice keeps the view-focus append');
 }
 
+// --- The node header's context menu (copy the node id) ------------------------
+// The header is the one strip on a card whose own menu the host cannot draw
+// (`user-select: none`, and webview content cannot add entries to VS Code's menu),
+// so the webview draws it. What is checked here: RMB on the header opens the menu
+// for *that* node, the entry posts the node's id to the host (the host owns the
+// clipboard), the menu closes after the click, and it is gone once the tree is
+// rebuilt for a different session (a menu that outlived its node would copy the id
+// of a node the session no longer has).
+{
+  const NODE = 'menu-node';
+  dispatch({ type: 'reset' });
+  dispatch({
+    type: 'tree',
+    viewId: NODE,
+    activeId: null,
+    rootId: NODE,
+    nodes: [
+      {
+        id: NODE,
+        parentId: null,
+        children: [],
+        title: 'menu smoke',
+        status: 'done',
+        createdAt: 0,
+        preview: 'menu smoke',
+        usage: null,
+        size: null,
+      },
+    ],
+  });
+  dispatch({ type: 'path', ids: [NODE], nodes: [{ id: NODE, status: 'done', items: [] }] });
+
+  const card = Array.from(elementById('tree-canvas').children).find(
+    (child) => child.dataset && child.dataset.id === NODE,
+  );
+  const head = card ? findByClass(card, 'node-head') : null;
+  const rmb = head && head._listeners && head._listeners.contextmenu;
+  if (typeof rmb !== 'function') {
+    problems.push('a node header has no contextmenu handler — the node id cannot be copied from the card');
+  } else {
+    let prevented = false;
+    rmb({ clientX: 40, clientY: 60, preventDefault: () => { prevented = true; }, stopPropagation() {} });
+    if (!prevented) {
+      problems.push("the header's contextmenu handler does not preventDefault — the host's own menu would win");
+    }
+    const menu = findByClass(document.body, 'node-menu');
+    if (!menu) {
+      problems.push('right-clicking a node header opened no menu');
+    } else {
       if (menu.dataset.id !== NODE) {
         problems.push(`the node menu carries ${JSON.stringify(menu.dataset.id)}, expected the card's own id ${NODE}`);
       }
