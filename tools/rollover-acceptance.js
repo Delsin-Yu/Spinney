@@ -304,9 +304,18 @@ const tick = (ms = 80) => new Promise((r) => setTimeout(r, ms));
     ok('rolloverContext() still reports success (in-place continue)', done === true);
     ok('no new node was created', Object.keys(s.nodes).length === before, Object.keys(s.nodes).join(','));
 
-    const note = messages.slice(marked).find((m) => m.type === 'harnessNote' && m.nodeId === 'p0');
-    ok('the model got the retry note, not a window reset', !!note && note.text.includes('[Harness continue]') && !note.text.includes('context window reset'));
+    // The resume's turn is fire-and-forget (`void run.agent.resumeTurn()`), so its
+    // first request has to actually fail before the card can carry anything.
     await tick();
+    // The resume is transparent: nothing is said to the model, so there is no
+    // harness note at all (`Agent.resumeTurn` returns undefined when no tool call
+    // was stranded). What the user gets instead is the display-only marker the
+    // engine's silent whole-request re-issues leave on the card.
+    const notes = messages.slice(marked).filter((m) => m.type === 'harnessNote' && m.nodeId === 'p0');
+    ok('the resume says nothing to the model (no retry note)', notes.length === 0, notes.map((n) => n.text).join(' | '));
+    const marks = messages.slice(marked).filter((m) => m.type === 'notice' && m.nodeId === 'p0' && /Silent retry/.test(String(m.text)));
+    ok('  ... and the silent re-issues are shown as a display-only marker', marks.length > 0, marks.map((m) => m.text).join(' | '));
+    ok('  ... never as a window reset', !messages.slice(marked).some((m) => String(m.text || '').includes('context window reset')));
   }
 
   console.log('');

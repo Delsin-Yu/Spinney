@@ -148,6 +148,13 @@ export interface DisplayItem {
   text?: string;
   thinking?: string;
   noticeKind?: 'warning' | 'info';
+  /**
+   * `kind:'notice'` only: the block's identity while it is **updated in place** rather
+   * than appended (the silent-retry marker). It travels with the item so a repaint
+   * re-tags the element, and a later run's marker — which carries a different id —
+   * cannot rewrite this one's block (`upsertNotice` in `media/main.js`).
+   */
+  noticeId?: string;
   name?: string;
   args?: string;
   content?: string;

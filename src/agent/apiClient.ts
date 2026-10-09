@@ -16,8 +16,15 @@ const MAX_ATTEMPTS = 10;
 const RETRY_BASE_DELAY_MS = 1_000;
 const RETRY_MAX_DELAY_MS = 30_000;
 
-/** A transient HTTP status worth another attempt; anything else is a refusal. */
-function isRetriableStatus(status: number): boolean {
+/**
+ * A transient HTTP status worth another attempt; anything else is a refusal.
+ *
+ * Exported for the agent's **turn-level** ladder (`shouldReissueTransparently` in
+ * `agent.ts`), which re-issues the whole request once this per-attempt ladder is
+ * exhausted: the two must agree on what "transient" means, or a 400 would be
+ * re-sent from above after this client already decided it was fatal.
+ */
+export function isRetriableStatus(status: number): boolean {
   return status === 408 || status === 429 || status >= 500;
 }
 

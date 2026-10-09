@@ -142,37 +142,12 @@ export function clipDisplayItem(item: DisplayItem): DisplayItem {
 }
 
 /**
- * The message a harness-level "continue" turn sends. It is intentionally the
- * *whole* instruction: the user pressed ▶ Continue instead of typing, so what
- * reaches the model is the same thing "continue" would have said — no fabricated
- * user intent beyond that. (The turn resumes the node in place; after an
- * interruption the agent prepends its own `INTERRUPT_NOTICE` to this message, and
- * after a failed call the runtime prefixes a failure note — see
- * `buildFailureContinue`.)
- */
-export const CONTINUE_MESSAGE = 'Continue from where you stopped.';
-
-/**
- * The failure variant of the continue message. After a non-interrupt error the
- * turn's partial messages were rolled back (`Agent.runTurn`), so the model has no
- * trace of it and would otherwise have to guess why it is being asked again.
- * The provider's error text already names the attempt count, so it is quoted
- * verbatim (clipped) rather than paraphrased.
- */
-function buildFailureContinue(error: string): string {
-  const reason = sliceText(error.replace(/\s+/g, ' ').trim(), 500);
-  return (
-    '[Harness continue] Your previous request failed before it produced an answer, so its partial output was ' +
-    'discarded and nothing from it is in this conversation. Redo the last request now: resume the work it asked ' +
-    `for, do not ask for confirmation, and do not start a different task. Failure: ${reason}`
-  );
-}
-
-/**
  * The failure text of a node whose last turn died on an error: the `⚠️ …` item
  * `handleAgentEvent` pushed onto its card. Derived from the node's own transcript
- * rather than a side table, so it survives a reload (the error item is persisted)
- * and the model is told exactly what the user can read on the card.
+ * rather than a side table, so it survives a reload (the error item is persisted).
+ * It is a **readout and a classifier**, never a message to the model: a resume
+ * tells the model nothing (see `continueFrom`), so the only callers left are the
+ * full-window judgement and the rollover's reason.
  */
 function lastFailureText(node: TreeNode): string | undefined {
   for (let i = node.displayItems.length - 1; i >= 0; i--) {
@@ -192,7 +167,7 @@ function lastFailureText(node: TreeNode): string | undefined {
  * *previous* request — it once read `ctx 65%` while the request actually carried
  * ~1.28 M tokens — so it is deliberately **not** a trigger. Reading the refusal back
  * off the node's own `⚠️ …` item (`lastFailureText`) is what makes the judgement
- * survive a reload: the card, the button and the model all agree on one text.
+ * survive a reload: the card and the button cannot disagree about what was refused.
  *
  * There are **two** such refusals, and `windowFullReason` reads both off the same text:
  * the token one ("maximum context length …") and the byte one ("Total image size exceeds
@@ -298,10 +273,10 @@ function isBudgetKill(task: BackgroundTask): boolean {
  * (§5/§6 of `docs/agents/invariants/context-rollover.md`).
  *
  * Model-facing, therefore deliberately **English** and built by plain string
- * concatenation, never through `vscode.l10n.t` — the `CONTINUE_MESSAGE` /
- * `buildFailureContinue` precedent. The user does see this text (the card renders it
- * verbatim in a `HARNESS` block), but it is an instruction to the model, and a
- * translated instruction is a different instruction.
+ * concatenation, never through `vscode.l10n.t` — it is an instruction to the
+ * model, and a translated instruction is a different instruction. The user does
+ * see this text (the card renders it verbatim in a `HARNESS` block), but that is
+ * a readout of what the model was told, not a message to the user.
  *
  * The shape, including its three degradations, is fixed by the contract: no
  * transcript on disk (the pointer is replaced by "rely on what was carried over"), a
@@ -609,6 +584,19 @@ export interface TurnRun {
   pendingThinking: string;
   pendingTools: Map<number, { id?: string; name: string; args: string }>;
   flushTimer: ReturnType<typeof setTimeout> | null;
+  /**
+   * The run's one **display-only** marker: the engine's silent-retry notice
+   * (`AgentEvent` `'retry'`). It lives in `items` so the card shows it, and it is
+   * updated in place rather than pushed per attempt — and it is never part of
+   * `messages`, because the model was told nothing (see `continueFrom`).
+   */
+  marker?: DisplayItem;
+  /**
+   * The marker's identity for the webview (`noticeId`). It is unique **per run**, not
+   * per node: a later run's first retry must not rewrite the block an earlier run left
+   * behind while this run's own copy of it sits in `items`.
+   */
+  markerId?: string;
 }
 
 /**
@@ -813,6 +801,12 @@ export class SessionRuntime {
    * the user sends the next prompt / ▶ Continue into that node.
    */
   private readonly stoppedLines = new Set<string>();
+  /**
+   * Serial behind `TurnRun.markerId`. A display-only block the webview rewrites in
+   * place needs an identity that outlives one run, and only a counter can hand out
+   * one without asking the DOM which blocks are already on screen.
+   */
+  private markerSerial = 0;
   /** Background task id -> the `kind:'bg'` card that mirrors it. */
   private readonly bgNodes = new Map<number, string>();
   /** Coalesces background UI refreshes (chatty processes fire onUpdated many times/s). */
@@ -2728,6 +2722,15 @@ export class SessionRuntime {
       // That node already has a live run; there is no second basis to bind.
       return null;
     }
+    if (this.nodeWorkers.get(node.id)?.agent.running) {
+      // The node has no run but its agent has not finished winding down: a turn's
+      // terminal event is delivered *before* `runTurn`'s `finally` clears `isRunning`,
+      // so a resume arriving in that window would be refused by the agent and would
+      // leave this run on the node with nothing streaming. The same guard the notice
+      // queue uses (`drainSignals`, `flushWritebacks`); the card still offers its
+      // button, so the click is simply refused and can be repeated.
+      return null;
+    }
     // ▶ Continue (or an injected turn) on a line the user once stopped is the user
     // continuing it again: normal delivery resumes from here.
     this.stoppedLines.delete(node.id);
@@ -3111,22 +3114,25 @@ export class SessionRuntime {
   }
 
   /**
-   * Resume a node in place: run a turn **on `nodeId` itself** with a message the
-   * harness writes, so a turn that ended in `interrupted` or `error` does not
-   * force the user to type "continue" — and, just as important, does not grow a
-   * new card in the tree. This is the same mechanism the background / sub-agent
-   * completion notices use (`beginInjectedTurn`): the run is bound to the existing
-   * node, its reply is appended to that node's own history (`fresh: false`) and
-   * the view focus does not move.
+   * Resume a node in place: run a turn **on `nodeId` itself**, so a turn that ended
+   * in `interrupted` or `error` does not force the user to type "continue" — and,
+   * just as important, does not grow a new card in the tree. This is the same
+   * mechanism the background / sub-agent completion notices use
+   * (`beginInjectedTurn`): the run is bound to the existing node, its reply is
+   * appended to that node's own history (`fresh: false`) and the view focus does
+   * not move. The engine starts the turn itself (`Agent.resumeTurn`), so this path
+   * never calls `sendUserMessage`.
    *
-   * The model therefore receives exactly the context where it stopped:
-   *  - interrupted → the checkpoint `preservePartialTurn` stored (its partial
-   *    text/reasoning is already in the history) plus the pending
-   *    `INTERRUPT_NOTICE`, which this node's agent still holds — nothing is
-   *    re-derived and the interrupted tool call is still named;
-   *  - failed → the history the rollback restored, i.e. right after the last
-   *    completed tool call, plus `buildFailureContinue`'s note, because the model
-   *    has no other way to learn why it is being asked again.
+   * **The resume is transparent: a failure says nothing to the model.** The
+   * history the agent holds is the one the turn died with — the checkpoint
+   * `preservePartialTurn` stored for an interruption, or the state the rollback
+   * restored for an error — and the resume adds no explanation to it, so a model
+   * call that failed can never read as "your work was thrown away, start over".
+   * The one exception is a tool call a Stop stranded: `resumeTurn` pushes that
+   * single pure-fact line itself and returns it, and only then is it shown here.
+   * `undefined` means the model was told nothing, so the card says nothing either:
+   * a harness note is posted **only** when there is a fact to show.
+   * `docs/agents/invariants/api-retries.md` carries the full rule.
    *
    * Refused (returns false, no turn) while the reboot hold is armed, while that
    * node is already streaming, or for a node that is not a conversational turn (a
@@ -3149,25 +3155,26 @@ export class SessionRuntime {
       );
       return false;
     }
-    const failure = node.status === 'error' ? lastFailureText(node) : undefined;
-    const message = failure ? buildFailureContinue(failure) : CONTINUE_MESSAGE;
     const run = this.beginInjectedTurn(node);
     if (!run) {
       return false;
     }
-    // The card shows the message the model actually got, as an inline harness
-    // block in this node's transcript (never a fabricated user bubble, and never
-    // the pinned prompt — that one still holds what the user asked for).
     node.status = 'running';
-    run.items.push({ kind: 'harness', text: message });
-    this.post({ type: 'harnessNote', nodeId: node.id, text: message });
+    // What the model was actually told, straight from the engine: a stranded tool
+    // call is the only thing a resume ever says. The card shows exactly that line
+    // as an inline harness block (never a fabricated user bubble, and never the
+    // pinned prompt — that one still holds what the user asked for).
+    const fact = run.agent.resumeTurn();
+    if (fact !== undefined) {
+      run.items.push({ kind: 'harness', text: fact });
+      this.post({ type: 'harnessNote', nodeId: node.id, text: fact });
+    }
     this.setBusy(true);
     this.lastStatus = vscode.l10n.t('Thinking…');
     this.post({ type: 'status', text: this.lastStatus });
     // Patch just this card: the chip follows the run, and the ▶ button goes away
     // for the duration (the webview hides it while the node has a live run).
     this.post({ type: 'nodeUpdate', ...this.nodeStatePatch(node) });
-    void run.agent.sendUserMessage(message);
     return true;
   }
 
@@ -4036,6 +4043,36 @@ export class SessionRuntime {
             content: clipForUi(event.content),
             nodeId: run.nodeId,
             ms: event.ms,
+          });
+        }
+        break;
+      case 'retry':
+        // The engine re-issued the whole request transparently: the model's
+        // conversation holds nothing about it, so neither may `messages`. The card
+        // gets one **display-only** marker (`run.marker`), updated in place as the
+        // attempts advance — one item for the run, never one per attempt. Posted
+        // node-scoped because the run need not be the view focus, and with a
+        // `noticeId` so the webview rewrites the same block instead of appending.
+        if (run) {
+          const text = vscode.l10n.t('\u27f3 Silent retry {0}/{1}', event.attempt, event.max);
+          // The id belongs to this **run**, not to its node (see `Run.markerId`): the
+          // second retry of a later run must add its own block, not rewrite the one
+          // this run left in the card.
+          if (!run.markerId) {
+            run.markerId = `retry-${run.nodeId}-${++this.markerSerial}`;
+          }
+          if (run.marker) {
+            run.marker.text = text;
+          } else {
+            run.marker = { kind: 'notice', noticeKind: 'info', text, noticeId: run.markerId };
+            run.items.push(run.marker);
+          }
+          this.post({
+            type: 'notice',
+            kind: 'info',
+            text,
+            nodeId: run.nodeId,
+            noticeId: run.markerId,
           });
         }
         break;

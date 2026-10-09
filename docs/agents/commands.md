@@ -24,6 +24,7 @@ npm run check:websearch                      # guard: the keyless web_search / w
 npm run check:image                          # guard: the pre-upload image transform (PNG codec, resampler, JPEG decode)
 npm run check:neterror                       # guard: a failed fetch names its cause (out/agent/netError.js)
 npm run check:unicode                        # guard: the well-formed text contract (out/text.js)
+npm run check:continue                       # guard: the transparent re-issue / resume contract (compiled agent + runtime)
 npm run package                              # compile + guards + package (.vsix) + collect   — POSIX
 npm run artifacts                            # collect the built artifacts into artifacts/ (no rebuild)
 powershell -File build-deploy.ps1            # compile + package + install         — Windows
@@ -32,10 +33,11 @@ powershell -File build-deploy.ps1 -NoInstall # compile + package only           
 
 `npm run package` and `build-deploy.ps1` are the two side-by-side closing paths.
 `npm run package` is the POSIX entry point: it packages the `.vsix`, runs the
-`vscode:prepublish` gate (compile + `sync:l10n` + the **seventeen** guards — `check:models`,
+`vscode:prepublish` gate (compile + `sync:l10n` + the **eighteen** guards — `check:models`,
 `check:webview`, `check:modeltree`, `check:signals`, `check:l10n`, `check:rollover`,
 `check:grid`, `check:docs`, `check:cwd`, `check:shell`, `check:kill`, `check:timeout`,
-`check:budget`, `check:websearch`, `check:image`, `check:neterror`, `check:unicode`) on the way, and takes the generated l10n
+`check:budget`, `check:websearch`, `check:image`, `check:neterror`, `check:unicode`,
+`check:continue`) on the way, and takes the generated l10n
 aliases off disk again once it is done.
 `build-deploy.ps1` is the Windows path, and it also installs
 `artifacts/spinney-<version>.vsix` **by that exact path** with

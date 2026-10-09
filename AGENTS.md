@@ -66,7 +66,7 @@ A change to anything under `src/`, `media/`, or `package.json` is not finished u
 
 - The version follows SemVer. We are at `0.x`, which is pre-1.0: a breaking change bumps the minor version only.
 - Tag every release as `vX.Y.Z`.
-- `vscode:prepublish` (compile plus the seventeen guards) is the release gate: a release does not ship when that script fails.
+- `vscode:prepublish` (compile plus the eighteen guards) is the release gate: a release does not ship when that script fails.
 - `CHANGELOG.md` uses the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
 ## Hard invariants (read before you touch code)
@@ -99,7 +99,7 @@ A change to anything under `src/`, `media/`, or `package.json` is not finished u
 - Prompt: `invariants/system-prompt` (template + rules) · `invariants/agent-authoring` (edit the prompt) · `invariants/agents-md-snapshot`
 - Model configuration: `invariants/model-cards` (provider nodes + model cards, the GUID id that survives a rename, per-card effort levels and vision transport, the Model Card Tree page, the two concurrency gates) · `invariants/model-capabilities` (why only the built-in `deepseek-flash` is vendored, why capabilities are declared and never probed, the API-driven context readout)
 - Tools: `tools` (add or change a tool, the verbatim frame syntax) · `invariants/sub-agents` (spawn_* / send_*) · `invariants/background-terminals` (exec_command and background terminals) · `invariants/transcripts` (search_transcripts) · `invariants/vision-images` (read_image) · `web-search` (the keyless web_search / web_fetch pair, its backend table and its guard)
-- Sessions and persistence: `invariants/conversation-validity` · `invariants/session-persistence` (persistence + rename_session auto-naming and locking) · `invariants/chat-tree` (branch / checkout) · `invariants/interrupt-rollback` · `invariants/api-retries` (10-step backoff on transient failures + the ▶ Continue card button) · `invariants/context-rollover` (a full window continues in a new one: the API prefix is cut at the node's context base)
+- Sessions and persistence: `invariants/conversation-validity` · `invariants/session-persistence` (persistence + rename_session auto-naming and locking) · `invariants/chat-tree` (branch / checkout) · `invariants/interrupt-rollback` · `invariants/api-retries` (a failed model call: the 10-attempt backoff, then the silent whole-request re-issues the model is never told about, behind the ▶ Continue / ↻ Retry button) · `invariants/context-rollover` (a full window continues in a new one: the API prefix is cut at the node's context base)
 - Multi-session / concurrency: `multi-session` (multi-tab + session/branch concurrency, the frozen P1–P4 contract) · the acceptance driver `tools/harness-test.mjs` (dev-only, not shipped in the `.vsix`)
 - Control plane / desktop: `control-plane` (includes hop_session / list_nodes)
 - Other invariants: `invariants/line-endings` · `invariants/config-keys` · `invariants/streaming-perf` · `invariants/vendored-deps`

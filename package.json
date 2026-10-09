@@ -2,7 +2,7 @@
   "name": "spinney",
   "displayName": "Spinney",
   "description": "%description%",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "DE-YU",
   "license": "MIT",
   "author": {
@@ -488,6 +488,7 @@
     "check:modeltree": "node tools/check-modeltree.js",
     "check:signals": "node tools/check-signal-persist.js",
     "check:rollover": "node tools/check-context-rollover.js",
+    "check:continue": "node tools/check-continue.js",
     "check:l10n": "node tools/check-l10n.js",
     "check:grid": "node tools/check-tree-grid.js",
     "check:docs": "node tools/check-docs.js",
@@ -505,7 +506,7 @@
     "check:jpeg": "node tools/check-jpeg.js",
     "sim": "node tools/sim/run.mjs",
     "sim:selftest": "node tools/sim/run.mjs --selftest",
-    "vscode:prepublish": "npm run compile && npm run sync:l10n && npm run check:models && npm run check:webview && npm run check:modeltree && npm run check:signals && npm run check:l10n && npm run check:rollover && npm run check:grid && npm run check:docs && npm run check:cwd && npm run check:shell && npm run check:kill && npm run check:timeout && npm run check:budget && npm run check:websearch && npm run check:image && npm run check:neterror && npm run check:unicode"
+    "vscode:prepublish": "npm run compile && npm run sync:l10n && npm run check:models && npm run check:webview && npm run check:modeltree && npm run check:signals && npm run check:l10n && npm run check:rollover && npm run check:grid && npm run check:docs && npm run check:cwd && npm run check:shell && npm run check:kill && npm run check:timeout && npm run check:budget && npm run check:websearch && npm run check:image && npm run check:neterror && npm run check:unicode && npm run check:continue"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

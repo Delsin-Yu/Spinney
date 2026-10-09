@@ -19,7 +19,11 @@
   responses when any `tool_call_id` is left unresolved — a foreign message inside the window
   therefore deletes the whole block on the next resume.
 - `sanitizeMessages` drops dangling `tool_calls` and orphan `tool`
-  messages. It is **not** applied by `loadSessions` (`ChatViewProvider.loadSessions` only
+  messages, and heals an assistant message that carries **neither content nor
+  `tool_calls`** by mirroring its `reasoning_content` into `content` — keeping the
+  reasoning as well, because thinking mode refuses a content-only assistant message
+  (`The reasoning_content in the thinking mode must be passed back to the API.`, a 400).
+  It is **not** applied by `loadSessions` (`ChatViewProvider.loadSessions` only
   hands the stored tree to `pruneSession`, which heals the nodes). The sanitized copy is
   produced where a request is assembled: `SessionRuntime.buildPath`
   (`src/chat/runtime.ts`, the `Agent.sanitizeMessages([system, ...pathMessages(...)])`
@@ -56,7 +60,7 @@
   label, `clip(rendered[i], 200)` / `clip(label, 100)`, and the session-header titles,
   `clip(t, 60)`); `truncate` (`src/tools/index.ts`, the shared tool-result cap); in
   `src/chat/runtime.ts` `clipForUi` (the webview's own copy, not the wire),
-  `buildFailureContinue`, `SessionRuntime.truncateField`, the rollover carry-over
+  `SessionRuntime.truncateField`, the rollover carry-over
   (`sliceText(input.request, ROLLOVER_REQUEST_CAP)`, and its answer) and the killed job's
   `command` (`clipText(task.command, 80)`); `truncateField` (`src/agent/agent.ts`); the tool
   results that *are* a rendered line — the five 160-unit line cuts in

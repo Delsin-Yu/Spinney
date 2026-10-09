@@ -207,6 +207,11 @@ const TURN_MESSAGES = [
   // with: this `delta` names a node id no `tree` ever declared, so there is no card
   // to route it to. That used to be a silent early return — the message simply
   // ceased to exist, in the webview and in the log — and the `kind:'drop'` report it
+  // The same type, node-scoped: a notice that names a card and a `noticeId` is one
+  // block *updated* as its state advances (the silent-retry marker), not one block per
+  // message. Both shapes have to survive the replay — the updating one is pinned in
+  // its own block further down.
+  { type: 'notice', kind: 'warning', text: 'smoke', nodeId: NODE_ID, noticeId: 'smoke-notice' },
   // has to post now is asserted at the bottom of this file ("a message thrown away
   // for a missing card can never be silent again").
   { type: 'delta', nodeId: UNKNOWN_NODE_ID, text: 'x' },
@@ -217,8 +222,10 @@ const TURN_MESSAGES = [
   { type: 'nodeUpdate', id: NODE_ID, status: 'done', title: 'smoke', usage: null, context: 'ok' },
   { type: 'panTo', id: NODE_ID },
   // An in-place continue writes an inline harness block into that node's own
-  // transcript (see the ▶ section below).
-  { type: 'harnessNote', nodeId: NODE_ID, text: 'Continue from where you stopped.' },
+  // transcript — and after the transparent-resume change that is the ONLY text this
+  // path posts: the engine says nothing to the model, so what is left here is the pure
+  // fact about a tool call a Stop stranded (the ▶ section below).
+  { type: 'harnessNote', nodeId: NODE_ID, text: HARNESS_FACT_TEXT },
   // The host took the message: this is the *only* message that empties the composer
   // (§4.4 — `send()` never does, so a modal answered with No cannot eat the text).
   { type: 'composerClear' },
@@ -2386,10 +2393,14 @@ if (contextLabel !== 'ctx 50%') {
     problems.push('a turn that failed after the tree was drawn shows no ↻ Retry button');
   }
 
-  // The harness message is written into *that* node's transcript as an inline
-  // block (never into the pinned prompt, and never as a bubble the user appears to
-  // have typed) — an in-place continue must not move the view focus.
-  dispatch({ type: 'harnessNote', nodeId: A, text: 'Continue from where you stopped.' });
+  // The ONE harness text this path still writes into *that* node's transcript: the
+  // fact about a tool call a Stop stranded, which is what the engine returned the host
+  // (`Agent.resumeTurn`). It is an inline block — never the pinned prompt, never a
+  // bubble the user appears to have typed — and an in-place continue must not move the
+  // view focus. A resume with nothing stranded posts no note at all, which is why the
+  // click below is asserted to write nothing of its own: `Continue from where you
+  // stopped.` (`CONTINUE_MESSAGE`) no longer exists, so the webview must not invent it.
+  dispatch({ type: 'harnessNote', nodeId: A, text: HARNESS_FACT_TEXT });
   const harnessBlock = findByClass(cards.get(A), 'harness-note');
   if (!harnessBlock) {
     problems.push('a harness continue message is not rendered in the continued node');
@@ -2403,7 +2414,19 @@ if (contextLabel !== 'ctx 50%') {
     problems.push('a harness continue message for another node leaked into a different card');
   }
 
-  // Clicking the button must ask the host to continue *that* node.
+  // Clicking the button must ask the host to continue *that* node — and ask for
+  // nothing more. The note above is the host's, written when the engine had a fact to
+  // state; a plain ▶ Continue / ↻ Retry resume tells the model nothing, so a click may
+  // never post a `harnessNote` (or write a block) of its own: that would be a message
+  // the model never received, shown to the user as if it had been.
+  const harnessBlocksIn = (root) => {
+    let n = 0;
+    for (const child of (root && root.children) || []) {
+      if (child.classList && child.classList.contains('harness-note')) n++;
+      n += harnessBlocksIn(child);
+    }
+    return n;
+  };
   const retry = buttonOf(B);
   const clickOf = retry && retry._listeners && retry._listeners.click;
   if (typeof clickOf !== 'function') {
@@ -2466,6 +2489,15 @@ if (contextLabel !== 'ctx 50%') {
     if (!sent || sent.id !== F) {
       problems.push(
         `clicking the rollover button posted ${JSON.stringify(posted)}, expected { type: 'rolloverTurn', id: '${F}' }`,
+    if (posted.some((message) => message && message.type === 'harnessNote')) {
+      problems.push(
+        `clicking Retry posted ${JSON.stringify(posted.filter((m) => m && m.type === 'harnessNote'))} — the resume ` +
+          'says nothing to the model, so the webview cannot write a harness note the model never received',
+      );
+    }
+    if (harnessBlocksIn(cards.get(B)) !== blocksBefore) {
+      problems.push('clicking Retry wrote a HARNESS block into the card by itself (only the engine\'s fact may appear there)');
+    }
       );
     }
     if (posted.some((message) => message && message.type === 'continueTurn')) {
@@ -2816,6 +2848,168 @@ if (contextLabel !== 'ctx 50%') {
     if (!menu) {
       problems.push('right-clicking a node header opened no menu');
     } else {
+// --- A node-scoped notice updates ONE block, and belongs to its node -----------
+// A run that keeps saying the same thing while its state advances — the silent-retry
+// marker the host posts per re-issue — must not grow one block per message. So a notice
+// may now carry `nodeId` + `noticeId`: the webview routes it to *that* card's log
+// (exactly like a harness note, and never to the view focus) and rewrites the text of
+// the one element carrying that `data-notice-id`, appending only when the id is new. A
+// notice with **no** `nodeId` is the shape that came first and stays exactly as it was:
+// it belongs to the card the view focuses, appended into that card's log, which is why
+// the demotion rule is asserted here too (an append after a promoted answer gives the
+// answer back first — see the zone block above).
+//
+// Nothing here throws when it breaks; the block simply stacks up or lands in the wrong
+// card, which reads as "the harness said it three times, in someone else's card".
+{
+  const A = 'notice-node-a'; // the view focus
+  const B = 'notice-node-b'; // the card the scoped notices name
+  const node = (id, parentId, children, extra) =>
+    Object.assign(
+      { id, parentId, children, title: id, status: 'done', createdAt: 0, preview: id, usage: null, size: null },
+      extra || {},
+    );
+  dispatch({ type: 'reset' });
+  dispatch({
+    type: 'tree',
+    viewId: A,
+    activeId: null,
+    rootId: A,
+    rootIds: [A],
+    nodes: [node(A, null, [B]), node(B, A, [])],
+  });
+  dispatch({
+    type: 'path',
+    // Only the root is on the path: `renderPath` makes the LAST path id the view focus
+    // (`treeActiveId`), and this fixture needs the focus to be A while the scoped
+    // notices name its child B — a card the tree rendered but the view is not on.
+    ids: [A],
+    nodes: [{ id: A, status: 'done', items: [{ kind: 'user', text: 'a' }, { kind: 'assistant', text: 'answer a' }] }],
+  });
+
+  const cardOf = (id) => {
+    for (const child of elementById('tree-canvas').children) {
+      if (child.dataset && child.dataset.id === id) return child;
+    }
+    return null;
+  };
+  /** Every `.notice` block in one card's log, in document order. */
+  const noticesIn = (id) => {
+    const card = cardOf(id);
+    const work = card ? findByClass(card, 'node-work') : null;
+    const out = [];
+    const walk = (element) => {
+      for (const child of (element && element.children) || []) {
+        if (hasClass(child, 'notice')) out.push(child);
+        walk(child);
+      }
+    };
+    walk(work);
+    return out;
+  };
+  const textOf = (element) => String((element && element.textContent) || '');
+
+  if (!cardOf(A) || !cardOf(B)) {
+    problems.push('the node-scoped-notice fixture rendered no card for one of its two nodes');
+  } else {
+    // (a) The first message of an id creates the block, and it carries the id.
+    const failed = dispatch({ type: 'notice', kind: 'info', text: 'Retrying (1/3)…', nodeId: B, noticeId: 'retry-B' });
+    if (failed) {
+      problems.push('a `notice` carrying a `nodeId` / `noticeId` threw — the webview no longer understands the shape');
+    }
+    const first = noticesIn(B);
+    if (first.length !== 1) {
+      problems.push(`a node-scoped notice rendered ${first.length} block(s) in its node, expected 1`);
+    } else {
+      if (first[0].dataset.noticeId !== 'retry-B') {
+        problems.push(
+          `the notice block carries data-notice-id=${JSON.stringify(first[0].dataset.noticeId)}, expected the id the ` +
+            'host sent (that id is what makes the block updatable at all)',
+        );
+      }
+      if (textOf(first[0]) !== 'Retrying (1/3)…') {
+        problems.push(`the notice block reads ${JSON.stringify(textOf(first[0]))}, expected the text the host sent`);
+      }
+    }
+
+    // (b) The same id again is that SAME element with new text — not a second block.
+    dispatch({ type: 'notice', kind: 'info', text: 'Retrying (2/3)…', nodeId: B, noticeId: 'retry-B' });
+    dispatch({ type: 'notice', kind: 'info', text: 'Retrying (3/3)…', nodeId: B, noticeId: 'retry-B' });
+    const updated = noticesIn(B);
+    if (updated.length !== 1) {
+      problems.push(
+        `three notices carrying one noticeId produced ${updated.length} block(s) — the same marker has to be updated ` +
+          'in place, or a turn that retries ten times writes ten lines of the same sentence',
+      );
+    } else {
+      if (updated[0] !== first[0]) {
+        problems.push('a repeated noticeId replaced the block instead of updating the one already on screen');
+      }
+      if (textOf(updated[0]) !== 'Retrying (3/3)…') {
+        problems.push(`the updated notice block reads ${JSON.stringify(textOf(updated[0]))}, expected the newest text`);
+      }
+      const asked = updated.filter((block) => block.dataset.noticeId === 'retry-B');
+      if (asked.length !== 1) {
+        problems.push(`the log holds ${asked.length} elements carrying data-notice-id="retry-B", expected exactly 1`);
+      }
+    }
+
+    // (c) A second id is a second block: two markers at once are two things said.
+    dispatch({ type: 'notice', kind: 'warning', text: 'Waiting for a free request slot…', nodeId: B, noticeId: 'queue-B' });
+    if (noticesIn(B).length !== 2) {
+      problems.push(
+        `a second noticeId produced ${noticesIn(B).length} block(s), expected 2 (an id names one block, it does not ` +
+          'collapse the whole log)',
+      );
+    }
+
+    // (d) It lands in the node it names — never in the view focus, even while the
+    // focus is another card with a promoted answer of its own.
+    if (noticesIn(A).length !== 0) {
+      problems.push(
+        `a notice naming node ${B} landed in the view-focus card ${A} (${JSON.stringify(noticesIn(A).map(textOf))}) — ` +
+          'a routed notice belongs to its own card, like every other routed append',
+      );
+    }
+
+    // (e) No `nodeId`: today's behaviour, unchanged. It belongs to the card the view
+    // focuses, is appended (no id, so nothing to update), and takes that card's answer
+    // back into its log first — the same rule every routed append follows.
+    const beforeFocus = cardOf(A);
+    const beforeAnswer = beforeFocus ? findByClass(beforeFocus, 'node-answer') : null;
+    if (!beforeAnswer || beforeAnswer.children.length !== 1) {
+      problems.push(
+        'the fixture never promoted the view-focus card\'s answer, so "the notice demoted it" below would say nothing',
+      );
+    }
+    dispatch({ type: 'notice', kind: 'warning', text: 'legacy notice' });
+    const focusNotices = noticesIn(A);
+    if (focusNotices.length !== 1) {
+      problems.push(`a notice with no nodeId rendered ${focusNotices.length} block(s) in the view-focus card, expected 1`);
+    } else if (textOf(focusNotices[0]) !== 'legacy notice') {
+      problems.push(`the nodeId-less notice reads ${JSON.stringify(textOf(focusNotices[0]))}, expected its own text`);
+    }
+    const afterAnswer = beforeFocus ? findByClass(beforeFocus, 'node-answer') : null;
+    if (
+      !beforeFocus ||
+      !afterAnswer ||
+      afterAnswer.children.length !== 0 ||
+      beforeFocus.classList.contains('has-answer')
+    ) {
+      problems.push(
+        'a nodeId-less notice left the view-focus card\'s answer promoted (`.node-answer` holds ' +
+          `${afterAnswer ? afterAnswer.children.length : 'no'} element(s)) — the append has to land *after* the ` +
+          'answer comes back into the log, or the answer is no longer the tail of that turn',
+      );
+    }
+    if (noticesIn(B).length !== 2) {
+      problems.push('a notice with no nodeId leaked into another card');
+    }
+  }
+
+  notes.push('node-scoped notices: one noticeId = one updated block in its own card; a nodeId-less notice keeps the view-focus append');
+}
+
       if (menu.dataset.id !== NODE) {
         problems.push(`the node menu carries ${JSON.stringify(menu.dataset.id)}, expected the card's own id ${NODE}`);
       }
@@ -3247,7 +3441,7 @@ if (contextLabel !== 'ctx 50%') {
     dispatch({ type: 'delta', nodeId: id, text: 'answer one' });
     dispatch({ type: 'interrupted', nodeId: id });
     expectPromoted(card, 'the turn an in-place continue resumes');
-    dispatch({ type: 'harnessNote', nodeId: id, text: 'Continue from where you stopped.' });
+    dispatch({ type: 'harnessNote', nodeId: id, text: HARNESS_FACT_TEXT });
     expectNotPromoted(card, 'an in-place `harnessNote` on a card showing its answer');
     const work = zoneOf(card, 'node-work');
     const kinds = kindsIn(work);
@@ -3642,7 +3836,7 @@ if (contextLabel !== 'ctx 50%') {
     const id = 'wf-label';
     const card = mount(id, 'running', [{ kind: 'user', text: 'the ask' }]);
     live(id);
-    dispatch({ type: 'harnessNote', nodeId: id, text: 'Continue from where you stopped.' });
+    dispatch({ type: 'harnessNote', nodeId: id, text: HARNESS_FACT_TEXT });
     const plain = labelOf(card);
     if (plain !== 'Work log') {
       problems.push(

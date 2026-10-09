@@ -12,7 +12,7 @@ gitignored, so a leftover is harmless). Before a release, confirm `npm run compi
 `npm run vscode:prepublish` — on a push to `main`, on a `v*` tag, on a pull request and on
 demand, so a red workflow and a red gate are the same thing instead of two lists that drift.
 
-Seventeen build-time guards are the exception (`check:image` runs the `check:png` /
+Eighteen build-time guards are the exception (`check:image` runs the `check:png` /
 `check:resample` / `check:jpeg` scripts with it), all run by `vscode:prepublish` so a
 regression fails *packaging* instead of the user's session:
 
@@ -93,6 +93,22 @@ regression fails *packaging* instead of the user's session:
   real window fills up — a wrong cut silently sends the entire dead history, or nothing
   at all — so they are pinned here. Like `check:signals` it is pure node against `out/`,
   and therefore also runs after `compile` in `vscode:prepublish`.
+- `npm run check:continue` (`tools/check-continue.js`, 86 checks) — the **transparent
+  re-issue / resume contract** (`invariants/api-retries.md`): the half of a failed turn that
+  used to be narrated to the model. It stubs `vscode` and drives the compiled `Agent` against
+  a scripted client, and pins: the ladder's own decision (`shouldReissueTransparently`, every
+  status class, both ceilings, and that it is pure), a request that streamed nothing being
+  re-issued **byte-identically**, a request that had streamed leaving exactly **one**
+  assistant checkpoint (never `tool_calls`, and `reasoning_content` kept whenever there was
+  reasoning — thinking mode refuses a content-only message), no user message or failure text
+  anywhere on those paths, the ladder stopping after `TRANSPARENT_ATTEMPTS` and surfacing the
+  ordinary `error`, a **completed tool round surviving** both an error and a Stop while the
+  incomplete tail goes, a Stop during the ladder taking the `interrupted` path instead, and
+  `Agent.resumeTurn()` speaking only the stranded-tool fact line. Its last section is the
+  source scan: `CONTINUE_MESSAGE` / `buildFailureContinue` must not exist anywhere in
+  `src/` — the two messages whose wording made a resume read as a restart. Needs `out/`
+  (`npm run compile` first) and is pure node, so like `check:signals` it runs after
+  `compile` in `vscode:prepublish`.
 - `npm run check:unicode` (`tools/check-unicode.js`) — text that stays **well-formed**, the
   one failure nothing local can see and the provider's reader rejects outright: `clipText` /
   `sliceText` must never return an unpaired UTF-16 surrogate for **any** cut position (a

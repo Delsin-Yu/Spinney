@@ -29,6 +29,7 @@ The window must be trusted. Spinney declares that it does not support an untrust
 - Press Stop to end the turn at the checked-out node: it aborts the turn, kills that node's background terminals and its sub-agent subtree, and nothing continues.
 - A prompt-snippet button at the left of the composer fills the input with a pre-written instruction: the shipped `Plan` / `Implement Parallel`, or your own rows from `spinney.promptSections`.
 - A full context window continues in a new one instead of being compressed, from the **⧉ Continue in a new window** button on the failed card.
+- A failed model call re-sends the same request by itself — up to three more times, six minutes for the turn — and the agent is never told: it carries on from the half-written answer, so it no longer redoes work it had already done. **▶ Continue** and **↻ Retry** resume the task the same way. A small `⟳ Silent retry` line on the card is the only trace.
 - An agent inspects the same history with `list_nodes`, and it can hand a task to a fresh session with `hop_session`, then take back that session's answer.
 
 ## Documentation
@@ -71,7 +72,7 @@ The local HTTP control plane is off by default. Turn it on only if you need it. 
 2. `npm run dev` — `compile` plus `sync:l10n`. The Chinese catalogs VS Code looks up are generated from the canonical ones, so a plain `npm run compile` leaves the manifest and host strings English in this window (`docs/agents/invariants/i18n.md`).
 3. Press F5. This opens an Extension Development Host window.
 
-Seventeen build guards run before packaging: `npm run check:models`, `npm run check:webview`, `npm run check:modeltree`, `npm run check:signals`, `npm run check:l10n`, `npm run check:rollover`, `npm run check:grid`, `npm run check:docs`, `npm run check:cwd`, `npm run check:shell`, `npm run check:kill`, `npm run check:timeout`, `npm run check:budget`, `npm run check:websearch`, `npm run check:image`, `npm run check:neterror`, and `npm run check:unicode`.
+Eighteen build guards run before packaging: `npm run check:models`, `npm run check:webview`, `npm run check:modeltree`, `npm run check:signals`, `npm run check:l10n`, `npm run check:rollover`, `npm run check:grid`, `npm run check:docs`, `npm run check:cwd`, `npm run check:shell`, `npm run check:kill`, `npm run check:timeout`, `npm run check:budget`, `npm run check:websearch`, `npm run check:image`, `npm run check:neterror`, `npm run check:unicode`, and `npm run check:continue`.
 
 Dev tooling lives in `tools/`: the guards, `sync-l10n-aliases.js` (the generated l10n aliases), the acceptance driver `harness-test.mjs`, `rollover-acceptance.js` (a windowless acceptance run for the context rollover), `modeltree-acceptance.js` (a windowless acceptance run for the Model Card Tree page's host half), `gate-acceptance.js` (a windowless acceptance run for the provider/card request gate), `model-switch-acceptance.js` (a windowless acceptance run for the per-node model selection), `exec-cwd-acceptance.js` (a windowless acceptance run for the working-directory and path-base contract, and the one acceptance run that is also a build guard), `collect-artifacts.mjs` (the collector behind `npm run artifacts`, which owns the `artifacts/` layout), the `hvsc` supervisor, and one migration script. A change under `tools/` needs no build and no reload; that folder is not shipped in the `.vsix`.
 
@@ -127,6 +128,7 @@ Spinney 是一个 VS Code 扩展。它把智能体放进一个编辑器标签页
 - 按 **停止** 会在检出的节点结束该回合：它中止这个回合，终止该节点拥有的后台终端和它的子智能体子树，之后不会有任何东西继续。
 - 输入框左侧的提示词片段按钮会把预写指令填入输入框：扩展自带的 `Plan` / `Implement Parallel`，或你在 `spinney.promptSections` 中自己添加的行。
 - 上下文窗口用满时会延续到一个新窗口，而不是被压缩：失败的那张卡片上有 **⧉ 在新窗口中继续** 按钮。
+- 模型调用失败时，Spinney 会自己把同一个请求再发一次 —— 最多再三次，一个回合计六分钟 —— 而且**不告诉智能体**：它从写到一半的回答接着往下写，不再重做已经做过的工作。**▶ 继续** 和 **↻ 重试** 也是同样地续写任务。卡片上那行 `⟳ 静默重试` 是唯一的痕迹。
 - 智能体用 `list_nodes` 查看同一段历史，也可以用 `hop_session` 把任务交给一个全新会话，然后取回那个会话的答案。
 
 ## 文档
@@ -169,7 +171,7 @@ Spinney 不发送任何遥测。它只连接你配置的服务商端点。一个
 2. `npm run dev` —— `compile` 加 `sync:l10n`。VS Code 会去查找的中文目录文件是由规范目录生成的，所以单纯跑 `npm run compile` 会让本窗口里的清单和宿主字符串保持英文（`docs/agents/invariants/i18n.md`）。
 3. 按 F5。这会打开一个扩展开发宿主窗口。
 
-打包前会运行十七个构建守卫：`npm run check:models`、`npm run check:webview`、`npm run check:modeltree`、`npm run check:signals`、`npm run check:l10n`、`npm run check:rollover`、`npm run check:grid`、`npm run check:docs`、`npm run check:cwd`、`npm run check:shell`、`npm run check:kill`、`npm run check:timeout`、`npm run check:budget`、`npm run check:websearch`、`npm run check:image`、`npm run check:neterror` 和 `npm run check:unicode`。
+打包前会运行十八个构建守卫：`npm run check:models`、`npm run check:webview`、`npm run check:modeltree`、`npm run check:signals`、`npm run check:l10n`、`npm run check:rollover`、`npm run check:grid`、`npm run check:docs`、`npm run check:cwd`、`npm run check:shell`、`npm run check:kill`、`npm run check:timeout`、`npm run check:budget`、`npm run check:websearch`、`npm run check:image`、`npm run check:neterror`、`npm run check:unicode` 和 `npm run check:continue`。
 
 开发工具位于 `tools/`：这些守卫、`sync-l10n-aliases.js`（生成的 l10n 别名）、验收驱动 `harness-test.mjs`、`rollover-acceptance.js`（上下文延续的无窗口验收运行）、`modeltree-acceptance.js`（模型卡片树页面宿主侧的无窗口验收运行）、`gate-acceptance.js`（服务商/卡片请求门闸的无窗口验收运行）、`model-switch-acceptance.js`（按节点选择模型的无窗口验收运行）、`exec-cwd-acceptance.js`（工作目录与路径基准契约的无窗口验收运行，也是唯一同时作为构建守卫的验收运行）、`collect-artifacts.mjs`（`npm run artifacts` 背后的收集器，由它掌管 `artifacts/` 的布局）、`hvsc` 监督进程，以及一个迁移脚本。改动 `tools/` 不需要构建，也不需要重载；该文件夹不会打进 `.vsix`。
 

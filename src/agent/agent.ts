@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { ApiError, RetryInfo } from './apiClient';
+import { ApiError, RetryInfo, isRetriableStatus } from './apiClient';
 import { ClientRegistry, QueueInfo } from './clients';
 import { ToolRegistry, resolvePath } from '../tools';
 import {
@@ -136,25 +136,33 @@ function describeTransform(t: ImageTransformRecord, scale: number): string {
 
 /**
  * Injected as an extra user message before a follow-up prompt when the previous
- * turn was interrupted (user pressed Stop). It tells the model that the partial
- * output of that turn was discarded, then leaves the decision to the model:
- * the next message may be a steering correction to continue the current task,
- * or a fresh request to start over. The model judges which is meant from the
- * message itself and the conversation history, so steering commands that tell
- * the agent to fix its reasoning are not force-restarted.
+ * turn was interrupted (user pressed Stop). It states what the history already
+ * holds — the response was cut off, and what it had written is above, unchanged —
+ * and then leaves the decision to the model: the next message may be a steering
+ * correction to continue the current task, or a fresh request to start over. The
+ * model judges which is meant from the message itself and the conversation
+ * history, so steering commands that tell the agent to fix its reasoning are not
+ * force-restarted.
+ *
+ * It must never claim the partial output was discarded or is gone:
+ * `preservePartialTurn` keeps the streamed text as a checkpoint in this very
+ * history, so the notice says where the model stopped instead of denying it. What
+ * a stop really leaves missing is the `tool` response of a call that was in
+ * flight, which is why that call is named (in the lead) rather than denied.
  *
  * When the stop landed while a tool call was being streamed, the notice is
  * prefixed with the specific tool that was interrupted so the model knows what
  * it was doing and can decide to re-issue it or correct it on the next turn.
  */
 const INTERRUPT_NOTICE_GENERIC =
-  '[Interruption notice] The user stopped your previous response before it was complete; its partial output was discarded. ';
+  '[Interruption notice] The user stopped your previous response before it was complete. ';
 
 const INTERRUPT_NOTICE_TAIL =
+  'What it had written so far is above, unchanged. ' +
   'Treat the next user message as your fresh input and decide for yourself how to proceed: ' +
   'if it reads as a steering correction or follow-up to the current task, continue that task and apply the correction; ' +
   'if it reads as a new or different request, start over. ' +
-  'Do not assume you must restart, and do not try to resume text that is no longer in the conversation.';
+  'Do not assume you must restart.';
 
 /** A partial tool call that was in progress when the user stopped the turn. */
 interface InterruptedToolCall {
@@ -233,9 +241,91 @@ function buildInterruptNotice(tools: InterruptedToolCall[]): string {
   const named = tools.filter((t) => t.name);
   const context = named.map(describeToolCall).join(' and ');
   const lead = context
-    ? `[Interruption notice] The user stopped your previous ${context} before it was complete; its partial output was discarded. `
+    ? `[Interruption notice] The user stopped your previous ${context} before it was complete, so that call did not finish; do not assume it completed. `
     : INTERRUPT_NOTICE_GENERIC;
   return lead + INTERRUPT_NOTICE_TAIL;
+}
+
+/**
+ * The **one** fact a resume may still tell the model: a tool call that was in
+ * flight when the Stop landed. Everything else about a Stop or a failed request
+ * is hidden — the model simply receives the history as it stands (see
+ * {@link Agent.resumeTurn}).
+ *
+ * This line is a pure statement of state, not a narrative: it does not say the
+ * user interrupted, does not ask for anything, and does not describe the
+ * failure. It exists because nothing else can tell the model that a call it may
+ * believe is running never finished — the call itself has no tool response in
+ * the history, and the model cannot tell "still running" from "cut off".
+ *
+ * English literal on purpose, deliberately **not** localized, like the
+ * `INTERRUPT_NOTICE` literals: it is model-facing text, and
+ * the reply language of the session must not change the fact the model reads.
+ *
+ * Returns undefined when no stranded call has a name (a stop before the tool name
+ * was decided carries no fact worth stating).
+ */
+function buildStrandedToolFact(tools: InterruptedToolCall[]): string | undefined {
+  const named = tools.filter((t) => t.name);
+  if (named.length === 0) {
+    return undefined;
+  }
+  return (
+    `[Harness] Your previous ${named.map(describeToolCall).join(' and ')} was cut off and did not finish; ` +
+    'do not assume it completed.'
+  );
+}
+
+/**
+ * How many WHOLE-REQUEST re-issues one turn may make **on top of** the client's
+ * own per-request ladder (`MAX_ATTEMPTS` in `apiClient.ts`, which still applies
+ * unchanged and inside each of these). Deliberately tiny: this ladder exists to
+ * hide a request that never got to produce anything, not to keep a broken
+ * connection alive — a turn that has already failed 10 attempts three times over
+ * is a provider outage, and the user has to see it.
+ */
+export const TRANSPARENT_ATTEMPTS = 3;
+
+/**
+ * Wall-clock budget for those re-issues, per turn. The ladder is bounded in time
+ * as well as in count, because each attempt carries its own watchdogs (a stalled
+ * first byte, a stalled stream) and 10 attempts of a slow failure can take
+ * minutes: past this deadline the failure surfaces exactly as it always did,
+ * while the model stays unaware of it.
+ */
+export const TRANSPARENT_BUDGET_MS = 6 * 60_000;
+
+/**
+ * Whether a failed model call may be re-issued as a whole request — the *same*
+ * request, byte for byte, with the history left exactly as it stands. Pure: no
+ * clock read of its own, no state, so the caller owns both the counter and the
+ * deadline it passes in.
+ *
+ * Two things are allowed to be transient here:
+ *  - **no status at all** (`undefined`): the request never reached a decision —
+ *    DNS/TLS/connection reset, or a body that broke off mid-stream. Nothing was
+ *    refused, so re-issuing the identical request on a fresh socket is the same
+ *    question asked again, which is exactly what a retry is for.
+ *  - a **{@link isRetriableStatus} status** (408/429/5xx): the provider answered
+ *    "not now" rather than "no".
+ *
+ * A 4xx that is *not* retriable (400/401/403/404…) is a **refusal**: the request
+ * itself is wrong or unauthorized, so re-issuing it repeats the same rejection
+ * while spending the budget the genuinely transient case needs. Those errors
+ * therefore surface to the user, and only the model stays unaware of the ones
+ * that did get re-issued.
+ */
+export function shouldReissueTransparently(
+  status: number | undefined,
+  reissuesUsed: number,
+  now: number,
+  deadline: number,
+): boolean {
+  return (
+    reissuesUsed < TRANSPARENT_ATTEMPTS &&
+    now < deadline &&
+    (status === undefined || isRetriableStatus(status))
+  );
 }
 
 /**
@@ -337,14 +427,19 @@ export class Agent {
       // Heal an assistant message that the API would reject: it must carry
       // content or tool_calls. If it has neither, mirror any reasoning into
       // content; if it has nothing at all (no content, no tool_calls, no
-      // reasoning), drop it entirely. The healed message is a **copy** — the
+      // reasoning), drop it entirely. **The mirror keeps the reasoning too**: a
+      // content-only message is refused by thinking mode (`The reasoning_content in
+      // the thinking mode must be passed back to the API.`), and this heal runs on
+      // every assembled request — so a history stored by a build that dropped it is
+      // repaired the next time the node is sent, not only newly written ones. The
+      // healed message is a **copy** — the
       // caller's objects are the persisted nodes' own messages (buildPath passes
       // `pathMessages(...)` by reference), and this function must never write
       // back into them.
       let out = msg;
       if (msg.role === 'assistant' && !msg.content && (!msg.tool_calls || msg.tool_calls.length === 0)) {
         if (msg.reasoning_content) {
-          out = { ...msg, content: msg.reasoning_content, reasoning_content: undefined };
+          out = { ...msg, content: msg.reasoning_content, reasoning_content: msg.reasoning_content };
         } else {
           continue;
         }
@@ -724,6 +819,29 @@ export class Agent {
     return this.isRunning;
   }
 
+  /**
+   * The head both turn entry points share ({@link sendUserMessage} and
+   * {@link resumeTurn}): arm the turn — flip it running, clear Stop, drop the
+   * images a previously aborted turn never flushed, install the fresh turn signal
+   * — and hand back the signal the turn runs on.
+   *
+   * The per-turn re-issue counter and its deadline are deliberately **not** here:
+   * they belong to `runTurn`, which is what actually makes the requests, so every
+   * new turn (typed prompt or resume) starts with a full ladder by construction.
+   */
+  private armTurn(): AbortSignal {
+    this.isRunning = true;
+    this.cancelled = false;
+    // Discard any image attached in a previously interrupted turn (it was never
+    // flushed as a user block, so it must not leak into this turn). The per-turn
+    // upload record goes with it: from this turn on, the provider's provenance is
+    // what knows about the earlier images (`uploadedThisTurn`).
+    this.pendingImages = [];
+    this.uploadedThisTurn.clear();
+    this.abortController = new AbortController();
+    return this.abortController.signal;
+  }
+
   sendUserMessage(content: string | ContentPart[]): void {
     if (this.isRunning) {
       return;
@@ -736,16 +854,7 @@ export class Agent {
       return;
     }
 
-    this.isRunning = true;
-    this.cancelled = false;
-    // Discard any image attached in a previously interrupted turn (it was never
-    // flushed as a user block, so it must not leak into this turn). The per-turn
-    // upload record goes with it: from this turn on, the provider's provenance is
-    // what knows about the earlier images (`uploadedThisTurn`).
-    this.pendingImages = [];
-    this.uploadedThisTurn.clear();
-    this.abortController = new AbortController();
-    const signal = this.abortController.signal;
+    const signal = this.armTurn();
 
     // If the previous turn was interrupted, let the model know its last output
     // was cancelled before we send the user's actual follow-up message. When the
@@ -757,15 +866,65 @@ export class Agent {
       this.lastInterruptedTools = [];
     }
 
-    // Everything appended during this turn; roll back on failure.
+    // Everything appended during this turn; rolled back on failure.
     this.messages.push({ role: 'user', content });
     const turnStartIndex = this.messages.length;
 
     void this.runTurn(signal, turnStartIndex);
   }
 
+  /**
+   * Resume this agent's turn **in place** — THE one entry point every resume path
+   * uses (the ▶ Continue button after a Stop, and the harness' own re-run of a
+   * turn whose model call failed). It puts *nothing* into the conversation on the
+   * model's behalf: no failure narrative, no "continue from where you stopped",
+   * no harness continue marker. The next request carries the history exactly as
+   * it stands, so a re-issued request is the same request, and a resumed turn
+   * continues the model's own last message instead of being told to start over.
+   *
+   * The one exception is a tool call that was in flight when the Stop landed: a
+   * call with no tool response is the only thing the history cannot express, so
+   * it is stated once as a pure fact ({@link buildStrandedToolFact}) — and only
+   * when the stop actually stranded a named call.
+   *
+   * Returns that fact line when one was pushed (so the caller can show the user
+   * what the model was told), and undefined when nothing was pushed — which
+   * includes the refusal to resume: this method is a no-op while a turn is
+   * already running.
+   *
+   * The per-turn bookkeeping is the same as a typed prompt's ({@link armTurn}):
+   * stale unflushed images are dropped, a fresh signal is installed, and the
+   * re-issue ladder starts over in `runTurn`.
+   */
+  resumeTurn(): string | undefined {
+    if (this.isRunning) {
+      return undefined;
+    }
+
+    const signal = this.armTurn();
+
+    let fact: string | undefined;
+    if (this.lastTurnInterrupted) {
+      fact = buildStrandedToolFact(this.lastInterruptedTools);
+      this.lastTurnInterrupted = false;
+      this.lastInterruptedTools = [];
+      if (fact) {
+        this.messages.push({ role: 'user', content: fact });
+      }
+    }
+
+    const turnStartIndex = this.messages.length;
+    void this.runTurn(signal, turnStartIndex);
+    return fact;
+  }
+
   private async runTurn(signal: AbortSignal, turnStartIndex: number): Promise<void> {
     try {
+      // The turn-level re-issue ladder's budget: created together where the turn
+      // starts, so the 3 re-issues and the 6-minute deadline cover the WHOLE turn
+      // — every assistant round of it, shared across rounds — rather than being
+      // handed back by each request.
+      const budget = { reissues: 0, deadline: Date.now() + TRANSPARENT_BUDGET_MS };
       while (true) {
         if (this.isStopped(signal)) {
           throw new Error('interrupted');
@@ -773,7 +932,7 @@ export class Agent {
 
         this.onEvent({ type: 'status', text: vscode.l10n.t('Thinking…') });
         const reqStart = Date.now();
-        const { message: assistant, indices, usage } = await this.requestAssistantMessage(signal);
+        const { message: assistant, indices, usage } = await this.requestRound(signal, budget);
         perf(
           () =>
             `assistant-round ${Date.now() - reqStart}ms msgs=${this.messages.length} ` +
@@ -854,16 +1013,24 @@ export class Agent {
         // interruption notice can name exactly what was stopped.
         this.markInterrupted(this.captureInterruptedToolCalls(err));
         // Preserve any partial output/reasoning streamed up to the interruption
-        // as a checkpoint, so the next turn can see where the model cut off and
-        // decide (with the interruption notice) whether to continue or restart.
+        // as a checkpoint, so the turn can be resumed (or continued by the user's
+        // next prompt) with the model's own last words still in the history and
+        // the finished rounds of the turn intact.
         this.preservePartialTurn(turnStartIndex, err instanceof InterruptedError ? err : undefined);
         this.onEvent({ type: 'interrupted' });
         return;
       }
 
-      // Non-interrupt error: roll back any partial assistant/tool messages added
-      // this turn so the transcript stays consistent for the next request.
-      this.messages.splice(turnStartIndex);
+      // Non-interrupt error: drop only the **incomplete tail** of this turn, never
+      // the whole turn. `sanitizeMessages` is the existing validity rule and is
+      // reused rather than re-derived: a turn's completed rounds — an assistant
+      // message whose tool_calls all have their tool responses — are finished work
+      // the model already paid for, and re-running them after a failure is exactly
+      // the re-do the user complained about. What must not survive is a dangling
+      // `assistant(tool_calls) -> tool(...)` block (the API rejects it on the next
+      // request) or an assistant message with neither content nor tool_calls, which
+      // is precisely what `sanitizeMessages` removes.
+      this.messages = Agent.sanitizeMessages(this.messages);
       const message = err instanceof Error ? err.message : String(err);
       this.onEvent({ type: 'error', message });
     } finally {
@@ -873,20 +1040,122 @@ export class Agent {
   }
 
   /**
+   * One assistant round with the **turn-level** re-issue ladder on top of the
+   * client's own per-request retry policy. `budget` is the turn's ladder state
+   * (its counter and its deadline), so the bound is per turn, not per request.
+   *
+   * A failure here is re-issued as the *same whole request* — the caller's while
+   * loop continues with `this.messages` untouched, so the model is asked exactly
+   * what it was asked before and told nothing about the failure. The one thing
+   * that may join the history is what the failure *streamed*: output the model
+   * itself produced is kept as its own assistant message (a checkpoint), because
+   * dropping it would both lose work and be a lie about what the request saw.
+   * That is the only difference between the four resume shapes — a re-issue with
+   * no checkpoint, and a re-issue with one, both inject no user message.
+   *
+   * Anything that is not transient ({@link shouldReissueTransparently}) is thrown
+   * unchanged, and a Stop is thrown unchanged before that test: the user's
+   * interruption is not a failure to paper over.
+   */
+  private async requestRound(
+    signal: AbortSignal,
+    budget: { reissues: number; deadline: number },
+  ): Promise<{ message: ChatMessage; indices: number[]; usage?: Usage }> {
+    while (true) {
+      // Fresh per round: one request's streamed partials, at most.
+      const partial = { content: '', reasoning: '' };
+      try {
+        return await this.requestAssistantMessage(signal, 0, partial);
+      } catch (err) {
+        // Stop wins: the interruption path is untouched (notice, checkpoint,
+        // `interrupted` event) and never becomes a silent re-issue.
+        if (this.isStopped(signal)) {
+          throw err;
+        }
+        const status = err instanceof ApiError ? err.status : undefined;
+        if (!shouldReissueTransparently(status, budget.reissues, Date.now(), budget.deadline)) {
+          throw err;
+        }
+        budget.reissues += 1;
+        // Keep the half-written output as the model's own assistant message before
+        // re-issuing, so the second request sees what the first one had already
+        // said — otherwise the model would repeat itself and the user would read
+        // the answer twice. No tool_calls ever ride along: they are always
+        // incomplete here (the stream died mid-write), and the API rejects an
+        // assistant message whose tool_calls have no responses.
+        if (partial.content || partial.reasoning) {
+          this.pushCheckpoint(partial.content, partial.reasoning);
+        }
+        this.onEvent({ type: 'retry', attempt: budget.reissues, max: TRANSPARENT_ATTEMPTS });
+        const attempt = budget.reissues;
+        const reason = (err instanceof Error ? err.message : String(err)).replace(/\s+/g, ' ').trim();
+        perf(
+          () =>
+            `reissue ${attempt}/${TRANSPARENT_ATTEMPTS} status=${status ?? 'none'} ` +
+            `checkpoint=${partial.content.length + partial.reasoning.length}chars ` +
+            `reason=${reason.length > 160 ? clipText(reason, 160) : reason}`,
+        );
+        // Loop: the next request is built from the same history (plus a checkpoint
+        // if there was one) and is byte-identical otherwise.
+      }
+    }
+  }
+
+  /**
+   * Keep streamed-but-unfinished output as a single checkpoint assistant message.
+   *
+   * Two provider rules meet here, and both are enforced:
+   *  - an assistant message carrying neither content nor tool_calls is rejected, so
+   *    reasoning that arrived with no answer text yet is mirrored into `content`;
+   *  - **thinking mode demands that thinking be passed back** — a content-only message
+   *    is answered with a 400, `The reasoning_content in the thinking mode must be
+   *    passed back to the API.` So the mirror does **not** consume the reasoning: when
+   *    there was no text, the same reasoning travels in both fields. Nothing is
+   *    invented and nothing is said twice by accident — it is one string that must be
+   *    in two places to be accepted.
+   *
+   * Never carries tool_calls: the calls of an unfinished message are incomplete by
+   * definition, and an assistant `tool_calls` block without its tool responses is
+   * exactly what the API refuses.
+   *
+   * Shared by the two places that must keep partial output — the Stop path
+   * ({@link preservePartialTurn}) and a re-issued request ({@link requestRound}) —
+   * so the rule exists once.
+   */
+  private pushCheckpoint(content: string, reasoning: string): void {
+    if (!content && !reasoning) {
+      return;
+    }
+    this.messages.push({
+      role: 'assistant',
+      content: content || reasoning || '',
+      // Kept whenever there is reasoning, including the mirrored case above: a
+      // checkpoint whose text came out of the model's own thinking must carry that
+      // thinking back, or the next request is refused outright.
+      reasoning_content: reasoning || undefined,
+    });
+  }
+
+  /**
    * On interruption, keep the partial output/reasoning streamed so far as a
    * single "checkpoint" assistant message (with no tool_calls — those are always
-   * incomplete when the user stops a turn). This lets the next turn see where the
-   * model was cut off, particularly its own reasoning, so it can self-correct
-   * rather than being force-restarted.
+   * incomplete when the user stops a turn), and drop only the turn's incomplete
+   * tail, so its finished tool rounds survive. Resuming therefore continues from
+   * the model's own last words with the work it already did still in the history,
+   * instead of re-deriving both.
    *
    * @param turnStartIndex index of the first message appended during this turn
    * @param streamed       interruption error carrying the streamed content/reasoning
    */
   private preservePartialTurn(turnStartIndex: number, streamed?: InterruptedError): void {
-    const added = this.messages.splice(turnStartIndex);
+    // The turn's tail, read *before* the history is narrowed: `sanitizeMessages`
+    // below may drop an interrupted `assistant(tool_calls)` message, and that
+    // message is the only place a stop that landed during tool execution left the
+    // text/reasoning it had already streamed.
+    const added = this.messages.slice(turnStartIndex);
 
     // Prefer the interrupting stream's partials; otherwise recover them from the
-    // most recently pushed assistant message (e.g. interruption during tool
+    // most recently appended assistant message (e.g. interruption during tool
     // execution), which is the one that was in progress when the user stopped.
     let content = streamed?.content ?? '';
     let reasoning = streamed?.reasoning ?? '';
@@ -904,22 +1173,17 @@ export class Agent {
       }
     }
 
-    // Keep only the partial text/reasoning; never carry incomplete tool_calls.
-    if (content || reasoning) {
-      // The chat-completion API rejects an assistant message that carries neither
-      // content nor tool_calls. If the user stopped the model while it was still
-      // emitting only reasoning (thinking) and produced no answer text yet, mirror
-      // that reasoning into content so the preserved checkpoint stays valid and is
-      // not lost from the history on the next turn.
-      const effectiveContent = content || reasoning || '';
-      this.messages.push({
-        role: 'assistant',
-        content: effectiveContent,
-        // Keep the raw reasoning alongside the content only when both exist; when
-        // only reasoning was streamed it is already mirrored into content above.
-        reasoning_content: content ? (reasoning || undefined) : undefined,
-      });
-    }
+    // Drop only the INCOMPLETE tail of the interrupted turn; the rounds it had
+    // already finished — an assistant's tool_calls together with every tool
+    // response for them — stay in the history, so resuming does not make the model
+    // re-run work it already did. `sanitizeMessages` is the existing rule for
+    // "API-valid prefix"; an interrupted `tool_calls` block has no responses and is
+    // exactly what must not survive.
+    this.messages = Agent.sanitizeMessages(this.messages);
+
+    // Keep only the partial text/reasoning; never carry incomplete tool_calls (see
+    // `pushCheckpoint` for why, and for the content/reasoning mirroring rule).
+    this.pushCheckpoint(content, reasoning);
   }
 
   /**
@@ -928,6 +1192,13 @@ export class Agent {
    * calls captured from the stream; when the stop landed during tool execution
    * the in-progress assistant message still carries fully-formed tool_calls, so
    * we describe those (without ever keeping them as a checkpoint).
+   *
+   * Only a call with **no response** of its own in the history counts as
+   * stranded. A round whose calls were all answered finished normally — the stop
+   * landed after it — and naming it would make the fact line
+   * ({@link buildStrandedToolFact}) claim that a call which really ran never
+   * finished. That distinction only started to matter when the resume stopped
+   * narrating a stop and began stating this one fact instead.
    */
   private captureInterruptedToolCalls(err: unknown): InterruptedToolCall[] {
     if (err instanceof InterruptedError && err.toolCalls && err.toolCalls.length > 0) {
@@ -935,12 +1206,24 @@ export class Agent {
     }
     for (let i = this.messages.length - 1; i >= 0; i--) {
       const msg = this.messages[i];
-      if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
-        return msg.tool_calls.map((tc) => ({
-          name: tc.function.name,
-          arguments: tc.function.arguments,
-        }));
+      if (msg.role !== 'assistant' || !msg.tool_calls || msg.tool_calls.length === 0) {
+        continue;
       }
+      const answered = new Set<string>();
+      for (let j = i + 1; j < this.messages.length; j++) {
+        const later = this.messages[j];
+        if (later.role === 'tool' && later.tool_call_id) {
+          answered.add(later.tool_call_id);
+        }
+      }
+      if (msg.tool_calls.every((tc) => answered.has(tc.id))) {
+        // The last tool round finished: nothing was cut off mid-call.
+        return [];
+      }
+      return msg.tool_calls.map((tc) => ({
+        name: tc.function.name,
+        arguments: tc.function.arguments,
+      }));
     }
     return [];
   }
@@ -1326,8 +1609,18 @@ export class Agent {
    * Stream one assistant response, assembling content and tool calls from the
    * incremental SSE chunks. Emits streamDelta / reasoningDelta / toolCallDelta
    * events for live rendering.
+   *
+   * `partial`, when the caller passes one, is filled with the content/reasoning
+   * streamed up to the moment this call throws — the raw material a whole-request
+   * re-issue needs to keep the model's own half-written output. Nothing else about
+   * this method changes: the InterruptedError normalisation below is untouched,
+   * and the image-retry recursion hands the same `partial` back in.
    */
-  private async requestAssistantMessage(signal: AbortSignal, imageRetry = 0): Promise<{ message: ChatMessage; indices: number[]; usage?: Usage }> {
+  private async requestAssistantMessage(
+    signal: AbortSignal,
+    imageRetry = 0,
+    partial?: { content: string; reasoning: string },
+  ): Promise<{ message: ChatMessage; indices: number[]; usage?: Usage }> {
     const toolCallMap = new Map<number, { id: string; name: string; arguments: string }>();
     let content = '';
     let reasoning = '';
@@ -1417,6 +1710,15 @@ export class Agent {
         throw new Error('interrupted');
       }
     } catch (err) {
+      // At the moment the request fails, hand the caller what was already
+      // streamed: a whole-request re-issue keeps it as the model's own assistant
+      // message instead of throwing away output the model has already produced.
+      // Copied on every throw path — the caller only reads it while an error is
+      // propagating, and the image retry below overwrites it if it runs again.
+      if (partial) {
+        partial.content = content;
+        partial.reasoning = reasoning;
+      }
       // A cancellation may surface either as our own 'interrupted' checks above
       // or as a network-level abort thrown by the stream generator. Normalize
       // both into an InterruptedError that carries the partial content/reasoning
@@ -1437,7 +1739,7 @@ export class Agent {
           type: 'status',
           text: vscode.l10n.t('The provider rejected an image; hiding it and retrying…'),
         });
-        return this.requestAssistantMessage(signal, imageRetry + 1);
+        return this.requestAssistantMessage(signal, imageRetry + 1, partial);
       }
       throw err;
     }

@@ -1518,6 +1518,30 @@
         value = obj[key] || '';
       }
     } catch {
+  /**
+   * The updating form of `addNotice`: a node-scoped notice the host keeps sending as
+   * its state advances (the silent-retry marker). A `noticeId` names the block, so a
+   * later message carrying the same id rewrites that element's text instead of
+   * appending a second one — one marker per run, however many attempts it takes.
+   * Without an id it is a plain `addNotice`.
+   */
+  function upsertNotice(kind, text, noticeId) {
+    if (noticeId) {
+      const kids = messagesEl ? messagesEl.children : [];
+      for (let i = kids.length - 1; i >= 0; i--) {
+        const node = kids[i];
+        if (node.dataset && node.dataset.noticeId === noticeId) {
+          node.textContent = text;
+          followActive();
+          return node;
+        }
+      }
+    }
+    const node = addNotice(kind, text);
+    if (node && noticeId) node.dataset.noticeId = noticeId;
+    return node;
+  }
+
       const m = String(args).match(/"path"\s*:\s*"((?:[^"\\]|\\.)*)"|"command"\s*:\s*"((?:[^"\\]|\\.)*)"/);
       value = m ? (m[1] || m[2] || '') : '';
     }
@@ -2575,7 +2599,11 @@
         if (last) last.appendChild(el('div', 'usage-line', formatUsage(item.usage)));
       }
     } else if (item.kind === 'notice') {
-      addNotice(item.noticeKind, item.text);
+      // A notice the host keeps updating in place carries its identity with it, so a
+      // repaint re-tags the element and the next message with that id rewrites this
+      // block instead of appending a second one (the silent-retry marker).
+      const notice = addNotice(item.noticeKind, item.text);
+      if (notice && item.noticeId) notice.dataset.noticeId = item.noticeId;
     } else if (item.kind === 'background') {
       addBackgroundNotice(item);
     } else if (item.kind === 'tool') {
@@ -6386,10 +6414,19 @@
         setStatus(tr('Error'));
         break;
       case 'notice':
-        // A notice carries no nodeId: it belongs to the card the view focuses, whose
-        // zone 2 is what `messagesEl` points at. It is appended *into* that log, so
-        // the answer zone has to give its run back first — the same rule `routeTo`
-        // enforces for every routed append.
+        // A notice may now be **node-scoped**: the silent-retry marker has to land in
+        // the log of the card that is retrying, which need not be the view focus, so
+        // a `nodeId` routes it exactly like the harness note above. Its `noticeId`
+        // names the block: the host keeps sending the same id as the attempts advance,
+        // and each message rewrites that element's text rather than appending another.
+        if (msg.nodeId) {
+          routeTo(msg.nodeId, () => upsertNotice(msg.kind, msg.text, msg.noticeId));
+          break;
+        }
+        // A notice with no nodeId carries no explicit target: it belongs to the card
+        // the view focuses, whose zone 2 is what `messagesEl` points at. It is
+        // appended *into* that log, so the answer zone has to give its run back first
+        // — the same rule `routeTo` enforces for every routed append.
         {
           const id = treeActiveId;
           const c = id ? nodeEls[id] : null;

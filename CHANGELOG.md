@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-09
+
+### Added
+
+- **A failed model call re-sends the request itself, and the agent is never told it happened.**
+  The client's ten transparent attempts stay exactly as they were; when they run out, the turn
+  now sends the **same whole request again** by itself — up to three more times, inside a
+  six-minute budget for the turn, each attempt still bounded by the stall watchdogs. The
+  conversation is re-sent as it stands: a request that had streamed nothing goes out
+  byte-identical, and one whose answer had already started leaves that half-written answer in
+  place as the model's own message and re-sends from there. No fabricated user turn, no "please
+  retry" note — the model sees the history it had, and the turn carries on. A break that used
+  to end a turn in an error and a nearly-restarted agent now usually passes unnoticed.
+- A marker line on the card (`⟳ Silent retry 1/3`, rewritten in place as the attempts advance)
+  is the only trace in the transcript: it lives in the card and never in what the model is
+  told. The status line keeps reporting every failed attempt, and the output channel logs one
+  line per re-issue.
+- `npm run check:continue` (`tools/check-continue.js`, 86 checks) — the guard behind all of
+  the above: the ladder's own decision, the byte-identical re-send, the checkpoint, the
+  narrowed rollback, and that no resume path writes a word into the model's history.
+
+### Changed
+
+- **▶ Continue and ↻ Retry resume the task instead of asking for a do-over.** Both used to
+  append a harness message to the conversation ("your previous request failed … nothing from
+  it is in this conversation. Redo the last request now."), which reads as *start over* and
+  made the agent repeat work it had already done. A resume now says nothing at all; the one
+  exception is a tool call that **Stop** cut off mid-flight, which is stated once as a plain
+  fact naming that call, because a missing tool response is the one thing a history cannot
+  express. **Stop** followed by a typed message is unchanged: that is a real interruption, and
+  the model is still told so — without the two claims that were not true (the partial output is
+  not discarded, and it is still in the conversation).
+- **A turn that fails or is stopped keeps the work it finished.** Both paths used to roll the
+  whole turn back — every completed tool call and its result — while the card kept showing it,
+  so the agent redid what its own transcript already displayed. Only the *incomplete* tail is
+  dropped now (an assistant `tool_calls` block with no answers cannot be sent), so a resumed
+  turn continues from the real state of the job.
+
+### Fixed
+
+- A resume after a stall that landed mid-**thinking** was refused by the provider with
+  `400 … The reasoning_content in the thinking mode must be passed back to the API.`: the
+  partial was mirrored into `content` and the reasoning itself was thrown away. The checkpoint
+  and `sanitizeMessages`' heal both keep it now, so a content-only assistant message is no
+  longer produced. **Sessions written by an earlier build** cannot be reconstructed (the text
+  is there, the field is not): continue from an earlier node, or use **⧉** if the card offers
+  it.
+
 ## [0.2.0] - 2026-10-02
 
 ### Added

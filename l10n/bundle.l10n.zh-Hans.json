@@ -1,5 +1,6 @@
 {
   "Model call failed ({0}/{1}); retrying in {2}…": "模型调用失败（{0}/{1}）；{2} 后重试…",
+  "⟳ Silent retry {0}/{1}": "⟳ 静默重试 {0}/{1}",
   "Waiting for a free request slot ({0} queued, {1} allowed at once)…": "正在等待空闲的请求槽位（已排队 {0} 个，同时允许 {1} 个）…",
   "Thinking…": "思考中…",
   "Done": "完成",

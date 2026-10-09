@@ -88,7 +88,7 @@ The first part holds your message. Spinney always shows this part, and it never 
 
 The second part is the work log. It holds the reasoning blocks, the tool cards, the notices, the background-job notices, the `HARNESS` blocks, and the text that the model wrote before a tool call. The work log scrolls. It is the only part that carries a green lock dot. The dot controls auto-scroll. The live turn starts locked. When a turn completes, the work log folds by itself into a one-line header. The header shows a chevron and a label. The label reads `Work log · 3 steps`. The number is the count of the tool cards. With no tool card, the label reads `Work log`. Click the header to unfold the work log again. A header that you clicked once stays as you left it. The automatic fold never overrules your click. The lock dot keeps the same rule. When you release the light of a card, the automatic fold stops folding or unfolding the work log of that card. The work log unfolds by itself again while a turn runs. The work log stays open when the card has no answer to show. Set `spinney.foldWork` to `false` to turn the automatic fold off (section 11). The blocks in the work log keep their own fold behaviour (see `spinney.foldThinking` and `spinney.foldToolCalls` below and in section 11).
 
-The third part is the answer. It holds the final message of the model. Spinney shows it at the bottom of the card, renders it as Markdown, and never folds it. The answer carries no lock dot. Spinney shows the answer only when the turn is at rest and the last item of the work log is the message of the model. The answer goes away when a newer item arrives in the work log, for example a background job, a sub-agent that reports in, a `HARNESS` block from **▶ Continue** or **↻ Retry**, or a new tool call. That message is in the work log again at that point. The text of an interrupted turn shows as the answer. The text of an errored turn does not show as the answer. The error stays in the work log.
+The third part is the answer. It holds the final message of the model. Spinney shows it at the bottom of the card, renders it as Markdown, and never folds it. The answer carries no lock dot. Spinney shows the answer only when the turn is at rest and the last item of the work log is the message of the model. The answer goes away when a newer item arrives in the work log, for example a background job, a sub-agent that reports in, a `HARNESS` block from **▶ Continue** or **↻ Retry**, the marker line of a silent retry (section 10.1), or a new tool call. That message is in the work log again at that point. The text of an interrupted turn shows as the answer. The text of an errored turn does not show as the answer. The error stays in the work log.
 
 When the card shows an answer and the work log stays open, the answer comes first, and the height of the answer alone makes the card taller. The work log keeps a strip of about 360 pixels, and it scrolls inside that strip. Drag the bottom-right corner of the card to make that strip taller. While a turn runs, there is no answer yet, and the card keeps that same strip height instead of growing with each tool call. The answer sits on its own surface under a divider line.
 
@@ -404,7 +404,7 @@ Spinney retries these failures:
 Spinney does not retry these failures:
 
 - HTTP `400`, `401`, `403`, `404`, or `422`. These cannot fix themselves.
-- A break in the middle of a stream. A retry would repeat output.
+- A break in the middle of a stream. This retry would repeat output. Spinney sends the whole request again instead (see below).
 - An image upload.
 - A wallet read.
 
@@ -412,19 +412,31 @@ Spinney does not retry these failures:
 
 A stalled request is bounded. Spinney waits 20 s for the first byte, 20 s for the first chunk, and 60 s between chunks. A stalled request shows `Thinking…` with `tok/s` at 0.
 
+Those ten attempts belong to one request. A failure that survives them does not end the turn. Spinney sends the same whole request again by itself, up to 3 more times, inside about 6 minutes for the whole turn.
+
+The agent learns nothing about those attempts. Spinney sends the conversation exactly as it stands. When the answer had already started, Spinney keeps the half-written answer as a message of the model, and sends the request again after it. No text arrives twice.
+
+A network error, a stalled stream, an HTTP `408`, an HTTP `429`, and a `5xx` get the new request. A refusal ends the turn at once.
+
+The card shows one marker line while Spinney sends the request again, for example `⟳ Silent retry 1/3`. Spinney rewrites that line as the attempts advance, so the work log holds one line, not one line for each attempt. The agent never reads that line.
+
+The status line reports the failed attempts and the waits, as it did before.
+
+When every attempt fails, the turn still ends in an error, and the card keeps its button (section 10.2).
+
 ### 10.2 The card buttons
 
 A card can carry one of three buttons, or two of them at once. The buttons depend on the state of the node.
 
 | Node state | Button | What it does |
 |---|---|---|
-| `interrupted` | **▶ Continue** | Sends a harness message and resumes the turn in the same card. The partial output stays. |
-| `error` | **↻ Retry** | Sends a harness message and runs the turn again from that node. The partial output of the failed turn is discarded. |
-| `error`, context at or above 90%, but not full | **↻ Retry** and **⧉ Continue in a new window** | Two buttons. Retry runs the turn again in this window. The other one offers a new window. Its tooltip shows the percentage. See section 10.3. |
+| `interrupted` | **▶ Continue** | Resumes the turn in the same card. The partial output stays. The agent is told nothing. When **Stop** stopped a tool call in the middle, the agent gets one short note that names that call, and the card shows the note. |
+| `error` | **↻ Retry** | Resumes the turn in the same card, from where it stopped. The finished rounds of the turn stay, so the agent does not repeat that work. The agent is told nothing. |
+| `error`, context at or above 90%, but not full | **↻ Retry** and **⧉ Continue in a new window** | Two buttons. Retry resumes the turn in this window. The other one offers a new window. Its tooltip shows the percentage. See section 10.3. |
 | `interrupted`, context at or above 90% | **⧉ Continue in a new window** | Offers a new context window. The tooltip shows the percentage. See section 10.3. |
 | `error`, context full | **⧉ Continue in a new window** | Starts a new context window. The window can be full by tokens or by image bytes. See section 10.3. |
 
-A button carries the work. You do not type the instruction yourself.
+A button carries the work. You do not type the instruction yourself. A **Stop** followed by a new message behaves as before: your message starts a normal turn (section 4.3).
 
 ### 10.3 A full context window
 
@@ -576,7 +588,7 @@ Open a folder in the same window, or close one, and Spinney switches the mode at
 |---|---|
 | `No API key configured for this provider.` | Set the key with `Spinney: Set API Key`, or on the model-cards page for a named provider. |
 | A request fails at once, with no retry | A `400`, `401`, `403`, `404`, or `422`. Read the message. The usual causes are a wrong key and a wrong model name. |
-| The status line repeats `retrying` | A network fault, a `429`, or a `5xx`. The status line cannot tell a dead socket from a provider error. Press **Stop** to end the wait. |
+| The status line repeats `retrying` | A network fault, a `429`, or a `5xx`. The status line cannot tell a dead socket from a provider error. Press **Stop** to end the wait. Spinney sends the whole request again by itself, up to 3 times, before the turn ends (section 10.1). |
 | `Thinking…` and `tok/s` at 0 for a long time | The stream stalled. The watchdogs end it after 20 s to 60 s. |
 | `ctx N%` looks wrong | It divides the prompt tokens of the **previous** request by the `contextWindow` of the card. Check the value of the card. |
 | No wallet figure | The `balance` value of the provider is `none`, or the read failed. Spinney reads the wallet once and never retries. |

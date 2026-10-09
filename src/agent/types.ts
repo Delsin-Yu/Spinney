@@ -224,6 +224,20 @@ export type AgentEvent =
     }
   | { type: 'done' }
   | { type: 'interrupted' }
+  | {
+      /**
+       * A whole-request re-issue after a transient model-call failure. The
+       * history is re-sent exactly as it stands (plus, when output had already
+       * started streaming, the half-written output as the model's own assistant
+       * message), so the model is told nothing — this event exists only so the
+       * UI can show that the same request is being made again.
+       */
+      type: 'retry';
+      /** The re-issue this turn is about to make, 1-based. */
+      attempt: number;
+      /** How many re-issues one turn may make in total. */
+      max: number;
+    }
   | { type: 'error'; message: string };
 
 /** A tool that the agent can invoke. */

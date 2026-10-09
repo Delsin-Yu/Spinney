@@ -265,7 +265,8 @@ node whose turn was opened by the harness.
 ## 6. The harness text
 
 Built by `SessionRuntime` (model-facing, therefore **deliberately English**, like
-`CONTINUE_MESSAGE` / `buildFailureContinue`, and never through `l10n.t`). Shape:
+the `[Harness]` fact line and the `INTERRUPT_NOTICE` literals, and never through
+`l10n.t`). Shape:
 
 ```
 [Harness: context window reset]
