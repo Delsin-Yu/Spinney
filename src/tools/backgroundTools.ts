@@ -82,7 +82,7 @@ export function makeCheckBackgroundTool(getAccess: () => BackgroundAccess | null
       function: {
         name: 'check_background_terminal',
         description:
-          'Check the status of a background terminal started by exec_command (timeout_behavior = background_when_timeout / start_in_background / start_detached). Returns whether it is running or finished, its exit code (when finished), and the output accumulated so far. This is how a detached job (start_detached) is read at all: it never sends a completion notice.',
+          'Check the status of a background terminal started by exec_command (timeout_behavior = background_when_timeout / start_in_background / start_detached). Returns whether it is running or finished, its exit code (when finished), and the output accumulated so far. This is a status read, not a wait: a job that has not finished answers the same thing however often it is asked, and calling it in a loop only burns round-trips. A node job (background_when_timeout / start_in_background) notifies you when it ends, so continue other work or end your turn instead of polling; a detached job (start_detached) never notifies, so read it once when you actually need its result.',
         parameters: {
           type: 'object',
           properties: {
@@ -135,7 +135,19 @@ export function makeCheckBackgroundTool(getAccess: () => BackgroundAccess | null
             : `Background terminal ${id} is running. (command: ${task.command}, ${dur} elapsed)`
           : `Background terminal ${id} finished with exit code ${task.exitCode ?? 'unknown'} after ${dur}.`;
       const outLine = out ? `\nOutput:\n${out}` : '';
-      return limitInline(`${statusLine}${outLine}`, 'check_background_terminal');
+      // A running job answers the same thing however often it is asked, and in the
+      // field an agent answered that with 46 checks back to back — so the status line
+      // carries what to do instead, at the moment the model is looking at it. A node
+      // job will wake the turn on its own; a detached one never will, and its reader
+      // is told the difference rather than promised a notice that cannot come.
+      const hint =
+        task.status !== 'running'
+          ? ''
+          : task.detached
+            ? `\nThis job never notifies: read it once when you actually need the result, not in a loop.`
+            : `\nYou may continue with other work or end your turn: the completion notice for id ${id} will ` +
+              `reach you when it finishes. Do not poll it — this is a status read, not a wait.`;
+      return limitInline(`${statusLine}${hint}${outLine}`, 'check_background_terminal');
     },
   };
 }
@@ -205,7 +217,7 @@ export function makeJoinBackgroundTool(getAccess: () => BackgroundAccess | null)
       function: {
         name: 'join_background',
         description:
-          'Block until a background terminal (by pid) finishes, then return its final exit code and full accumulated output. Respects Stop. Use to wait for a command you moved to the background and collect its result. A join is refused while the job still has more than the foreground limit of its budget left (spinney.commandMaxForegroundDuration, 300 s unless changed), because a turn must never wait longer than that — end your turn instead and let the completion notice arrive. A detached job (start_detached) is refused outright: it never notifies, so check_background_terminal is how its result is read.',
+          'Block until a background terminal (by pid) finishes, then return its final exit code and full accumulated output. Respects Stop. Use to wait for a command you moved to the background and collect its result. A join is refused while the job still has more than the maximum of its budget left (spinney.commandMaxForegroundDuration, 1800 s unless changed), because a turn must never wait longer than that — end your turn instead and let the completion notice arrive. A detached job (start_detached) is refused outright: it never notifies, so check_background_terminal is how its result is read.',
         parameters: {
           type: 'object',
           properties: {

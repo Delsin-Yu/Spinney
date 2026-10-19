@@ -201,9 +201,9 @@ const ROLLOVER_SETTLE_TIMEOUT_MS = 2000;
 
 /**
  * Fallback when `spinney.commandMaxForegroundDuration` is absent or not a positive
- * number: the 5 minutes the setting ships with.
+ * number: the 30 minutes the setting ships with.
  */
-const DEFAULT_COMMAND_MAX_FOREGROUND_DURATION_SEC = 300;
+const DEFAULT_COMMAND_MAX_FOREGROUND_DURATION_SEC = 1800;
 
 /**
  * **Nothing may hold a turn longer than this** — `spinney.commandMaxForegroundDuration`
@@ -212,6 +212,11 @@ const DEFAULT_COMMAND_MAX_FOREGROUND_DURATION_SEC = 300;
  * resume (`send_agent_message`) that is still running when the budget runs out stops
  * holding the turn — the tool returns the ids and the summaries arrive later as a
  * completion notice.
+ *
+ * The setting is the **ceiling**, not a command's default: `exec_command` gives a
+ * command `spinney.commandDefaultTimeout` when the call states none, and only the
+ * ceiling can refuse a stated `timeout`. A join and a batch wait are still bounded by
+ * the ceiling, because both are the turn being held.
  *
  * This is a deliberate **local** copy of `commandMaxForegroundDurationSec()` in
  * `src/tools/execCommand.ts` (the command-side half): importing that one would make

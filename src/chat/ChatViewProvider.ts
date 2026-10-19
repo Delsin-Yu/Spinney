@@ -2197,7 +2197,8 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       () =>
         `config effective maxSubagents=${cfg.maxConcurrentSubagents} maxLevel2=${cfg.maxLevel2Subagents} ` +
         `maxInlineToolOutput=${num('maxInlineToolOutput', 32768)} ` +
-        `commandMaxForegroundDuration=${num('commandMaxForegroundDuration', 300)}s ` +
+        `commandDefaultTimeout=${num('commandDefaultTimeout', 500)}s ` +
+        `commandMaxForegroundDuration=${num('commandMaxForegroundDuration', 1800)}s ` +
         `saveSessionTranscripts=${cfg.saveSessionTranscripts} saveSubAgentTranscripts=${cfg.saveSubAgentTranscripts} ` +
         `transcriptDir=${cfg.subAgentTranscriptDir || '(global storage)'} ` +
         `dataDir=${(raw.get<string>('dataDir') ?? '').trim() || '(default)'} ` +
