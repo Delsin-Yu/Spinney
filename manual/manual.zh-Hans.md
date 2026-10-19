@@ -367,6 +367,22 @@ Spinney 在以下情况下终止正在运行的任务：
 
 子智能体可以启动后台终端，但不能管理它。只有你能终止它。
 
+### 8.3 会话交接
+
+智能体可以把一个自包含的任务交给新会话。这个工具是 `hop_session`。新会话执行任务，Spinney 可以把答案带回本对话。
+
+| 事实 | 说明 |
+|---|---|
+| 开始 | hop 等当前回合结束。随后 Spinney 创建新会话，并把任务发到那里。新会话看不到本对话，因此任务必须完整。 |
+| 答案 | Spinney 把新会话的最终回复送回发起 hop 的节点，作为一条新分支。`returnNodeId` 可以指定另一个节点。 |
+| 安静送达 | 答案不会打开或聚焦本会话的标签页，不会移动已签出的节点，不会清空输入框，也不会询问冻结设置的问题。 |
+| 节点繁忙 | 如果接收答案的节点正忙，Spinney 会保留答案，等该节点空闲后再送达。 |
+| 不要答案 | `mode` 参数决定行为。默认模式是 `return_when_finished`。用 `mode: "fire_and_forget"` 时没有答案回来，Spinney 也不会往本对话里写入任何内容。 |
+| 每会话一个 | 同一会话同时只有一个在途 hop。另一个会话的 hop 不会阻塞它。 |
+| 限制 | 会话有正在运行的后台终端时，hop 会被拒绝。 |
+| 设置 | `spinney.hopSession.enabled` 用于开启或关闭该工具。默认开启。关闭时 `list_nodes` 与 `rename_session` 仍然可用。 |
+| 重载 | hop 列表只保存在内存中。重载窗口会丢弃在途的 hop。新会话保留自己的历史。 |
+
 ## 9. 图片
 
 用 **附加图片** 按钮附加图片，或把图片粘贴到输入框。待处理的附件显示为小图片，带一个 **×** 按钮。
@@ -481,6 +497,7 @@ Spinney 再次发送请求期间，卡片会显示一行标记，例如 `⟳ 静
 | `spinney.promptSections` | `{}` | 额外的提示词片段，以菜单中的名称为键。与自带片段同名的名称会替换其文本。 |
 | `spinney.commandMaxForegroundDuration` | `300` | 任何操作占用一个回合的最长时间，单位为秒。300 即 5 分钟。该上限只限制命令的前台部分。命令达到该上限时仍在运行，只有调用请求了后台取值才会离开本回合：`background_when_timeout` 或 `start_in_background`。`timeout` 长于该上限的命令必须请求其中一个。这两个取值都必须自带 `timeout`，否则 Spinney 会拒绝该调用。`start_detached` 从不占用回合，也可以没有截止时间。 |
 | `spinney.maxInlineToolOutput` | `32768` | 工具结果的大小上限，单位为字节。更大的结果会写入文件。`0` 关闭该上限。 |
+| `spinney.hopSession.enabled` | `true` | 允许智能体用 `hop_session` 把自包含任务交给新会话。已经冻结的会话仍保留该工具，但 Spinney 会拒绝调用。 |
 | `spinney.maxConcurrentSubagents` | `15` | 同时可以运行多少个第 1 层子智能体。多出的任务等待。 |
 | `spinney.maxLevel2Subagents` | `2` | 一个子智能体可以启动多少个子节点。 |
 | `spinney.autoSessionTitles` | `true` | 根据对话为会话命名。 |

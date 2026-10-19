@@ -367,6 +367,22 @@ After a restart, a job that was running shows as `interrupted`. A card never cla
 
 A sub-agent can start a background terminal, but it cannot manage one. Only you can kill it.
 
+### 8.3 Session handoff
+
+The agent can give a self-contained task to a new session. The tool is `hop_session`. The new session runs the task, and Spinney can bring the answer back to this conversation.
+
+| Fact | Detail |
+|---|---|
+| Start | The hop waits for the current turn to end. Then Spinney creates a new session and sends the task there. The new session cannot see this conversation, so the task must be complete. |
+| Answer | Spinney sends the final reply of the new session back to the node that started the hop, as a new branch. A `returnNodeId` names another node. |
+| Quiet delivery | The answer does not open or focus the tab of this session. It does not move the checked-out node. It does not clear the input box. It does not ask the frozen-setup question. |
+| Busy node | If the node that must receive the answer is busy, Spinney holds the answer and delivers it when the node is free again. |
+| No answer | The `mode` argument selects the behaviour. The default mode is `return_when_finished`. With `mode: "fire_and_forget"` no answer comes back, and Spinney writes nothing into this conversation. |
+| One per session | A session has one hop in flight at a time. A hop in another session does not block it. |
+| Limit | A hop is refused while the session has a running background terminal. |
+| Settings | `spinney.hopSession.enabled` turns the tool on and off. The default is on. `list_nodes` and `rename_session` stay available when it is off. |
+| Reload | The hop list lives in memory. A window reload drops a hop that is in flight. The new session keeps its history. |
+
 ## 9. Images
 
 Attach an image with the **Attach image** button, or paste one into the input box. Pending attachments show as small pictures with an **×** button.
@@ -481,6 +497,7 @@ All keys start with `spinney.`. Open the Settings UI, or edit `settings.json`.
 | `spinney.promptSections` | `{}` | Extra prompt snippets, keyed by the name in the menu. A name that matches a shipped snippet replaces its text. |
 | `spinney.commandMaxForegroundDuration` | `300` | The longest time anything may hold a turn, in seconds. 300 is 5 minutes. The limit caps only the foreground part of a command. A command that still runs at the limit leaves the turn only when the call asks for a background value: `background_when_timeout` or `start_in_background`. A `timeout` longer than the limit must ask for one of them. Both of those values need a `timeout` of their own, or Spinney refuses the call. `start_detached` never holds a turn, and it can have no deadline. |
 | `spinney.maxInlineToolOutput` | `32768` | The size limit of a tool result, in bytes. A larger result goes to a file. `0` turns the limit off. |
+| `spinney.hopSession.enabled` | `true` | Let the agent send a self-contained task to a new session with `hop_session`. A conversation that is already frozen keeps the tool, and Spinney refuses the call. |
 | `spinney.maxConcurrentSubagents` | `15` | How many level-1 sub-agents can run at once. Extra tasks wait. |
 | `spinney.maxLevel2Subagents` | `2` | How many children one sub-agent can start. |
 | `spinney.autoSessionTitles` | `true` | Name sessions from their conversation. |

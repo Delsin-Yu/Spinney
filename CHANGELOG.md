@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`hop_session` can hand the task over without a return trip.** The tool's `mode` argument
+  is `return_when_finished` (the default: the new session's answer comes back) or
+  `fire_and_forget` (the new session runs the task and nothing is delivered back — no receipt,
+  and nothing written into the origin's tree). `returnNodeId` is refused with the silent mode.
+- **`spinney.hopSession.enabled`** (default `true`) turns `hop_session` on and off, without
+  touching `list_nodes` / `rename_session`. It is read at every turn start and enforced at the
+  call, so a conversation that already froze its tool set keeps the schema and gets a refusal
+  instead of a rewritten prefix.
+- **Several hops at once, one per origin session.** A hop in another session no longer blocks
+  this one; the child index is what the return trip matches on.
+- `GET /state` reports the in-flight hops (`hops`) and how many answers are waiting for their
+  return node (`pendingReceipts`).
+- The user manual gains section 8.3 (session handoff) in all three languages.
+
+### Changed
+
+- **The hop answer comes back to the node that dispatched it**, not to whatever was checked
+  out when it returned, and it no longer steals the tab: it does not open or focus the origin's
+  tab, move its checkout, clear its composer, or ask the frozen-setup question. A receipt that
+  cannot start a turn (busy or locked return node, reload hold) now waits and lands later
+  instead of being dropped while the agent was told it succeeded.
+- `POST /session/start {returnTo:true}` now **requires `originSessionId`**. The origin was the
+  last focused tab, which is how an answer could land in the wrong conversation;
+  `sessionId + returnTo` and `returnTo + mode:"fire_and_forget"` are refused with a sentence
+  rather than silently ignored.
+- `rename_session` without `sessionId` renames the **caller's** session, not the focused tab.
+
+### Fixed
+
+- **A hop receipt can no longer be attributed to the wrong session.** The child's id is bound
+  the moment its session is created (before its first turn can start) and the return trip
+  matches on it; the old rule — "the first session created after the hop was armed that
+  finishes a turn" — could report back an unrelated conversation created while the hop was in
+  flight, and dropped the real child's answer.
+- Deleting a session retires every hop that touches it (origin **or** child). A hop whose child
+  was deleted used to stay armed forever, refusing every later hop with "already in progress".
+
 ## [0.3.0] - 2026-10-09
 
 ### Added

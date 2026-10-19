@@ -31,7 +31,7 @@
  * Usage:
  *   node tools/harness-test.mjs <suite...|all> [options]
  *
- *   Suites: health sessions concurrency navigation background signals branch selftest
+ *   Suites: health sessions concurrency navigation background signals branch hop selftest
  *
  *   --instance <pid-NNNN>    target that discovery instance (by id or file stem)
  *   --discovery <file>       target the control plane recorded in that JSON file
@@ -59,7 +59,7 @@ import * as path from 'node:path';
 // ---------------------------------------------------------------------------
 
 const EXT_ID = 'de-yu.spinney';
-const SUITES = ['health', 'sessions', 'concurrency', 'navigation', 'background', 'signals', 'branch', 'selftest'];
+const SUITES = ['health', 'sessions', 'concurrency', 'navigation', 'background', 'signals', 'branch', 'hop', 'selftest'];
 const DEFAULT_TIMEOUT_SEC = 180;
 const DEFAULT_INTERVAL_MS = 250;
 /** How long a suite waits for a turn's transcript dump to appear. */
@@ -2527,6 +2527,188 @@ async function suiteSelftestAll(cx) {
   return result;
 }
 
+
+// ---------------------------------------------------------------------------
+// Suite: hop — the answer comes back to the session that dispatched it
+// ---------------------------------------------------------------------------
+
+const HOP_RECEIPT_MARK = '[session hop receipt]';
+
+/** The session's transcript dumps, each with its meta line (the hop's evidence). */
+function sessionMetas(cx, sessionId) {
+  const out = [];
+  for (const file of sessionTranscriptFiles(cx.transcriptDir(sessionId))) {
+    let parsed;
+    try {
+      parsed = parseTranscriptJsonl(fs.readFileSync(file, 'utf8'));
+    } catch {
+      continue;
+    }
+    out.push({ file, nodeId: path.basename(file, '.jsonl'), meta: parsed.meta });
+  }
+  return out;
+}
+
+/**
+ * A hop over the control plane (`POST /session/start {returnTo:true}`):
+ *
+ *  - `returnTo` is refused without an explicit `originSessionId`, and with a
+ *    `sessionId` (a hop always creates a fresh session);
+ *  - the child's id is reported in `/state.hops` as soon as the child session
+ *    exists — that id, not a timestamp, is what the return trip matches on;
+ *  - a **decoy** session created while the hop is in flight, finishing first, must
+ *    not steal the receipt: the receipt names the child and contains no trace of
+ *    the decoy (this is the regression that made a hop answer land in the wrong
+ *    conversation);
+ *  - the receipt lands on the node the hop was dispatched from, in the origin
+ *    session, without focusing the origin's tab.
+ */
+async function suiteHop(cx) {
+  const checks = makeChecks();
+  const name = 'hop';
+
+  const noOrigin = await cx.client.startSession({
+    title: `harness-test ${cx.runId} HOP-NOORIGIN`,
+    prompt: `HARNESS-TEST ${cx.runId} HOP-NOORIGIN: reply with the single word "ok".`,
+    returnTo: true,
+  });
+  checks.check(
+    'returnTo without originSessionId is refused',
+    noOrigin.status === 409 && /originSessionId/.test(String(noOrigin.body?.error ?? '')),
+    `HTTP ${noOrigin.status}: ${noOrigin.body?.error ?? JSON.stringify(noOrigin.body)}`,
+  );
+
+  const withSessionId = await cx.client.startSession({
+    sessionId: 'harness-test-no-such-session',
+    prompt: 'x',
+    returnTo: true,
+    originSessionId: 'harness-test-no-such-session',
+  });
+  checks.check(
+    'returnTo + sessionId is refused (a hop creates its own session)',
+    withSessionId.status === 409 && /fresh session/i.test(String(withSessionId.body?.error ?? '')),
+    `HTTP ${withSessionId.status}: ${withSessionId.body?.error ?? JSON.stringify(withSessionId.body)}`,
+  );
+
+  const origin = await startSession(cx, { label: 'HOP', prompt: longRunPrompt(cx.runId, 'HOP', 20000) });
+  if (origin.fail) {
+    return suiteResult(name, 'FAIL', origin.fail, checks);
+  }
+  if (origin.skip) {
+    return suiteResult(name, 'SKIP', origin.skip, checks);
+  }
+
+  const armed = await cx.client.startSession({
+    title: `harness-test ${cx.runId} HOP-CHILD`,
+    prompt: longRunPrompt(cx.runId, 'HOP-CHILD', 25000),
+    returnTo: true,
+    originSessionId: origin.sessionId,
+  });
+  checks.check(
+    'a hop is accepted and queued',
+    armed.status === 202 && armed.body?.queued === true && armed.body?.originSessionId === origin.sessionId,
+    `HTTP ${armed.status}: ${JSON.stringify(armed.body)}`,
+  );
+
+  // The child's id must be in /state.hops before the child's first turn can end.
+  const armedPoll = await pollState(
+    cx,
+    (state) => {
+      const hop = Array.isArray(state.hops)
+        ? state.hops.find((h) => h && h.originSessionId === origin.sessionId)
+        : null;
+      return hop && typeof hop.targetSessionId === 'string' && hop.targetSessionId ? hop : undefined;
+    },
+    120000,
+  );
+  if (!armedPoll.ok) {
+    return suiteResult(
+      name,
+      'FAIL',
+      `the hop never reported a targetSessionId in /state.hops (${JSON.stringify(armedPoll.state?.hops ?? null)})`,
+      checks,
+    );
+  }
+  const childHop = armedPoll.value;
+  const childId = childHop.targetSessionId;
+  cx.ctx.created.push({
+    id: childId,
+    nodeId: null,
+    title: `harness-test ${cx.runId} HOP-CHILD`,
+    label: 'HOP-CHILD',
+    suite: cx.currentSuite,
+  });
+  checks.check(
+    'the hop names the node the answer goes back to',
+    typeof childHop.originNodeId === 'string' && childHop.originNodeId.length > 0,
+    String(childHop.originNodeId),
+  );
+
+  // A decoy created *while the hop is in flight*, with a short turn so it finishes
+  // before the child: the old timestamp rule would have reported its answer back.
+  const decoy = await startSession(cx, { label: 'HOP-X', prompt: longRunPrompt(cx.runId, 'HOP-X', 1500) });
+  if (decoy.fail) {
+    checks.check('the decoy session started', false, decoy.fail);
+  }
+  if (decoy.skip) {
+    checks.subskip('the decoy session started', decoy.skip);
+  }
+
+  const receipt = await pollUntil(
+    () =>
+      sessionMetas(cx, origin.sessionId).find((dump) =>
+        String(dump.meta?.prompt ?? '').startsWith(HOP_RECEIPT_MARK),
+      ),
+    { timeoutMs: 240000, intervalMs: 1000 },
+  );
+  if (!receipt.ok) {
+    return suiteResult(name, 'FAIL', 'no hop receipt landed in the origin session', checks);
+  }
+  const meta = receipt.value.meta ?? {};
+  const receiptText = String(meta.prompt ?? '');
+  checks.check('the receipt landed in the origin session', meta.sessionId === origin.sessionId, `meta.sessionId=${meta.sessionId}`);
+  checks.check(
+    'the receipt branches off the dispatch node',
+    meta.parentId === childHop.originNodeId,
+    `parent=${meta.parentId} dispatch=${childHop.originNodeId}`,
+  );
+  checks.check('the receipt names the child session', receiptText.includes(childId), childId);
+  if (!decoy.fail && !decoy.skip) {
+    checks.check(
+      'the receipt does not name the decoy session',
+      !receiptText.includes(decoy.sessionId),
+      `${decoy.sessionId} in "${receiptText.slice(0, 80)}"`,
+    );
+    checks.check(
+      'the decoy session has no receipt of its own',
+      sessionMetas(cx, decoy.sessionId).every((d) => !String(d.meta?.prompt ?? '').includes(HOP_RECEIPT_MARK)),
+    );
+  }
+
+  const settled = await cx.client.state();
+  const settledMap = sessionMap(settled.body);
+  checks.check(
+    'the hop is no longer in /state',
+    !Array.isArray(settled.body?.hops) || !settled.body.hops.some((h) => h && h.originSessionId === origin.sessionId),
+    JSON.stringify(settled.body?.hops ?? null),
+  );
+  checks.check('no receipt is left pending', Number(settled.body?.pendingReceipts ?? 0) === 0, String(settled.body?.pendingReceipts));
+  checks.check(
+    "the receipt did not focus the origin's tab",
+    settledMap.get(origin.sessionId)?.active === false,
+    `active=${settledMap.get(origin.sessionId)?.active}`,
+  );
+
+  const bad = checks.failures();
+  return suiteResult(
+    name,
+    bad.length ? 'FAIL' : 'PASS',
+    bad.length ? `${bad.length} check(s) failed` : `origin ${origin.sessionId} <- child ${childId}`,
+    checks,
+  );
+}
+
+
 // ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
@@ -2539,6 +2721,7 @@ const SUITE_FNS = {
   background: suiteBackground,
   signals: suiteSignals,
   branch: suiteBranch,
+  hop: suiteHop,
   selftest: suiteSelftestAll,
 };
 

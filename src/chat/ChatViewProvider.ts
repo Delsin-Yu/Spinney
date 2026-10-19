@@ -295,6 +295,7 @@ interface PendingHopStart {
 interface PendingReceipt {
   hop: Hop;
   prompt: string;
+  queuedAt: number;
   /** Dispatch attempts that found a free node but did not start a turn. */
   attempts: number;
 }
@@ -307,6 +308,12 @@ const HOP_RETRY_MS = 200;
  * merely busy or locked never counts: only an attempt that saw a free node counts.
  */
 const HOP_RECEIPT_MAX_ATTEMPTS = 1500;
+/**
+ * The longest a receipt waits for a return node that never frees up (30 minutes).
+ * The child's transcript is on disk, so dropping it is a log line and a lost
+ * resume, never lost work.
+ */
+const HOP_RECEIPT_MAX_WAIT_MS = 30 * 60 * 1000;
 
 /**
  * The Spinney output channel with the time stamp attached to every line written through it.
@@ -3153,6 +3160,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     const receipt: PendingReceipt = {
       hop,
       attempts: 0,
+      queuedAt: Date.now(),
       prompt:
         `[session hop receipt] The task you dispatched to the new session "${session.title}" (${session.id}) has finished (status: ${status}).\n` +
         `Its final reply:\n\n${clipped || '(the new session produced no text reply)'}\n\n` +
@@ -3191,6 +3199,9 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     if (!origin) {
       return drop('the origin session is gone');
     }
+    if (Date.now() - receipt.queuedAt > HOP_RECEIPT_MAX_WAIT_MS) {
+      return drop(`the return node stayed unavailable for ${Math.round(HOP_RECEIPT_MAX_WAIT_MS / 60000)} min`);
+    }
     const nodeId = hop.returnNodeId ?? hop.originNodeId;
     if (!nodeId || !origin.nodes[nodeId]) {
       return drop(`the return node ${nodeId || '(none)'} is gone`);
@@ -3211,20 +3222,32 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     this.pendingReceipts.splice(index, 1);
     receipt.attempts += 1;
     const before = Object.keys(origin.nodes).length;
-    void rt.onUserMessage(receipt.prompt, [], { basisNodeId: nodeId }).then(() => {
-      if (this.disposed) {
-        return;
-      }
-      if (Object.keys(origin.nodes).length > before) {
-        this.outputLog(`[hop] receipt delivered to ${hop.originSessionId} node ${nodeId}`);
-        return;
-      }
-      // The turn did not start (a race with a lock or the hold): put it back and let
-      // the drain retry, instead of losing the child's answer.
-      this.pendingReceipts.unshift(receipt);
-      this.outputLog('[hop] receipt could not start a turn yet; it stays queued');
-      this.kickHopWork(HOP_RETRY_MS);
-    });
+    void rt
+      .onUserMessage(receipt.prompt, [], { basisNodeId: nodeId })
+      .then(() => {
+        if (this.disposed) {
+          return;
+        }
+        if (Object.keys(origin.nodes).length > before) {
+          this.outputLog(`[hop] receipt delivered to ${hop.originSessionId} node ${nodeId}`);
+          return;
+        }
+        // The turn did not start (a race with a lock or the hold): put it back and let
+        // the drain retry, instead of losing the child's answer.
+        this.pendingReceipts.unshift(receipt);
+        this.outputLog('[hop] receipt could not start a turn yet; it stays queued');
+        this.kickHopWork(HOP_RETRY_MS);
+      })
+      .catch((err) => {
+        if (this.disposed) {
+          return;
+        }
+        this.pendingReceipts.unshift(receipt);
+        this.outputLog(
+          `[hop] receipt failed to start a turn: ${err instanceof Error ? err.message : String(err)} (it stays queued)`,
+        );
+        this.kickHopWork(HOP_RETRY_MS);
+      });
     return true;
   }
 
@@ -3282,7 +3305,11 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
                 `${hop.returnNodeId ?? hop.originNodeId}`,
             );
           } else {
-            this.outputLog(`[hop] child ${sessionId} (fire_and_forget: no receipt)`);
+            this.outputLog(
+              hop.mode === 'fire_and_forget'
+                ? `[hop] child ${sessionId} (fire_and_forget: no receipt)`
+                : `[hop] child ${sessionId} started, but this hop was disarmed while it started (no receipt)`,
+            );
           }
         },
       },
@@ -3294,16 +3321,29 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
 
   /**
    * Arm a hop on behalf of the control plane (`POST /session/start {returnTo:true}`):
-   * the same queue the tool uses, with the origin taken from the window's active
-   * session. Returns `{ok:true, queued:true}` — a hop is always asynchronous.
+   * the same queue the tool uses. The origin is **required** (`originSessionId`) and
+   * never inferred — the answer belongs to the conversation the caller names, not to
+   * whichever tab happens to have focus. Returns `{ok:true, queued:true}`: a hop is
+   * always asynchronous.
    */
-  private armHopFromControl(title: string | undefined, prompt: string, returnNodeId?: string): ControlResult {
+  private armHopFromControl(
+    title: string | undefined,
+    prompt: string,
+    returnNodeId: string | undefined,
+    originSessionId: string | undefined,
+  ): ControlResult {
     if (!prompt) {
       return { ok: false, error: 'returnTo requires a prompt (the task the fresh session runs)' };
     }
-    const origin = this.getActiveSession();
+    if (!originSessionId) {
+      return {
+        ok: false,
+        error: 'returnTo requires originSessionId: this API never guesses which session the answer belongs to',
+      };
+    }
+    const origin = this.sessions.find((s) => s.id === originSessionId);
     if (!origin) {
-      return { ok: false, error: 'returnTo needs an origin session, and this window has no active session' };
+      return { ok: false, error: `no such session: ${originSessionId}` };
     }
     if (this.hopsByOrigin.has(origin.id)) {
       return { ok: false, error: 'a session hop from this session is already in progress', busy: true };
@@ -3326,8 +3366,8 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     this.hopsByOrigin.set(origin.id, hop);
     this.pendingHopStarts.push({ hop, title: title || undefined, prompt });
     this.kickHopWork();
-    this.outputLog(`[http] session/start hop queued (${prompt.slice(0, 60)})`);
-    return { ok: true, queued: true };
+    this.outputLog(`[http] session/start hop queued for ${origin.id} (${prompt.slice(0, 60)})`);
+    return { ok: true, queued: true, originSessionId: origin.id };
   }
 
   /**
@@ -4393,6 +4433,15 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
           effort: rt ? rt.thinkingEffort : this.effectiveEffort(s, this.effectiveModel(s)),
         };
       }),
+      hops: this.allHops().map((hop) => ({
+        originSessionId: hop.originSessionId,
+        originNodeId: hop.originNodeId,
+        targetSessionId: hop.targetSessionId,
+        returnNodeId: hop.returnNodeId,
+        mode: hop.mode,
+        armedAt: hop.armedAt,
+      })),
+      pendingReceipts: this.pendingReceipts.length,
     };
   }
 
@@ -4562,7 +4611,26 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     }
     const prompt = (opts.prompt ?? '').trim();
     if (opts.returnTo) {
-      return this.armHopFromControl(opts.title, prompt, opts.returnNodeId);
+      // A hop is always asynchronous, and its origin is **explicit**: the control
+      // plane has no idea which conversation a caller means, and guessing "the last
+      // focused tab" is how an answer used to land in the wrong session.
+      if (opts.sessionId) {
+        return {
+          ok: false,
+          error: 'returnTo always creates a fresh session; drop sessionId (POST /continue brings a caller-supplied message back)',
+        };
+      }
+      const mode = parseHopMode(opts.mode);
+      if (!mode) {
+        return { ok: false, error: `unknown "mode": use "return_when_finished" or "fire_and_forget"` };
+      }
+      if (mode === 'fire_and_forget') {
+        return {
+          ok: false,
+          error: 'mode "fire_and_forget" cannot be combined with returnTo (nothing would return); drop returnTo for a fire-and-forget start',
+        };
+      }
+      return this.armHopFromControl(opts.title, prompt, opts.returnNodeId, opts.originSessionId);
     }
     if (opts.sessionId) {
       const session = this.sessions.find((s) => s.id === opts.sessionId);
