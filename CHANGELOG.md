@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A model card can lead web search with its provider's own search API.** `searchProvider`
+  is `builtin` (the keyless chain, the default) or `deepseek`: the DeepSeek search API
+  answers first, the built-in backends stay behind it as the fallback, and each hit carries
+  the API's long summary, its date and its rerank score. The card — not a setting — decides,
+  because the endpoint and the token are the card provider's: the request goes to that
+  provider's address with that provider's API key, and a separate token can be stored in the
+  Model Cards page (`spinney.searchKey.deepseek`) when the two are different accounts. The
+  built-in `deepseek-flash` card ships with it on; every other card, and every card that
+  leaves the field out, keeps the keyless chain and spends nothing. Also on the card: when
+  the local reader finds no text at all in a page (a client-rendered one), `web_fetch` now
+  falls back to that provider's fetch API — after the private-address check, on the final
+  URL — and says so in the result. New outcomes (`unauthorized`, `no-balance`,
+  `not-offered`, `disabled`) keep a wrong token, an empty wallet or a provider that does not
+  serve the path from being retried as if they were transient failures.
+
 ## [0.3.0] - 2026-10-09
 
 ### Added

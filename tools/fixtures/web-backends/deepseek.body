@@ -1,0 +1,52 @@
+{
+  "results": [
+    {
+      "rerank_score": 2.7,
+      "title": "DeepSeek V4 模型发布",
+      "url": "https://api-docs.deepseek.com/news/v4",
+      "snippet": "DeepSeek V4 已上线，支持工具调用与长上下文。",
+      "summary": "DeepSeek 发布了 V4 模型。此次发布改进了工具调用与长上下文能力，适合 Agent 工作流；API 与网页端同日开放。",
+      "content": "",
+      "site_name": "DeepSeek",
+      "site_icon": "https://api-docs.deepseek.com/favicon.ico",
+      "date": "2026-06-01T00:00:00+00:00",
+      "authority": 4
+    },
+    {
+      "rerank_score": 1.4,
+      "title": "DeepSeek V4 review: agent workflows",
+      "url": "https://example.com/blog/deepseek-v4-review?utm_source=newsletter",
+      "snippet": "A hands-on look at tool calling and long context in the new release.",
+      "summary": "We ran the new model against our agent harness: tool calls stayed stable across long sessions, and the context window handled a full repository without a rollover.",
+      "content": "",
+      "site_name": "Example Blog",
+      "site_icon": null,
+      "date": null,
+      "authority": 2
+    },
+    {
+      "rerank_score": 0.8,
+      "title": "DeepSeek 模型 对比 表格",
+      "url": "https://example.org/compare",
+      "snippet": "各版本参数对比。",
+      "summary": "",
+      "content": "",
+      "site_name": null,
+      "site_icon": null,
+      "date": "2025-11-20T08:30:00+00:00",
+      "authority": -1
+    },
+    {
+      "rerank_score": 2.4,
+      "title": "DeepSeek V4 模型发布",
+      "url": "https://api-docs.deepseek.com/news/v4?spm=a1z.1234",
+      "snippet": "同一个链接的另一种写法，用于验证去重。",
+      "summary": "重复条目：标题与正文都指向第一篇结果。",
+      "content": "",
+      "site_name": "DeepSeek",
+      "site_icon": null,
+      "date": "2026-06-01T00:00:00+00:00",
+      "authority": 4
+    }
+  ]
+}

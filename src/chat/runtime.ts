@@ -1183,6 +1183,10 @@ export class SessionRuntime {
         currentOwner: () => ({ sessionId: this.sessionId, nodeId: node.id }),
         hub: this.hub,
       });
+      // The two web tools read `searchProvider` off **this node's** card: the paid tier
+      // is the card's declaration, and the token it needs is that card's provider's —
+      // resolved live, so an edit in the Model Cards page applies to the next call.
+      tools.setWebCard(() => this.cardForNode(node));
       const agent = new Agent(this.clients, tools, (event) => this.handleAgentEventFor(node, event));
       agent.setCard(this.cardForNode(node));
       agent.setThinkingEffort(this.effortForNode(node));

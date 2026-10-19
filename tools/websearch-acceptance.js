@@ -79,6 +79,7 @@ function backend(id) {
 async function main() {
   console.log('\n== parsers against the saved responses ==');
   const EXPECTED = [
+    { id: 'deepseek', min: 3, note: 'documented result objects' },
     { id: 'bing-rss', min: 5, note: 'RSS items' },
     { id: 'bing', min: 5, note: 'b_algo blocks' },
     { id: 'so360', min: 5, note: 'res-list blocks' },
@@ -279,6 +280,155 @@ async function main() {
       backend('baidu').parse('<html><title>百度安全验证</title></html>').length === 0 &&
         backend('baidu').blocked.test('<title>百度安全验证</title>'),
     );
+  }
+
+  console.log('\n== the token-bearing row (a card with searchProvider: deepseek) ==');
+  {
+    const paid = fixture('deepseek');
+    const hits = backend('deepseek').parse(paid);
+    check(
+      'the long summary is what the model reads, not the one-line snippet',
+      /Agent 工作流/.test(hits[0].snippet || '') && (hits[0].snippet || '').length > 40,
+      hits[0] && hits[0].snippet,
+    );
+    check(
+      'the rerank score is normalised to 0–1 and the date is kept',
+      hits[0].rank === 2.7 / 3 && hits[0].date === '2026-06-01T00:00:00+00:00',
+      `${hits[0].rank} / ${hits[0].date}`,
+    );
+    check(
+      'a result with no summary falls back to its snippet, and a missing date stays absent',
+      (hits[2].snippet || '').includes('各版本参数对比') && hits[2].date === '2025-11-20T08:30:00+00:00' && hits[1].date === undefined,
+      JSON.stringify({ snippet: hits[2].snippet, date: hits[1].date }),
+    );
+
+    const originalFetch = globalThis.fetch;
+    const calls = [];
+    const answerWith = (status, body) =>
+      new Response(body, { status, headers: { 'content-type': 'application/json' } });
+    globalThis.fetch = async (url, init) => {
+      calls.push({ url: String(url), init: init || {} });
+      if (String(url).includes('/v1/tools/')) {
+        return answerWith(200, paid);
+      }
+      // Every keyless backend: a well-formed empty machine body (an honest "no results").
+      return answerWith(200, '{"items":[],"hits":[],"total_count":0,"results":[]}');
+    };
+    const access = (provider, token) => ({ provider, baseUrl: 'https://api.example', token });
+    try {
+      webBackends.resetHealth();
+      calls.length = 0;
+      const builtin = await webBackends.runWebSearch('deepseek 模型 发布', 3, {
+        access: access('builtin', 'unused-token'),
+        attemptTimeoutMs: 2_000,
+      });
+      check(
+        'a builtin card never calls the paid API',
+        !calls.some((call) => call.url.includes('/v1/tools/')),
+        calls.map((call) => call.url).join(', '),
+      );
+      check(
+        'and the paid row reports disabled, with the reason',
+        builtin.attempts[0] && builtin.attempts[0].id === 'deepseek' && builtin.attempts[0].outcome === 'disabled',
+        JSON.stringify(builtin.attempts[0]),
+      );
+
+      webBackends.resetHealth();
+      calls.length = 0;
+      const report = await webBackends.runWebSearch('deepseek v4 模型 发布', 3, {
+        access: access('deepseek', 'secret-token'),
+        attemptTimeoutMs: 2_000,
+      });
+      const post = calls.find((call) => call.url === 'https://api.example/v1/tools/search');
+      check(
+        'the request is a POST to the card provider root plus the documented path',
+        !!post && post.init.method === 'POST',
+        post ? `${post.init.method} ${post.url}` : 'no POST was made',
+      );
+      check(
+        'it carries the bearer token and the documented JSON body',
+        !!post &&
+          post.init.headers.authorization === 'Bearer secret-token' &&
+          JSON.parse(post.init.body).query === 'deepseek v4 模型 发布',
+        post ? `${post.init.headers.authorization} / ${post.init.body}` : undefined,
+      );
+      check(
+        'the paid hits lead the merged result',
+        report.hits[0] && report.hits[0].engine === 'deepseek',
+        report.hits[0] && report.hits[0].engine,
+      );
+      check(
+        'the paid row is the only place the paid token is used, and it never reaches the report',
+        !JSON.stringify(report).includes('secret-token'),
+      );
+      check(
+        'two spellings of one URL are merged (the fixture carries a tracked duplicate)',
+        report.hits.filter((hit) => hit.engine === 'deepseek').length === 3,
+        String(report.hits.filter((hit) => hit.engine === 'deepseek').length),
+      );
+
+      // Credential and capability answers are sentences, and each is its own outcome.
+      for (const [status, outcome] of [
+        [401, 'unauthorized'],
+        [402, 'no-balance'],
+        [404, 'not-offered'],
+        [429, 'rate-limited'],
+        [500, 'http-error'],
+      ]) {
+        webBackends.resetHealth();
+        globalThis.fetch = async () => answerWith(status, '{"error":{"message":"x"}}');
+        const { attempt } = await webBackends.attemptBackend(backend('deepseek'), 'q', 3, {
+          access: access('deepseek', 't'),
+          timeoutMs: 2_000,
+        });
+        check(`HTTP ${status} is classified as ${outcome}`, attempt.outcome === outcome, attempt.outcome);
+        if (status === 401) {
+          check(
+            'a rejected token sits out for hours, not two minutes',
+            webBackends.cooldownFor('deepseek', 'unauthorized') >= 60 * 60_000,
+          );
+        }
+      }
+      check(
+        'a QPS wall on the paid row is a minute, while a scraper keeps its ten',
+        webBackends.cooldownFor('deepseek', 'rate-limited') === 60_000 &&
+          webBackends.cooldownFor('baidu', 'rate-limited') === 10 * 60_000,
+      );
+      check(
+        'a provider that does not serve the path is told apart from a bad request',
+        webBackends.cooldownFor('deepseek', 'not-offered') >= 60 * 60_000,
+      );
+
+      // The fetch fallback: refused before anything is sent, and per-URL answers are
+      // sentences rather than cooldowns.
+      calls.length = 0;
+      const refused = await webFetch.fetchThroughApi('http://127.0.0.1/admin', access('deepseek', 't'));
+      check(
+        'a private URL is never handed to the fetch API',
+        typeof refused === 'string' && /not sent/.test(refused) && calls.length === 0,
+        String(refused),
+      );
+      globalThis.fetch = async () =>
+        answerWith(404, '{"error":{"message":"' + 'no content' + '"}}');
+      webBackends.resetHealth();
+      const gone = await webFetch.fetchThroughApi('https://example.com/page', access('deepseek', 't'));
+      check(
+        'a per-URL 404 comes back as a sentence and opens no cooldown',
+        typeof gone === 'string' && /404/.test(gone) && webBackends.backendCooldown('deepseek') === 0,
+        String(gone),
+      );
+      globalThis.fetch = async () =>
+        answerWith(200, JSON.stringify({ title: 'Rendered page', content: '# Rendered\n\nThe body.' }));
+      const page = await webFetch.fetchThroughApi('https://example.com/page', access('deepseek', 't'));
+      check(
+        'the fetch API returns its Markdown with the page title',
+        page && typeof page === 'object' && page.title === 'Rendered page' && page.content.includes('The body'),
+        JSON.stringify(page),
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+      webBackends.resetHealth();
+    }
   }
 
   console.log('\n== tool surface ==');

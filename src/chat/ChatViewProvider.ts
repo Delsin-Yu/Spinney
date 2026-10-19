@@ -10,14 +10,17 @@ import {
   DEFAULT_EFFORT,
   DEFAULT_MODEL,
   DEFAULT_PROVIDER_ID,
+  VENDORED_CARD,
   cardDisplayName,
   cards,
   contextWindowFor,
   normalizeEffort,
   parseCatalog,
+  providerById,
   providerSpecs,
   resolveCard,
   setCatalog,
+  type SearchProvider,
 } from '../agent/models';
 import {
   AgentSession,
@@ -68,7 +71,7 @@ import {
   clipDisplayItem,
 } from './runtime';
 import { SessionTreeItem } from './SessionsProvider';
-import { ModelTreeController, apiKeySecretName } from './modelTree';
+import { ModelTreeController, apiKeySecretName, searchKeySecretName } from './modelTree';
 import { resolvePromptSnippets } from './promptSnippets';
 import {
   removeTranscriptDir,
@@ -100,6 +103,7 @@ import {
   workReadout,
 } from '../perf';
 import { sliceText } from '../text';
+import { setSearchAccessResolver } from '../tools/webAccess';
 
 // Model cards, providers, context windows and image support all live in one
 // place: `src/agent/models.ts` (their editor is the Model Card Tree page,
@@ -655,8 +659,29 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       hasKey: (providerId) => this.clients.hasKey(providerId),
       storeKey: (providerId, key) => this.storeKeyFor(providerId, key),
       clearKey: (providerId) => this.clearKeyFor(providerId),
+      hasSearchToken: (dialect) => this.hasSearchKeyFor(dialect),
+      storeSearchToken: (dialect, token) => this.storeSearchKeyFor(dialect, token),
+      clearSearchToken: (dialect) => this.clearSearchKeyFor(dialect),
       onSaved: () => this.onModelCardsSaved(),
       log: (line) => this.output.appendLine(line),
+    });
+    // The two web tools ask this window one question per call: which engine leads, and
+    // with what token. It has to be a resolver, not a captured value — the answer is the
+    // **running node's** card (`ToolRegistry.setWebCard`), the endpoint is that card's
+    // provider, and the token may be typed while the session is open. `undefined` means
+    // no node (the self-test command): the vendored card answers, which is the shipped
+    // dialect.
+    setSearchAccessResolver(async (card) => {
+      const target = card ?? VENDORED_CARD;
+      const provider = providerById(target.providerId);
+      if (target.searchProvider !== 'deepseek') {
+        return { provider: 'builtin', baseUrl: provider.baseUrl, token: '' };
+      }
+      // The request goes to the card's own provider, so the token is that provider's
+      // key — the two can never come from different hosts. The stored search token is
+      // the override for when they are different *accounts*.
+      const token = (await this.readSearchKeyFor(target.searchProvider)) || (await this.readApiKeyFor(provider.id));
+      return { provider: target.searchProvider, baseUrl: provider.baseUrl, token };
     });
     // The panel manager needs only callbacks, so it can be built before the
     // sessions (runtimes post into it lazily).
@@ -801,6 +826,48 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   private async clearKeyFor(providerId: string): Promise<void> {
     await this.secrets?.delete(apiKeySecretName(providerId));
     await this.refreshKeys(`clearApiKey:${providerId}`);
+  }
+
+  // ---- search tokens (SecretStorage: one entry per dialect) ----
+
+  /**
+   * A search dialect's own token, or '' when none is stored. This is the **override**:
+   * a card's provider key is what authenticates its search request unless this is set,
+   * which is why the vendored card needs no extra configuration. It exists for the case
+   * the two are different keys — chat through a relay, search straight at the vendor —
+   * and it is read on every call, so a new token is live with the next `web_search`.
+   */
+  private async readSearchKeyFor(dialect: SearchProvider): Promise<string> {
+    if (!this.secrets) {
+      return '';
+    }
+    try {
+      return ((await this.secrets.get(searchKeySecretName(dialect))) ?? '').trim();
+    } catch (err) {
+      this.output.appendLine(
+        `[config] could not read the search token: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return '';
+    }
+  }
+
+  /** True when the dialect has its own token (the page shows "set" for it). */
+  private async hasSearchKeyFor(dialect: SearchProvider): Promise<boolean> {
+    return (await this.readSearchKeyFor(dialect)) !== '';
+  }
+
+  private async storeSearchKeyFor(dialect: SearchProvider, token: string): Promise<void> {
+    const value = (token ?? '').trim();
+    if (!value || !this.secrets) {
+      return;
+    }
+    await this.secrets.store(searchKeySecretName(dialect), value);
+    this.output.appendLine(`[config] search token (${dialect}): set`);
+  }
+
+  private async clearSearchKeyFor(dialect: SearchProvider): Promise<void> {
+    await this.secrets?.delete(searchKeySecretName(dialect));
+    this.output.appendLine(`[config] search token (${dialect}): cleared`);
   }
 
   /**

@@ -10,6 +10,13 @@ round-trip. The declaration lives **on the card** now — `contextWindow`,
 `vision.enabled`, `vision.transport` — where it sits next to the wire model name it
 describes and travels with the session that picked it (see `model-cards.md`).
 
+The same rule covers the one place a card names an **endpoint capability** rather than a
+model one: `searchProvider` (`builtin` | `deepseek`) says whether that card provider's
+search API may lead `web_search`. Nothing checks that the endpoint really serves
+`/v1/tools/search`; the first request answers it, and a provider that does not is reported
+as `not-offered` in one sentence instead of being probed on every call
+(`docs/agents/web-search.md` §"The paid row").
+
 ### Why not ask the API
 
 Measured against `https://api.deepseek.com` (2026-09):

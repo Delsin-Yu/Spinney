@@ -329,6 +329,19 @@
   }
 
   /**
+   * Which engine leads web search for a card: the keyless chain (`builtin`) or an
+   * engine that speaks an API and needs a token (`deepseek`).
+   *
+   * A **missing** value reads as `builtin` — the value that makes no request and spends
+   * nothing — so a snapshot from an older host, or a row this page has never heard of,
+   * still draws a usable select instead of throwing.
+   */
+  function normalizeSearchProvider(value) {
+    const raw = String(value == null ? '' : value).trim().toLowerCase();
+    return raw === 'deepseek' ? 'deepseek' : 'builtin';
+  }
+
+  /**
    * The reset targets of a snapshot (`ModelTreeDefaults`), as the page reads them:
    * every field coerced to the type the draft uses, so a host that sends a string
    * where a number belongs cannot put one into a form. Nothing here throws, and
@@ -358,6 +371,7 @@
       contextWindow: isCount(fields.contextWindow) ? fields.contextWindow : 0,
       concurrency: isCount(fields.concurrency) ? fields.concurrency : 0,
       vision: { enabled: !!vision.enabled, transport: normalizeTransport(vision.transport) },
+      searchProvider: normalizeSearchProvider(fields.searchProvider),
       // A fresh array on every read: a reset *assigns* it to the draft, and the
       // draft's own list is edited in place (a keystroke in a level box).
       efforts: Array.isArray(fields.efforts) ? fields.efforts.map(text) : [],
@@ -402,6 +416,20 @@
     return true;
   }
 
+  /**
+   * Which search engines have their own stored token, as a lookup the card form can read
+   * (`{ deepseek: true }`). Only the fact travels — the token itself never comes back to
+   * the page, exactly like a provider key.
+   */
+  function readSearchTokens(raw) {
+    const tokens = {};
+    for (const entry of Array.isArray(raw) ? raw : []) {
+      const dialect = text(entry && entry.dialect).trim().toLowerCase();
+      if (dialect) tokens[dialect] = !!(entry && entry.hasKey);
+    }
+    return tokens;
+  }
+
   function draftFromSnapshot(source) {
     return {
       providers: (source.providers || [])
@@ -428,6 +456,7 @@
             enabled: !!(card.vision && card.vision.enabled),
             transport: normalizeTransport(card.vision && card.vision.transport),
           },
+          searchProvider: normalizeSearchProvider(card.searchProvider),
           efforts: Array.isArray(card.efforts) ? card.efforts.map(text) : [],
           defaultEffort: text(card.defaultEffort),
           isBuiltin: !!card.isBuiltin,
@@ -436,6 +465,11 @@
       // A key the page has never seen: the value is only ever filled by typing.
       apiKeys: {},
       clearedKeys: [],
+      // Search tokens, same rule: only the fact that one exists travels, and a typed
+      // value lives in `searchKeys` until the next save writes the secret.
+      searchTokens: readSearchTokens(source.searchTokens),
+      searchKeys: {},
+      clearedSearchKeys: [],
     };
   }
 
@@ -577,12 +611,15 @@
         contextWindow: card.contextWindow,
         concurrency: card.concurrency,
         vision: { enabled: !!card.vision.enabled, transport: normalizeTransport(card.vision.transport) },
+        searchProvider: normalizeSearchProvider(card.searchProvider),
         efforts: card.efforts,
         defaultEffort: card.defaultEffort,
       })),
       defaultCardId: draft.defaultCardId,
       apiKeys: Object.keys(draft.apiKeys).map((providerId) => ({ providerId: providerId, key: draft.apiKeys[providerId] })),
       clearedKeys: draft.clearedKeys.slice(),
+      searchKeys: Object.keys(draft.searchKeys).map((dialect) => ({ dialect: dialect, key: draft.searchKeys[dialect] })),
+      clearedSearchKeys: draft.clearedSearchKeys.slice(),
     };
     return payload;
   }
@@ -1196,6 +1233,7 @@
       },
     });
     buildVisionFields(form, card);
+    buildSearchFields(form, card);
     buildEffortFields(form, card);
 
     const actions = el('div', 'mt-actions');
@@ -1301,6 +1339,117 @@
     }));
     row.appendChild(line);
     form.appendChild(row);
+  }
+
+  /**
+   * The web-search engine of a card, and the token its API needs.
+   *
+   * The select is the card's own **declaration** (`searchProvider`): `builtin` is the
+   * keyless chain this harness has always run, `deepseek` leads with the card provider's
+   * paid search API and keeps the keyless chain as its fallback.
+   *
+   * The token row below it is **one secret per engine for the whole extension**, not one
+   * per card — several cards may select the same engine — and the hint says which
+   * endpoint the request would go to and what would authenticate it (the engine's own
+   * stored token, or else the card provider's API key). The row is disabled, never
+   * hidden, while the engine is the keyless chain: that is this page's established shape
+   * for a companion control (like the image transport), so toggling the select cannot
+   * change the card's measured height.
+   */
+  function buildSearchFields(form, card) {
+    const row = fieldRow('searchProvider', tr('Web search'));
+    const line = el('div', 'mt-toggle-row');
+
+    const select = el('select', 'mt-input mt-transport-select');
+    select.dataset.field = 'searchProvider';
+    for (const option of [
+      // The keyless chain first: it is what a card does unless told otherwise, and it
+      // costs nothing — the paid engine is the opt-in.
+      { value: 'builtin', text: tr('Built-in backends') },
+      { value: 'deepseek', text: tr('DeepSeek Search') },
+    ]) {
+      const node = el('option');
+      node.value = option.value;
+      node.textContent = option.text;
+      if (option.value === normalizeSearchProvider(card.searchProvider)) node.selected = true;
+      select.appendChild(node);
+    }
+    select.value = normalizeSearchProvider(card.searchProvider);
+    select.title = tr('Web search engine');
+    select.setAttribute('aria-label', tr('Web search engine'));
+    line.appendChild(select);
+
+    const tokenRow = fieldRow('searchToken', tr('Search token'));
+    const hasToken = () => !!(draft.searchTokens && draft.searchTokens['deepseek']);
+    const tokenBadge = badge(hasToken() ? tr('Token set') : tr('Provider key'), hasToken() ? 'mt-badge-ok' : '');
+    tokenRow.appendChild(tokenBadge);
+    const input = el('input', 'mt-input');
+    input.type = 'password';
+    input.value = '';   // a stored token never travels back: the host only says `hasToken`
+    input.placeholder = tr('Paste the token');
+    input.disabled = normalizeSearchProvider(card.searchProvider) === 'builtin';
+    tokenRow.appendChild(input);
+
+    select.addEventListener('change', () => {
+      card.searchProvider = normalizeSearchProvider(select.value);
+      // State only, never a rebuild: the row's height and the card's geometry are the
+      // same either way, so the tree cannot move under the click.
+      input.disabled = card.searchProvider === 'builtin';
+      setDirty(true);
+      edit();
+    });
+
+    line.appendChild(resetButton({
+      current: () => normalizeSearchProvider(card.searchProvider),
+      target: () => normalizeSearchProvider(cardDefaults(card).searchProvider),
+      assign: (value) => {
+        card.searchProvider = normalizeSearchProvider(value);
+      },
+    }, (value) => {
+      select.value = normalizeSearchProvider(value);
+      input.disabled = normalizeSearchProvider(value) === 'builtin';
+    }));
+    row.appendChild(line);
+    form.appendChild(row);
+
+    const actions = el('div', 'mt-actions');
+    actions.appendChild(button(tr('Save token'), 'mt-btn', () => {
+      const value = input.value.trim();
+      if (!value) return;
+      draft.searchKeys['deepseek'] = value;
+      draft.clearedSearchKeys = draft.clearedSearchKeys.filter((dialect) => dialect !== 'deepseek');
+      if (!draft.searchTokens) draft.searchTokens = {};
+      draft.searchTokens['deepseek'] = true;
+      setDirty(true);
+      render();   // the badge and the hint lines change the form's height
+    }));
+    actions.appendChild(button(tr('Clear token'), 'mt-btn mt-danger', () => {
+      delete draft.searchKeys['deepseek'];
+      if (draft.clearedSearchKeys.indexOf('deepseek') < 0) draft.clearedSearchKeys.push('deepseek');
+      if (!draft.searchTokens) draft.searchTokens = {};
+      draft.searchTokens['deepseek'] = false;
+      setDirty(true);
+      render();
+    }));
+    tokenRow.appendChild(actions);
+    form.appendChild(tokenRow);
+
+    // The endpoint the request would go to, so the token is never a guess: the request
+    // goes to **this card's provider**, which is why an empty token can be enough.
+    const provider = providerById(card.providerId);
+    const baseUrl = provider ? String(provider.baseUrl || '').trim().replace(/\/+$/, '') : '';
+    const hint = el('div', 'mt-hint');
+    hint.textContent = tr('Shared by every card. Requests go to {0}.', baseUrl || tr('(no base URL)'));
+    form.appendChild(hint);
+    if (draft.searchKeys['deepseek']) {
+      const pending = el('div', 'mt-hint');
+      pending.textContent = tr('The new token is written with the next save.');
+      form.appendChild(pending);
+    } else if (draft.clearedSearchKeys.indexOf('deepseek') >= 0) {
+      const pending = el('div', 'mt-hint');
+      pending.textContent = tr('The token is removed with the next save; the provider key is used again.');
+      form.appendChild(pending);
+    }
   }
 
   /**
@@ -1569,6 +1718,7 @@
       contextWindow: seed.contextWindow,
       concurrency: seed.concurrency,
       vision: { enabled: !!seed.vision.enabled, transport: normalizeTransport(seed.vision.transport) },
+      searchProvider: normalizeSearchProvider(seed.searchProvider),
       efforts: seed.efforts.slice(),
       defaultEffort: seed.defaultEffort,
       isBuiltin: false,

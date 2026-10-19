@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { perf } from '../perf';
+import { searchAccessFor } from './webAccess';
 import { WEB_BACKENDS, probeAllBackends, type Attempt } from './webBackends';
 
 /**
@@ -22,13 +23,17 @@ import { WEB_BACKENDS, probeAllBackends, type Attempt } from './webBackends';
  */
 export async function runWebSearchSelfTest(): Promise<void> {
   const query = 'deepseek';
+  // No turn is running, so there is no node card: the host answers `undefined` with the
+  // vendored card, which is the shipped dialect and endpoint. That is exactly what this
+  // command measures — whether *this machine* can reach the index the build ships.
+  const access = await searchAccessFor(undefined);
   const attempts = await vscode.window.withProgress(
     {
       location: vscode.ProgressLocation.Notification,
       title: vscode.l10n.t('Testing web search backends…'),
       cancellable: false,
     },
-    () => probeAllBackends(query, { timeoutMs: 9_000 }),
+    () => probeAllBackends(query, { timeoutMs: 9_000, access }),
   );
 
   const byId = new Map(attempts.map((attempt) => [attempt.id, attempt]));
@@ -54,17 +59,20 @@ export async function runWebSearchSelfTest(): Promise<void> {
   lines.push('');
   lines.push(
     vscode.l10n.t(
-      'ok = results parsed · blocked = captcha or verify wall · rate-limited = HTTP 429/403 · timeout = no answer in time · parse-empty = the page loaded but no result could be read (the upstream markup changed) · unexpected = the body was not the format this backend publishes · http-error = the request or its status failed',
+      'ok = results parsed · blocked = captcha or verify wall · rate-limited = HTTP 429/403 · timeout = no answer in time · parse-empty = the page loaded but no result could be read (the upstream markup changed) · unexpected = the body was not the format this backend publishes · http-error = the request or its status failed · unauthorized / no-balance = the token was rejected / the account cannot pay · not-offered = that provider does not serve the search path · disabled = the model card did not opt in, or no token is configured',
     ),
   );
   lines.push('');
   lines.push(
-    vscode.l10n.t('Nothing needs configuring: web_search tries these in order and skips the ones that recently failed.'),
+    vscode.l10n.t(
+      'The keyless backends need no configuration: web_search tries them in order and skips the ones that recently failed. The first row is the model card\u2019s own search provider — it answers only when the card selects it and a token resolves.',
+    ),
   );
   lines.push('');
   lines.push('```');
   for (const backend of WEB_BACKENDS) {
-    lines.push(`${backend.id} → ${backend.build(query, 5)}`);
+    const url = backend.api && access.baseUrl ? `${access.baseUrl.replace(/\/+$/, '')}${backend.api.path}` : backend.build(query, 5);
+    lines.push(`${backend.id} → ${url}`);
   }
   lines.push('```');
 
