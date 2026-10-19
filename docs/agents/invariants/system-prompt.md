@@ -56,7 +56,7 @@
   gone answers the call as an ordinary tool error instead of gaining or losing a
   schema inside a prefix it has already sent.
 - **Capabilities are one judgement, used twice.** Each intercepted tool declares a
-  `requires` tag (`vision` / `spawn` / `spawnReadOnly` / `hop`) in
+  `requires` tag (`vision` / `spawn` / `spawnReadOnly` / `hop` / `hopSession`) in
   `src/agent/tools/*`; `interceptedDefinitions(capabilities)` filters that single
   list for `getTools()`, and those same flags are what the prompt's
   `## Delegation (when to hand work off)` guidance assumes. A non-vision model

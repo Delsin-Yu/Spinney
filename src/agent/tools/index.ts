@@ -17,7 +17,7 @@ import { spawnReadonlyAgentsTool } from './spawnReadonlyAgents';
  * filters this single list by the agent's capabilities, so the tool list the
  * model sees and the capabilities the prompt describes can never drift apart.
  */
-export type ToolRequirement = 'vision' | 'spawn' | 'spawnReadOnly' | 'hop';
+export type ToolRequirement = 'vision' | 'spawn' | 'spawnReadOnly' | 'hop' | 'hopSession';
 
 export interface InterceptedTool {
   definition: ToolDefinition;
@@ -33,8 +33,14 @@ export interface ToolCapabilities {
   canSpawn: boolean;
   /** May spawn / message read-only sub-agents. */
   canSpawnReadOnly: boolean;
-  /** Main agent only: hop to a fresh session, list the tree, rename the session. */
+  /** Main agent only: list the tree, rename the session. */
   canHop: boolean;
+  /**
+   * Main agent only, and only while `spinney.hopSession.enabled` is on: hand a
+   * task to a fresh session. Kept apart from `canHop` so switching hopping off
+   * never takes `list_nodes` / `rename_session` away.
+   */
+  hopEnabled: boolean;
 }
 
 /** Every intercepted tool, in the order it is advertised. */
@@ -59,6 +65,8 @@ function isAvailable(requires: ToolRequirement, caps: ToolCapabilities): boolean
       return caps.canSpawnReadOnly;
     case 'hop':
       return caps.canHop;
+    case 'hopSession':
+      return caps.hopEnabled;
   }
 }
 

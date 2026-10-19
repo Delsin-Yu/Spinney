@@ -401,6 +401,12 @@
             "default": 32768,
             "description": "%spinney.maxInlineToolOutput.description%",
             "scope": "window"
+          },
+          "spinney.hopSession.enabled": {
+            "type": "boolean",
+            "default": true,
+            "description": "%spinney.hopSession.enabled.description%",
+            "scope": "window"
           }
         }
       },

@@ -77,6 +77,28 @@ export interface ControlState {
   runningSubAgents: number;
   runningBackgrounds: boolean;
   sessions: ControlSessionInfo[];
+  /**
+   * The session hops this window is holding: one in flight per origin session, plus
+   * the children that were started and have not reported back yet. `targetSessionId`
+   * is absent while the child session does not exist (its origin turn is still
+   * running). Empty when nothing is hopping.
+   */
+  hops: ControlHopInfo[];
+  /** How many finished children are waiting for their return node to be free. */
+  pendingReceipts: number;
+}
+
+/** One in-flight session hop, as the control plane reports it. */
+export interface ControlHopInfo {
+  originSessionId: string;
+  /** The node the answer goes back to (`returnNodeId` overrides it). */
+  originNodeId: string;
+  /** The child session, once created. */
+  targetSessionId?: string;
+  returnNodeId?: string;
+  /** `return_when_finished` (the default) is the only armed kind; `fire_and_forget` never is. */
+  mode: 'return_when_finished' | 'fire_and_forget';
+  armedAt: number;
 }
 
 export interface ControlResult {
@@ -92,6 +114,8 @@ export interface ControlResult {
   prompted?: boolean;
   /** `POST /session/start`: the start was queued to run when the turn ends. */
   queued?: boolean;
+  /** `POST /session/start {returnTo}`: the origin session the answer goes back to. */
+  originSessionId?: string;
   /** `POST /stop`: how many agents (one per run) were cancelled. */
   stopped?: number;
 }
@@ -122,9 +146,9 @@ export interface ControlHost {
    * Start a session and optionally send a caller-supplied prompt as its first
    * turn. Without `sessionId` a fresh session is created (and titled from the
    * prompt); with it the caller jumps to that session instead. `returnTo` arms a
-   * hop: the fresh session's final answer is delivered back to the session that
-   * was active when the hop was queued, as a new branch off `returnNodeId` when
-   * that is given. `nodeId` checks out a node in the target session first.
+   * hop: the fresh session's final answer is delivered back to `originSessionId`
+   * (required — the API never guesses), as a new branch off `returnNodeId` when that
+   * is given. `nodeId` checks out a node in the target session first.
    */
   controlStartSession(opts: {
     sessionId?: string;
@@ -133,6 +157,10 @@ export interface ControlHost {
     prompt?: string;
     returnTo?: boolean;
     returnNodeId?: string;
+    /** The origin session of a `returnTo` hop; required with `returnTo`. */
+    originSessionId?: string;
+    /** `return_when_finished` (default) | `fire_and_forget`; the latter never hops. */
+    mode?: string;
   }): Promise<ControlResult>;
   /**
    * Reload this window (`workbench.action.reloadWindow`). The only way to restart
@@ -337,6 +365,8 @@ export class ControlServer implements vscode.Disposable {
           prompt: typeof body.prompt === 'string' ? body.prompt : undefined,
           returnTo: body.returnTo === true,
           returnNodeId: typeof body.returnNodeId === 'string' ? body.returnNodeId : undefined,
+          originSessionId: typeof body.originSessionId === 'string' ? body.originSessionId : undefined,
+          mode: typeof body.mode === 'string' ? body.mode : undefined,
         });
         send(result.ok ? (result.queued ? 202 : 200) : 409, result);
         return;

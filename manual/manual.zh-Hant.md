@@ -368,6 +368,22 @@ Spinney 會在這些情況下終止正在執行的工作：
 
 子代理可以啟動背景終端，但無法管理背景終端。只有你能終止它。
 
+### 8.3 工作階段交接
+
+代理可以把一個自包含的任務交給新工作階段。這個工具是 `hop_session`。新工作階段執行任務，Spinney 可以把答案帶回本對話。
+
+| 事實 | 說明 |
+|---|---|
+| 開始 | hop 等目前回合結束。隨後 Spinney 建立新工作階段，並把任務送到那裡。新工作階段看不到本對話，因此任務必須完整。 |
+| 答案 | Spinney 把新工作階段的最終回覆送回發起 hop 的節點，作為一條新分支。`returnNodeId` 可以指定另一個節點。 |
+| 安靜送達 | 答案不會開啟或聚焦本工作階段的標籤頁，不會移動已簽出的節點，不會清空輸入方塊，也不會詢問凍結設定的問題。 |
+| 節點忙碌 | 如果接收答案的節點正忙，Spinney 會保留答案，等該節點空閒後再送達。 |
+| 不要答案 | `mode` 參數決定行為。預設模式是 `return_when_finished`。用 `mode: "fire_and_forget"` 時沒有答案回來，Spinney 也不會往本對話裡寫入任何內容。 |
+| 每工作階段一個 | 同一工作階段同時只有一個在途 hop。另一個工作階段的 hop 不會阻塞它。 |
+| 限制 | 工作階段有正在執行的背景終端時，hop 會被拒絕。 |
+| 設定 | `spinney.hopSession.enabled` 用於開啟或關閉該工具。預設開啟。關閉時 `list_nodes` 與 `rename_session` 仍然可用。 |
+| 重載 | hop 清單只保存在記憶體中。重新載入視窗會丟棄在途的 hop。新工作階段保留自己的歷史。 |
+
 ## 9. 圖片
 
 用 **附加圖片** 按鈕附加圖片，或把圖片貼到輸入方塊中。待處理的附件會顯示為小圖片，並帶有 **×** 按鈕。
@@ -483,6 +499,7 @@ Spinney 再次傳送要求期間，卡片會顯示一行標記，例如 `⟳ 靜
 | `spinney.commandDefaultTimeout` | `500` | 呼叫沒有傳入 `timeout` 時，一條命令執行的時間，以秒為單位。500 即 8 分 20 秒。它只是預設值，不是上限：呼叫傳入的 `timeout` 按寫入的值使用，最多到 `spinney.commandMaxForegroundDuration`。它也是 `background_when_timeout` 在前景執行、隨後 Spinney 把命令移到背景的時間。 |
 | `spinney.commandMaxForegroundDuration` | `1800` | 單一命令在前景佔用一個回合的最長時間，以秒為單位。1800 即 30 分鐘。不超過該值的 `timeout` 按寫入的值使用。`timeout` 長於該值時，Spinney 拒絕該呼叫，除非它要求 `background_when_timeout` 或 `start_in_background`。這兩個取值都必須自帶 `timeout`，否則 Spinney 會拒絕該呼叫。`start_detached` 從不佔用回合，也可以沒有截止時間。`join_background` 也不會等待超過該值。 |
 | `spinney.maxInlineToolOutput` | `32768` | 工具結果的大小上限，以位元組為單位。更大的結果會寫入檔案。`0` 關閉上限。 |
+| `spinney.hopSession.enabled` | `true` | 允許代理用 `hop_session` 把自包含任務交給新工作階段。已經凍結的工作階段仍保留該工具，但 Spinney 會拒絕呼叫。 |
 | `spinney.maxConcurrentSubagents` | `15` | 同時可以執行多少個第 1 層子代理。多出的工作會等待。 |
 | `spinney.maxLevel2Subagents` | `2` | 一個子代理可以啟動多少個子項。 |
 | `spinney.autoSessionTitles` | `true` | 依對話為工作階段命名。 |

@@ -2,7 +2,7 @@
 The settings are contributed in **groups**: `contributes.configuration` is an array of
 `{ title, properties }` sections — Model & API (`model`, `providers`, `modelCards`) · Chat & Display
 (`replyLanguage`, `foldThinking`, `foldToolCalls`, `foldWork`, `promptSections`) · Tools & Execution
-(`commandDefaultTimeout`, `commandMaxForegroundDuration`, `maxInlineToolOutput`) · Sub-agents
+(`commandDefaultTimeout`, `commandMaxForegroundDuration`, `maxInlineToolOutput`, `hopSession.enabled`) · Sub-agents
 (`maxConcurrentSubagents`, `maxLevel2Subagents`) · Sessions & Transcripts (`autoSessionTitles`,
 `saveSessionTranscripts`, `saveSubAgentTranscripts`, `subAgentTranscriptDir`) ·
 Control Plane (`httpApi.*`). The
@@ -97,7 +97,15 @@ the title; the one-time historical backfill is keyed by the Memento marker
 **agent root** — the workspace folder, or the no-repo scratch folder
 `<globalStorage>/no-workspace`; now the root for **both** transcript kinds),
 `maxInlineToolOutput` (bytes, default `32768`; `0` = always inline — above it a
-tool result spills to `<agentRoot>/.spinney/tool-output/`). `SubAgentPool` clamps `maxConcurrentSubagents`
+tool result spills to `<agentRoot>/.spinney/tool-output/`),
+`hopSession.enabled` (default `true` — may the main agent hand a task to a fresh
+session with `hop_session`? Read **live at every turn start** and enforced in the
+handler as well, because a chain that already froze its tool set keeps advertising the
+schema and the epoch rules forbid rewriting a sent prefix: switching it off stops new
+chains from being offered the tool and makes the call fail with a sentence. Only the
+hop tool is affected — `list_nodes` / `rename_session` stay, which is why the
+capability is `hopEnabled` and not `canHop`; see `control-plane.md` §"Hop and hop
+back"). `SubAgentPool` clamps `maxConcurrentSubagents`
 to **≥ 1** (a non-positive limit would otherwise deadlock every sub-agent).
 `httpApi.enabled` (default `false` — the local control plane) and `httpApi.port`
 (default `0` = ephemeral).
@@ -143,7 +151,7 @@ no handling.
 | `foldToolCalls`, `foldThinking`, `foldWork` | immediately, incl. cards already on screen | pushed: `postConfig()` → the webview re-applies the default to existing cards (`foldWork` re-runs the card's automatic work-log fold after the push, which is how a finished card folds or unfolds without a repaint) |
 | `promptSections` | immediately, incl. a chat tab already open | pushed: `postConfig()` → the webview rebuilds the snippet menu from `snippets` (it keeps no copy of the list, and the shipped rows are merged in again on every push, so a renamed or emptied row shows up at once) |
 | `httpApi.enabled`, `httpApi.port` | immediately | pushed: `ControlServer.restart()` (rebind the listener; disabling just leaves `start()` a no-op) |
-| `commandDefaultTimeout`, `commandMaxForegroundDuration`, `maxInlineToolOutput`, `maxLevel2Subagents`, `saveSessionTranscripts`, `saveSubAgentTranscripts`, `subAgentTranscriptDir`, `autoSessionTitles` | immediately | pulled at the point of use (they already were — no listener needed; both command numbers are read **per call** — an `exec_command` invocation, a join, a spawn — and never cached, so a change applies to the next call and never to a call already waiting) |
+| `commandDefaultTimeout`, `commandMaxForegroundDuration`, `maxInlineToolOutput`, `maxLevel2Subagents`, `saveSessionTranscripts`, `saveSubAgentTranscripts`, `subAgentTranscriptDir`, `autoSessionTitles`, `hopSession.enabled` | immediately | pulled at the point of use (they already were — no listener needed; both command numbers are read **per call** — an `exec_command` invocation, a join, a spawn — and never cached, so a change applies to the next call and never to a call already waiting. `hopSession.enabled` is read at every turn start (`workerFor` → `Agent.setHopEnabled`) and again in `handleHopSession`) |
 
 - **`model` / `thinkingEffort` arbitration (P4):** the selection belongs to the **node**.
   A turn records the card and level it ran with on the node it creates; a follow-up

@@ -133,8 +133,9 @@
   counters but builds **no** history (`buildPath` runs at `beginTurn`), so a session
   nobody opened never pays for an agent history.
 - **Deleting a session** (`deleteSessionNow`) drops its runtime (killing the background
-  terminals it owns), its tab, its transcript dumps, and any queued session start / armed hop
-  pointing at it; `finishDeletions` then keeps the window with at least one session, moves the
+  terminals it owns), its tab, its transcript dumps, and every hop that touches it (as
+  origin or as the child — the armed record, the queued start and the waiting receipt
+  all go); `finishDeletions` then keeps the window with at least one session, moves the
   active pointer and persists/refreshes **once**. The sidebar is **multi-select**
   (`canSelectMany`): the inline trash bucket on an item that is part of a multi-selection deletes
   the **whole selection** (`deleteSessionsInteractive`) behind one modal — the context menu is
