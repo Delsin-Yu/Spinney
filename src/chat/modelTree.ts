@@ -27,6 +27,7 @@ import {
   FRESH_PROVIDER_DEFAULTS,
   newId,
   parseCatalog,
+  SearchProvider,
 } from '../agent/models';
 
 /** The pre-card SecretStorage entry; the built-in provider keeps using it. */
@@ -39,6 +40,23 @@ export const LEGACY_API_KEY_SECRET = 'spinney.apiKey';
  */
 export function apiKeySecretName(providerId: string): string {
   return providerId === DEFAULT_PROVIDER_ID ? LEGACY_API_KEY_SECRET : `${LEGACY_API_KEY_SECRET}.${providerId}`;
+}
+
+/**
+ * The engines that speak a search API and therefore need a token. `builtin` is the
+ * keyless chain and needs none. A dialect gets its own SecretStorage entry so a future
+ * one can never read another vendor's key.
+ */
+export const SEARCH_DIALECTS: readonly SearchProvider[] = ['deepseek'];
+
+/**
+ * Where a search token lives: `spinney.searchKey.<dialect>`, a **second** namespace, so
+ * a provider that happens to be called "search" cannot collide with it. It is an
+ * *override*: when it is empty the card's own provider key is what authenticates the
+ * request, which is why the vendored card searches the paid index with no extra setup.
+ */
+export function searchKeySecretName(dialect: SearchProvider): string {
+  return `spinney.searchKey.${dialect}`;
 }
 
 /** A parsed row of the settings, before the page's view shape is built. */
@@ -58,6 +76,12 @@ export interface ModelTreeControllerOptions {
   storeKey(providerId: string, key: string): Promise<void>;
   /** Forget a provider's key. */
   clearKey(providerId: string): Promise<void>;
+  /** True when a search token is stored for a dialect (`spinney.searchKey.<dialect>`). */
+  hasSearchToken(dialect: SearchProvider): Promise<boolean>;
+  /** Store a search token for a dialect (SecretStorage). */
+  storeSearchToken(dialect: SearchProvider, token: string): Promise<void>;
+  /** Forget a dialect's search token (the provider key takes over again). */
+  clearSearchToken(dialect: SearchProvider): Promise<void>;
   /**
    * Called after a successful save: re-read the three settings keys, reinstall
    * the catalog, push the change into every live session and refresh balances.
@@ -165,6 +189,7 @@ export class ModelTreeController {
       contextWindow: card.contextWindow,
       concurrency: card.concurrency,
       vision: card.vision,
+      searchProvider: card.searchProvider,
       efforts: card.efforts,
       defaultEffort: card.defaultEffort,
       // The **vendored** card is the built-in one: it cannot be deleted, and its reset
@@ -180,6 +205,11 @@ export class ModelTreeController {
       // the parser reports issues (`CatalogIssue`), and the English sentence its output
       // channel prints is only one of the two readings (`ISSUE_TEXT` below).
       errors: parsed.issues.map(issueText),
+      // Only whether a token exists, never its value: the page shows "set"/"missing",
+      // exactly as it does for a provider key.
+      searchTokens: await Promise.all(
+        SEARCH_DIALECTS.map(async (dialect) => ({ dialect, hasKey: await this.opts.hasSearchToken(dialect) })),
+      ),
       defaults: {
         builtin: { provider: BUILTIN_PROVIDER_DEFAULTS, card: BUILTIN_CARD_DEFAULTS },
         fresh: { provider: FRESH_PROVIDER_DEFAULTS, card: FRESH_CARD_DEFAULTS },
@@ -230,6 +260,7 @@ export class ModelTreeController {
         contextWindow: Math.floor(card.contextWindow),
         concurrency: Math.floor(card.concurrency) || 0,
         vision: { enabled: card.vision.enabled, transport: card.vision.transport },
+        searchProvider: card.searchProvider,
         efforts: card.efforts.map((level) => level.trim()),
         defaultEffort: card.defaultEffort,
       };
@@ -261,6 +292,20 @@ export class ModelTreeController {
     }
     for (const providerId of save.clearedKeys ?? []) {
       await this.opts.clearKey(providerId);
+    }
+    // The search token is one secret **per dialect**, not per card: several cards may
+    // select the same engine, and a save from any of them writes the same entry. An
+    // empty value is not a write — clearing is its own request, exactly like a key.
+    for (const entry of save.searchKeys ?? []) {
+      const token = (entry?.key ?? '').trim();
+      if (token && isSearchDialect(entry?.dialect)) {
+        await this.opts.storeSearchToken(entry.dialect, token);
+      }
+    }
+    for (const dialect of save.clearedSearchKeys ?? []) {
+      if (isSearchDialect(dialect)) {
+        await this.opts.clearSearchToken(dialect);
+      }
     }
 
     this.opts.onSaved();
@@ -353,6 +398,9 @@ function validatePayload(payload: ModelTreeSave | undefined): string[] {
     } else if (!isTransport(card.vision.transport)) {
       errors.push(vscode.l10n.t('Card "{0}": the image transport must be "openai" or "deepseek".', label));
     }
+    if (!isSearchProvider(card.searchProvider)) {
+      errors.push(vscode.l10n.t('Card "{0}": the web search engine must be "builtin" or "deepseek".', label));
+    }
     const levels = Array.isArray(card.efforts) ? card.efforts.map((l) => String(l ?? '').trim()) : [];
     if (levels.length === 0 || levels.some((level) => !level)) {
       errors.push(vscode.l10n.t('Card "{0}": list at least one thinking level.', label));
@@ -369,6 +417,11 @@ function validatePayload(payload: ModelTreeSave | undefined): string[] {
   for (const entry of payload.apiKeys ?? []) {
     if (!providerIds.has((entry?.providerId ?? '').trim())) {
       errors.push(vscode.l10n.t('An API key was sent for a provider that does not exist.'));
+    }
+  }
+  for (const entry of payload.searchKeys ?? []) {
+    if (!isSearchDialect(entry?.dialect)) {
+      errors.push(vscode.l10n.t('A search token was sent for an engine this build does not know.'));
     }
   }
   return errors;
@@ -410,6 +463,16 @@ function isTransport(value: unknown): boolean {
   return value === 'openai' || value === 'deepseek';
 }
 
+/** A `searchProvider` the settings may hold: the keyless chain, or an engine with an API. */
+function isSearchProvider(value: unknown): value is SearchProvider {
+  return value === 'builtin' || value === 'deepseek';
+}
+
+/** A search dialect this build knows (i.e. one whose token has a home in SecretStorage). */
+function isSearchDialect(value: unknown): value is SearchProvider {
+  return SEARCH_DIALECTS.includes(value as SearchProvider);
+}
+
 function isCount(value: unknown): boolean {
   return typeof value === 'number' && Number.isFinite(value) && Math.floor(value) >= 0;
 }
@@ -444,6 +507,8 @@ const ISSUE_TEXT: Record<CatalogIssueCode, (args: readonly (string | number)[]) 
     vscode.l10n.t('modelCards["{0}"]: {1} must be a positive token count, got {2}', a[0], a[1], a[2]),
   'card-vision': (a) =>
     vscode.l10n.t('modelCards["{0}"]: vision must be true/false or { enabled, transport: "openai" | "deepseek" }', a[0]),
+  'card-search-provider': (a) =>
+    vscode.l10n.t('modelCards["{0}"]: searchProvider must be one of builtin, deepseek, got {1}', a[0], a[1]),
   'card-efforts-array': (a) => vscode.l10n.t('modelCards["{0}"]: {1} must be an array of level names', a[0], a[1]),
   'card-efforts-empty': (a) => vscode.l10n.t('modelCards["{0}"]: {1} must name at least one level', a[0], a[1]),
   'card-default-effort': (a) => vscode.l10n.t('modelCards["{0}"]: {1} must be a level name', a[0], a[1]),

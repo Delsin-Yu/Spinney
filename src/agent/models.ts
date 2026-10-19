@@ -8,9 +8,10 @@
  *                    OpenAI-compatible endpoint, the dialect its wallet line is read
  *                    in, and how many requests may be in flight against it.
  *   model card     → `{ id, name, providerId, oaiModel, contextWindow, vision,
- *                    efforts, defaultEffort, concurrency }` — branches off exactly
- *                    one provider and carries everything a request to it needs:
- *                    the wire name, the window, the image dialect, the levels.
+ *                    searchProvider, efforts, defaultEffort, concurrency }` —
+ *                    branches off exactly one provider and carries everything a
+ *                    request to it needs: the wire name, the window, the image
+ *                    dialect, which engine leads web search, the levels.
  *
  * A card's `id` is a GUID the Model Card Tree page generates (the one exception
  * is the built-in fallback card below). It is the value every persisted surface
@@ -66,6 +67,27 @@ export interface VisionSpec {
   transport: VisionTransport;
 }
 
+/**
+ * Which engine leads web search for a run of this card.
+ *
+ *   `builtin`  — the keyless multi-backend chain (`src/tools/webBackends.ts`): no key,
+ *                no configuration, the behaviour this harness has always had. It is
+ *                the default, so an existing card never starts spending money.
+ *   `deepseek` — the card provider's own search API leads
+ *                (`POST <baseUrl>/v1/tools/search`), and the keyless chain follows as
+ *                the fallback. The token is that provider's API key unless a dedicated
+ *                search token is stored (`searchKeySecretName` in
+ *                `src/chat/modelTree.ts`).
+ *
+ * A **declaration**, like `balance` and `vision.transport`: nothing probes the endpoint
+ * to find out whether it serves the path. The first request answers that, and a
+ * provider that does not serve it says so in one sentence instead of a guess.
+ */
+export type SearchProvider = 'builtin' | 'deepseek';
+
+/** Every value `searchProvider` accepts, in the order the page offers them. */
+export const SEARCH_PROVIDERS: readonly SearchProvider[] = ['builtin', 'deepseek'];
+
 /** One OpenAI-compatible endpoint (`POST <baseUrl>/chat/completions`). */
 export interface ProviderSpec {
   id: string;
@@ -95,6 +117,8 @@ export interface ModelCard {
   /** Context window in tokens, for the usage indicator. */
   contextWindow: number;
   vision: VisionSpec;
+  /** Which engine leads web search for this card's runs (see {@link SearchProvider}). */
+  searchProvider: SearchProvider;
   /** The thinking levels this card offers (free-form strings; `none` is special). */
   efforts: string[];
   /** Which of {@link efforts} a session starts on. Must be one of them. */
@@ -193,6 +217,10 @@ export const VENDORED_CARD: ModelCard = {
   oaiModel: VENDORED_MODEL.id,
   contextWindow: VENDORED_MODEL.contextWindow,
   vision: { enabled: VENDORED_MODEL.vision, transport: 'deepseek' },
+  // The one card that ships leads with the provider's own search API: it points at the
+  // DeepSeek endpoint, whose key the card already carries, so a configured install
+  // searches the paid index without another switch to find.
+  searchProvider: 'deepseek',
   efforts: [...BUILTIN_EFFORTS],
   defaultEffort: DEFAULT_EFFORT,
   // The built-in card documents the endpoint's real tolerance instead of claiming
@@ -213,6 +241,7 @@ export interface CardDefaults {
   contextWindow: number;
   concurrency: number;
   vision: VisionSpec;
+  searchProvider: SearchProvider;
   efforts: string[];
   defaultEffort: string;
 }
@@ -235,6 +264,8 @@ export const FRESH_CARD_DEFAULTS: CardDefaults = {
   contextWindow: DEFAULT_CONTEXT_WINDOW,
   concurrency: 0,
   vision: { enabled: false, transport: 'openai' },
+  // A brand-new card searches the way this harness always has: the keyless chain.
+  searchProvider: 'builtin',
   efforts: [...BUILTIN_EFFORTS],
   defaultEffort: DEFAULT_EFFORT,
 };
@@ -250,6 +281,7 @@ export const BUILTIN_CARD_DEFAULTS: CardDefaults = {
   contextWindow: VENDORED_CARD.contextWindow,
   concurrency: VENDORED_CARD.concurrency,
   vision: { ...VENDORED_CARD.vision },
+  searchProvider: VENDORED_CARD.searchProvider,
   efforts: [...VENDORED_CARD.efforts],
   defaultEffort: VENDORED_CARD.defaultEffort,
 };
@@ -511,6 +543,7 @@ export type CatalogIssueCode =
   | 'card-wire-model'
   | 'card-context-window'
   | 'card-vision'
+  | 'card-search-provider'
   | 'card-efforts-array'
   | 'card-efforts-empty'
   | 'card-default-effort'
@@ -547,6 +580,7 @@ export const CATALOG_ISSUE_TEXT: Record<CatalogIssueCode, string> = {
   'card-wire-model': 'modelCards["{0}"]: oaiModel must be a non-empty string',
   'card-context-window': 'modelCards["{0}"]: {1} must be a positive token count, got {2}',
   'card-vision': 'modelCards["{0}"]: vision must be true/false or { enabled, transport: "openai" | "deepseek" }',
+  'card-search-provider': 'modelCards["{0}"]: searchProvider must be one of builtin, deepseek, got {1}',
   'card-efforts-array': 'modelCards["{0}"]: {1} must be an array of level names',
   'card-efforts-empty': 'modelCards["{0}"]: {1} must name at least one level',
   'card-default-effort': 'modelCards["{0}"]: {1} must be a level name',
@@ -714,6 +748,7 @@ function parseCardRow(id: string, rawFields: unknown, issues: CatalogIssue[]): M
     oaiModel: '',
     contextWindow: DEFAULT_CONTEXT_WINDOW,
     vision: { enabled: false, transport: 'openai' },
+    searchProvider: 'builtin',
     efforts: [...BUILTIN_EFFORTS],
     defaultEffort: DEFAULT_EFFORT,
     concurrency: 0,
@@ -752,6 +787,14 @@ function parseCardRow(id: string, rawFields: unknown, issues: CatalogIssue[]): M
         return undefined;
       }
       card.vision = vision;
+    } else if (key === 'searchprovider' || key === 'search') {
+      // Spelled out rather than a boolean: the value *names* the engine that leads, so
+      // a second dialect is a new value and not a second field.
+      if (rawValue !== 'builtin' && rawValue !== 'deepseek') {
+        issues.push(issue('card-search-provider', id, JSON.stringify(rawValue)));
+        return undefined;
+      }
+      card.searchProvider = rawValue;
     } else if (EFFORT_KEYS.has(key)) {
       if (!Array.isArray(rawValue) || rawValue.some((l) => typeof l !== 'string')) {
         issues.push(issue('card-efforts-array', id, rawKey));

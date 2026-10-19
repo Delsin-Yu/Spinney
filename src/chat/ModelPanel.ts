@@ -1,6 +1,6 @@
 import * as vscode from 'vscode';
 import { BalanceDialect } from '../agent/balance';
-import { CardDefaults, ProviderDefaults } from '../agent/models';
+import { CardDefaults, ProviderDefaults, SearchProvider } from '../agent/models';
 import { displayLocale, webviewL10n } from '../i18n';
 
 /**
@@ -42,6 +42,8 @@ export interface CardView {
   contextWindow: number;
   concurrency: number;
   vision: { enabled: boolean; transport: 'openai' | 'deepseek' };
+  /** Which engine leads web search for this card (see `SearchProvider`). */
+  searchProvider: SearchProvider;
   efforts: string[];
   defaultEffort: string;
   isBuiltin: boolean;
@@ -65,6 +67,11 @@ export interface ModelTreeSnapshot {
   defaultCardId: string;
   errors: string[];
   defaults: ModelTreeDefaults;
+  /**
+   * Whether a token is stored for each search dialect (`spinney.searchKey.*`). Only the
+   * fact travels — the value never comes back to the page, exactly like a provider key.
+   */
+  searchTokens: { dialect: string; hasKey: boolean }[];
 }
 
 /** A provider as it is written back: the derived fields are the host's business. */
@@ -82,6 +89,10 @@ export interface ModelTreeSave {
   defaultCardId: string;
   apiKeys: { providerId: string; key: string }[];
   clearedKeys: string[];
+  /** Search tokens to write (`spinney.searchKey.<dialect>`), when the page typed one. */
+  searchKeys: { dialect: string; key: string }[];
+  /** Search dialects whose stored token the page asked to forget. */
+  clearedSearchKeys: string[];
 }
 
 /** Everything a panel needs regardless of how it came into existence. */

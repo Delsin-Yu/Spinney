@@ -54,8 +54,9 @@
 //   (l) a fresh snapshot rebuilds the tree,
 //   (m) the **reset buttons**: exactly one `↺` per resettable property (`baseUrl`,
 //       `balance`, `concurrency`, `contextWindow`, the vision toggle, the transport,
-//       the level list, the default level) and none for `id` / `name` / `oaiModel` /
-//       `providerId`, all of them the same glyph and the same sentence, disabled while
+//       the search engine, the level list, the default level) and none for `id` /
+//       `name` / `oaiModel` / `providerId`, all of them the same glyph and the same
+//       sentence, disabled while
 //       the property already holds its default and live the moment it does not, one
 //       click writing only that property into the draft (the card is not rebuilt — its
 //       element identity survives, the tree does not move) with the level list the one
@@ -712,6 +713,7 @@ const SNAPSHOT = {
       contextWindow: 65536,
       concurrency: 0,
       vision: { enabled: true, transport: 'deepseek' },
+      searchProvider: 'deepseek',
       efforts: ['none', 'low'],
       defaultEffort: 'low',
       isBuiltin: true,
@@ -724,6 +726,7 @@ const SNAPSHOT = {
       contextWindow: 131072,
       concurrency: 3,
       vision: { enabled: false, transport: 'openai' },
+      searchProvider: 'builtin',
       efforts: ['high'],
       defaultEffort: 'high',
       isBuiltin: false,
@@ -731,6 +734,8 @@ const SNAPSHOT = {
   ],
   defaultCardId: 'card-a',
   errors: [],
+  // Only the *fact* that a token exists travels, never its value.
+  searchTokens: [{ dialect: 'deepseek', hasKey: true }],
   // What every reset button restores, exactly what the host posts
   // (`ModelTreeSnapshot.defaults` → `BUILTIN_*` / `FRESH_*` in src/agent/models.ts).
   // The values the protocol pins are the real ones — the built-in card really does
@@ -745,6 +750,7 @@ const SNAPSHOT = {
         contextWindow: 1048576,
         concurrency: 2500,
         vision: { enabled: true, transport: 'deepseek' },
+        searchProvider: 'deepseek',
         efforts: ['none', 'low', 'medium', 'high'],
         defaultEffort: 'medium',
       },
@@ -755,6 +761,7 @@ const SNAPSHOT = {
         contextWindow: 1048576,
         concurrency: 0,
         vision: { enabled: false, transport: 'openai' },
+        searchProvider: 'builtin',
         efforts: ['none', 'low', 'medium', 'high'],
         defaultEffort: 'medium',
       },
@@ -1253,6 +1260,9 @@ function assertDraw() {
     if (!added.vision || added.vision.enabled !== fresh.vision.enabled || added.vision.transport !== fresh.vision.transport) {
       problems.push(`a new card starts at vision ${JSON.stringify(added.vision)}, expected the fresh defaults ${JSON.stringify(fresh.vision)}`);
     }
+    if (added.searchProvider !== fresh.searchProvider) {
+      problems.push(`a new card starts at searchProvider ${JSON.stringify(added.searchProvider)}, expected the fresh default ${JSON.stringify(fresh.searchProvider)}`);
+    }
     if (added.providerId !== 'provider-a') {
       problems.push(`a new card did not hang off the selected provider: ${JSON.stringify(added.providerId)}`);
     }
@@ -1313,6 +1323,7 @@ function assertDraw() {
     const payload = sent.payload || {};
     if (!Array.isArray(payload.providers) || !Array.isArray(payload.cards) ||
         !Array.isArray(payload.apiKeys) || !Array.isArray(payload.clearedKeys) ||
+        !Array.isArray(payload.searchKeys) || !Array.isArray(payload.clearedSearchKeys) ||
         typeof payload.defaultCardId !== 'string') {
       problems.push(`the save payload is not a ModelTreeSave: ${JSON.stringify(Object.keys(payload))}`);
     } else {
@@ -1334,6 +1345,9 @@ function assertDraw() {
       }
       if (!last.vision || last.vision.enabled !== true || last.vision.transport !== 'openai') {
         problems.push(`the payload lost the card's vision settings: ${JSON.stringify(last.vision)}`);
+      }
+      if (last.searchProvider !== 'builtin') {
+        problems.push(`the payload carries searchProvider ${JSON.stringify(last.searchProvider)}, expected the card's own value`);
       }
       if (last.efforts.join(',') !== 'none,low' || last.defaultEffort !== 'none') {
         problems.push(`the payload lost the effort levels: ${JSON.stringify(last.efforts)} / ${JSON.stringify(last.defaultEffort)}`);
@@ -1753,10 +1767,10 @@ if (!posted.some((message) => message && message.type === 'dirty' && message.dir
   seam.selectCard('card-a');
   {
     const all = resetsOf(canvas());
-    if (all.length !== 6) {
+    if (all.length !== 7) {
       problems.push(
-        `the selected model card renders ${all.length} reset button(s), expected exactly 6 ` +
-          '(context window, concurrency, the vision toggle, the transport, the level list, the default level)',
+        `the selected model card renders ${all.length} reset button(s), expected exactly 7 ` +
+          '(context window, concurrency, the vision toggle, the transport, the search engine, the level list, the default level)',
       );
     }
     notes.push(`${all.length} reset button(s) on the selected model card`);
@@ -1849,6 +1863,51 @@ if (!posted.some((message) => message && message.type === 'dirty' && message.dir
     const count = resetsOf(findField(cardA, field)).length;
     if (count !== 0) {
       problems.push(`the card's "${field}" field carries a reset button — it has no factory value to restore`);
+    }
+  }
+  // The search engine is the card's own select, with exactly one ↺: its factory value is
+  // the vendored card's `deepseek` on the built-in row and `builtin` on every other one.
+  if (resetsOf(findField(cardA, 'searchProvider')).length !== 1) {
+    problems.push(
+      `the card's "searchProvider" field renders ${resetsOf(findField(cardA, 'searchProvider')).length} reset button(s), expected exactly one`,
+    );
+  }
+  // The search engine's companion row: the token field follows the select by *state*
+  // (disabled for the keyless chain, never hidden, so the card cannot change height),
+  // the hint names the endpoint, and the ↺ restores the vendored card's own `deepseek`.
+  {
+    const row = findField(cardA, 'searchProvider');
+    const select = firstSelect(row);
+    const tokenInput = inputsOf(findField(cardA, 'searchToken')).find((node) => node.type === 'password');
+    const reset = resetsOf(row)[0];
+    const hintText = findAllByClass(cardA, 'mt-hint').map((node) => String(node.textContent)).join(' ');
+    if (!select || !tokenInput || !reset) {
+      problems.push('the search row is missing its engine select, its token field or its reset button');
+    } else {
+      const providerBase = String((seam.state().providers.find((entry) => entry.id === 'provider-a') || {}).baseUrl || '').replace(/\/+$/, '');
+      if (!providerBase || hintText.indexOf(providerBase) < 0) {
+        problems.push(`the token row does not name the endpoint requests go to (${JSON.stringify(providerBase)}): ${JSON.stringify(hintText)}`);
+      }
+      if (tokenInput.disabled) {
+        problems.push('the card selects `deepseek`, so its token field must be usable');
+      }
+      if (!reset.disabled) {
+        problems.push('a card already on its own default engine must have its search reset disabled');
+      }
+      select.value = 'builtin';
+      fire(select, 'change', { target: select });
+      if (!tokenInput.disabled) {
+        problems.push('switching the card to the keyless chain left the token field usable');
+      }
+      if (draftCard('card-a').searchProvider !== 'builtin') {
+        problems.push(`the engine change did not reach the draft: ${JSON.stringify(draftCard('card-a').searchProvider)}`);
+      }
+      fire(reset, 'click');
+      if (select.value !== 'deepseek' || tokenInput.disabled) {
+        problems.push(
+          `the search reset restored ${JSON.stringify(select.value)}/${tokenInput.disabled}, expected the built-in deepseek with a usable token field`,
+        );
+      }
     }
   }
   // The level list carries exactly two ↺ (the list itself, then its default level);

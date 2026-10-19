@@ -20,7 +20,9 @@ provider id → `{ name, baseUrl, balance, concurrency }`; `balance` is the wall
 dialect — `none` / `deepseek` / `openrouter` / `moonshot` — and a row that leaves it
 out is declared by host, see `invariants/model-cards.md`), `modelCards` (object of
 card id → `{ name, providerId, oaiModel, contextWindow, concurrency, vision: {
-enabled, transport }, efforts, defaultEffort }`),
+enabled, transport }, searchProvider, efforts, defaultEffort }`; `searchProvider` is
+`builtin` (the keyless search chain, the default) or `deepseek` (that card provider's own
+search API leads — see `docs/agents/web-search.md` §"The paid row")),
 `commandDefaultTimeout` (seconds, default 500 — what a command gets when the call states
 no `timeout` of its own, and the foreground slice `background_when_timeout` promotes at.
 It is read **per call** by `commandDefaultTimeoutSec` in `src/tools/execCommand.ts`, and
@@ -179,3 +181,11 @@ optional provider id (the palette defaults to the built-in provider). `refreshKe
 invalidates the cache and re-reads, so a new key is live without a reload. It is
 therefore **not** part of the "every `spinney.*` change applies immediately" rule.
 Every other `spinney.*` setting still applies at the moment you change it.
+
+A second secret namespace exists for a search token, `spinney.searchKey.<dialect>`
+(today `deepseek`; `searchKeySecretName` in `src/chat/modelTree.ts`), and it is an
+**override**, not a requirement: when it is empty the card provider's own API key
+authenticates the card's search request, which is why the vendored card needs no setup.
+It is set and cleared on the Model Cards page (one field, shared by every card), read on
+every call — so a new token is live with the next `web_search`, no reload and no
+`refreshKeys` — and never echoed back to the page, which is told only whether one exists.

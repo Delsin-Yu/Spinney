@@ -1,14 +1,21 @@
 import { describeFetchError } from '../agent/netError';
 import { sliceText } from '../text';
+import { awaitApiSlot, type SearchAccess } from './webAccess';
 import { absoluteUrl, decodeBody, decodeEntities, hasClass, scanTags, textOf } from './webHtml';
 
 /**
  * The built-in search backends — the whole of "where results come from".
  *
- * There is **no provider setting and no API key**: the list below is what ships,
- * and adding an engine means adding one row here plus a saved response under
- * `tools/fixtures/web-backends/` for the acceptance driver. Two decisions in
- * this table were made from measurements on the target network, not from taste:
+ * Adding an engine means adding one row here plus a saved response under
+ * `tools/fixtures/web-backends/` for the acceptance driver. Every row but one needs
+ * **no provider setting and no API key**, and that is deliberate: the target network
+ * blocks Google, DuckDuckGo and Mojeek, while the commercial search APIs behind them
+ * need a foreign card, so a tool that only works after buying access is a tool the
+ * agent cannot use. The exception is `deepseek`: it speaks the card provider's own
+ * search API (`api` below), which is enabled per model card
+ * (`searchProvider`) and paid per request — so it is the row the card opts into, and
+ * it is the only one that carries a token. Two decisions in this table were made from
+ * measurements on the target network, not from taste:
  *
  * - **Machine formats first.** `Bing` publishes an RSS view of its results
  *   (`&format=rss`) that answers with real `<item>` entries from the region that
@@ -34,6 +41,10 @@ export interface SearchHit {
   snippet?: string;
   /** The id of the backend that produced it. */
   engine: string;
+  /** The backend's own ordering score, 0–1, when it publishes one (tie-breaker only). */
+  rank?: number;
+  /** The page's publication date, RFC 3339, when the backend knows it. */
+  date?: string;
 }
 
 /** What the body of a backend's response looks like, before parsing. */
@@ -43,6 +54,10 @@ export interface RawHit {
   title: string;
   url: string;
   snippet?: string;
+  /** See {@link SearchHit.rank}. */
+  rank?: number;
+  /** See {@link SearchHit.date}. */
+  date?: string;
 }
 
 export interface WebBackend {
@@ -60,6 +75,23 @@ export interface WebBackend {
   parse(body: string): RawHit[];
   /** A body matching this is a wall (captcha / consent / verify), not a result page. */
   blocked?: RegExp;
+  /**
+   * The row speaks a **machine API that needs a token** instead of a keyless GET.
+   *
+   * `build` keeps its meaning — the canonical endpoint, which is what the self-test
+   * prints — but the request actually goes to the *card provider's* root plus this
+   * path, because a card may point at a relay that serves the same API. Nothing
+   * checks that it does: the declaration is the card's, and a provider that does not
+   * serve the path answers 404, which is reported in one sentence.
+   */
+  api?: {
+    /** The path appended to the card provider's base URL. */
+    path: string;
+    /** The JSON body of the request. */
+    body(query: string, count: number): unknown;
+    /** What this row sits out for, where a QPS wall is not the same as a ban. */
+    cooldown?: Partial<Record<Outcome, number>>;
+  };
 }
 
 const q = (value: string): string => encodeURIComponent(value);
@@ -343,11 +375,69 @@ function parseGitHub(body: string): RawHit[] {
 }
 
 /**
+ * The DeepSeek search API (`POST /v1/tools/search`): a documented, structured JSON
+ * list — no markup to drift, no captcha to classify. The fields are used as the docs
+ * describe them: `summary` (the long, query-relevant abstract, 600–800 characters) is
+ * what the model gets to read, and `rerank_score` (0–3) is kept as a tie-breaker.
+ */
+function parseDeepSeekSearch(body: string): RawHit[] {
+  const data = JSON.parse(body) as { results?: Array<Record<string, unknown>> };
+  const hits: RawHit[] = [];
+  for (const item of data.results ?? []) {
+    const title = tidy(String(item.title ?? ''));
+    const url = String(item.url ?? '');
+    if (!title || !/^https?:\/\//i.test(url)) {
+      continue;
+    }
+    // `summary` first: the request is billed per call and never per token, so the long
+    // abstract is free — and it is the half a model can actually reason from.
+    const snippet = tidy(String(item.summary ?? '') || String(item.snippet ?? ''), 700);
+    const score = typeof item.rerank_score === 'number' && Number.isFinite(item.rerank_score) ? item.rerank_score : undefined;
+    const date = typeof item.date === 'string' && item.date.trim() ? item.date.trim() : undefined;
+    hits.push({
+      title,
+      url,
+      snippet,
+      // 0–3 as published, normalised so the sort's tie-breaker and a hit's relevance
+      // stay on the same 0–1 scale.
+      rank: score === undefined ? undefined : Math.max(0, Math.min(1, score / 3)),
+      date,
+    });
+  }
+  return hits;
+}
+
+/** The endpoint this build ships knowledge about; a card's provider root is what is used. */
+const DEEPSEEK_API_ROOT = 'https://api.deepseek.com';
+
+/**
  * The shipped backends, in the order they are tried. Order is the priority: the
  * machine-format endpoints come first because they are cheap, stable and
  * region-proof; the scrapers follow, most region-appropriate first.
+ *
+ * `deepseek` is first because it is the best index of the ones listed *and* the only
+ * one that costs anything — a card that opted in gets it before the free chain, and a
+ * card that did not (`builtin`) never touches it (it answers `disabled` without a
+ * request, see `attemptBackend`).
  */
 export const WEB_BACKENDS: readonly WebBackend[] = [
+  {
+    id: 'deepseek',
+    label: 'DeepSeek Search',
+    shape: 'json',
+    reach: 'any',
+    note: "the card provider's own search API — paid per request, needs a token (opt-in per model card)",
+    build: (query) => `${DEEPSEEK_API_ROOT}/v1/tools/search?q=${q(query)}`,
+    parse: parseDeepSeekSearch,
+    api: {
+      path: '/v1/tools/search',
+      body: (query, count) => ({ query, count }),
+      // 5 requests per second per account. A 429 here is a wall a few seconds wide, not
+      // the ten minutes a scraper earns for one: two nodes that search at once must not
+      // bench the paid tier for the rest of the turn.
+      cooldown: { 'rate-limited': 60_000 },
+    },
+  },
   {
     id: 'bing-rss',
     label: 'Bing (RSS)',
@@ -442,13 +532,41 @@ const COOLDOWN_MS: Record<Outcome, number> = {
   'http-error': 2 * 60_000,
   timeout: 2 * 60_000,
   aborted: 0,
+  // The three credential answers are facts about a configuration that only a person
+  // changes, so retrying is pointless until one does: six hours, and the result says
+  // which of the three it was.
+  unauthorized: 6 * 60 * 60_000,
+  'no-balance': 6 * 60 * 60_000,
+  'not-offered': 6 * 60 * 60_000,
+  // Never a failure: the row was not eligible for this call at all.
+  disabled: 0,
 };
+
+/** The cooldown overrides a backend declares for itself (`api.cooldown`). */
+const COOLDOWN_OVERRIDES = new Map<string, Partial<Record<Outcome, number>>>();
+for (const backend of WEB_BACKENDS) {
+  if (backend.api?.cooldown) {
+    COOLDOWN_OVERRIDES.set(backend.id, backend.api.cooldown);
+  }
+}
+
+/**
+ * How long this backend sits out after this outcome. An API row may narrow a default
+ * — a QPS wall is not a ban — and every other row keeps the table above unchanged.
+ */
+export function cooldownFor(id: string, outcome: Outcome): number {
+  return COOLDOWN_OVERRIDES.get(id)?.[outcome] ?? COOLDOWN_MS[outcome];
+}
 
 /**
  * What actually happened. The distinction is the point of the whole module:
  * `blocked` must not be retried (the wall is real and 30 minutes long), while a
  * `timeout` is worth one more try; `parse-empty` means the page loaded but this
- * build cannot read it — the upstream markup moved.
+ * build cannot read it — the upstream markup moved. The last four exist for the
+ * token-bearing row: `unauthorized` / `no-balance` / `not-offered` are answers about
+ * a *configuration* (a wrong token, an empty wallet, a provider that does not serve
+ * the path), and `disabled` is not an answer at all — the card's `searchProvider`
+ * said not to ask.
  */
 export type Outcome =
   | 'ok'
@@ -459,7 +577,11 @@ export type Outcome =
   | 'rate-limited'
   | 'http-error'
   | 'timeout'
-  | 'aborted';
+  | 'aborted'
+  | 'unauthorized'
+  | 'no-balance'
+  | 'not-offered'
+  | 'disabled';
 
 export interface Attempt {
   id: string;
@@ -498,14 +620,14 @@ export function recordOutcome(id: string, outcome: Outcome, now = Date.now()): v
     health.delete(id);
     return;
   }
-  if (outcome === 'aborted' || outcome === 'empty') {
+  if (outcome === 'aborted' || outcome === 'empty' || outcome === 'disabled') {
     health.set(id, { ...entry, lastOutcome: outcome });
     return;
   }
   entry.failures += 1;
   entry.lastOutcome = outcome;
   // A wall or a moved page is not a transient failure: sit out immediately.
-  const base = COOLDOWN_MS[outcome];
+  const base = cooldownFor(id, outcome);
   const scaled = outcome === 'timeout' || outcome === 'http-error' ? base * Math.min(entry.failures, 3) : base;
   entry.openUntil = now + scaled;
   health.set(id, entry);
@@ -592,33 +714,102 @@ function headersFor(backend: WebBackend): Record<string, string> {
 const MAX_BODY_BYTES = 3 * 1024 * 1024;
 const DEFAULT_ATTEMPT_TIMEOUT_MS = 9_000;
 
+/** The host of a URL, for a sentence that has to name where a request went. */
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return url;
+  }
+}
+
 /**
  * Run one backend once and classify the result. Nothing here throws: a failed
- * backend is data (see {@link Attempt}), because "which of the eight answers on
- * this network" is the question the tool exists to answer.
+ * backend is data (see {@link Attempt}), because "which of these answers on this
+ * network" is the question the tool exists to answer.
+ *
+ * The one row with an `api` needs the call's {@link SearchAccess}: without it — the
+ * card says `builtin`, or no token resolved — the row answers `disabled` and no
+ * request is made at all.
  */
 export async function attemptBackend(
   backend: WebBackend,
   query: string,
   count: number,
-  options: { signal?: AbortSignal; timeoutMs?: number } = {},
+  options: { signal?: AbortSignal; timeoutMs?: number; access?: SearchAccess } = {},
 ): Promise<{ attempt: Attempt; hits: SearchHit[] }> {
   const started = Date.now();
   const timeoutMs = options.timeoutMs ?? DEFAULT_ATTEMPT_TIMEOUT_MS;
-  const controller = new AbortController();
-  const onAbort = () => controller.abort();
-  options.signal?.addEventListener('abort', onAbort, { once: true });
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const api = backend.api;
+  const access = options.access;
   const done = (outcome: Outcome, hits: SearchHit[], detail?: string): { attempt: Attempt; hits: SearchHit[] } => ({
     attempt: { id: backend.id, label: backend.label, outcome, ms: Date.now() - started, count: hits.length, detail },
     hits,
   });
+  // A token-bearing row is asked only when the card opted in *and* a token resolved.
+  // This is what keeps `builtin` free: no request is ever made to find out that none
+  // was needed, so the old behaviour costs exactly what it always did.
+  if (api) {
+    if (!access || access.provider === 'builtin') {
+      return done('disabled', [], "the card's searchProvider is builtin");
+    }
+    if (!access.token) {
+      return done('disabled', [], 'no token for this provider');
+    }
+    if (!access.baseUrl) {
+      return done('disabled', [], "the card's provider has no base URL");
+    }
+  }
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  options.signal?.addEventListener('abort', onAbort, { once: true });
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    const response = await fetch(backend.build(query, count), {
-      headers: headersFor(backend),
-      redirect: 'follow',
-      signal: controller.signal,
-    });
+    const endpoint = api && access ? `${access.baseUrl.replace(/\/+$/, '')}${api.path}` : backend.build(query, count);
+    if (api) {
+      // The account's 5 requests per second are shared by every card and every node.
+      await awaitApiSlot('search');
+      if (options.signal?.aborted) {
+        return done('aborted', [], 'turn aborted');
+      }
+    }
+    const response =
+      api && access ? await fetch(endpoint, {
+        method: 'POST',
+        headers: {
+          authorization: `Bearer ${access.token}`,
+          // The token is the only secret in this module, and it travels in exactly one
+          // place: this header. It is never logged, never echoed into a result.
+          'content-type': 'application/json',
+          accept: 'application/json',
+        },
+        body: JSON.stringify(api.body(query, count)),
+        signal: controller.signal,
+      }) : await fetch(endpoint, {
+        headers: headersFor(backend),
+        redirect: 'follow',
+        signal: controller.signal,
+      });
+    if (api) {
+      // Answers about a *configuration* first: a wrong token, an empty wallet and a
+      // provider that does not serve the path are all resolved by a person, so none of
+      // them is retried (see `COOLDOWN_MS`).
+      if (response.status === 401) {
+        return done('unauthorized', [], 'HTTP 401 — check the token');
+      }
+      if (response.status === 402) {
+        return done('no-balance', [], 'HTTP 402 — the account has no balance');
+      }
+      if (response.status === 404) {
+        return done('not-offered', [], `HTTP 404 — ${hostOf(endpoint)} does not serve ${api.path}`);
+      }
+      if (response.status === 403) {
+        return done('blocked', [], 'HTTP 403 — refused by the provider');
+      }
+      if (response.status === 429) {
+        return done('rate-limited', [], 'HTTP 429 — over 5 requests per second');
+      }
+    }
     if (response.status === 429 || response.status === 403) {
       return done('rate-limited', [], `HTTP ${response.status}`);
     }
@@ -813,7 +1004,14 @@ export interface SearchReport {
 export async function runWebSearch(
   query: string,
   count: number,
-  options: { signal?: AbortSignal; budgetMs?: number; ignoreHealth?: boolean; attemptTimeoutMs?: number } = {},
+  options: {
+    signal?: AbortSignal;
+    budgetMs?: number;
+    ignoreHealth?: boolean;
+    attemptTimeoutMs?: number;
+    /** The engine/token in force for this call (see `webAccess.ts`). */
+    access?: SearchAccess;
+  } = {},
 ): Promise<SearchReport> {
   const budgetMs = options.budgetMs ?? 25_000;
   const deadline = Date.now() + budgetMs;
@@ -843,6 +1041,7 @@ export async function runWebSearch(
     const { attempt, hits: found } = await attemptBackend(backend, query, count, {
       signal: options.signal,
       timeoutMs: remaining,
+      access: options.access,
     });
     attempts.push(attempt);
     if (!options.ignoreHealth) {
@@ -864,10 +1063,12 @@ export async function runWebSearch(
     }
   }
   // Best first, but only reordered: a stable sort keeps the backend order as the
-  // tie-breaker, so two equally relevant hits still read in chain order.
+  // tie-breaker, so two equally relevant hits still read in chain order — and a backend
+  // that publishes its own ranking (`rank`, the paid row does, 0–1) wins ties ahead of
+  // that, because its order is the better-formed one.
   const scored = hits
     .map((hit, index) => ({ hit, index, score: hitRelevance(hit, tokens) }))
-    .sort((a, b) => b.score - a.score || a.index - b.index);
+    .sort((a, b) => b.score - a.score || (b.hit.rank ?? 0) - (a.hit.rank ?? 0) || a.index - b.index);
   const returned = scored.slice(0, count);
   return {
     hits: returned.map((entry) => entry.hit),
@@ -880,14 +1081,18 @@ export async function runWebSearch(
 /** Probe every backend once, ignoring cooldowns — the self-test command's engine. */
 export async function probeAllBackends(
   query: string,
-  options: { signal?: AbortSignal; timeoutMs?: number } = {},
+  options: { signal?: AbortSignal; timeoutMs?: number; access?: SearchAccess } = {},
 ): Promise<Attempt[]> {
   const attempts: Attempt[] = [];
   for (const backend of WEB_BACKENDS) {
     if (options.signal?.aborted) {
       break;
     }
-    const { attempt } = await attemptBackend(backend, query, 5, { signal: options.signal, timeoutMs: options.timeoutMs });
+    const { attempt } = await attemptBackend(backend, query, 5, {
+      signal: options.signal,
+      timeoutMs: options.timeoutMs,
+      access: options.access,
+    });
     attempts.push(attempt);
   }
   return attempts;

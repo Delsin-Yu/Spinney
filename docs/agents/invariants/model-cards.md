@@ -40,6 +40,7 @@ A **model card** is one selectable model:
 | oaiModel | The only thing that travels as `body.model`. |
 | contextWindow | The card's own window, for the context-usage indicator. It is not the API's `max_tokens` output budget. |
 | vision | `{ enabled, transport }` — see below. |
+| searchProvider | `builtin` (the keyless search chain — the default, and what every card that leaves the field out gets) or `deepseek` (that card provider's own search API leads, and the keyless chain stays behind it). A declaration like the vision dialect, never probed; `docs/agents/web-search.md` §"The paid row" has the token order and the cost. |
 | efforts | A free-form list of thinking levels this card offers. |
 | defaultEffort | The level a session starts on; it must be one of `efforts`. |
 | concurrency | Maximum requests in flight for this card; `0` = unlimited. |
@@ -186,8 +187,8 @@ the chat tree's visual language and the same vendored layout engine — with:
   invalid in the one place nothing may invent: its **wire model name**. So validation
   refuses it until it is named, and every other field is already usable,
 - a **reset button on every resettable property** (base URL, the wallet dialect,
-  concurrency, context window, vision on/off, image transport, the level list, the
-  default level). What it
+  concurrency, context window, vision on/off, image transport, the search engine, the
+  level list, the default level). What it
   restores is **the row's own factory state**, and the page is told it rather than
   knowing it: the snapshot carries `defaults.builtin` / `defaults.fresh`
   (`FRESH_*` / `BUILTIN_*` in `src/agent/models.ts`, chosen per row by

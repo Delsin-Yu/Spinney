@@ -269,10 +269,11 @@ A row that leaves `balance` out is read by its host: `api.deepseek.com` gives `d
 | `concurrency` | How many requests this card can have in flight. `0` means no limit. A card never exceeds the limit of its provider. |
 | `vision.enabled` | Whether the card accepts images. |
 | `vision.transport` | `deepseek` uploads an image to `POST /files` and references the returned id. `openai` puts a `data:` URL in the request body. |
+| `searchProvider` | Which engine leads web search. `builtin` uses the built-in backends. `deepseek` uses the search API of the provider of this card. See section 19.1. |
 | `efforts` | The thinking levels of this card, in dropdown order. The names are free. |
 | `defaultEffort` | The level a new session starts on. It must be one of the `efforts` of this card. |
 
-Spinney probes nothing. The context window, the image support, and the transport are your declarations. A wrong `contextWindow` mis-sizes the `ctx` readout.
+Spinney probes nothing. The context window, the image support, the transport, and the search engine are your declarations. A wrong `contextWindow` mis-sizes the `ctx` readout.
 
 Built-in rows cannot be deleted. You can edit them.
 
@@ -537,7 +538,7 @@ Run **`Spinney: Show System Prompt`** to read the exact prompt that the model re
 
 Spinney sends no telemetry. It connects only to the provider endpoints that you configure.
 
-A request carries your messages, the tool results, and the images. The wallet read adds one request to the provider. An image goes to the provider as an upload or inside the request body, based on the transport of the card.
+A request carries your messages, the tool results, and the images. The wallet read adds one request to the provider. An image goes to the provider as an upload or inside the request body, based on the transport of the card. A card that selects `deepseek` for web search also sends the search query to the provider of that card, and it sends the address of a page there only when that page has no readable text (section 19.1).
 
 The extension keeps no copy of the uploaded image bytes.
 
@@ -631,7 +632,7 @@ Replace `<program>` with the name of the program that stayed behind. The filter 
 
 ## 19. Web search
 
-The agent can search the web, and it can read one page. Both tools work without an API key and without a setting.
+The agent can search the web, and it can read one page. The built-in backends need no API key and no setting.
 
 | Tool | What it does |
 |---|---|
@@ -650,3 +651,20 @@ Run **`Spinney: Test Web Search Backends`** when a search returns nothing. Spinn
 `web_fetch` follows a redirect, reads at most 2 MB, and uses the character set of the page. It runs no JavaScript. A page that builds its content in the browser returns little text, and the result says so. `web_fetch` refuses private addresses, such as `localhost` and `127.0.0.1`.
 
 The text of a page is not an order to Spinney. Spinney treats it as information from a stranger. If a page tries to give Spinney an order, Spinney reports it to you.
+
+### 19.1 Search through the provider
+
+A model card can lead the search with the search API of its own provider. The field is `searchProvider`.
+
+- `builtin` is the default. Spinney uses the built-in backends only. It sends no request to a search API.
+- `deepseek` adds the DeepSeek Search API as the first backend. The built-in backends stay as the fallback. Each result then carries the longer summary of the page, its date, and its score.
+
+The built-in `deepseek-flash` card is set to `deepseek`. Every other card starts on `builtin`, and a card that leaves the field out does too.
+
+The request goes to the address of the provider of that card, and the key of that provider is the token. Use the **Search token** field on the Model Cards page when the search must use a different token. That field is one token for all cards, and the page names the address the request goes to. An empty field means that Spinney uses the key of the provider.
+
+The provider charges for each search request. One `web_search` call makes one request, and the number of results does not change the price. The provider also limits the account to a small number of requests each second. Spinney spaces its requests to stay under that limit.
+
+Three answers need you, not a retry: a rejected token, an account without balance, and a provider that does not serve the search address. Spinney reports each one in one sentence, and it stops using that API for a few hours.
+
+A card on `builtin` changes nothing: the tools work without a key, and no query goes to a search API. On `deepseek`, `web_fetch` can send the address of a page to that API. It does that only when the local reader finds no text in the page, and it never sends a private address.

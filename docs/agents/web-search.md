@@ -2,8 +2,8 @@
 
 `web_search` and `web_fetch` are registry tools (`src/tools/webSearch.ts`,
 `src/tools/webFetch.ts`) over a backend table (`src/tools/webBackends.ts`) and a
-hand-written HTML layer (`src/tools/webHtml.ts`). They need **no API key, no
-provider row and no setting** — that is the whole point, and it is a decision, not
+hand-written HTML layer (`src/tools/webHtml.ts`). The chain needs **no API key, no
+provider row and no setting** — that is the whole point of it, and it is a decision, not
 a shortcut:
 
 - The target network blocks Google, DuckDuckGo, Mojeek and Wikipedia, while the
@@ -17,6 +17,10 @@ a shortcut:
   DuckDuckGo/Mojeek/Wikipedia do not connect at all. Nothing may assume which side
   this machine is on — see "Learning the network" below.
 
+One row is the exception, and it is opt-in **per model card**: `deepseek` speaks the card
+provider's own search API, is billed per request and needs a token. `builtin` (every card
+that does not opt in) never makes that request. See "The paid row" below.
+
 ## The backend table
 
 Order is priority. Machine formats come first: they are cheap, they survive a
@@ -24,6 +28,7 @@ redesign of a result page, and they are the same from any region.
 
 | id | kind | region | why it is here |
 | --- | --- | --- | --- |
+| `deepseek` | JSON API (`POST /v1/tools/search`) | any | the card provider's own index — structured results, a 600–800 character summary per hit, dates and an authority score; **opt-in per card**, billed, needs a token |
 | `bing-rss` | RSS (`&format=rss`) | any | the most reliable general index from the target region; real `<item>` entries |
 | `so360` | HTML | cn | `res-list` blocks; the anchor carries the real URL in `data-mdurl` |
 | `baidu` | HTML | cn | organic blocks carry `data-url`; the sponsored ones (`baidu.php`) do not, which is the filter that keeps ads out |
@@ -43,6 +48,14 @@ fails instead of the user. It also pins the traps: `so360` must use `data-mdurl`
 and not its `/link` redirect, `baidu` must not emit `baidu.php`, `bing` must not
 emit a `/ck/a` click-tracker, `sogou` hrefs must be absolute.
 
+The one exception to "captured from the real endpoint" is `deepseek`, and it is an
+honest one: its body is a **documented JSON schema**, not scraped markup, so the fixture
+(`tools/fixtures/web-backends/deepseek.body`) is written from the vendor's published
+example — field for field, including a tracked duplicate URL for the de-duplication
+check. A parser for a documented machine format cannot drift the way a scraper does; the
+acceptance driver still pins the mapping (`summary` → snippet, `rerank_score` → the 0–1
+`rank` tie-breaker, `date`).
+
 Deliberately **absent**: Quark (its results are not in the served HTML) and every
 engine that could not be measured from this machine.
 
@@ -52,7 +65,9 @@ A search backend answers in one of nine ways, and the difference decides whether
 retry is useful (`src/tools/webBackends.ts`):
 
 `ok` · `empty` · `parse-empty` · `unexpected` · `blocked` · `rate-limited` ·
-`http-error` · `timeout` · `aborted`
+`http-error` · `timeout` · `aborted` — plus the four the token-bearing row answers with:
+`unauthorized` (401) · `no-balance` (402) · `not-offered` (404) · `disabled` (the card said
+`builtin`, or no token resolved — no request was made).
 
 - `blocked` (captcha/consent/verify) and `parse-empty` (page loaded, nothing
   readable — the upstream markup moved) open a **30 minute** cooldown: the wall is
@@ -64,13 +79,22 @@ retry is useful (`src/tools/webBackends.ts`):
   entries is `empty` (no cooldown) and not `parse-empty`: a query with no matches
   used to bench Hacker News, StackExchange and GitHub for half an hour, which is
   damage the backend never did.
+- `unauthorized`, `no-balance` and `not-offered` are answers about a
+  **configuration** (a wrong token, an empty wallet, a provider that does not serve the
+  path), so they open a six-hour cooldown and the tool result names which one it was. A
+  person resolves them; retrying within the turn cannot.
+- `disabled` opens nothing and can never be a failure: it is "the row was not eligible".
+  Every `builtin` card costs exactly what the keyless chain always cost.
 - The CN engines **throttle**: within one session, a burst of consecutive queries
   made `so360` serve `<title>访问异常页面` (6.8 KB, zero result blocks) and `sogou` a
   captcha page, while the same queries answered normally again a minute later. So
   a `blocked` here is real *and* temporary — the cooldown is what keeps a retry
   from hammering its way into a longer ban, and the chain simply falls through to
   `baidu`/`bing` meanwhile.
-- `rate-limited` (HTTP 429/403) opens 10 minutes.
+- `rate-limited` (HTTP 429/403) opens 10 minutes — except on a row that declares its own
+  value (`api.cooldown`): the paid row takes **60 seconds**, because 5 requests per
+  second per account is a wall a few seconds wide, not a ban, and two nodes that search
+  at once must not bench the tier for the rest of the turn.
 - `timeout` and `http-error` open 2 minutes and back off up to 3× on repeats,
   because those are the transient ones.
 - Any `ok` clears the record.
@@ -112,6 +136,58 @@ outcome, time and hits per backend. Its strings are localized
 (`l10n/bundle.l10n.*.json`); the outcome tokens (`ok`, `blocked`, …) are not — they
 are log fields, like `via=rg|walk`.
 
+## The paid row (an opt-in that belongs to the card)
+
+`deepseek` is a **model-card field**, not a setting: `searchProvider` is `'builtin'` (the
+keyless chain — the default, also for every card that leaves the field out) or
+`'deepseek'` (the card provider's own search API leads, the keyless chain stays behind it
+as the fallback). The vendored `deepseek-flash` card declares `deepseek`, so a configured
+install gets the better index with no extra switch; a user's own card never starts
+spending money until its owner ticks the box. `'builtin'` is therefore not "off" — it is
+the tool as it has always been, and it keeps working with no key at all.
+
+Why the card and not a `spinney.*` setting: the **endpoint and the token belong to the
+card's provider**, and the answer is per **node** (two branches may run on two cards at
+once). `ToolRegistry.setWebCard(() => cardForNode(node))` hands each node's registry its
+own card, and the host installs one resolver (`setSearchAccessResolver`) that knows
+providers and `SecretStorage` — tools have no `ExtensionContext`, and
+`src/tools/webAccess.ts` is the whole of what they learn.
+
+The token, in order, and there is no fourth source:
+
+1. `spinney.searchKey.deepseek` — a dedicated token, set on the Model Cards page (one
+   per **dialect**, shared by every card, never echoed back to the page).
+2. the **card provider's own API key** (`spinney.apiKey` / `spinney.apiKey.<id>`, with
+   `DEEPSEEK_API_KEY` as the built-in provider's environment fallback) — which is why the
+   vendored card needs no configuration at all.
+3. empty → the row answers `disabled(no-token)` and **no request is made**.
+
+The invariant that makes that safe: **the request goes to the card provider's `baseUrl`,
+and the token is that same provider's key.** A relay's key is never sent to the vendor,
+and the vendor's is never sent to a relay. When the two have to be different accounts,
+the override in (1) is what the user sets, and the request still goes to the card's
+provider — the Model Cards page names that address next to the field.
+
+Costs and limits, stated rather than discovered: the vendor bills **per successful
+request** (one `web_search` call is one request — `count` does not change the price) and
+rate-limits the account to **5 requests per second**, separately for search and fetch.
+`awaitApiSlot()` spaces the starts (220 ms, per endpoint kind) so a burst from parallel
+nodes does not turn into a 429 the next call has to sit out.
+
+Two properties of the rest of the codebase hold for this row, and both are deliberate:
+
+- **The tool schema never mentions it.** `liveToolSchemas()` (in `src/chat/runtime.ts`)
+  builds the tool set for the drift check, and the comment there is a rule: no tool
+  *schema* depends on the wiring. The paid tier is visible in the **result**
+  (`attempts: deepseek=ok(3)`, `from deepseek(...)`, or `disabled:no token for this
+  provider`) and never in the frozen epoch.
+- **`searchProvider` is not part of the epoch.** It changes no byte the provider sees in
+  the prefix, so switching it mid-chain must not fork the tree or ask `Continue with
+  current setup`. A sub-agent inherits the parent node's registry (and therefore its
+  card's search tier) through `ToolRegistry.subset()`.
+
+`web_fetch` uses the same access: see the next section.
+
 ## `web_fetch` boundaries
 
 - **No JavaScript, no interaction.** A page that renders client-side comes back
@@ -143,6 +219,16 @@ are log fields, like `via=rg|walk`.
   `UND_ERR_*` / the TLS code in `cause`. Without it the first acceptance run could
   not tell a DNS failure from a blocked site on three huggingface.co URLs (10 s
   each, no status, no reason).
+- **The provider's fetch API is the last resort, and only after the address check.** When
+  the card opted into `deepseek` and the local extraction came back **empty** (the
+  client-rendered page this reader cannot answer), `POST <baseUrl>/v1/tools/fetch` is
+  tried and its Markdown is returned with `via the provider's fetch API` in the header.
+  The private-address check runs **again on the URL about to leave the machine** —
+  handing a loopback or metadata URL to a third party would make that party the probe
+  this harness refuses to be — and the per-URL answers (403 by the provider's own policy,
+  404 for "nothing readable") are sentences, never a cooldown: they are facts about one
+  page. `builtin` never calls it, so a card that did not opt in sends nothing new
+  anywhere.
 - **An empty extraction is reported, never silent.** `HTTP 200 · 72914 bytes` with
   no readable text looks like success; the note is therefore driven by the size of
   the **result**, not by which extraction path ran — `no readable text was found —
@@ -196,9 +282,13 @@ re-litigate it from taste:
   is a backend coming back *after* its cooldown expires and a later search using it
   again — the five-minute check is to search, wait out the window, and search again.
 
-- No `spinney.webSearch.*` setting and no keyed backend. A self-hosted SearXNG
-  (`?format=json`, opt-in on the instance) is the obvious first optional row if a
-  user needs one; it would add a setting and therefore a manual section.
+- No `spinney.webSearch.*` setting. The one keyed backend there is (`deepseek`) is
+  declared **per model card** (`searchProvider`), because the endpoint and the token are
+  the card provider's — see "The paid row". A self-hosted SearXNG (`?format=json`,
+  opt-in on the instance) would be the next such value, not a new setting.
+- No `ori_question`, no `localization`, and no `need_content` on that request: the
+  original user question and the machine's IP are not the tool's to send, and the page
+  body is `web_fetch`'s job. All three are one field each if a real need shows up.
 - No persistence of backend health across reloads (see above).
 - No proxy support: `fetch` in the extension host does not read the system proxy,
   and honoring `http.proxy` would mean a dependency.

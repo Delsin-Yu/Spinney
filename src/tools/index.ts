@@ -2,6 +2,7 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
+import type { ModelCard } from '../agent/models';
 import { AgentTool, ToolDefinition } from '../agent/types';
 import type { BackgroundAccess } from '../chat/backgroundHub';
 import { clipText } from '../text';
@@ -12,8 +13,8 @@ import { readFileTool } from './readFile';
 import { replaceInFileTool } from './replaceInFile';
 import { searchFilesTool } from './searchFiles';
 import { makeSearchTranscriptsTool } from './searchTranscripts';
-import { webFetchTool } from './webFetch';
-import { webSearchTool } from './webSearch';
+import { makeWebFetchTool } from './webFetch';
+import { makeWebSearchTool } from './webSearch';
 import { writeFileTool } from './writeFile';
 
 /**
@@ -485,6 +486,13 @@ export class ToolRegistry {
    * so a settings change needs no rebuild).
    */
   private transcriptRoots: (() => string[]) | null = null;
+  /**
+   * The model card of the node this registry belongs to, resolved at call time (a card
+   * edit needs no rebuild, and two nodes running at once each keep their own). The web
+   * tools read `searchProvider` off it — never off the tab's dropdown, never off a
+   * global setting — because the token and the endpoint belong to that card's provider.
+   */
+  private webCard: (() => ModelCard | undefined) | null = null;
 
   constructor() {
     this.buildTools();
@@ -505,11 +513,12 @@ export class ToolRegistry {
       makeCheckBackgroundTool(getAccess),
       makeKillBackgroundTool(getAccess),
       makeJoinBackgroundTool(getAccess),
-      // The two web tools are keyless and configless: their backends live in
-      // `webBackends.ts` and their only state is the cooldown a failed backend
-      // earns (see `docs/agents/web-search.md`).
-      webSearchTool,
-      webFetchTool,
+      // The two web tools take this node's card: its `searchProvider` decides whether the
+      // provider's paid API leads (and which token the request carries), while the
+      // keyless chain behind it needs no key, no setting and no configuration at all.
+      // See `webAccess.ts` for the one resolver the host installs.
+      makeWebSearchTool(() => this.webCard?.()),
+      makeWebFetchTool(() => this.webCard?.()),
     ]) {
       this.tools.set(tool.definition.function.name, tool);
     }
@@ -532,6 +541,16 @@ export class ToolRegistry {
    */
   setTranscriptRoots(provider: (() => string[]) | null): void {
     this.transcriptRoots = provider;
+    this.buildTools();
+  }
+
+  /**
+   * Point the two web tools at **this node's** model card — the same resolver shape as
+   * `setTranscriptRoots`, because the answer is per node and may change under a running
+   * session (a card edited in the Model Cards page applies to the next call).
+   */
+  setWebCard(resolver: (() => ModelCard | undefined) | null): void {
+    this.webCard = resolver;
     this.buildTools();
   }
 
