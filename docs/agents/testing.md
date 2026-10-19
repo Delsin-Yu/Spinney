@@ -445,13 +445,25 @@ The open question itself stands — a tab **can** stop painting, and that screen
 keeps it real — but it now waits on evidence a log of that shape cannot carry, which is
 exactly what the frame sampler, the probe and the one-nudge ladder in
 `invariants/streaming-perf.md` were added for; a re-report is read against those lines, and
-the ` | at=` stamp on each one is what puts the two sides on one clock.
+the ` | at=` stamp on each one is what puts the two sides on one clock. The first re-report
+arrived 2026-10-03 and is read there, next to the numbers: 27 `stale` episodes, 26 of them
+inside an **unfocused window**, every one closing `recovered via=self` within 202 ms, the
+script alive throughout (`drops=0`, all nine probes answered, up to 92.6 s late) — and, for
+the complaint it was about, **zero** `webview-resize` lines, because that report was driven
+by the one box a stale layout viewport does not move. So the same change taught the sampler
+about the window's own focus and gave the resize report a trigger the defect cannot
+nullify.
 
 The guard takes those probes up with it: `check:webview.js` now asserts that they
-**answer** — the probe reply to a request, the frame that follows it, the nudge frame, and
-a drop for a message routed to a node that does not exist — so a silently dead probe fails
-packaging instead of shipping, exactly as a dead paint report already does. See the same
-issue, and the ladder, in `invariants/streaming-perf.md`.
+**answer** — the probe reply to a request, the frame that follows it, the nudge frame, a
+drop for a message routed to a node that does not exist, the surface snapshot a return to a
+focused window posts, and the resize report a window `resize` event drives (with the whole
+surface on all of them, `doc=` / `vis=` / `canvasDev=` / `canvasRect=` included) — so a
+silently dead probe fails packaging instead of shipping, exactly as a dead paint report
+already does. The resize half is why that deferred step waits 700 ms: the report is
+throttled to one per 500 ms, so the two clocks have to be reconciled in the only place the
+webview runs without a host. See the same issue, and the ladder, in
+`invariants/streaming-perf.md`.
 
 ## Windowed checks (the bounded wait, and what no guard can see)
 

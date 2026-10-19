@@ -230,6 +230,22 @@
   let tabVisible = true;             // on screen until the host says otherwise
   let tabHiddenSince = null;         // set while the tab is not on screen
   let tabHiddenMs = 0;               // off-screen time already accumulated
+  // The **window's** own focus, the third fact "is anybody looking at this tab" needs, and
+  // the one the first two cannot see: a window that is not in front is painted on a
+  // different clock (Windows marks it occluded and the engine stops producing frames), so a
+  // sampler that only knew the page and the tab called every stretch spent in another
+  // application a frozen screen — and the ladder (probe → nudge) ran for a screen nobody
+  // could see. Measured on a real re-report: 26 of 27 `stale` episodes sat inside an
+  // unfocused window, and the one that did not lasted exactly the 3 s threshold.
+  //
+  // The host owns the fact (`vscode.window.state.focused`) and pushes it inside `viewState`,
+  // so this stays a report, never a guess. Leaving the window is handled like the page going
+  // hidden; *coming back* is the moment the diagnostic exists for, and it now sends the
+  // snapshot that was missing — what the surface looked like while nobody was watching
+  // (see `applyWindowFocus`).
+  let winFocused = true;             // focused until the host says otherwise
+  let winBlurSince = null;           // set while the window is not focused
+  let winBlurMs = 0;                 // unfocused time already accumulated
 
   function perfNow() {
     return typeof performance !== 'undefined' && performance.now ? performance.now() : Date.now();
@@ -379,19 +395,26 @@
   }
 
   /**
-   * Is this tab on screen at all — the page visible **and** the editor tab in front? The
-   * sampler runs only then, and a `stall` can only be reported then. A tab nobody is looking
-   * at is allowed to stop drawing (that is the engine throttling it, not a defect), so a gap
-   * measured there is not evidence of anything the user saw — and reporting it was drowning
-   * the real case in false alarms.
+   * Is this tab on screen at all — the page visible, **the editor tab in front**, and the
+   * window itself focused? The sampler runs only then, and a `stall` can only be reported
+   * then. A tab nobody is looking at is allowed to stop drawing (that is the engine
+   * throttling it, not a defect), so a gap measured there is not evidence of anything the
+   * user saw — and reporting it was drowning the real case in false alarms. The window's
+   * focus is the third fact of that question and the one the first two never had: a window
+   * that is not in front stops producing frames without the page ever going hidden.
    */
   function perfOnScreen() {
-    return !perfHidden() && tabVisible;
+    return !perfHidden() && tabVisible && winFocused;
   }
 
   /** Milliseconds this tab has spent off screen, the stretch in progress included. */
   function perfTabHiddenMs() {
     return Math.round(tabHiddenMs + (tabHiddenSince != null ? perfNow() - tabHiddenSince : 0));
+  }
+
+  /** Milliseconds the window has spent unfocused, the stretch in progress included. */
+  function perfWinBlurMs() {
+    return Math.round(winBlurMs + (winBlurSince != null ? perfNow() - winBlurSince : 0));
   }
 
   /**
@@ -436,6 +459,14 @@
       tabHiddenMs: perfTabHiddenMs(),
       canvas: perfCanvasBox(),
       dom: perfDomCount(),
+      // `doc=` and `zoom=` ride along for the *other* shape a frozen picture takes: a
+      // document that kept laying out at its old size (the whole page in a small rectangle
+      // in the top-left corner) shows up here as a `doc=` that disagrees with the window's
+      // own size, and `zoom` is what turns `canvas=` into the device pixels a layer limit is
+      // measured against. The full surface readout — `vis=`, `canvasDev=`, `canvasRect=` — is
+      // what the probe reply carries, and the host asks for it within the same 3 s.
+      doc: perfDocBox(),
+      zoom: perfZoom(),
     });
   }
 
@@ -516,7 +547,8 @@
   }
 
   /**
-   * The host said whether this tab is on screen (`viewState`).
+   * The host said whether this tab is on screen (`viewState`) — and, in the same message,
+   * whether the *window* is focused.
    *
    * Going off screen is the same situation as the page being hidden — frames are supposed to
    * stop, so the episode in flight ends without a `recovered` and the clock for the gap is
@@ -531,6 +563,9 @@
    */
   function perfOnViewState(msg) {
     try {
+      // The window's focus is handled first and on its own: it changes without the tab's
+      // visibility changing at all, which is exactly the case that used to read as a freeze.
+      if (typeof msg.focused === 'boolean') applyWindowFocus(msg.focused);
       const visible = msg.visible !== false;
       if (visible === tabVisible) return;
       const now = perfNow();
@@ -557,6 +592,61 @@
   }
 
   /**
+   * The window's own focus changed (`viewState.focused`).
+   *
+   * Going away is handled exactly like the page going hidden: frames are supposed to stop for
+   * a window that is not in front, so the episode in flight ends **without** a `recovered`,
+   * the frame clock is reset, and the time is accumulated in `winBlurMs` — which is what lets
+   * a later report say "this gap was the user being in another application" instead of "the
+   * screen froze on them".
+   *
+   * Coming back is the moment this whole diagnostic exists for, and the snapshot it sends is
+   * the report it never had: the surface is whatever was left on screen while nobody was
+   * watching. So the return posts the surface *before* asking for the three frames that prove
+   * drawing resumed — a document that kept laying out at its old size (the entire page in a
+   * small rectangle in the top-left corner) or a canvas whose box the wrapper outgrew is
+   * visible in `doc=` / `vis=` / `canvasRect=` on that line, and it may well be repaired
+   * again by the time the first frame of the return arrives.
+   */
+  function applyWindowFocus(focused) {
+    if (focused === winFocused) return;
+    const now = perfNow();
+    winFocused = focused;
+    if (!focused) {
+      perfStopSampler();
+      if (winBlurSince == null) winBlurSince = now;
+      lastFrameAt = now;
+      staleSince = null;
+      staleReportedAt = 0;
+      staleVia = null;
+      return;
+    }
+    let away = 0;
+    if (winBlurSince != null) {
+      away = now - winBlurSince;
+      winBlurMs += away;
+      winBlurSince = null;
+    }
+    perfPost(
+      'focus',
+      Object.assign(
+        {
+          state: 'return',
+          // The stretch that just ended, not the running total: next to a snapshot of the
+          // surface, "how long nobody was looking at it" is the number that explains it.
+          awayMs: Math.round(away),
+        },
+        perfSurface(),
+      ),
+    );
+    lastFrameAt = now;
+    requestAnimationFrame(perfMarkFrame);
+    requestAnimationFrame(perfMarkFrame);
+    requestAnimationFrame(perfMarkFrame);
+    perfStartSampler();
+  }
+
+  /**
    * `probe`: answer with this document's counters *now*, then with the frame that
    * follows them. The two answers are what tell the three ways a quiet tab can fail
    * apart — the script is dead (neither arrives), the script runs but nothing reaches
@@ -564,27 +654,36 @@
    * freeze is elsewhere. The counters go out immediately, before the frame is asked
    * for, because they are the half the host can still use from a tab that will never
    * paint again.
+   *
+   * The reply carries the whole surface (`perfSurface()`, merged last so the field names
+   * are the ones every other report uses) plus the two facts about *looking*: the window's
+   * own focus and how long it has been away. Together with `hiddenMs` / `tabHiddenMs` that
+   * is every reason a frame may legitimately have stopped.
    */
   function perfOnProbe(msg) {
     try {
       const t0 = perfNow();
       perfNoteEpisode('probe');
-      perfPost('probe', {
-        id: msg.id,
-        msgs: perfMessages,
-        drops: perfDrops,
-        frames: frameCount,
-        lastFrame: Math.round(perfNow() - lastFrameAt),
-        dom: perfDomCount(),
-        cards: Object.keys(nodeEls).length,
-        canvas: perfCanvasBox(),
-        wrap: perfBox(treeWrap),
-        inner: perfInnerBox(),
-        dpr: perfDpr(),
-        hiddenMs: perfHiddenMs(),
-        tabHiddenMs: perfTabHiddenMs(),
-        readyState: document.readyState,
-      });
+      perfPost(
+        'probe',
+        Object.assign(
+          {
+            id: msg.id,
+            msgs: perfMessages,
+            drops: perfDrops,
+            frames: frameCount,
+            lastFrame: Math.round(perfNow() - lastFrameAt),
+            dom: perfDomCount(),
+            cards: Object.keys(nodeEls).length,
+            hiddenMs: perfHiddenMs(),
+            tabHiddenMs: perfTabHiddenMs(),
+            focused: winFocused,
+            winBlurMs: perfWinBlurMs(),
+            readyState: document.readyState,
+          },
+          perfSurface(),
+        ),
+      );
       requestAnimationFrame(() => {
         try {
           perfPost('probe-frame', { id: msg.id, ms: Math.round(perfNow() - t0) });
@@ -692,6 +791,121 @@
     return Number(window.devicePixelRatio) || 0;
   }
 
+  /** The tree's zoom factor, rounded: the multiplier between the canvas and the screen. */
+  function perfZoom() {
+    return Math.round((Number(zoom) || 1) * 100) / 100;
+  }
+
+  /**
+   * The document's own initial containing block — what the *layout engine* believes it was
+   * given. This is the box that goes stale when a resize never reaches the document: the
+   * page then lays out at the old, smaller size and paints into the top-left corner while
+   * the window around it is already large, which is what "the whole Spinney page became a
+   * small rectangle in the corner" looks like from outside. `documentElement`, not `body`:
+   * a document with no height set on its root is exactly the case this reads.
+   */
+  function perfDocBox() {
+    try {
+      const el = document.documentElement;
+      return Math.round(el.clientWidth) + 'x' + Math.round(el.clientHeight);
+    } catch (err) {
+      return '0x0';
+    }
+  }
+
+  /**
+   * The visual viewport, when the engine has one: the size the compositor is actually
+   * showing, which is *not* the same question as the layout viewport above. A `doc=` that
+   * disagrees with this one is the stale-layout-viewport defect, stated as two numbers.
+   */
+  function perfVisualBox() {
+    try {
+      const vv = window.visualViewport;
+      if (!vv) return 'n/a';
+      return Math.round(vv.width) + 'x' + Math.round(vv.height);
+    } catch (err) {
+      return 'n/a';
+    }
+  }
+
+  /**
+   * The canvas in **device pixels**: `style × zoom × dpr`, i.e. the pixels the compositor
+   * has to raster for this one layer. It is the number a layer/texture limit is measured
+   * against, and until now no line carried it — nor the `zoom` that turns the readout the
+   * stall line already had (`canvas=`, in CSS pixels) into this one.
+   */
+  function perfCanvasDeviceBox() {
+    try {
+      const scale = perfZoom() * (perfDpr() || 1);
+      const w = Math.round(perfPx(treeCanvas.style.width) * scale);
+      const h = Math.round(perfCanvasStyleHeight() * scale);
+      return w + 'x' + h;
+    } catch (err) {
+      return '0x0';
+    }
+  }
+
+  /** The canvas style height in CSS pixels (`perfPx` on the style, never the measured box). */
+  function perfCanvasStyleHeight() {
+    try {
+      return perfPx(treeCanvas.style.height);
+    } catch (err) {
+      return 0;
+    }
+  }
+
+  /**
+   * Where the canvas was actually laid out, relative to the wrapper: `WxH@x,y`. A canvas
+   * whose measured box disagrees with the wrapper it lives in is "the canvas kept its old
+   * box while the tree area grew" — the other half of the resize report, as a number
+   * instead of an inference.
+   */
+  function perfCanvasRect() {
+    try {
+      const r = treeCanvas.getBoundingClientRect();
+      return (
+        Math.round(r.width) + 'x' + Math.round(r.height) +
+        '@' + Math.round(r.left) + ',' + Math.round(r.top)
+      );
+    } catch (err) {
+      return '0x0@0,0';
+    }
+  }
+
+  /**
+   * The whole surface this document is painting into, on **one** template, for every report
+   * that has to answer that question: the `probe` reply, the `focus` snapshot of a return,
+   * the `resize` report, and the `doc=` / `zoom=` half of a `stall`.
+   *
+   * WHY THESE FIELDS AND NOT A SCREENSHOT. A frozen picture has two shapes and they are
+   * told apart by comparing boxes, not by looking:
+   *
+   *  - **the viewport went stale** — the document kept laying out at its old size, so the
+   *    page paints into a small rectangle in the top-left corner: `doc=` (the ICB) falls
+   *    behind `inner=` / `vis=` (the window and the visual viewport), and `wrap=` — which is
+   *    measured *through* the layout — stays at the old size too;
+   *  - **the canvas is too big to repaint** — `canvasDev=` is the raster the compositor owes
+   *    for one layer, and `canvasRect=` says whether the canvas was ever re-measured against
+   *    its wrapper.
+   *
+   * Every field is a string except the two numbers, and every one of them is producible on a
+   * real engine *and* in the offline sandbox (`tools/check-webview.js` stubs the DOM; a
+   * missing `visualViewport` answers `n/a` rather than throwing).
+   */
+  function perfSurface() {
+    return {
+      doc: perfDocBox(),
+      vis: perfVisualBox(),
+      inner: perfInnerBox(),
+      wrap: perfBox(treeWrap),
+      canvas: perfCanvasBox(),
+      canvasDev: perfCanvasDeviceBox(),
+      canvasRect: perfCanvasRect(),
+      dpr: perfDpr(),
+      zoom: perfZoom(),
+    };
+  }
+
   // ---- Messages thrown away for a node with no card ----------------------------
   // `routeTo` cannot write a routed message into a node the tree does not have, and
   // the message then disappears: no card, no error, nothing in the log. That is the
@@ -720,34 +934,67 @@
     perfPost('drop', { node: key, n: 1 });
   }
 
-  // ---- The tree area's own size (the `resize` report) --------------------------
-  // A wrapper that is resized while the canvas keeps its old box is the second shape a
-  // frozen picture takes: the canvas is what the pan/zoom transform moves, so a wrap
-  // the layout never re-measured leaves the tree parked where it was. The observer
-  // that drives `relayout()` reports the change here; the report is throttled and only
-  // ever sent for a real change, so a dragged window writes one line per half second
-  // and a settled one writes none.
+  // ---- The surface's own size (the `resize` report) ----------------------------
+  // A wrapper that is resized while the canvas keeps its old box is one shape a frozen
+  // picture takes: the canvas is what the pan/zoom transform moves, so a wrap the layout
+  // never re-measured leaves the tree parked where it was. The observer that drives
+  // `relayout()` reports the change here; the report is throttled, so a dragged window
+  // writes one line per half second and a settled one writes none.
+  //
+  // WHY THE OBSERVER ALONE WAS NOT ENOUGH — the hole this rewrite closes. The report used
+  // to fire only when the wrapper's *own box* changed, and that box is exactly the one a
+  // stale layout viewport does not move: when the panel grows but the document keeps laying
+  // out at its old size, `treeWrap` measures the same as before and the one report written
+  // for this defect can never fire. Measured on the re-report it should have caught: zero
+  // `webview-resize` lines in 3 h 20 m, through a session whose complaint was "the whole
+  // page became a small rectangle in the corner after I resized the panel". So the window's
+  // and the visual viewport's own resize events drive it as well (`via=window` / `via=vv`);
+  // those fire whether or not the layout followed. The report now carries the whole surface
+  // (`perfSurface()`) and `was=`, the pair it replaced — so a document that did not follow
+  // its window states that in one line, as `doc=` / `wrap=` behind `inner=` / `vis=`.
   let resizeReportAt = 0;
-  let resizeReportedBox = '';   // the last box a report was sent for ('' = no baseline yet)
+  let resizeReportedSurface = '';  // the whole stamp of the last report ('' = no baseline yet)
+  let resizeReportedWas = '';      // its `WxH@inner`, which the next report prints as `was=`
 
-  function perfReportResize() {
+  /** The stamp one report is compared against the previous one by, as a whole. */
+  function perfResizeStamp(w, h, surface) {
+    return w + 'x' + h + '@' + surface.inner + '/' + surface.vis + '/' + surface.doc;
+  }
+
+  /**
+   * Report the surface. `via` names what asked: the wrapper's `ResizeObserver` (which also
+   * drives the re-layout), the window's own `resize`, or the visual viewport's.
+   */
+  function perfReportResize(via) {
     try {
       const rect = treeWrap.getBoundingClientRect();
       const w = Math.round(rect.width);
       const h = Math.round(rect.height);
-      const box = w + 'x' + h;
+      const surface = perfSurface();
+      const stamp = perfResizeStamp(w, h, surface);
       // The first measurement of a document is the baseline, not a change: there is
-      // nothing to compare it with, and `wrap=` in the probe reply already carries it.
-      if (resizeReportedBox === '') {
-        resizeReportedBox = box;
+      // nothing to compare it with, and the probe reply already carries it.
+      if (resizeReportedSurface === '') {
+        resizeReportedSurface = stamp;
+        resizeReportedWas = w + 'x' + h + '@' + surface.inner;
         return;
       }
-      if (box === resizeReportedBox) return;
+      // A window/viewport event is allowed through with the wrapper's box unchanged — that
+      // is precisely the stale-layout-viewport case, and the throttle below is what bounds
+      // it. An observer callback with nothing new to say writes nothing.
+      if (via === 'observer' && stamp === resizeReportedSurface) return;
       const now = perfNow();
       if (now - resizeReportAt < RESIZE_REPORT_MS) return;
+      const was = resizeReportedWas;
       resizeReportAt = now;
-      resizeReportedBox = box;
-      perfPost('resize', { w, h, dpr: perfDpr(), canvas: perfCanvasBox() });
+      resizeReportedSurface = stamp;
+      resizeReportedWas = w + 'x' + h + '@' + surface.inner;
+      perfPost('resize', Object.assign({ via, was }, surface));
+      // A re-layout — and, on a tree this size, the re-raster of one enormous layer — is a
+      // legitimate reason for frames to stop, so the frame clock starts again here. An
+      // episode already in flight is left alone: a stall that began before this line is not
+      // made untrue by it, and clearing it would hide the very thing this file reports.
+      if (staleSince == null) lastFrameAt = perfNow();
     } catch (err) {
       /* a probe must never break the UI */
     }
@@ -4073,7 +4320,12 @@
       const del = head.querySelector('.node-del');
       if (del) head.insertBefore(info, del); else head.appendChild(info);
     }
-    info.textContent = tr('d{0} · {1} · {2}', msg.depth || 1, msg.model || '', msg.write ? tr('write') : tr('ro'));
+    // The caption names the model the way a human does — `modelName` is the display form
+    // the host resolved (`cardDisplayName`), while `model` is the card's **id**, an opaque
+    // GUID that is also twice as long. The head is a 320px row, so the id belongs in the
+    // tooltip: the same id/display split the transcripts and the control plane use.
+    info.textContent = tr('d{0} · {1} · {2}', msg.depth || 1, msg.modelName || msg.model || '', msg.write ? tr('write') : tr('ro'));
+    info.title = tr('d{0} · {1} · {2}', msg.depth || 1, msg.model || '', msg.write ? tr('write') : tr('ro'));
     // The run's duration, next to the SUB line and left of the delete button: the
     // host hands over the start clock, the chip ticks it locally.
     syncElapsed(head, 'node-agent-elapsed', msg.startedAt, null, head.querySelector('.node-del'));
@@ -5482,11 +5734,20 @@
     }
   });
 
-  // Reposition on resize so a long chain stays coherent — and report the new size of
-  // the tree area to the host (throttled, only on a real change), because a wrapper
-  // that changed while the canvas did not is one of the shapes a frozen picture takes.
+  // Reposition on resize so a long chain stays coherent — and report the surface to the
+  // host (throttled, only on a real change): a wrapper that changed while the canvas did
+  // not is one of the shapes a frozen picture takes, and a window that changed while the
+  // *document* did not is the other one (see `perfReportResize` — the observer alone can
+  // never see it, which is why it reported nothing at all in the session that complained
+  // about exactly that).
   if (typeof ResizeObserver !== 'undefined') {
-    new ResizeObserver(() => { relayout(); ensureNodeInView(); perfReportResize(); }).observe(treeWrap);
+    new ResizeObserver(() => { relayout(); ensureNodeInView(); perfReportResize('observer'); }).observe(treeWrap);
+  }
+  // The window and the visual viewport: these fire whether or not the layout followed, so
+  // they are the only events that arrive on the defect the report exists for.
+  window.addEventListener('resize', () => perfReportResize('window'));
+  if (window.visualViewport && typeof window.visualViewport.addEventListener === 'function') {
+    window.visualViewport.addEventListener('resize', () => perfReportResize('vv'));
   }
 
   let nodeInViewRaf = null;

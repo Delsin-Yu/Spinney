@@ -409,6 +409,40 @@ assertion — a repaint must come back as a paint report, and the new probes mus
 that does not exist) — so a silently dead probe fails packaging instead of shipping
 silently; that intent, and this issue, are recorded next to each other in `testing.md`.
 
+**The first re-report, read against these lines (2026-10-03, build 0.2.0, 3 h 20 m).**
+The same user hit it again on another machine, and the account of it is what the numbers
+had to be matched to: *"the entire Spinney page becomes a small rectangle anchored at the
+top-left of its webview, and it recovers by itself"*, after *"bringing VS Code to the front
+and scaling the section"*. What those lines said:
+
+- **27 `stale` episodes, 459 s in total, worst 84.1 s** — and every one of them closed with
+  `recovered … via=self` within **0–202 ms** of the report. That is the signature of a
+  renderer that comes back *in a burst*, not of a screen that stuttered.
+- **26 of the 27 sat inside an unfocused window** (`[perf] window active=false`, the one
+  exception lasting exactly the 3 s threshold). The sampler's "on screen" question had only
+  ever asked about the page and the editor tab — so every stretch spent in another
+  application read as a frozen screen, and the ladder (probe → nudge) ran for a screen
+  nobody could see: 9 probes, 7 of them unanswered inside the deadline, **6 ladders ending
+  `stale-unresolved`** — all of it noise.
+- **The script was alive and nothing was lost**: all 9 probes were answered (up to 92.6 s
+  late, `webview-probe-late`), `drops=0`, no `post-failed`, and the frame after each answer
+  arrived in 2–61 ms. So neither "the script is dead" nor "the host stopped posting" — and
+  the host was healthy throughout (one `lag blocked` line in the whole file, at startup).
+- **The report written for the user's own description never fired once: zero
+  `webview-resize` lines.** It was driven by the wrapper's *own box*, and that box is
+  exactly the one a stale layout viewport does not move — so the defect it exists for is the
+  one case it could never see.
+- The load is real and worth naming (it is what made the bursts long): `dom=33432` nodes,
+  one `canvas=1865x26602` layer, 40–58 ms per streaming message handler, **410–757 messages
+  a second** handed to the tab, and 19–26 parallel tool calls in a single second.
+
+Two changes came out of it, both reports and nothing else — the sampler's question gained
+the window's own focus (so an unfocused window is no longer a stall, and the *return* sends
+the surface snapshot the diagnosis was missing), and the resize report gained the window's
+and the visual viewport's own events plus the whole surface on the line, so a document that
+kept laying out at its old size states that instead of staying silent. Both are described
+below, in the line list they belong to.
+
 ### The tab stopped painting: the frame sampler, the probe, and one nudge
 
 Everything above measures a repaint that **happened**: an op ends on the webview's paint
@@ -425,21 +459,76 @@ disappoint), so the sampler itself can never be the traffic it reports on: it is
 window from idling either. Stale is defined as a **3 s** gap in a *visible* tab: three ticks
 that did not happen while somebody was looking, which no throttling can explain.
 
-- `webview-stall state=stale ms=… frames=… hiddenMs=… tab=… tabHiddenMs=… canvas=… dom=…`
-  — the renderer stopped producing frames for at least 3 s **in a tab that is on screen**.
-  `frames=` is the sampler's running total (it stops growing), `hiddenMs=` how much of the gap
-  the window spent hidden, `canvas=` / `dom=` the size of what was being drawn (see the layer
-  note below), and `tab=` / `tabHiddenMs=` the same question for the **editor tab**.
+**"On screen" is three facts, not one, and the third was missing until the re-report.**
+The page visible (`document.hidden`), the **editor tab** in front (`viewState.visible`), and
+the **window** focused (`viewState.focused`) — because a window that is not in front is
+painted on a different clock: Windows marks it occluded, the engine stops producing frames
+and after minutes it freezes the script outright, and nothing about the page or the tab says
+so. Measured on the re-report: 26 of 27 `stale` episodes sat inside an unfocused window and
+the 27th lasted exactly the threshold, so every one of them was a screen nobody could have
+been looking at. The webview now treats losing the window exactly like going off screen (the
+episode in flight ends **without** a `recovered`, the frame clock is reset, the time is
+accumulated in `winBlurMs`), and coming back is the moment the diagnostic exists for:
+
+- `webview-focus state=return awayMs=… doc=… vis=… inner=… wrap=… canvas=… canvasDev=…
+  canvasRect=… dpr=… zoom=…` — the **snapshot of the surface at the moment the window came
+  back**, sent *before* the three frames that prove drawing resumed. This is the line the
+  2026-10-03 report was missing: the complaint was "the whole page is a small rectangle in
+  the top-left corner" and no line could say it, because at that instant nobody had asked.
+  `awayMs=` is the stretch that just ended, so a short alt-tab is recognisable and ignorable.
+  One line per return (59 of them in the measured 3 h 20 m), and a healthy one is still
+  evidence: it says the surface agreed with its window at the moment the user came back.
+
+- `webview-stall state=stale ms=… frames=… hiddenMs=… tab=… tabHiddenMs=… canvas=… dom=…
+  doc=… zoom=…` — the renderer stopped producing frames for at least 3 s **in a tab that is
+  on screen**. `frames=` is the sampler's running total (it stops growing), `hiddenMs=` how
+  much of the gap the window spent hidden, `canvas=` / `dom=` the size of what was being
+  drawn (see the layer note below), and `tab=` / `tabHiddenMs=` the same question for the
+  **editor tab**. The last two fields are the cheap half of the *other* shape a frozen
+  picture takes: `doc=` is the document's own box, so a layout viewport that went stale shows
+  up here as a `doc=` that disagrees with the window's size, and `zoom=` turns `canvas=` into
+  the device pixels a layer limit is measured against. The full surface (`vis=`,
+  `canvasDev=`, `canvasRect=`) is what the probe reply carries, and the host asks for one
+  within the same 3 s.
 - `webview-stall state=recovered ms=… via=self|nudge|probe` — the frames came back, and
   **what brought them back**: `self` (nothing was done, the renderer resumed on its own —
   the suspend case), `nudge` (the ladder's one nudge) or `probe` (the host asked).
 - `webview-visibility state=hidden|visible ms=…` — the page's own visibility changes, so a
   gap can be attributed to a hidden window without having to read the host's side for it.
-- `webview-resize w=… h=… dpr=… canvas=…` — a resize is where a canvas-backed view can
-  lose its drawing surface, and `canvas=` is the size the surface actually has as the
-  webview reads it: a resize that leaves it without a size is a document that can no
-  longer paint whatever its cards say. Like the sampler, it is the webview describing its
-  own surface instead of its work.
+- `webview-resize via=observer|window|vv was=… doc=… vis=… inner=… wrap=… canvas=…
+  canvasDev=… canvasRect=… dpr=… zoom=…` — the surface changed, reported by whichever of the
+  three things noticed: the tree area's `ResizeObserver` (which also drives the re-layout),
+  the **window's** own `resize`, or the **visual viewport's**. `was=` is the pair the previous
+  report replaced (`<wrap>@<inner>`), and the rest is the surface readout below.
+  A resize is where a canvas-backed view can lose its drawing surface, and `canvas=` is the
+  size the surface actually has as the webview reads it: a resize that leaves it without a
+  size is a document that can no longer paint whatever its cards say. Like the sampler, it is
+  the webview describing its own surface instead of its work.
+
+  **Why the observer alone was not enough, and what the fields are for.** The report used to
+  fire only when the wrapper's own box changed — and that is precisely the box a *stale layout
+  viewport* does not move: when the panel grows but the document keeps laying out at its old
+  size, the wrapper measures the same as before and the one report written for this defect can
+  never fire. The session that complained about exactly that wrote **zero** `webview-resize`
+  lines in 3 h 20 m. So the window's and the visual viewport's events drive it too — they fire
+  whether or not the layout followed — and the line carries the whole surface, which is what
+  turns the two shapes of a frozen picture into numbers instead of impressions:
+
+  | Field | What it is | What it says when it is wrong |
+  |---|---|---|
+  | `doc=` | `documentElement.clientWidth×clientHeight` — the document's own box, what layout believes it was given | behind `inner=` / `vis=`: the layout viewport went stale, so the page lays out at the old size and paints into the top-left corner |
+  | `vis=` | `window.visualViewport` (`n/a` where the engine has none) | the size the compositor is actually showing; a `doc=` that disagrees with it *is* the defect above |
+  | `inner=` | `window.innerWidth×innerHeight` | the window the document was handed |
+  | `wrap=` | the tree area's measured box | a wrapper that changed while the canvas did not |
+  | `canvas=` | the canvas' style box, in CSS pixels | — |
+  | `canvasDev=` | `canvas × zoom × dpr` | the pixels the compositor owes for that one layer, i.e. the number a layer/texture limit is measured against |
+  | `canvasRect=` | the canvas' laid-out box, `WxH@x,y` | the canvas kept an old box relative to its wrapper |
+  | `zoom=` / `dpr=` | the tree's zoom, the device pixel ratio | the pair that turns `canvas=` into `canvasDev=` |
+
+  A reported surface also **restarts the frame clock** (`if (staleSince == null) lastFrameAt =
+  now`): re-laying out — and, on a tree this size, re-rastering one enormous layer — is a
+  legitimate reason for frames to stop, and its own line is the evidence. An episode already
+  in flight is left alone, because a stall that began before the line is not made untrue by it.
 
 **The tab is not the page, and the first real logs proved it.** `document.hidden` is about the
 *window*: a chat tab in the background of a visible VS Code window is not a hidden document —
@@ -466,12 +555,17 @@ discrimination is the whole purpose of the probe.
 - `webview-probe-request session=… probe#N` — the host asked; `N` is the probe's number
   for that tab, and it is what the reply and the two failures below are named by.
 - `webview-probe session=… id=N msgs=… drops=… frames=… lastFrame=… dom=… cards=…
-  canvas=… wrap=… inner=… dpr=… hiddenMs=… readyState=…` — the webview's own state,
+  hiddenMs=… tabHiddenMs=… focused=… winBlurMs=… readyState=… doc=… vis=… inner=…
+  wrap=… canvas=… canvasDev=… canvasRect=… dpr=… zoom=…` — the webview's own state,
   posted back in answer to that request: how many host messages it has handled
   (`msgs`) and how many it dropped (`drops`, the counter below), what the sampler saw
   (`frames`, and `lastFrame=` ms since the last frame it produced), the DOM and card
-  counts it holds, the canvas's size against the wrapper's and the window's (`canvas=` /
-  `wrap=` / `inner=`) at this `dpr=`, how long it has been hidden, and its `readyState`.
+  counts it holds, how long it has been hidden (`hiddenMs`) and off screen
+  (`tabHiddenMs`) and, because "is anybody looking at this tab" now has three parts,
+  whether the **window** is focused (`focused`) and how long it has been away
+  (`winBlurMs`), its `readyState`, and finally the whole surface (`doc=` / `vis=` /
+  `inner=` / `wrap=` / `canvas=` / `canvasDev=` / `canvasRect=` / `dpr=` / `zoom=`, one
+  template shared with the `focus` and `resize` reports — see the table below).
 - `webview-probe-frame session=… id=N ms=…` — a frame was produced *after* the reply,
   which is the proof that the tab was drawing and not merely running.
 - `webview-probe-dead … (no reply in 3000ms)` — the reply itself never arrived.
@@ -484,9 +578,11 @@ document whose boot threw, a message that never got through) — while
 `webview-probe-noframe` means the script *is* running and its own state is readable, but
 the compositor produced no frame: the DOM is intact and the surface is not, which is a
 paint problem and never a logic one. The reply's numbers then say which part of the
-surface: `hiddenMs` (nothing to paint), `canvas=` / `wrap=` (a surface with no size),
-`lastFrame` / `frames` (the loop running without frames, `frames` being the running total
-that stops growing), `drops` (messages that found no card). That discrimination is exactly what the old reading of the customer log could not
+surface: `hiddenMs` (nothing to paint), `tabHiddenMs` / `focused` / `winBlurMs` (nobody was
+looking), `doc=` / `vis=` (the document's box against the compositor's — the stale viewport),
+`canvas=` / `canvasDev=` / `canvasRect=` / `wrap=` (a surface with no size, or one too large
+to repaint), `lastFrame` / `frames` (the loop running without frames, `frames` being the
+running total that stops growing), `drops` (messages that found no card). That discrimination is exactly what the old reading of the customer log could not
 make.
 
 **`webview-drop node=… n=1`** is written the first time a routed message finds no card
@@ -547,7 +643,12 @@ would otherwise feed a placeholder height into the tidy-tree layout. A live card
 node, a card being dragged and any card something is written into (`cvWake`) are never skipped,
 and the margin is 1000px, so the un-skip happens well before a card becomes visible. Whether
 that is enough to stop the stale corner is what the `canvas=` / `dom=` fields on the next real
-stall will say.
+stall will say — and the 2026-10-03 re-report raised the number rather than settling it: its
+worst canvas was `1865x26602` at `dpr=1.5` with `dom=33432`, i.e. ~40 000 device pixels of one
+layer, while every stall of that session was inside an unfocused window. `canvasDev=` and
+`zoom=` are now on the surface readout so the next one can be judged without arithmetic, and
+the load beside it is worth naming too: 40–58 ms per streaming message handler and 410–757
+messages a second handed to the tab.
 
 **Nothing above the nudge is automatic**, and that is a rule rather than a missing
 feature: a silent repair hides the defect — the tab paints again, the user never learns
@@ -589,16 +690,24 @@ matters at all: `[panel] session=… visible=… active=…` is written once whe
 wired and then on **every change** (never per tick — and once at wiring, because a
 listener that only fired on change would leave "is this the tab the user is looking at?"
 unanswered until the next click, which is exactly the moment a stale tab gets noticed),
-and `[perf] window active=…` follows the window's own focus. A hidden tab in a background
-window is allowed to be stale; a tab that is `visible` and `active` is not, and that is the
-condition the automatic probe tests.
+and `[perf] window active=…` follows the window's own focus. Those two facts are also
+**pushed into the tab** — the window's focus rides in the same `viewState` message the tab's
+visibility does (`ChatPanel.viewStateTo`, forwarded by the provider's
+`onDidChangeWindowState`), because the sampler has to stop calling an unfocused window a
+frozen screen, and only the document can take the snapshot of the return. A hidden tab in a
+background window is allowed to be stale; so is a tab in an unfocused one; a tab that is
+`visible`, `active` **and** in a focused window is not, and that is the condition the
+automatic probe tests.
 
 **What it costs:** a healthy tab writes *nothing* — the sampler reports only a gap of 3 s
 or more, the visibility and resize lines are written on change, and a probe only exists
 because the tab is already stale. The sampler runs at one frame per second and stops while
 hidden, and a stall that is still in flight repeats at most once every 10 s, so even a tab
-that froze for an hour adds a bounded handful of lines. The per-session volume stays in the
-low hundreds of lines a day, the same order as the op trace it can be read next to.
+that froze for an hour adds a bounded handful of lines. The two lines a *user* causes are
+the return snapshot (`webview-focus`, one per return to a focused window — 59 of them in the
+measured 3 h 20 m) and `webview-resize` (one per half second while a panel is being dragged),
+and both are only written for a change. The per-session volume stays in the low hundreds of
+lines a day, the same order as the op trace it can be read next to.
 
 ### Sending the log to someone else: the diagnostics log
 

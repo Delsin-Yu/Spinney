@@ -296,6 +296,34 @@ export class ChatPanel {
    * because a diagnostic did.
    */
   private reportViewState(): void {
+    this.viewStateTo(vscode.window.state.focused);
+  }
+
+  /**
+   * The **window's** own focus changed (`vscode.window.onDidChangeWindowState`).
+   *
+   * The third fact "is anybody looking at this tab" is made of, and the one the page and
+   * the editor tab cannot supply: a window that is not in front is painted on a different
+   * clock — Windows marks it occluded and the engine stops producing frames — so without
+   * this the frame sampler called every stretch spent in another application a frozen
+   * screen, and the one-nudge ladder ran for a screen nobody could see. What the tab does
+   * with it is in `media/main.js` `applyWindowFocus`; the report the *return* sends is the
+   * snapshot of the surface nobody was watching.
+   */
+  reportWindowFocus(focused: boolean): void {
+    this.viewStateTo(focused);
+  }
+
+  /**
+   * Post the complete view state — the tab's visibility, the tab being active, and the
+   * window's focus — to the webview in one message, and hand the tab's own half
+   * (`visible` / `active`) to the caller's hook exactly as before.
+   *
+   * One shape, always whole: the webview reads the three as one picture, and a partial
+   * message would leave the part it left out at whatever was last true — which is exactly
+   * the stale-fact failure this diagnostic exists to stop guessing at.
+   */
+  private viewStateTo(focused: boolean): void {
     const state = { visible: this.panel.visible, active: this.panel.active };
     // The webview is told too, and this is the half of visibility the page cannot see:
     // `document.hidden` is about the window, while a background editor tab is not a hidden
@@ -303,7 +331,7 @@ export class ChatPanel {
     // outright. Without the fact the frame sampler reads "the user switched away" as "the
     // screen is frozen", which is exactly the false alarm it drowned its real signal in.
     try {
-      this.post({ type: 'viewState', visible: state.visible, active: state.active });
+      this.post({ type: 'viewState', visible: state.visible, active: state.active, focused });
     } catch {
       /* diagnostics only: a consumer bug is never a reason to break the panel */
     }

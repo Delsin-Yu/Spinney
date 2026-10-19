@@ -1947,8 +1947,15 @@ button.icon-btn {
   border: 1px solid var(--border);
 }
 
+/* A sub-agent head's caption. `flex: 0 1 auto`, not `0 0 auto`: this is the one head item
+   that may give way, and in a 320px head nothing else can — the title is the only other
+   shrinkable item, and it ends up with what this leaves over. While the item could not
+   shrink at all (`flex-basis: auto` plus `shrink: 0` always resolved to its content width)
+   the truncation below was dead code, and a long caption pushed the elapsed chip and the
+   ✕ / 🗑 buttons straight out of the card (`.node` is `overflow: visible`, so they paint
+   past the border instead of being clipped). */
 .node-agent-info {
-  flex: 0 0 auto;
+  flex: 0 1 auto;
   min-width: 0;
   font-size: 10px;
   color: var(--text-dim);

@@ -605,6 +605,13 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     // from the file. The event only fires on a change, so no de-dupe is needed here.
     this.windowStateSub = vscode.window.onDidChangeWindowState((state) => {
       perf(`window active=${state.focused}`);
+      // …and every tab is told, because the webview's frame sampler has to know it as well:
+      // a window that is not in front must not be reported as a frozen screen, and the
+      // snapshot each return sends is what shows the surface nobody was watching (see
+      // `ChatPanel.reportWindowFocus`). Read-only for the tabs — nothing else changes.
+      for (const id of this.panels.ids()) {
+        this.panels.get(id)?.reportWindowFocus(state.focused);
+      }
     });
     // Keep the workspace lock alive: a heartbeat that stops is how a *live* window is
     // told apart from a killed one, and letting it lapse would hand the files to a second

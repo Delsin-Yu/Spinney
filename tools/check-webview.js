@@ -259,11 +259,18 @@ const TURN_MESSAGES = [
   // in the deferred step at the bottom of this file.
   // `viewState` is the other half of the same question: whether the *editor tab* is on
   // screen, which the page itself cannot see (`document.hidden` is about the window) and
-  // the frame sampler needs before it may call a gap a stall. Both directions are
-  // replayed — off screen and back on — so the transition that resets the frame clock
-  // and restarts the sampler is exercised too, and the run ends with the tab on screen.
-  { type: 'viewState', visible: false, active: false },
-  { type: 'viewState', visible: true, active: true },
+  // the frame sampler needs before it may call a gap a stall — plus the window's own
+  // focus, the third fact of it. Both directions of the tab are replayed — off screen and
+  // back on — so the transition that resets the frame clock and restarts the sampler is
+  // exercised too, and the run ends with the tab on screen. Then the *window* goes away
+  // and comes back **with the tab up**, which is the case that used to read as a frozen
+  // screen: it must not stop the tab from answering, and the return has to post the
+  // snapshot of the surface that was on screen while nobody was watching (`kind:'focus'`,
+  // asserted in the deferred step at the bottom of this file).
+  { type: 'viewState', visible: false, active: false, focused: true },
+  { type: 'viewState', visible: true, active: true, focused: true },
+  { type: 'viewState', visible: true, active: true, focused: false },
+  { type: 'viewState', visible: true, active: true, focused: true },
   { type: 'probe', id: 1 },
   { type: 'nudge', id: 2, reason: 'visible', force: true },
 ];
@@ -587,7 +594,26 @@ const sandbox = {
   cancelAnimationFrame: window.cancelAnimationFrame,
   performance,
   ResizeObserver: class {
-    observe() {}
+    constructor(callback) {
+      this.callback = callback;
+    }
+    // A real `ResizeObserver` delivers one observation as soon as it starts observing — on
+    // a later task, not inside `observe()` itself. Both halves matter here: the webview's
+    // resize report treats its first measurement as the baseline every later one is
+    // compared against, so a stub that never called back left it with no baseline at all
+    // (and the window-driven half of that report, asserted in the deferred step at the
+    // bottom of this file, could never fire); and a *synchronous* call would run the
+    // observer's own `relayout()` in the middle of the script's initial run, before the
+    // tree this file replays has been rendered.
+    observe(target) {
+      setTimeout(() => {
+        try {
+          this.callback?.([{ target, contentRect: { width: 0, height: 0 } }], this);
+        } catch (err) {
+          /* as in a browser: an observer callback's failure is its own */
+        }
+      }, 0);
+    }
     unobserve() {}
     disconnect() {}
   },
@@ -5275,6 +5301,11 @@ if (contextLabel !== 'ctx 50%') {
  * (`media/main.js` `BURST_QUIET_MS`, 50 ms), and it is what the stall probes' frame
  * answers need too: `probe` / `nudge` report from a `requestAnimationFrame`
  * callback (the sandbox runs one on a timer), so those reports are due here.
+ *
+ * It also has to outlast `RESIZE_REPORT_MS` (500 ms): the window-driven half of the
+ * resize report is asserted below, and it is throttled by that window on purpose — so
+ * this step is the one place the two clocks are reconciled. Half a second per run is
+ * nothing next to a report that could not fire at all.
  */
 setTimeout(() => {
   /** `paint`, `probe#1`, `drop` … — what the probes did post, for the messages below. */
@@ -5311,17 +5342,29 @@ setTimeout(() => {
           `tab that stopped answering would look idle; posted ${JSON.stringify(diagnostics)}`,
       );
     } else {
-      const numbers = ['msgs', 'drops', 'frames', 'lastFrame', 'dom', 'cards', 'hiddenMs'];
+      const numbers = [
+        'msgs', 'drops', 'frames', 'lastFrame', 'dom', 'cards', 'hiddenMs', 'tabHiddenMs',
+        'winBlurMs', 'dpr', 'zoom',
+      ];
       const notNumbers = numbers.filter((field) => typeof probe[field] !== 'number');
       if (notNumbers.length > 0) {
         problems.push(`the probe report's ${notNumbers.join(', ')} (id 1) is not numeric: ${JSON.stringify(probe)}`);
       }
-      // The four strings are the readout the probe exists for: where the canvas and
-      // its wrapper sit, how large the window is, what document state the tab is in.
-      // All four *are* producible in this sandbox — `readyState` / `visibilityState`
-      // were added to the DOM stub for exactly this (see `document` above) — so an
-      // empty one is a broken probe, not a sandbox limitation being papered over.
-      const strings = ['canvas', 'wrap', 'inner', 'readyState'];
+      // Whether the *window* is focused is the fact the sampler needs before it may call a
+      // gap a stall: a `probe` answered while the window is away has to say so, or the
+      // reading of that gap is a guess again.
+      if (typeof probe.focused !== 'boolean') {
+        problems.push(`the probe report's \`focused\` (id 1) is not a boolean: ${JSON.stringify(probe)}`);
+      }
+      // The strings are the readout the probe exists for: where the canvas and its wrapper
+      // sit, how large the window is, what document state the tab is in, and the two boxes
+      // that tell a stale viewport from a slow one (`doc=` against `vis=`, plus the canvas'
+      // own device-pixel size and where it was actually laid out). All of them *are*
+      // producible in this sandbox — `readyState` / `visibilityState` were added to the DOM
+      // stub for exactly this (see `document` above), and a missing `visualViewport` answers
+      // `n/a` — so an empty one is a broken probe, not a sandbox limitation being papered
+      // over.
+      const strings = ['canvas', 'wrap', 'inner', 'readyState', 'doc', 'vis', 'canvasDev', 'canvasRect'];
       const notStrings = strings.filter((field) => typeof probe[field] !== 'string' || probe[field].length === 0);
       if (notStrings.length > 0) {
         problems.push(
@@ -5372,6 +5415,63 @@ setTimeout(() => {
     }
   }
 
+  // --- the surface of a screen that came back wrong -----------------------------
+  // The re-report this pair answers was "the whole Spinney page became a small rectangle
+  // in the corner after I resized the panel, and it recovered by itself" — and nothing in
+  // the log could say so, because the one report written for it was driven by the
+  // wrapper's *own box*, which is exactly the box a stale layout viewport does not move.
+  // So two halves are asserted here: the return to a focused window posts the surface
+  // snapshot of what was on screen while nobody was watching (`kind:'focus'`, replayed
+  // above as the window going away and coming back with the tab up), and the window's own
+  // resize event reaches that report (`via=window`) rather than being swallowed as "the
+  // wrapper did not move".
+  {
+    const focus = reportOf('focus');
+    if (!focus) {
+      problems.push(
+        'the window losing focus and coming back posted no `kind: "focus"` report — the snapshot of the ' +
+          'surface nobody was watching is the evidence the frozen-picture report is read against; posted ' +
+          JSON.stringify(diagnostics),
+      );
+    } else {
+      if (focus.state !== 'return') {
+        problems.push(`the focus report is not the return (state=${JSON.stringify(focus.state)}): ${JSON.stringify(focus)}`);
+      }
+      if (typeof focus.awayMs !== 'number') {
+        problems.push(`the focus report carries no numeric \`awayMs\`: ${JSON.stringify(focus)}`);
+      }
+      const fields = ['doc', 'vis', 'inner', 'wrap', 'canvas', 'canvasDev', 'canvasRect'];
+      const missing = fields.filter((field) => typeof focus[field] !== 'string' || focus[field].length === 0);
+      if (missing.length > 0) {
+        problems.push(`the focus report's ${missing.join(', ')} is not a non-empty string: ${JSON.stringify(focus)}`);
+      }
+    }
+
+    // The window's own event, delivered the way a browser delivers one. Nothing in this
+    // sandbox moves a box, so the report can only come back because the event is what
+    // drives it — which is the whole point of the change (the observer alone could not,
+    // and the session that complained about it wrote zero resize lines in 3 h 20 m).
+    for (const handler of listeners.resize ?? []) {
+      handler({ type: 'resize' });
+    }
+    const resize = reportOf('resize');
+    if (!resize) {
+      problems.push(
+        'a window `resize` event posted no `kind: "resize"` report — the surface readout is back to being ' +
+          `driven only by the wrapper's own box, which a stale layout viewport never moves; posted ${JSON.stringify(diagnostics)}`,
+      );
+    } else {
+      if (resize.via !== 'window') {
+        problems.push(`the resize report does not name the window as its trigger (via=${JSON.stringify(resize.via)})`);
+      }
+      const fields = ['was', 'doc', 'vis', 'inner', 'wrap', 'canvas', 'canvasDev', 'canvasRect'];
+      const missing = fields.filter((field) => typeof resize[field] !== 'string' || resize[field].length === 0);
+      if (missing.length > 0) {
+        problems.push(`the resize report's ${missing.join(', ')} is not a non-empty string: ${JSON.stringify(resize)}`);
+      }
+    }
+  }
+
   notes.push(`perf probes: ${diagnostics.length} report(s): ${seen.join(', ') || 'none'}`);
 
   if (problems.length > 0) {
@@ -5394,4 +5494,4 @@ setTimeout(() => {
   // forever — the process would hang after printing OK (which reads as "the
   // checker is slow/stuck" to whoever ran it from a shell).
   process.exit(0);
-}, 150);
+}, 700);
