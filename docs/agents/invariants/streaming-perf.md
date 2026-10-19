@@ -751,7 +751,7 @@ The lines that make such a report diagnosable, in the order they appear:
 - `[env version=… diag=… vscode=… node=… <platform>-<arch> cpus=… mem=…GB appRoot=… folders=… root=… store=… key=… language=…]`
   — which build, on which VS Code (that decides whether the bundled ripgrep is findable at
   all), on what machine, for which workspace and store root.
-- `[config effective maxSubagents=… maxLevel2=… maxInlineToolOutput=… commandMaxForegroundDuration=…s saveSessionTranscripts=… transcriptDir=… dataDir=… autoSessionTitles=… replyLanguage=… defaultCard=… providers=… cards=…]`
+- `[config effective maxSubagents=… maxLevel2=… maxInlineToolOutput=… commandDefaultTimeout=…s commandMaxForegroundDuration=…s saveSessionTranscripts=… transcriptDir=… dataDir=… autoSessionTitles=… replyLanguage=… defaultCard=… providers=… cards=…]`
   — the settings in force, in one line.
 - `[search rg=<path>]` (or `rg=missing (… the fix is NOT in play)`, or a spawn-failure line)
   — **the first thing to check**: whether the child-process search path is actually the one

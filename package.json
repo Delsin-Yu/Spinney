@@ -384,9 +384,15 @@
       {
         "title": "%spinney.config.tools.title%",
         "properties": {
+          "spinney.commandDefaultTimeout": {
+            "type": "number",
+            "default": 500,
+            "description": "%spinney.commandDefaultTimeout.description%",
+            "scope": "window"
+          },
           "spinney.commandMaxForegroundDuration": {
             "type": "number",
-            "default": 300,
+            "default": 1800,
             "description": "%spinney.commandMaxForegroundDuration.description%",
             "scope": "window"
           },

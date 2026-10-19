@@ -1,5 +1,5 @@
 /*
- * exec-timeout-acceptance — the `exec_command` foreground-limit contract, as a
+ * exec-timeout-acceptance — the `exec_command` foreground-budget contract, as a
  * build-time guard.
  *
  * Same trick as `exec-cwd-acceptance.js` (a `Module._load` hook that stubs
@@ -9,32 +9,40 @@
  * the agent cannot see any more, so they are pinned here rather than argued about
  * in a review.
  *
- * The model is one knob and three numbers:
- *   `spinney.commandMaxForegroundDuration` (seconds, default 300 = 5 minutes) —
- *     the longest one command may occupy a turn's foreground;
- *   `timeout` — the command's TOTAL budget (there is no ceiling any more); and
- *   the foreground slice — `min(timeout, the limit)`.
+ * The model is two settings and three numbers:
+ *   `spinney.commandDefaultTimeout` (seconds, default 500) — what a call that states
+ *     no `timeout` gets, and the foreground slice `background_when_timeout` promotes
+ *     at;
+ *   `spinney.commandMaxForegroundDuration` (seconds, default 1800) — the hard ceiling
+ *     on a foreground hold;
+ *   `timeout` — the command's TOTAL budget (there is no ceiling on it); and
+ *   the foreground slice — the stated `timeout`, honored as given up to the ceiling;
+ *     for `background_when_timeout`, `min(timeout, the default)`.
  * The default `timeout_behavior` is `stop_when_timeout`.
  *
  * What it pins:
  *   1. A fast command is still a plain foreground call: `[exit 0 in …]`, nothing
  *      registered anywhere.
- *   2. `timeout` at or below the limit, with no behavior or an explicit "stop_when_timeout", is
- *      killed at the timeout — even where a background terminal was available.
- *      (Regression: the default used to be "move it to the background", so a
- *      timeout that fits in the turn got promoted; the budget is spent, and
- *      promoting it would be "kill it immediately" in disguise.)
- *   3. `timeout` ABOVE the limit with no behavior, or with "stop_when_timeout", is refused
- *      BEFORE the spawn: the tool throws `timeout <n> s is longer than the <limit> s
- *      a turn may hold (spinney.commandMaxForegroundDuration). … Nothing was
- *      started.`, and neither a process nor a background job is created.
- *      (Regression: a model that asked for 30 minutes held the turn for 30 minutes.)
- *   4. `timeout` above the limit WITH "background_when_timeout" is promoted at the
- *      LIMIT (not at `timeout`) and carries only the REMAINING budget
- *      (`timeout − limit`); the message names both numbers. (Regression: the job
+ *   2. `timeout` at or below the default, with no behavior or an explicit
+ *      "stop_when_timeout", is killed at the timeout — even where a background
+ *      terminal was available. (Regression: the default used to be "move it to the
+ *      background", so a timeout that fits in the turn got promoted; the budget is
+ *      spent, and promoting it would be "kill it immediately" in disguise.)
+ *   3. `timeout` ABOVE the default but at or below the maximum is STILL the number
+ *      the call asked for: it is honored as given and the turn is held that long.
+ *      (Regression — this is the whole point of the split: the setting used to be a
+ *      cap, so a stated 2 s against a 1 s default was clamped to 1 s or refused.)
+ *   4. `timeout` ABOVE the maximum with no behavior, or with "stop_when_timeout", is
+ *      refused BEFORE the spawn: the tool throws `timeout <n> s is longer than the
+ *      <max> s a turn may hold (spinney.commandMaxForegroundDuration). … Nothing was
+ *      started.`, and neither a process nor a background job is created. (Regression:
+ *      a model that asked for 30 minutes held the turn for 30 minutes.)
+ *   5. `timeout` above the DEFAULT with "background_when_timeout" is promoted at the
+ *      DEFAULT (not at `timeout`) and carries only the REMAINING budget
+ *      (`timeout − default`); the message names both numbers. (Regression: the job
  *      used to get the whole `timeout` again once in the background, so "1 minute
  *      in the foreground + 30 minutes in the background" was really 30 minutes.)
- *   5. A node-scoped background behavior with `timeout` omitted —
+ *   6. A node-scoped background behavior with `timeout` omitted —
  *      `background_when_timeout` and `start_in_background` alike — is refused BEFORE
  *      the spawn: the one refusal names the value that was asked for, the missing
  *      timeout and both ways out (pass a `timeout`, or use `start_detached`), it
@@ -44,20 +52,22 @@
  *      deadline — `hub.register` was handed an undefined budget — which is the same
  *      "holds its node on Stop until something kills it" shape this refusal exists to
  *      close.)
- *   6. There is no ceiling: `timeout: 99999` with `start_in_background` is accepted,
- *      and the whole 99999 s travels to the background as that job's budget.
- *   7. A session without background access still kills at the timeout (the old
+ *   7. There is no ceiling on the budget: `timeout: 99999` with `start_in_background`
+ *      is accepted, and the whole 99999 s travels to the background as that job's
+ *      budget.
+ *   8. A session without background access still kills at the timeout (the old
  *      behaviour) and never throws `Background terminals are not available`.
- *   8. The description keeps the two rules the model is given (never background the
- *      command yourself; use `cwd` instead of a `cd <dir> && …` prefix) and gains
- *      the new ones (5 minutes / `spinney.commandMaxForegroundDuration` / a
- *      background mode is required for a longer timeout), while the removed
+ *   9. The description keeps the two rules the model is given (never background the
+ *      command yourself; use `cwd` instead of a `cd <dir> && …` prefix) and states
+ *      both settings (the default and the ceiling), while the removed
  *      `spinney.commandTimeout` / `spinney.commandTimeoutMax` are gone from it.
  *
- * The settings stub answers **keyed by name** (`commandMaxForegroundDuration` → 1)
- * because the limit is only observable when the key can be wrong: a stub that
- * returns one value for every key would hide a leftover `commandTimeout` read. One
- * second keeps every case below at about a second instead of five minutes.
+ * The settings stub answers **keyed by name** (`commandDefaultTimeout` → 1,
+ * `commandMaxForegroundDuration` → 3) because the numbers are only observable when
+ * the keys can be wrong: a stub that returns one value for every key would hide a
+ * leftover `commandTimeout` read, and a stub that answered the same value for both
+ * would hide the split itself. One second of default keeps the cases below at about
+ * a second instead of eight minutes.
  *
  * Needs `out/` (run `npm run compile` first: it requires the compiled tool).
  * Portable by construction: the "slow" command is `process.execPath -e …`, so it
@@ -71,14 +81,20 @@ const Module = require('module');
 const ROOT = path.resolve(__dirname, '..');
 const OUT = path.join(ROOT, 'out');
 
-/** The limit the tools see, in seconds; 1 keeps the whole matrix at a few seconds. */
-const LIMIT_SEC = 1;
-const LIMIT_MS = LIMIT_SEC * 1000;
-/** The `timeout` the promotion/refusal cases ask for: 1 s in the foreground, 4 s left. */
+/** The default the tools see, in seconds; 1 keeps the whole matrix at a few seconds. */
+const DEFAULT_SEC = 1;
+const DEFAULT_MS = DEFAULT_SEC * 1000;
+/** The ceiling the tools see: above the default, so the override is observable. */
+const MAX_SEC = 3;
+const MAX_MS = MAX_SEC * 1000;
+/** A `timeout` between the default and the ceiling: it must be honored as given. */
+const MID_SEC = 2;
+const MID_MS = MID_SEC * 1000;
+/** A `timeout` above the ceiling: refused unless a background behavior is asked for. */
 const OVER_SEC = 5;
 const OVER_MS = OVER_SEC * 1000;
 
-const SETTINGS = { commandMaxForegroundDuration: LIMIT_SEC };
+const SETTINGS = { commandDefaultTimeout: DEFAULT_SEC, commandMaxForegroundDuration: MAX_SEC };
 
 const vscodeStub = {
   env: {},
@@ -193,32 +209,51 @@ const killJob = async (job) => {
   check('nothing was registered', registered.length === 0, `registered=${registered.length}`);
   measured('fast command', t0);
 
-  console.log('== case 2: timeout within the limit + no behavior = killed at the timeout ==');
+  console.log('== case 2: timeout at or below the default + no behavior = killed at the timeout ==');
   t0 = Date.now();
   let before = registered.length;
-  r = await timed('case 2', withAccess.execute({ command: SLOW, timeout: LIMIT_SEC }));
+  r = await timed('case 2', withAccess.execute({ command: SLOW, timeout: DEFAULT_SEC }));
   check('the result reports the timeout', /timed out/i.test(r.text) && /1000 ms/.test(firstLine(r.text)), firstLine(r.text));
   check('it settled at the timeout, not at the command’s own end', r.ms >= 900 && r.ms <= 2500, `${r.ms}ms`);
   check('the command was not moved to the background', !/moved to background/.test(r.text), firstLine(r.text));
   check('nothing was registered', registered.length === before, `registered=${registered.length}`);
   measured('kill at the timeout', t0);
 
-  console.log(`== case 3: timeout above the limit + no behavior = refused before spawning ==`);
+  console.log(`== case 2b: a stated timeout between the default and the maximum is honored AS GIVEN ==`);
+  t0 = Date.now();
+  before = registered.length;
+  r = await timed('case 2b', withAccess.execute({ command: SLOW, timeout: MID_SEC }));
+  check('the call was not refused (the default is not a cap)', !r.threw, r.threw ? firstLine(r.text) : undefined);
+  check(
+    `the result reports the ${MID_MS} ms the call asked for, not the ${DEFAULT_MS} ms default`,
+    /timed out/i.test(r.text) && /2000 ms/.test(firstLine(r.text)),
+    firstLine(r.text),
+  );
+  check('it held the turn for the stated timeout', r.ms >= 1900 && r.ms <= 3000, `${r.ms}ms`);
+  check('the command was not moved to the background', !/moved to background/.test(r.text), firstLine(r.text));
+  check('nothing was registered', registered.length === before, `registered=${registered.length}`);
+  measured('a stated timeout is not clamped', t0);
+
+  console.log(`== case 3: timeout above the maximum + no behavior = refused before spawning ==`);
   before = registered.length;
   r = await timed('case 3', withAccess.execute({ command: SLOW, timeout: OVER_SEC }));
   let bare = r.text.replace(/^Error: /, '');
   check('the tool throws (a returned value would be a silent clamp)', r.threw, r.threw ? undefined : `returned: ${firstLine(r.text)}`);
   check(
     'the message is the frozen refusal sentence',
-    /^timeout 5\s?s is longer than the 1\s?s a turn may hold \(spinney\.commandMaxForegroundDuration\)\./.test(bare),
+    /^timeout 5\s?s is longer than the 3\s?s a turn may hold \(spinney\.commandMaxForegroundDuration\)\./.test(bare),
     short(bare, 'longer than'),
   );
-  check('it names both numbers (the request and the limit)', /\b5\s?s\b/.test(bare) && /\b1\s?s\b/.test(bare), short(bare, 'longer than'));
+  check(
+    'it names the request, the maximum and the default it would fall back to',
+    /\b5\s?s\b/.test(bare) && /\b3\s?s\b/.test(bare) && /\b1\s?s\b/.test(bare),
+    short(bare, 'longer than'),
+  );
   check('it says nothing was started', bare.includes('Nothing was started'), short(bare, 'Nothing was started'));
   check('it returned at once (the 3 s command never ran)', r.ms < 700, `${r.ms}ms`);
   check('nothing was registered', registered.length === before, `registered=${registered.length}`);
 
-  console.log(`== case 4: timeout above the limit + "stop_when_timeout" = the same refusal ==`);
+  console.log(`== case 4: timeout above the maximum + "stop_when_timeout" = the same refusal ==`);
   before = registered.length;
   r = await timed('case 4', withAccess.execute({ command: SLOW, timeout: OVER_SEC, timeout_behavior: 'stop_when_timeout' }));
   bare = r.text.replace(/^Error: /, '');
@@ -226,17 +261,17 @@ const killJob = async (job) => {
   check('it returned at once too', r.ms < 700, `${r.ms}ms`);
   check('nothing was registered', registered.length === before, `registered=${registered.length}`);
 
-  console.log(`== case 5: timeout above the limit + background_when_timeout = promoted at the limit ==`);
+  console.log(`== case 5: timeout above the default + background_when_timeout = promoted at the default ==`);
   t0 = Date.now();
   before = registered.length;
   r = await timed('case 5', withAccess.execute({ command: SLOW, timeout: OVER_SEC, timeout_behavior: 'background_when_timeout' }));
   check('the result leads with the background id', r.text.startsWith('[command moved to background: id 7]'), firstLine(r.text));
-  check(`it was promoted at the ${LIMIT_MS} ms limit, not at the ${OVER_MS} ms budget`, r.ms >= 900 && r.ms <= 2500, `${r.ms}ms`);
+  check(`it was promoted at the ${DEFAULT_MS} ms default, not at the ${OVER_MS} ms budget`, r.ms >= 900 && r.ms <= 2500, `${r.ms}ms`);
   check('it was registered exactly once', registered.length === before + 1, `registered=${registered.length}`);
   const job5 = registered[registered.length - 1];
   check(
-    `the job carries the remaining budget (${OVER_MS} − ${LIMIT_MS} ms)`,
-    job5 && Math.abs((job5.timeoutMs ?? -1) - (OVER_MS - LIMIT_MS)) <= 200,
+    `the job carries the remaining budget (${OVER_MS} − ${DEFAULT_MS} ms)`,
+    job5 && Math.abs((job5.timeoutMs ?? -1) - (OVER_MS - DEFAULT_MS)) <= 200,
     `timeoutMs=${String(job5 && job5.timeoutMs)}`,
   );
   check(
@@ -253,12 +288,27 @@ const killJob = async (job) => {
   );
   check('it is owned by the turn that spawned it', job5 && job5.o === owner);
   if (job5) await killJob(job5);
-  measured('move to background at the limit', t0);
+  measured('move to background at the default', t0);
 
-  console.log('== case 6: timeout within the limit + background_when_timeout = killed, not promoted ==');
+  console.log(`== case 5b: the same promotion for a budget between the default and the maximum ==`);
   t0 = Date.now();
   before = registered.length;
-  r = await timed('case 6', withAccess.execute({ command: SLOW, timeout: LIMIT_SEC, timeout_behavior: 'background_when_timeout' }));
+  r = await timed('case 5b', withAccess.execute({ command: SLOW, timeout: MID_SEC, timeout_behavior: 'background_when_timeout' }));
+  check('the result leads with the background id', r.text.startsWith('[command moved to background: id 7]'), firstLine(r.text));
+  check(`it was promoted at the ${DEFAULT_MS} ms default`, r.ms >= 900 && r.ms <= 2500, `${r.ms}ms`);
+  const job5b = registered.length > before ? registered[registered.length - 1] : null;
+  check(
+    `the job carries the remaining budget (${MID_MS} − ${DEFAULT_MS} ms)`,
+    !!job5b && Math.abs((job5b.timeoutMs ?? -1) - (MID_MS - DEFAULT_MS)) <= 200,
+    `timeoutMs=${String(job5b && job5b.timeoutMs)}`,
+  );
+  if (job5b) await killJob(job5b);
+  measured('move to background, mid budget', t0);
+
+  console.log('== case 6: timeout at the default + background_when_timeout = killed, not promoted ==');
+  t0 = Date.now();
+  before = registered.length;
+  r = await timed('case 6', withAccess.execute({ command: SLOW, timeout: DEFAULT_SEC, timeout_behavior: 'background_when_timeout' }));
   check('the result reports the timeout', /timed out/i.test(r.text), firstLine(r.text));
   check('it was NOT promoted (the budget was already spent)', !/moved to background/.test(r.text), firstLine(r.text));
   check('nothing was registered', registered.length === before, `registered=${registered.length}`);
@@ -320,7 +370,7 @@ const killJob = async (job) => {
   console.log('== case 9: no background access = kill at the timeout, never throw ==');
   t0 = Date.now();
   before = registered.length;
-  r = await timed('case 9', withoutAccess.execute({ command: SLOW, timeout: LIMIT_SEC }));
+  r = await timed('case 9', withoutAccess.execute({ command: SLOW, timeout: DEFAULT_SEC }));
   check('it did not throw "Background terminals are not available"', !r.threw, r.threw ? firstLine(r.text) : undefined);
   check('the result reports the timeout', /timed out/i.test(r.text), firstLine(r.text));
   check('nothing was registered', registered.length === before, `registered=${registered.length}`);
@@ -334,11 +384,22 @@ const killJob = async (job) => {
   check('the cwd rule survived', /instead of prefixing the command with "cd <dir> && "/.test(desc));
   check('the cwd argument still says "or an absolute path"', /or an absolute path/.test(def.parameters.properties.cwd.description));
   check(
-    'the 5-minute limit is stated',
-    /5 minutes/.test(desc) || /300 s/.test(desc),
-    `limit words: ${(desc.match(/[^.]*5 minutes[^.]*\./) || desc.match(/[^.]*300 s[^.]*\./) || ['(none)'])[0].slice(0, 160)}`,
+    'the default timeout is stated',
+    /8 minutes/.test(desc) || /500 s/.test(desc),
+    `default words: ${(desc.match(/[^.]*500 s[^.]*\./) || ['(none)'])[0].slice(0, 160)}`,
+  );
+  check(
+    'the maximum is stated',
+    /30 minutes/.test(desc) || /1800 s/.test(desc),
+    `maximum words: ${(desc.match(/[^.]*1800 s[^.]*\./) || ['(none)'])[0].slice(0, 160)}`,
   );
   check('the limit setting is named', /commandMaxForegroundDuration/.test(desc), `setting mentions: ${(desc.match(/commandMaxForegroundDuration/g) || []).length}`);
+  check('the default setting is named', /commandDefaultTimeout/.test(desc), `setting mentions: ${(desc.match(/commandDefaultTimeout/g) || []).length}`);
+  check(
+    'the timeout parameter states that a stated value at or below the maximum is honored',
+    /honored as given/.test(def.parameters.properties.timeout.description),
+    def.parameters.properties.timeout.description.slice(0, 160),
+  );
   // The one sentence the model reads about the missing timeout has to cover BOTH
   // node-scoped values, or a sub-agent that omits one learns the rule only for the
   // other (the refusal itself is cheap; the wasted round trip is not).
@@ -373,8 +434,9 @@ const killJob = async (job) => {
     process.exit(1);
   }
   console.log(
-    `PASS exec-timeout: ${total}/${total} checks — a turn holds the foreground for at most ` +
-      'spinney.commandMaxForegroundDuration: a timeout beyond it is refused unless a background mode is asked ' +
-      'for, and then only the remaining budget leaves the foreground',
+    `PASS exec-timeout: ${total}/${total} checks — spinney.commandDefaultTimeout is the time a command ` +
+      'gets when it states none, a stated timeout is honored up to spinney.commandMaxForegroundDuration, ' +
+      'and a longer one is refused unless a background mode is asked for (then only the remaining budget ' +
+      'leaves the foreground)',
   );
 })();

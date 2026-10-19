@@ -640,7 +640,7 @@ watchdog.unref?.();
   }
   console.log(
     `PASS bg-budget: ${total}/${total} checks — a background job with a budget is killed at its deadline and says why, ` +
-      'an unbudgeted job is left alone, join_background refuses to hold a turn longer than the limit, and a detached ' +
+      'an unbudgeted job is left alone, join_background refuses to hold a turn longer than the ceiling, and a detached ' +
       'job never locks its owner (that node keeps offering Send)',
   );
 })();

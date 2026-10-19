@@ -249,25 +249,33 @@ regression fails *packaging* instead of the user's session:
   `bg kill id=… pid=… outcome=… ms=…` diagnostics line, a confirmed one stays quiet.
   Needs `out/` and is portable — the POSIX and Windows halves exercise the same public
   API. Part of `vscode:prepublish`.
-- `npm run check:timeout` (`tools/exec-timeout-acceptance.js`, **52 checks**) — the
-  **foreground limit** `spinney.commandMaxForegroundDuration` (300 s) and the
-  `exec_command` budget model it rules: `timeout` is the command's **total** budget —
-  foreground plus background — with **no ceiling**, the limit caps only the
-  **foreground slice** (`min(timeout, limit)`), and the default `timeout_behavior` is
-  `stop_when_timeout` again. It pins, in order: (1) a fast command stays a plain foreground call
+- `npm run check:timeout` (`tools/exec-timeout-acceptance.js`, **63 checks**) — the
+  **command budget pair** `spinney.commandDefaultTimeout` (500 s, what a call that states
+  no `timeout` gets, and the foreground slice `background_when_timeout` promotes at) and
+  `spinney.commandMaxForegroundDuration` (1800 s, the hard ceiling), and the
+  `exec_command` model they rule: `timeout` is the command's **total** budget —
+  foreground plus background — with **no ceiling**, a stated `timeout` is the
+  **foreground slice**, honored as given up to the ceiling (`min(timeout, default)`
+  only for `background_when_timeout`, which is what that value names), and the default
+  `timeout_behavior` is
+  `stop_when_timeout`. It pins, in order: (1) a fast command stays a plain foreground call
   (`[exit 0 in …]`, nothing registered anywhere); (2) a `timeout` at or below the
-  limit, with no behavior or an explicit `"stop_when_timeout"`, is killed at that timeout even
+  default, with no behavior or an explicit `"stop_when_timeout"`, is killed at that timeout even
   where a background terminal was available (the budget is spent, so promoting it
-  would be "kill it immediately" in disguise); (3) **rule R2** — a `timeout` *above*
-  the limit with no behavior, or with `"stop_when_timeout"`, is **refused before the spawn** by
-  `timeoutTooLongError`, with the message naming both numbers and saying
+  would be "kill it immediately" in disguise); (2b) a `timeout` **between the two
+  settings** is honored as given — the call is not refused and the result names its own
+  number, not the default (the split's reason, and the regression it closes: one setting
+  used to play both parts, so that call was clamped or refused); (3) **rule R2** — a `timeout` *above*
+  the ceiling with no behavior, or with `"stop_when_timeout"`, is **refused before the spawn** by
+  `timeoutTooLongError`, with the message naming the request, the ceiling and the default,
+  saying
   `Nothing was started.`, and with neither a process nor a background job created
-  (a returned value would be a silent clamp); (4) `timeout` above the limit **with**
-  `"background_when_timeout"` is promoted at the **limit**, not at `timeout`, and the job
-  carries only the **remaining** budget `timeout − limit` — the message names both
+  (a returned value would be a silent clamp); (4) `timeout` above the default **with**
+  `"background_when_timeout"` is promoted at the **default**, not at `timeout`, and the job
+  carries only the **remaining** budget `timeout − default` — the message names both
   numbers, `hub.register` happens exactly once under the **owner of the turn** (a job
   registered under the wrong owner renders in the wrong branch and its notice reaches
-  nobody), and a `timeout` that fits inside the limit is *not* promoted at all;
+  nobody), and a `timeout` that fits inside the default is *not* promoted at all;
   (5) a **node-scoped** value with `timeout` omitted — `background_when_timeout` (case 7)
   and `start_in_background` (case 8b) alike — is **refused before the spawn** by the one
   refusal (`needsTimeoutError(behavior)`) that names the value that was asked for, the
@@ -275,21 +283,25 @@ regression fails *packaging* instead of the user's session:
   or use `start_detached`), and it returns at once with nothing registered
   (`hub.register` is never called — the shape that used to be promoted into a node job
   with **no deadline** is closed here);
-  (6) there is **no ceiling** — `timeout: 99999` with `start_in_background` is
+  (6) there is **no ceiling** on the budget — `timeout: 99999` with `start_in_background` is
   accepted and the whole 99999 s travels to the background as that job's budget;
   (7) a session without background access — a bare `ToolRegistry`, exactly what
   `exec-cwd-acceptance.js` constructs — still kills at the timeout, reports
   `timed out`, registers nothing and never throws `Background terminals are not
   available`; and (8) the tool description keeps the two rules a sub-agent reads
   there (never background the command yourself, use `cwd` instead of a
-  `cd <dir> && …` prefix), gains the limit sentence and the rule that **both**
+  `cd <dir> && …` prefix), states both settings (the default and the ceiling) and that a
+  stated `timeout` at or below the ceiling is honored as given, keeps the rule that **both**
   node-scoped values need a `timeout` while `start_detached` is the only value that may
   omit one, and no longer contains the
   deleted `spinney.commandTimeout` / `spinney.commandTimeoutMax` at all. The settings
-  stub answers **keyed by name** (`commandMaxForegroundDuration` → 1), because the
-  limit is only observable when the key can be wrong: a stub that answers every key
-  with the same value would hide a leftover `commandTimeout` read, and 1 s keeps the
-  whole matrix at a few seconds instead of five minutes. Needs `out/` (`npm run
+  stub answers **keyed by name** (`commandDefaultTimeout` → 1,
+  `commandMaxForegroundDuration` → 3), because the numbers are only observable when the
+  keys can be wrong: a stub that answers every key
+  with the same value would hide a leftover `commandTimeout` read, and a stub that
+  answered the same value for both would hide the split itself. One second of default
+  keeps the
+  whole matrix at a few seconds instead of minutes. Needs `out/` (`npm run
   compile` first) and is portable by construction: the "slow" command is
   `process.execPath -e …`, so it needs no `sleep`, no shell builtin and no PATH
   lookup. Part of `vscode:prepublish`.
@@ -474,7 +486,7 @@ escape at `spinney.commandMaxForegroundDuration` through a `Promise.race` in
 (`deliverBatchWhenSettled` / `deliverResumeAsync`) — a live window is the only place
 that path exists. How to verify it, with the diagnostics log on:
 
-1. Set a small limit (`spinney.commandMaxForegroundDuration` a few seconds, say 10)
+1. Set a small ceiling (`spinney.commandMaxForegroundDuration`, a few seconds, say 10)
    and drive `POST /session/start {title, prompt}` through the control plane with a
    prompt that spawns **one slow sub-agent** in `sync` mode (an `instruction` whose
    work outlives the limit — a slow build, or an `exec_command` with a long
