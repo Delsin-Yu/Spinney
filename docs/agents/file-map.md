@@ -156,11 +156,13 @@
   and what `//F` / `//IM` become is printed), the kill contract
   (`'exited' | 'no-exit' | 'no-pid'`, a real exit confirmed before the deadline,
   `BackgroundRegistry.kill` staying synchronous, an unconfirmed kill flagged *and*
-  logged), the **foreground limit** `spinney.commandMaxForegroundDuration` (a `timeout`
-  above it refused *before the spawn* unless a background `timeout_behavior` asked for
+  logged), the **command budget pair** (`spinney.commandDefaultTimeout` for a call that
+  states none, `spinney.commandMaxForegroundDuration` as the ceiling — a `timeout`
+  above the ceiling refused *before the spawn* unless a background `timeout_behavior` asked for
   one — `background_when_timeout` / `start_in_background` / `start_detached`, the
-  default `stop_when_timeout` being the value that is refused — the promotion at the
-  limit carrying only the `timeout − limit` that is left and
+  default `stop_when_timeout` being the value that is refused — a stated `timeout` at or
+  below the ceiling honored as given, the promotion at the default carrying only the
+  `timeout − default` that is left and
   one `hub.register` under the owner of the turn, a node-scoped value
   (`background_when_timeout` / `start_in_background`) with no `timeout` refused before the
   spawn, and no ceiling on `timeout`), and the
@@ -285,9 +287,11 @@
   the argv a native child receives under Git Bash (the `MSYS_NO_PATHCONV` fix), the
   kill-confirmation rules (`'exited'` / `'no-exit'` / `'no-pid'`, a confirmed exit before
   the deadline, a synchronous `BackgroundRegistry.kill`, an unconfirmed kill flagged and
-  logged), the foreground limit (`spinney.commandMaxForegroundDuration`: the refusal of a
-  `timeout` above it before the spawn without a background `timeout_behavior`, the
-  promotion at the limit with only the remaining budget, a node-scoped value
+  logged), the command budget pair (`spinney.commandDefaultTimeout` /
+  `spinney.commandMaxForegroundDuration`: the refusal of a
+  `timeout` above the ceiling before the spawn without a background `timeout_behavior`, a stated
+  `timeout` at or below it honored as given, the
+  promotion at the default with only the remaining budget, a node-scoped value
   (`background_when_timeout` / `start_in_background`) with no `timeout` refused before the spawn,
   no ceiling on `timeout`), and the background budget (a job killed at its own
   deadline with `killReason:'timeout'`, an unbudgeted job left alone,

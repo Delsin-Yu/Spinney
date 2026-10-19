@@ -2,7 +2,7 @@
 The settings are contributed in **groups**: `contributes.configuration` is an array of
 `{ title, properties }` sections — Model & API (`model`, `providers`, `modelCards`) · Chat & Display
 (`replyLanguage`, `foldThinking`, `foldToolCalls`, `foldWork`, `promptSections`) · Tools & Execution
-(`commandMaxForegroundDuration`, `maxInlineToolOutput`) · Sub-agents
+(`commandDefaultTimeout`, `commandMaxForegroundDuration`, `maxInlineToolOutput`) · Sub-agents
 (`maxConcurrentSubagents`, `maxLevel2Subagents`) · Sessions & Transcripts (`autoSessionTitles`,
 `saveSessionTranscripts`, `saveSubAgentTranscripts`, `subAgentTranscriptDir`) ·
 Control Plane (`httpApi.*`). The
@@ -21,20 +21,30 @@ dialect — `none` / `deepseek` / `openrouter` / `moonshot` — and a row that l
 out is declared by host, see `invariants/model-cards.md`), `modelCards` (object of
 card id → `{ name, providerId, oaiModel, contextWindow, concurrency, vision: {
 enabled, transport }, efforts, defaultEffort }`),
-`commandMaxForegroundDuration` (seconds, default 300 = 5 minutes — the **longest
-anything may hold a turn**: an `exec_command` foreground call, a `join_background`
+`commandDefaultTimeout` (seconds, default 500 — what a command gets when the call states
+no `timeout` of its own, and the foreground slice `background_when_timeout` promotes at.
+It is read **per call** by `commandDefaultTimeoutSec` in `src/tools/execCommand.ts`, and
+a non-positive/absent value falls back to 500. It is a **default**, never a cap, so a
+stated `timeout` is not clipped to it; a configured default above
+`commandMaxForegroundDuration` is clamped to that ceiling, because an omitted `timeout`
+must not describe a hold the ceiling would refuse),
+`commandMaxForegroundDuration` (seconds, default 1800 = 30 minutes — the **longest
+anything may hold a turn's foreground**: one `exec_command` call, a `join_background`
 wait, a `spawn_agents` / `send_agent_message` `sync` wait. It is read **per call**
 — an `exec_command` invocation, a join, a spawn — and never cached;
 `commandMaxForegroundDurationSec` in `src/tools/execCommand.ts` is the reader, with a
 deliberate local copy in `src/chat/runtime.ts` for the two bounded waits, and a
-non-positive/absent value falls back to 300. It is the single knob of the command
-budget model: it caps the **foreground slice** (`min(timeout, limit)`, i.e. how long
-one call may hold the turn) and it is the number rule **R2** is checked against
-(`timeoutTooLongError`). `timeout` is **not** capped — it is the command's **total
+non-positive/absent value falls back to 1800. It is the **ceiling** of the command
+budget model — the number rule **R2** is checked against (`timeoutTooLongError`) — while
+the default above is what a call that states nothing gets, so the two never stand in for
+each other: a stated `timeout` at or below the ceiling is **honored as given**, and only
+`background_when_timeout` still holds the foreground for the shorter default slice
+(`min(timeout, default)`), because promoting at that point is what the value names.
+`timeout` is **not** capped — it is the command's **total
 budget**, foreground plus background, with **no ceiling** — and a `timeout` above the
-limit is **refused before the spawn** unless the call asked for a background
+ceiling is **refused before the spawn** unless the call asked for a background
 `timeout_behavior` (`background_when_timeout` gives the job the rest of that budget,
-`timeout − limit`, as its own deadline; `start_in_background` gives it the whole of
+`timeout − default`, as its own deadline; `start_in_background` gives it the whole of
 it and is refused **without** a `timeout`, because a node job with no deadline would
 hold its node's composer on Stop until it is killed; `start_detached` gives it the
 whole of it as a session-wide **detached** job that locks no node, never notifies and
@@ -44,9 +54,9 @@ cannot be joined, which is why it — and only it — may omit `timeout`; and a
 `start_detached` and to nothing else).
 A background job carries that budget as its deadline (`BackgroundTask.timeoutMs` /
 `deadlineAt`, readable again through `remainingBudgetMs` in `src/tools/background.ts`);
-the two keys this replaced — `commandTimeout` (600) and `commandTimeoutMax` (1800) —
-were a default plus a ceiling, so an over-long command was silently shortened instead
-of becoming a job that says how long it runs and what ended it — see
+the keys this replaced — `commandTimeout` (600, a default) and `commandTimeoutMax`
+(1800, a ceiling) — were merged into one cap by `889154a` and are split again here, as
+`commandDefaultTimeout` + `commandMaxForegroundDuration` — see
 `invariants/background-terminals.md`),
 `replyLanguage` (`auto` — the default, i.e. follow the VS Code display language —
 or one of the language tags VS Code ships display translations for; resolved into
@@ -131,7 +141,7 @@ no handling.
 | `foldToolCalls`, `foldThinking`, `foldWork` | immediately, incl. cards already on screen | pushed: `postConfig()` → the webview re-applies the default to existing cards (`foldWork` re-runs the card's automatic work-log fold after the push, which is how a finished card folds or unfolds without a repaint) |
 | `promptSections` | immediately, incl. a chat tab already open | pushed: `postConfig()` → the webview rebuilds the snippet menu from `snippets` (it keeps no copy of the list, and the shipped rows are merged in again on every push, so a renamed or emptied row shows up at once) |
 | `httpApi.enabled`, `httpApi.port` | immediately | pushed: `ControlServer.restart()` (rebind the listener; disabling just leaves `start()` a no-op) |
-| `commandMaxForegroundDuration`, `maxInlineToolOutput`, `maxLevel2Subagents`, `saveSessionTranscripts`, `saveSubAgentTranscripts`, `subAgentTranscriptDir`, `autoSessionTitles` | immediately | pulled at the point of use (they already were — no listener needed; the limit is read **per call** — an `exec_command` invocation, a join, a spawn — and never cached, so a change applies to the next call and never to a call already waiting) |
+| `commandDefaultTimeout`, `commandMaxForegroundDuration`, `maxInlineToolOutput`, `maxLevel2Subagents`, `saveSessionTranscripts`, `saveSubAgentTranscripts`, `subAgentTranscriptDir`, `autoSessionTitles` | immediately | pulled at the point of use (they already were — no listener needed; both command numbers are read **per call** — an `exec_command` invocation, a join, a spawn — and never cached, so a change applies to the next call and never to a call already waiting) |
 
 - **`model` / `thinkingEffort` arbitration (P4):** the selection belongs to the **node**.
   A turn records the card and level it ran with on the node it creates; a follow-up

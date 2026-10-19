@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A command's timeout is now a default plus a ceiling, not one cap.** `spinney.commandDefaultTimeout`
+  (default **500** s) is what an `exec_command` call gets when it states no `timeout`; it is a
+  default, never a cap. `spinney.commandMaxForegroundDuration` keeps its name and becomes the hard
+  **ceiling** (default **1800** s, was 300): a stated `timeout` at or below it is honored as given,
+  and only a longer one is refused before the spawn unless the call asks for a background mode.
+  `background_when_timeout` still holds the foreground only for the default slice and hands the
+  rest (`timeout − default`) to the job. A configured default above the ceiling is clamped to it.
+  `join_background` and the two `sync` sub-agent waits are bounded by the ceiling.
+- **A running background job's result now says what to do instead of waiting.** The
+  `check_background_terminal` answer for a live job appends
+  `You may continue with other work or end your turn: the completion notice for id 3 will reach you
+  when it finishes. Do not poll it — this is a status read, not a wait.` (a detached job gets
+  `This job never notifies: read it once when you actually need the result, not in a loop.`), the
+  promotion and `start_in_background` results carry the same instruction, and the tool description
+  and the system prompt say a running job is worth at most one check. The field transcript this
+  comes from answered one promoted job with 46 back-to-back checks.
+
 ## [0.3.0] - 2026-10-09
 
 ### Added

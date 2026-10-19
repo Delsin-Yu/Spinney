@@ -1,5 +1,5 @@
 ## Background terminals
-- **`exec_command` has one knob and four behaviors** (`timeout_behavior`: `stop_when_timeout` —
+- **`exec_command` has two knobs and four behaviors** (`timeout_behavior`: `stop_when_timeout` —
   **the default** — `background_when_timeout`, `start_in_background`, `start_detached`), and this
   matrix is the whole contract. The values are the **job's identity**, not a mode: each one decides
   what is registered, whether the call locks its node, whether it notifies, and whether the job can
@@ -7,22 +7,29 @@
 
   | value | behaviour | registered as | locks its node | notifies | joinable |
   | --- | --- | --- | --- | --- | --- |
-  | `stop_when_timeout` (**the default**) | a foreground call, killed at the timeout | nothing | (it is the turn) | - | - |
-  | `background_when_timeout` | foreground up to the five-minute limit, then promoted, carrying `timeout − limit` as its own deadline | a node job | **yes** | yes | yes, if its remaining budget fits in a turn |
+  | `stop_when_timeout` (**the default**) | a foreground call, killed at its timeout (or at the default timeout when the call states none) | nothing | (it is the turn) | - | - |
+  | `background_when_timeout` | foreground up to the **default timeout**, then promoted, carrying `timeout − default` as its own deadline | a node job | **yes** | yes | yes, if its remaining budget fits in a turn |
   | `start_in_background` | a node job from the start | a node job | **yes** | yes | as above |
-  | `start_detached` (**new**) | **fire-and-forget**: session-wide | a **detached** job | **no** | **no** | **refused** |
+  | `start_detached` | **fire-and-forget**: session-wide | a **detached** job | **no** | **no** | **refused** |
 
-  The knob is
-  `spinney.commandMaxForegroundDuration` (seconds, default 300 = 5 minutes), the longest anything may
-  hold a turn; `timeout` is the command's **total budget** — foreground plus background, with **no
-  ceiling** — and the foreground slice a call may hold the turn for is `min(timeout, limit)`, zero
-  for `start_in_background` and `start_detached` (both return before waiting):
+  The two knobs are **not** interchangeable, and the split is the point:
+  `spinney.commandDefaultTimeout` (seconds, default 500) is what a call that states no `timeout`
+  gets — a **default**, never a cap — and it is also the foreground slice `background_when_timeout`
+  promotes at; `spinney.commandMaxForegroundDuration` (seconds, default 1800) is the **ceiling** on a
+  foreground hold, the only number that can refuse a stated `timeout`. `timeout` itself is the
+  command's **total budget** — foreground plus background, with **no ceiling** — and the foreground
+  slice a call may hold the turn for is the stated `timeout`, honored as given up to the ceiling
+  (`min(timeout, default)` for `background_when_timeout`, which is what that behavior names), zero
+  for `start_in_background` and `start_detached` (both return before waiting). A configured default
+  above the ceiling is clamped to it, so an omitted `timeout` can never describe a hold the ceiling
+  would refuse:
 
   | `timeout` | no behavior / `stop_when_timeout` | `background_when_timeout` | `start_in_background` | `start_detached` |
   | --- | --- | --- | --- | --- |
-  | omitted | killed at the limit | **refused before the spawn** | **refused before the spawn** | a detached job with **no deadline** |
-  | ≤ limit | killed at the timeout | killed at the timeout, **not** promoted | the whole budget as the job's deadline | the whole budget as the job's deadline |
-  | > limit | **refused before the spawn** | promoted at the **limit**, the hub gets `timeout − limit` | the whole budget as the job's deadline | the whole budget as the job's deadline |
+  | omitted | killed at the **default** | **refused before the spawn** | **refused before the spawn** | a detached job with **no deadline** |
+  | ≤ default | killed at the timeout | killed at the timeout, **not** promoted | the whole budget as the job's deadline | the whole budget as the job's deadline |
+  | default < `timeout` ≤ ceiling | killed at the **stated timeout** (honored as given) | promoted at the **default**, the hub gets `timeout − default` | the whole budget as the job's deadline | the whole budget as the job's deadline |
+  | > ceiling | **refused before the spawn** | promoted at the **default**, the hub gets `timeout − default` | the whole budget as the job's deadline | the whole budget as the job's deadline |
 
   Two refusals carry this vocabulary, and they are the load-bearing part of it:
 
@@ -59,19 +66,23 @@
   model** — the agent learns its outcome only by asking — so the fire-and-forget spelling is for work
   whose result is not needed to continue.
 
-  `background_when_timeout` runs the command in the foreground up to the slice and, only when the budget
-  outlives the slice (`timeout > limit`), promotes it to a background terminal
-  at the **limit** instead of killing it: the result names the `id`, the working directory, the fact
-  that **nothing was killed** and that it keeps running, the budget the job now has, and the join
-  caveat below (`[command moved to background: id 7]`, then the output so far). A call that omitted
+  `background_when_timeout` runs the command in the foreground up to the default slice and, only when
+  the budget outlives that slice (`timeout > default`), promotes it to a background terminal
+  at the **default** instead of killing it: the result names the `id`, the working directory, the fact
+  that **nothing was killed** and that it keeps running, the budget the job now has, and what to do
+  instead of waiting — continue other work or end the turn, because the completion notice comes back
+  by itself (`[command moved to background: id 7]`, then the output so far). That last line is
+  load-bearing: a session in the field answered the same silence with 46
+  `check_background_terminal` calls back to back, so the message says in as many words that a status
+  read is not a wait. A call that omitted
   `timeout` never reaches this point — it is refused before the spawn, like `start_in_background`
   (see the refusal above) — so a promotion always has a remainder to hand over. The hub is handed the
-  **remainder** (`timeout − limit`), never the budget a second time, because the job's deadline is
+  **remainder** (`timeout − default`), never the budget a second time, because the job's deadline is
   measured from the registration that happens at the promotion. A promotion is its own kind of ending
   in the diagnostics: `outcome=promoted`, neither `exit` nor `timeout`, because the process is alive
-  and now belongs to the hub — whose card, id and completion notice take over. `timeout ≤ limit` with
-  a background behavior is therefore killed at its timeout and **never** promoted: its budget is spent
-  exactly when the slice ends, so a promotion there would be "kill it immediately" in disguise.
+  and now belongs to the hub — whose card, id and completion notice take over. `timeout ≤ default`
+  with a background behavior is therefore killed at its timeout and **never** promoted: its budget is
+  spent exactly when the slice ends, so a promotion there would be "kill it immediately" in disguise.
   `start_in_background` keeps its spelling and its behaviour: it launches immediately and returns a
   **session-local** `id` with no foreground time to report, and it refuses an omitted `timeout`, as
   `background_when_timeout` does.
@@ -86,44 +97,56 @@
   there does throw — `Background terminals are not available in this session.` — because that is a
   request the context cannot honour. The id is minted by the hub (`BackgroundHub.mintId`) — a
   monotonic per-session counter, **not** a real OS pid — and is only resolvable inside its own session.
-- **A `timeout` that would outlive a turn is refused, never clamped** — the one rule that keeps the
-  single knob a knob. `spinney.commandMaxForegroundDuration` is read live per call
-  (`commandMaxForegroundDurationSec()` in `src/tools/execCommand.ts`, with
-  `DEFAULT_COMMAND_MAX_FOREGROUND_SEC = 300`), and a `timeout` longer than it with no behavior (or
-  with `stop_when_timeout`) throws `timeoutTooLongError` **before the spawn** — no process, no job, nothing
-  started, which is the half the model needs or it will go looking for an output that does not
-  exist — because a command that may run that long must say *which* kind of background job it is:
-  `timeout 1800 s is longer than the 300 s a turn may hold (spinney.commandMaxForegroundDuration).
+- **A `timeout` that would outlive the ceiling is refused, never clamped** — the rule that keeps the
+  ceiling a ceiling now that the default is a separate number. `spinney.commandMaxForegroundDuration`
+  is read live per call (`commandMaxForegroundDurationSec()` in `src/tools/execCommand.ts`, with
+  `DEFAULT_COMMAND_MAX_FOREGROUND_SEC = 1800`), and `spinney.commandDefaultTimeout` the same way
+  (`commandDefaultTimeoutSec()`, `DEFAULT_COMMAND_DEFAULT_TIMEOUT_SEC = 500`). A `timeout` **at or
+  below** the ceiling is honored as given — that is the whole point of the split, and the regression
+  it closes: one setting used to play both parts, so a stated 900 s against a 300 s setting was
+  either clamped to 300 s or refused outright. A `timeout` **longer** than the ceiling with no
+  behavior (or with `stop_when_timeout`) throws `timeoutTooLongError` **before the spawn** — no
+  process, no job, nothing started, which is the half the model needs or it will go looking for an
+  output that does not exist — because a command that may run that long must say *which* kind of
+  background job it is:
+  `timeout 2000 s is longer than the 1800 s a turn may hold (spinney.commandMaxForegroundDuration).
   A command that may run that long must not hold the turn: pass timeout_behavior "background_when_timeout"
-  (300 s in the foreground, the rest of its 1800 s budget in the background) or
-  "start_in_background" (the whole 1800 s in the background), or pass a timeout of 300 s or less.
-  Nothing was started.` (the registry adds the `Error: ` prefix). The same value set adds the
-  other refusal: a node-job value **without** a `timeout` — `start_in_background` and, since this
-  change, `background_when_timeout` — is refused before the spawn too,
+  (500 s in the foreground, the rest of its 2000 s budget in the background) or
+  "start_in_background" (the whole 2000 s in the background), or pass a timeout of 1800 s or less.
+  Nothing was started.` (the registry adds the `Error: ` prefix; the sentence it opens with is
+  unchanged, and the two numbers it names are the ceiling that was exceeded and the default the
+  promotion would run). The same value set adds the
+  other refusal: a node-job value **without** a `timeout` — `start_in_background` and
+  `background_when_timeout` — is refused before the spawn too,
   naming `start_detached` as the value that owns an unbounded lifetime, because a node job with no
   deadline would hold its node's composer on Stop until it is killed. There is **no ceiling** on
   `timeout` itself — `timeout: 99999` with `start_in_background` is accepted and the whole budget
   travels to the hub — and `spinney.commandTimeout` / `spinney.commandTimeoutMax` no longer exist.
-  `tools/exec-timeout-acceptance.js` (`npm run check:timeout`, 52 checks, part of
+  `tools/exec-timeout-acceptance.js` (`npm run check:timeout`, 63 checks, part of
   `vscode:prepublish`) pins the matrix and the refusal with a settings stub keyed **by name**
-  (`commandMaxForegroundDuration` → 1), which is the only way the limit is observable at all — and a
-  stub that answered one value for every key would hide a leftover `commandTimeout` read. The key is
+  (`commandDefaultTimeout` → 1, `commandMaxForegroundDuration` → 3), which is the only way the two
+  numbers are observable at all — a stub that answered one value for every key would hide a leftover
+  `commandTimeout` read, and a stub that answered the same value for both would hide the split. It
+  pins the case the split exists for: a stated `timeout` between the two settings is honored at its
+  own number, not the default. Both keys are
   declared in `package.json`'s `contributes.configuration`, and `npm run check:docs` fails the build
-  while the user manual's settings reference does not name it: the documentation half of the same
+  while the user manual's settings reference does not name them: the documentation half of the same
   contract.
-- **`join_background` is gated by the same limit** (`src/tools/backgroundTools.ts`), because a turn
-  must not wait longer than it may hold. A running job with more of its budget left than the limit is
-  refused — the gate is read **before** the task is touched, since a refused join must leave
+- **`join_background` is gated by the same ceiling** (`src/tools/backgroundTools.ts`), because a turn
+  must not wait longer than it may hold. A running job with more of its budget left than the ceiling
+  is refused — the gate is read **before** the task is touched, since a refused join must leave
   everything as it was — with a **plain result**, not an `Error:` (nothing was malformed, and an
   `Error:` would invite a retry with the same pid); the wording is deliberately imperative, because
   ending the turn is the action that will actually reach the result:
-  `Background terminal 3 has 27m 30s of its 30m 0s budget left, which is longer than the 300 s a turn
+  `Background terminal 3 has 27m 30s of its 30m 0s budget left, which is longer than the 900 s a turn
   may wait, so this join was refused and nothing changed. End your turn instead: the completion
   notice for id 3 will reach you when it finishes (check_background_terminal(3) reports it sooner).
-  If you want to end the command rather than wait for it, call kill_background(3).` A job with **no
+  If you want to end the command rather than wait for it, call kill_background(3).` (900 s is the
+  configured ceiling in the example; the number quoted is always whatever
+  `spinney.commandMaxForegroundDuration` currently is). A job with **no
   deadline** (`remainingBudgetMs(task)` → `null`) cannot be waited on at all and is refused for the
   same reason, saying so instead of naming a budget: `Background terminal 3 has no deadline, so it
-  can run longer than the 300 s a turn may wait, and this join was refused — nothing changed. End
+  can run longer than the 900 s a turn may wait, and this join was refused — nothing changed. End
   your turn instead: the completion notice for id 3 will reach you when it finishes
   (check_background_terminal(3) reports it sooner). If you want to end the command rather than wait
   for it, call kill_background(3).`. Since this change the
@@ -136,7 +159,7 @@
   refused outright, before the finished check, so its status does not matter. A finished job is never
   gated (the wait
   returns at once, so there is nothing to bound, and a refusal would tell the model to expect a notice
-  for a job that already ended), and a job with ≤ the limit left joins exactly as before.
+  for a job that already ended), and a job with ≤ the ceiling left joins exactly as before.
   `remainingBudgetMs(task)` is what the gate reads: `null` is the contract's "no deadline", never
   "0 left".
 - **A command must not background itself** (`&`, `nohup`, `disown`, `Start-Process`): the hub
@@ -202,7 +225,13 @@
   of its 30m 0s budget elapsed)` — and an ending the budget caused is told apart from a kill:
   `Background terminal 3 was killed after 30m 0s — its 30m 0s budget ran out. (command: …)`, because
   `killReason: 'timeout'` is not the user's doing. An unconfirmed kill adds
-  `, but the process tree did not report an exit`. These
+  `, but the process tree did not report an exit`. A **running** answer also carries one line of
+  instruction, appended after the status line (which stays byte-identical) and before the output:
+  `You may continue with other work or end your turn: the completion notice for id 3 will reach you
+  when it finishes. Do not poll it — this is a status read, not a wait.` — or, for a **detached** job,
+  `This job never notifies: read it once when you actually need the result, not in a loop.` The
+  difference is the whole reason the line exists: a node job will wake the turn by itself, a detached
+  one never will, and a model told "wait" for a job that cannot notify would poll forever. These
   are **model-facing** strings, so they are deliberately not localized — the same locale-free token
   the webview's chips render, not a translated status word.
 - **A kill reports what it achieved** (`src/tools/background.ts`): `CommandHandle.kill()` is

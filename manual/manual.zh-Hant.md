@@ -326,18 +326,18 @@ Spinney 絕不傳送卡片沒有宣告的層級。卡片沒有提供的層級會
 
 背景終端在回合繼續時保留一個長時間執行的命令。代理透過帶有 `timeout_behavior` 的 `exec_command` 啟動一個背景終端。
 
-任何操作佔用一個回合的時間都不會超過 `spinney.commandMaxForegroundDuration`（300 秒，即 5 分鐘）。`exec_command` 的 `timeout` 是命令的全部預算：前景時間加背景時間，沒有上限。`timeout` 長於該上限時，不會啟動任何東西，呼叫會先被拒絕，除非它同時傳入一個背景取值。
+一條命令在前景佔用一個回合的時間不超過 `spinney.commandMaxForegroundDuration`（1800 秒，即 30 分鐘）。沒有傳入 `timeout` 的命令使用 `spinney.commandDefaultTimeout`（500 秒）。`exec_command` 的 `timeout` 是命令的全部預算：前景時間加背景時間，沒有上限。不超過上限的 `timeout` 按寫入的值使用。`timeout` 長於該上限時，不會啟動任何東西，呼叫會先被拒絕，除非它同時傳入一個背景取值。
 
 `timeout_behavior` 決定該呼叫是什麼身分。它有四個取值：
 
 | 取值 | Spinney 啟動什麼 | 代價是什麼 |
 |---|---|---|
-| `stop_when_timeout` | 不啟動任何東西。命令達到逾時時間時仍在執行，Spinney 就會終止它。該取值是預設值。 | 沒有代價。 |
-| `background_when_timeout` | 在該節點上啟動一個工作。命令先在前景執行，最多到 5 分鐘上限，隨後 Spinney 把它移到背景。預算的剩餘部分就是該工作的預算。該呼叫必須傳入 `timeout`。 | 該工作結束前，該節點不能傳送訊息。工作結束時 Spinney 傳送一則完成通知。 |
+| `stop_when_timeout` | 不啟動任何東西。命令達到逾時時間時仍在執行，Spinney 就會終止它。呼叫沒有傳入 `timeout` 時，Spinney 在預設逾時時間終止命令。該取值是預設值。 | 沒有代價。 |
+| `background_when_timeout` | 在該節點上啟動一個工作。命令先在前景執行到預設逾時時間，隨後 Spinney 把它移到背景。預算的剩餘部分就是該工作的預算。該呼叫必須傳入 `timeout`。 | 該工作結束前，該節點不能傳送訊息。工作結束時 Spinney 傳送一則完成通知。 |
 | `start_in_background` | 立即在該節點上啟動一個工作。全部預算就是該工作的截止時間。該呼叫必須傳入 `timeout`。 | 與上一列相同。 |
 | `start_detached` | 立即啟動一個分離工作。該工作不鎖定任何節點。`timeout` 可以省略。 | 該節點保持空閒，而且該工作不傳送通知，所以代理只在主動查詢時才知道它的結果。該工作階段中的任何節點都能讀取或終止該工作。 |
 
-預算用盡時，Spinney 終止該工作。`background_when_timeout` 和 `start_in_background` 都需要 `timeout`：未傳入 `timeout` 時，Spinney 不會啟動任何東西，呼叫會先被拒絕。沒有截止時間的工作會一直佔用它的節點，所以那樣的工作屬於 `start_detached`。拒絕訊息會指出呼叫要求的取值，說明沒有啟動任何東西，並給出兩條出路：傳入 `timeout`，或改用 `start_detached`。只有 `start_detached` 可以沒有截止時間，因為它不鎖定任何節點。`join_background` 同樣不得讓一個回合超過該上限：只要該工作剩下的預算還多於該上限，或根本沒有截止時間，join 就會被拒絕，並告知代理結束本回合，完成通知之後才會到達。Spinney 也會拒絕分離工作的 join：該工作沒有截止時間，也不傳送通知，所以沒有任何可等待的東西。代理用 `check_background_terminal` 讀取分離工作，用 `kill_background` 結束它。`check_background_terminal` 和 `kill_background` 對每個工作都可用。
+預算用盡時，Spinney 終止該工作。`background_when_timeout` 和 `start_in_background` 都需要 `timeout`：未傳入 `timeout` 時，Spinney 不會啟動任何東西，呼叫會先被拒絕。沒有截止時間的工作會一直佔用它的節點，所以那樣的工作屬於 `start_detached`。拒絕訊息會指出呼叫要求的取值，說明沒有啟動任何東西，並給出兩條出路：傳入 `timeout`，或改用 `start_detached`。只有 `start_detached` 可以沒有截止時間，因為它不鎖定任何節點。`join_background` 同樣不得讓一個回合超過該上限：只要該工作剩下的預算還多於該上限，或根本沒有截止時間，join 就會被拒絕，並告知代理結束本回合，完成通知之後才會到達。Spinney 也會拒絕分離工作的 join：該工作沒有截止時間，也不傳送通知，所以沒有任何可等待的東西。代理用 `check_background_terminal` 讀取分離工作，用 `kill_background` 結束它。`check_background_terminal` 和 `kill_background` 對每個工作都可用。代理啟動工作或把工作移到背景時，Spinney 會告訴它可以繼續其他工作，或結束本回合：工作結束時完成通知會到達。狀態查詢不會等待，所以代理不得對正在執行的工作反覆查詢。
 
 代理不會自己把進程放到背景，例如用 `&` 或 `Start-Process`。Spinney 無法追蹤這樣的進程，你也不能從卡片上終止它。
 
@@ -479,7 +479,8 @@ Spinney 再次傳送要求期間，卡片會顯示一行標記，例如 `⟳ 靜
 | `spinney.foldToolCalls` | `true` | 預設摺疊工作日誌中的工具呼叫卡片。正在執行的呼叫會保持展開。 |
 | `spinney.foldWork` | `true` | 預設在回合完成時把工作日誌摺疊成單行標頭；你點選過的標頭、或你鬆開過鎖定圓點的卡片，會保持你留下的狀態。 |
 | `spinney.promptSections` | `{}` | 額外的提示詞片段，以選單中的名稱作為設定鍵。與內建片段同名的項目會取代其文字。 |
-| `spinney.commandMaxForegroundDuration` | `300` | 任何操作佔用一個回合的最長時間，以秒為單位。300 即 5 分鐘。該上限只限制命令的前景部分。命令在達到該上限時仍在執行，只有呼叫要求了背景取值才會離開本回合：`background_when_timeout` 或 `start_in_background`。`timeout` 長於該上限的命令必須要求其中一個。這兩個取值都必須自帶 `timeout`，否則 Spinney 會拒絕該呼叫。`start_detached` 從不佔用回合，也可以沒有截止時間。 |
+| `spinney.commandDefaultTimeout` | `500` | 呼叫沒有傳入 `timeout` 時，一條命令執行的時間，以秒為單位。500 即 8 分 20 秒。它只是預設值，不是上限：呼叫傳入的 `timeout` 按寫入的值使用，最多到 `spinney.commandMaxForegroundDuration`。它也是 `background_when_timeout` 在前景執行、隨後 Spinney 把命令移到背景的時間。 |
+| `spinney.commandMaxForegroundDuration` | `1800` | 單一命令在前景佔用一個回合的最長時間，以秒為單位。1800 即 30 分鐘。不超過該值的 `timeout` 按寫入的值使用。`timeout` 長於該值時，Spinney 拒絕該呼叫，除非它要求 `background_when_timeout` 或 `start_in_background`。這兩個取值都必須自帶 `timeout`，否則 Spinney 會拒絕該呼叫。`start_detached` 從不佔用回合，也可以沒有截止時間。`join_background` 也不會等待超過該值。 |
 | `spinney.maxInlineToolOutput` | `32768` | 工具結果的大小上限，以位元組為單位。更大的結果會寫入檔案。`0` 關閉上限。 |
 | `spinney.maxConcurrentSubagents` | `15` | 同時可以執行多少個第 1 層子代理。多出的工作會等待。 |
 | `spinney.maxLevel2Subagents` | `2` | 一個子代理可以啟動多少個子項。 |
