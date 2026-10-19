@@ -243,6 +243,48 @@ function lastAssistantText(node: TreeNode): string {
 }
 
 /**
+ * How a session hop ends for the origin conversation.
+ *
+ * - `return_when_finished` (the default): the child session's final answer is
+ *   delivered back as a user message when its turn finishes.
+ * - `fire_and_forget`: the child runs the task and **nothing** comes back; the
+ *   origin is never resumed by it, and no trace is written into its tree.
+ */
+type HopMode = 'return_when_finished' | 'fire_and_forget';
+
+const HOP_MODES: readonly HopMode[] = ['return_when_finished', 'fire_and_forget'];
+
+/** Parse the `mode` argument; `null` means the caller sent something unknown. */
+function parseHopMode(raw: unknown): HopMode | null {
+  if (raw === undefined || raw === null || raw === '') {
+    return 'return_when_finished';
+  }
+  return typeof raw === 'string' && (HOP_MODES as readonly string[]).includes(raw) ? (raw as HopMode) : null;
+}
+
+/**
+ * One in-flight session handoff (`hop_session` / `POST /session/start` with
+ * `returnTo`).
+ *
+ * `targetSessionId` is the **identity** of the child: it is written in the same
+ * synchronous step that creates the session, before the child's first turn can
+ * start, and the return trip matches on it alone — never on a timestamp or on
+ * "the first new session that finishes", which is how a receipt used to be
+ * attributed to the wrong conversation.
+ */
+interface Hop {
+  id: string;
+  originSessionId: string;
+  /** The node the hop was dispatched from — the default place the answer lands. */
+  originNodeId: string;
+  /** Explicit override of the branch point (validated in the origin session). */
+  returnNodeId?: string;
+  mode: HopMode;
+  armedAt: number;
+  targetSessionId?: string;
+}
+
+/**
  * The Spinney output channel with the time stamp attached to every line written through it.
  *
  * The stamp has to live on the **channel** and not only on the call sites, because some writers
@@ -418,13 +460,13 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   /** A queued `POST /session/start` waiting for the current turn to end. */
   private pendingSessionStart: { title?: string; prompt?: string; sessionId?: string; nodeId?: string } | null = null;
   /**
-   * An armed session hop (`hop_session` tool / `POST /session/start` with
-   * `returnTo`). Set when the hop is queued; the first turn that finishes in a
-   * session created after `armedAt` (i.e. the hopped one) delivers its answer
-   * back to `originSessionId` — as a new branch off `returnNodeId` when given —
-   * and clears this.
+   * The armed session hop (`hop_session` / `POST /session/start` with `returnTo`).
+   * Set when the hop is queued; the child session's id is bound the moment it is
+   * created (`targetSessionId`), and the turn that finishes **in that session**
+   * delivers its answer back to `originSessionId` — as a new branch off
+   * `returnNodeId ?? originNodeId` — and clears this.
    */
-  private hopReturn: { originSessionId: string; armedAt: number; returnNodeId?: string } | null = null;
+  private hopReturn: Hop | null = null;
   /**
    * Cache-busting suffix for media URLs; changes per extension session. Public because the
    * Model Card Tree page renders its own document and has to bust the same cache.
@@ -716,12 +758,17 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     const saveSessionTranscripts = cfg.get<boolean>('saveSessionTranscripts') ?? true;
     const subAgentTranscriptDir = (cfg.get<string>('subAgentTranscriptDir') ?? '').trim();
     const autoSessionTitles = cfg.get<boolean>('autoSessionTitles') ?? true;
+    // `hop_session` is the one tool a setting can take away. It is read live here
+    // (and again from the provider's own gate) so switching it off reaches the next
+    // turn; a chain that already froze the schema keeps advertising it and the call
+    // is refused instead — the epoch rules forbid rewriting a sent prefix.
+    const hopSessionEnabled = cfg.get<boolean>('hopSession.enabled') ?? true;
     // The composer's snippets: the shipped rows plus the user's own, keyed by
     // display name (`spinney.promptSections`). Resolved here rather than cached, so
     // the list is live on the next `postConfig` — the same shape every other key
     // follows.
     const promptSnippets = resolvePromptSnippets(cfg.get<unknown>('promptSections'));
-    return { defaultCardId, replyLanguage, foldToolCalls, foldThinking, foldWork, maxConcurrentSubagents, maxLevel2Subagents, saveSubAgentTranscripts, saveSessionTranscripts, subAgentTranscriptDir, autoSessionTitles, promptSnippets };
+    return { defaultCardId, replyLanguage, foldToolCalls, foldThinking, foldWork, maxConcurrentSubagents, maxLevel2Subagents, saveSubAgentTranscripts, saveSessionTranscripts, subAgentTranscriptDir, autoSessionTitles, hopSessionEnabled, promptSnippets };
   }
 
   // ---- API keys (SecretStorage: one entry per provider) ----
@@ -2397,16 +2444,24 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     return { ok: true, title: clean };
   }
 
-  /** `rename_session` tool: an explicit, locking rename (main agent only). */
-  handleRenameSession(args: Record<string, unknown>): string {
+  /**
+   * `rename_session` tool: an explicit, locking rename (main agent only).
+   * `callerSessionId` is the session the calling agent runs in — the default target,
+   * so an agent working in a background tab never renames whatever tab has focus.
+   */
+  handleRenameSession(args: Record<string, unknown>, callerSessionId?: string): string {
     const title = typeof args.title === 'string' ? args.title.trim() : '';
     if (!title) {
       return 'Error: "title" is required.';
     }
     const wanted = typeof args.sessionId === 'string' ? args.sessionId.trim() : '';
-    const session = wanted ? this.sessions.find((s) => s.id === wanted) : this.getActiveSession();
+    const session = wanted
+      ? this.sessions.find((s) => s.id === wanted)
+      : callerSessionId
+        ? this.sessions.find((s) => s.id === callerSessionId)
+        : this.getActiveSession();
     if (!session) {
-      return `Error: no such session: ${wanted || '(active)'}.`;
+      return `Error: no such session: ${wanted || callerSessionId || '(active)'}.`;
     }
     const result = this.renameSession(session.id, title);
     if (!result.ok) {
@@ -2936,21 +2991,36 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
 
   // ---- Session hop (global bookkeeping) ----
 
+  /** `spinney.hopSession.enabled`, read live (the handler refuses, the schema follows). */
+  private hopSessionEnabled(): boolean {
+    return vscode.workspace.getConfiguration('spinney').get<boolean>('hopSession.enabled') ?? true;
+  }
+
   /**
    * The agent handed a task to a fresh session via `hop_session`: queue it with a
    * return address. The hop itself can only start once this turn ends, so the
-   * provider's session-start queue does the work; the armed `hopReturn` then
-   * routes the hopped session's answer back here. `node` is the caller's own node
-   * (P3 binds the handler per node); the hop contract is session-wide, so it does
-   * not change the behaviour — it just makes the caller explicit.
+   * provider's session-start queue does the work; the armed hop then routes the
+   * child's answer back here. `node` is the caller's own node (P3 binds the handler
+   * per node) and it is the **default** place the answer lands — the hop leaves from
+   * the node it was dispatched from, not from whatever is checked out when it comes
+   * back.
    */
   handleHopSession(rt: SessionRuntime, node: TreeNode, args: Record<string, unknown>): string {
-    void node;
     const prompt = typeof args.prompt === 'string' ? args.prompt.trim() : '';
     if (!prompt) {
       return 'Error: "prompt" is required.';
     }
-    if (this.hopReturn) {
+    if (!this.hopSessionEnabled()) {
+      return 'Error: session hopping is disabled by the "spinney.hopSession.enabled" setting.';
+    }
+    if (this.readOnly) {
+      return 'Error: another window owns this workspace\u2019s sessions, so this window cannot start a session (it is read-only).';
+    }
+    const mode = parseHopMode(args.mode);
+    if (!mode) {
+      return `Error: unknown "mode" ${JSON.stringify(args.mode)}; use "return_when_finished" or "fire_and_forget".`;
+    }
+    if (this.hopReturn && this.hopReturn.mode === 'return_when_finished') {
       return 'Error: a session hop is already in progress.';
     }
     if (this.pendingSessionStart) {
@@ -2961,51 +3031,72 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       return 'Error: a background terminal is still running in this session; finish or kill it before hopping.';
     }
     const returnNodeId = typeof args.returnNodeId === 'string' ? args.returnNodeId.trim() : '';
+    if (mode === 'fire_and_forget' && returnNodeId) {
+      return 'Error: "returnNodeId" cannot be used with mode "fire_and_forget" (nothing returns to this session).';
+    }
     if (returnNodeId && !session.nodes[returnNodeId]) {
       return `Error: no such node in this session: ${returnNodeId} (use list_nodes to see the tree).`;
     }
     const title = typeof args.title === 'string' ? sliceText(args.title.trim(), 80) : '';
     this.pendingSessionStart = { title: title || undefined, prompt };
-    this.hopReturn = {
-      originSessionId: session.id,
-      armedAt: Date.now(),
-      returnNodeId: returnNodeId || undefined,
-    };
-    this.outputLog(`[hop] queued: ${prompt.slice(0, 80)}${returnNodeId ? ` (return node ${returnNodeId})` : ''}`);
+    if (mode === 'return_when_finished') {
+      this.hopReturn = {
+        id: newId(),
+        originSessionId: session.id,
+        originNodeId: node.id,
+        returnNodeId: returnNodeId || undefined,
+        mode,
+        armedAt: Date.now(),
+      };
+    }
+    this.outputLog(
+      `[hop] queued (${mode}): ${prompt.slice(0, 80)}` +
+        (mode === 'return_when_finished'
+          ? ` (return to ${session.id} node ${returnNodeId || node.id})`
+          : ' (no receipt)'),
+    );
+    if (mode === 'fire_and_forget') {
+      return (
+        'Queued. This turn is over: a fresh session will run your task now. ' +
+        'Mode "fire_and_forget" means nothing comes back — this conversation will not be resumed by it, ' +
+        'so put anything the user needs in your reply before ending the turn. ' +
+        'The child session appears in the session list, and search_transcripts can read its trace later.'
+      );
+    }
     return (
       'Queued. This turn is over: a fresh session will run your task now, and when it finishes ' +
-      `you will be resumed here with its final answer as a user message` +
-      (returnNodeId ? `, as a new branch off node ${returnNodeId}.` : '.')
+      `you will be resumed here with its final answer as a user message, as a new branch off ` +
+      (returnNodeId ? `node ${returnNodeId}.` : `the node you dispatched from (${node.id}).`)
     );
   }
 
   /**
-   * A turn just finished in a runtime: if a hop is armed and that turn belongs to
-   * the hopped session, queue its final answer back to the origin session, then
-   * kick any queued `POST /session/start` (the handoff runs once the agent is
-   * idle). Folding the kick in here keeps `finishTurn` on the narrow host API.
+   * A turn just finished in a runtime: if the finished turn belongs to the hopped
+   * session (matched by its id, never by a timestamp), queue its final answer back
+   * to the origin session, then kick any queued hop start. Folding the kick in here
+   * keeps `finishTurn` on the narrow host API.
    */
   queueHopReturn(rt: SessionRuntime, node: TreeNode | null, status: TurnStatus): void {
     this.maybeDeliverHopReturn(rt, node, status);
-    // A queued `POST /session/start` (the agent handing a task to a fresh
-    // session) runs once this turn is fully closed out.
+    // A queued hop start (the agent handing a task to a fresh session) runs once
+    // the origin session is idle — see `runPendingSessionStart`.
     this.runPendingSessionStart();
   }
 
   /**
-   * If a hop is armed and the turn that just finished belongs to the hopped
-   * session (a session created after the hop was queued), deliver that session's
-   * final answer back to the origin session as a queued start.
+   * If the turn that just finished belongs to the hopped session — the session the
+   * armed hop created — deliver its final answer back to the origin session as a
+   * queued start. A turn in any other session is ignored: attribution is by the
+   * child's id, so a conversation created while the hop was in flight can no longer
+   * steal the receipt.
    */
   private maybeDeliverHopReturn(rt: SessionRuntime, node: TreeNode | null, status: TurnStatus): void {
     const hop = this.hopReturn;
     const session = rt.session;
-    if (!hop || session.id === hop.originSessionId) {
+    if (!hop || hop.targetSessionId === undefined || session.id !== hop.targetSessionId) {
       return;
     }
-    // Only the freshly created target session counts — a manual session switch
-    // while a hop is in flight must not fire the return.
-    if ((session.createdAt ?? 0) < hop.armedAt - 1000) {
+    if (node && isSidecar(node)) {
       return;
     }
     this.hopReturn = null;
@@ -3020,37 +3111,71 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     }
     const answer = node ? lastAssistantText(node) : '';
     const clipped = answer.length > 8000 ? `${sliceText(answer, 8000)}\n…[truncated]` : answer;
+    const returnNodeId = hop.returnNodeId ?? hop.originNodeId;
     this.pendingSessionStart = {
       sessionId: hop.originSessionId,
-      nodeId: hop.returnNodeId,
+      nodeId: returnNodeId,
       prompt:
         `[session hop receipt] The task you dispatched to the new session "${session.title}" (${session.id}) has finished (status: ${status}).\n` +
         `Its final reply:\n\n${clipped || '(the new session produced no text reply)'}\n\n` +
         `(search_transcripts sessionId=${session.id} has the full trace if you need it)`,
     };
     this.outputLog(
-      `[hop] returning to ${hop.originSessionId}` +
-        `${hop.returnNodeId ? ` node ${hop.returnNodeId}` : ''} (status ${status}, ${clipped.length} chars)`,
+      `[hop] returning to ${hop.originSessionId} node ${returnNodeId} (status ${status}, ${clipped.length} chars)`,
     );
   }
 
-  /** Run a queued session start as soon as the agent is really idle. */
+  /**
+   * Run a queued hop start as soon as its **origin session** is idle (the hop
+   * contract is "this turn is over"; other sessions may keep running). The child's
+   * id is bound the moment the session exists, so the return trip can never be
+   * attributed to another conversation.
+   */
   private runPendingSessionStart(): void {
     const pending = this.pendingSessionStart;
     if (!pending) {
       return;
     }
-    if (this.disposed || !this.globallyIdle()) {
+    if (pending.sessionId) {
+      // A hop return: it is a turn in an existing session, not a fresh start.
+      this.pendingSessionStart = null;
+      void this.controlStartSession(pending).then(
+        (r) => this.outputLog(`[hop] receipt -> ${JSON.stringify(r)}`),
+        (err) => this.outputLog(`[hop] receipt failed: ${err instanceof Error ? err.message : String(err)}`),
+      );
+      return;
+    }
+    if (this.disposed) {
+      return;
+    }
+    const hop = this.hopReturn;
+    // A hop waits for its own origin to finish the dispatching turn. A queued start
+    // with no hop (a fire-and-forget hop's child, or an external caller that was
+    // busy) keeps the whole-window gate.
+    const idle = hop ? this.originIdle(hop.originSessionId) : this.globallyIdle();
+    if (!idle) {
       setTimeout(() => this.runPendingSessionStart(), 50);
       return;
     }
     this.pendingSessionStart = null;
-    void this.controlStartSession(pending).then(
+    void this.controlStartSession(pending, {
+      onSessionCreated: (sessionId) => {
+        if (!hop || !this.hopReturn || this.hopReturn.id !== hop.id) {
+          this.outputLog(`[hop] child ${sessionId} (fire_and_forget: no receipt)`);
+          return;
+        }
+        hop.targetSessionId = sessionId;
+        this.outputLog(
+          `[hop] child ${sessionId} will report back to ${hop.originSessionId} node ` +
+            `${hop.returnNodeId ?? hop.originNodeId}`,
+        );
+      },
+    }).then(
       (r) => {
         this.outputLog(`[http] queued session/start -> ${JSON.stringify(r)}`);
         if (!r.ok) {
           // A hop whose start failed must not stay armed, or the next turn to
-          // finish anywhere would report back into the origin session.
+          // finish in its origin would report back a child that never ran.
           this.hopReturn = null;
         }
       },
@@ -3059,6 +3184,12 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         this.outputLog(`[http] queued session/start failed: ${err instanceof Error ? err.message : String(err)}`);
       },
     );
+  }
+
+  /** True when the session has no live turn (a session that was never opened is idle). */
+  private originIdle(sessionId: string): boolean {
+    const rt = this.runtimes.get(sessionId);
+    return !rt || !rt.isRunning();
   }
 
   /** True when no session has a run, a sub-agent or a background terminal live. */
@@ -3831,7 +3962,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     if (this.pendingSessionStart?.sessionId === id) {
       this.pendingSessionStart = null;
     }
-    if (this.hopReturn?.originSessionId === id) {
+    if (this.hopReturn && (this.hopReturn.originSessionId === id || this.hopReturn.targetSessionId === id)) {
       this.hopReturn = null;
     }
     this.sessions.splice(idx, 1);
@@ -4246,14 +4377,24 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    * that is given. `nodeId` checks out a node in the target session before the
    * prompt is sent.
    */
-  async controlStartSession(opts: {
-    sessionId?: string;
-    nodeId?: string;
-    title?: string;
-    prompt?: string;
-    returnTo?: boolean;
-    returnNodeId?: string;
-  }): Promise<ControlResult> {
+  async controlStartSession(
+    opts: {
+      sessionId?: string;
+      nodeId?: string;
+      title?: string;
+      prompt?: string;
+      returnTo?: boolean;
+      returnNodeId?: string;
+      /** `hop_session`'s `mode` (also accepted here so both entry points agree). */
+      mode?: string;
+      /** The origin of a `returnTo` hop. Never inferred; see P3. */
+      originSessionId?: string;
+    },
+    internal?: {
+      /** Called with the new session id the instant it exists, before its first turn. */
+      onSessionCreated?: (sessionId: string) => void;
+    },
+  ): Promise<ControlResult> {
     if (this.readOnly) {
       return { ok: false, error: 'another window owns this workspace\u2019s sessions; this window is read-only' };
     }
@@ -4302,7 +4443,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       // (only one turn could exist at a time); sessions are independent now, so a
       // fresh session starts right away — that is the concurrency this phase adds.
       if (prompt && !opts.returnTo) {
-        return this.startFreshSession({ title: opts.title, prompt });
+        return this.startFreshSession({ title: opts.title, prompt }, internal);
       }
       // A hop (`returnTo`) still queues: its contract is "your turn is over, the
       // fresh session reports back", and the return trip needs the origin idle.
@@ -4317,9 +4458,12 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         this.pendingSessionStart = { title: opts.title, prompt: opts.prompt };
         if (origin) {
           this.hopReturn = {
+            id: newId(),
             originSessionId: origin.id,
-            armedAt: Date.now(),
+            originNodeId: opts.returnNodeId || origin.activeNodeId || origin.rootIds[0] || '',
             returnNodeId: opts.returnNodeId || undefined,
+            mode: 'return_when_finished',
+            armedAt: Date.now(),
           };
         }
         this.outputLog(`[http] session/start queued (${(opts.prompt ?? '').slice(0, 60)})`);
@@ -4339,16 +4483,24 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       this.panels.ensure(session.id);
       return { ok: true, sessionId: session.id, nodeId: session.activeNodeId, prompted: false };
     }
-    return this.startFreshSession({ title: opts.title, prompt });
+    return this.startFreshSession({ title: opts.title, prompt }, internal);
   }
 
   /**
    * Create a session, title it, open its tab and send `prompt` as its first turn.
    * Shared by the idle path and the "another session is running" path — the latter
-   * is what makes sessions genuinely concurrent (P1).
+   * is what makes sessions genuinely concurrent (P1). `internal.onSessionCreated`
+   * runs **synchronously between** `createSessionInMemory()` and the dispatch, which
+   * is what lets a hop bind its child's id before the child's first turn can end.
    */
-  private async startFreshSession(opts: { title?: string; prompt: string }): Promise<ControlResult> {
+  private async startFreshSession(
+    opts: { title?: string; prompt: string },
+    internal?: { onSessionCreated?: (sessionId: string) => void },
+  ): Promise<ControlResult> {
     const session = this.createSessionInMemory();
+    // The hop's target id must exist before the turn does: a child's turn can never
+    // finish before its own identity is recorded (`Hop.targetSessionId`).
+    internal?.onSessionCreated?.(session.id);
     if (opts.title?.trim()) {
       // A caller-supplied title is explicit: lock it so automatic naming never
       // overwrites what the dispatcher asked for.

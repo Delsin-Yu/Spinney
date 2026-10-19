@@ -434,6 +434,13 @@ export interface HarnessConfig {
   subAgentTranscriptDir: string;
   autoSessionTitles: boolean;
   /**
+   * `spinney.hopSession.enabled`: may the main agent hand a task to a fresh
+   * session (`hop_session`)? Read live at every turn start, so a settings change
+   * reaches the next turn; only the hop tool is affected (`list_nodes` /
+   * `rename_session` stay).
+   */
+  hopSessionEnabled: boolean;
+  /**
    * The composer's prompt snippets — `spinney.promptSections` merged over the
    * shipped rows (`resolvePromptSnippets` in `src/chat/promptSnippets.ts`), in
    * menu order and addressed by display name. They are **user-turn** text: the
@@ -666,7 +673,7 @@ export interface RuntimeHost {
    */
   resolveModel(candidate: string): string;
   handleHopSession(rt: SessionRuntime, node: TreeNode, args: Record<string, unknown>): string;
-  handleRenameSession(args: Record<string, unknown>): string;
+  handleRenameSession(args: Record<string, unknown>, callerSessionId?: string): string;
   queueHopReturn(rt: SessionRuntime, node: TreeNode | null, status: TurnStatus): void;
   /**
    * True while an external controller is reloading the window (`/wait-for-finish`
@@ -1193,7 +1200,8 @@ export class SessionRuntime {
       // And it can resume a finished sub-agent with a follow-up message.
       agent.setSendMessageHandler((args, signal) => this.handleSendAgentMessage(node, args, signal));
       // And it can hand a self-contained task to a fresh session, which reports
-      // its answer back here (only the main agent may do this).
+      // its answer back here (only the main agent may do this; the settings switch
+      // is applied on every call, not once at construction).
       agent.setCanHop(true);
       // Completion signals (a finished background terminal or an async sub-agent)
       // are injected into this node's *running* turn at its next tool boundary.
@@ -1202,10 +1210,14 @@ export class SessionRuntime {
       agent.setListNodeHandler(() => Promise.resolve(this.handleListNodes(node)));
       // And it can rename the session (an explicit rename locks the title, so the
       // automatic namer leaves it alone).
-      agent.setRenameSessionHandler((args) => Promise.resolve(this.host.handleRenameSession(args)));
+      agent.setRenameSessionHandler((args) => Promise.resolve(this.host.handleRenameSession(args, this.sessionId)));
       worker = { agent, tools };
       this.nodeWorkers.set(node.id, worker);
     }
+    // `spinney.hopSession.enabled` is read at every turn start: a settings change
+    // must reach the next turn without rebuilding the worker, and a chain that froze
+    // the schema still refuses the call (the handler checks it too).
+    worker.agent.setHopEnabled(this.host.getConfig().hopSessionEnabled);
     // The budget accounting `read_image` needs before it may attach anything: which bytes
     // this chain's next request would already carry, and the ceiling its transport has.
     // Installed on **every** call, not only when the worker is built: `workerFor` runs at the
@@ -1407,6 +1419,7 @@ export class SessionRuntime {
       canSpawn: !sidecar,
       canSpawnReadOnly: false,
       canHop: !sidecar,
+      hopEnabled: !sidecar && this.host.getConfig().hopSessionEnabled,
     };
     return [...registry.definitions, ...interceptedDefinitions(capabilities)];
   }

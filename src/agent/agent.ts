@@ -527,8 +527,14 @@ export class Agent {
   private canSpawnReadOnly = false;
   /** Whether this agent may spawn sub-agents (a depth-2 sub-agent may not). */
   private canSpawn = true;
-  /** Whether `hop_session` is exposed (main agent only). */
+  /** Whether `list_nodes` / `rename_session` are exposed (main agent only). */
   private canHop = false;
+  /**
+   * Whether `hop_session` is exposed. Main agent only, and only while
+   * `spinney.hopSession.enabled` is on — kept apart from `canHop` so the switch
+   * never removes the two read-only session tools.
+   */
+  private hopEnabled = false;
   /**
    * The tool schemas of the epoch this agent is sending with, when it has one. Set from
    * the node's frozen envelope at every turn start; `undefined` means "the live set",
@@ -636,6 +642,16 @@ export class Agent {
     this.canHop = v;
   }
 
+  /**
+   * Allow/deny `hop_session` itself (`spinney.hopSession.enabled`). The runtime
+   * re-applies this at every turn start, so a settings change reaches the next
+   * turn; a chain that already froze the schema keeps advertising it, and this
+   * flag is what refuses the call.
+   */
+  setHopEnabled(v: boolean): void {
+    this.hopEnabled = v;
+  }
+
   /** Allow/deny this agent from spawning sub-agents (a depth-2 agent may not). */
   setCanSpawn(v: boolean): void {
     this.canSpawn = v;
@@ -688,6 +704,7 @@ export class Agent {
       canSpawn: this.canSpawn,
       canSpawnReadOnly: this.canSpawnReadOnly,
       canHop: this.canHop,
+      hopEnabled: this.canHop && this.hopEnabled,
     };
   }
 
@@ -1302,9 +1319,11 @@ export class Agent {
       const args = parseToolArgs(call.function.arguments);
       result = !this.canHop
         ? 'Error: only the main agent may hop to another session.'
-        : this.hopHandler
-          ? await this.hopHandler(args, signal)
-          : 'Error: session hopping is not available in this session.';
+        : !this.hopEnabled
+          ? 'Error: session hopping is disabled by the "spinney.hopSession.enabled" setting.'
+          : this.hopHandler
+            ? await this.hopHandler(args, signal)
+            : 'Error: session hopping is not available in this session.';
     } else if (call.function.name === 'list_nodes') {
       result = !this.canHop
         ? 'Error: only the main agent may list the session tree.'
