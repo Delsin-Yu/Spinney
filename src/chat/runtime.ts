@@ -2901,12 +2901,21 @@ export class SessionRuntime {
     }
   }
 
-  async onUserMessage(text: string, attachments: UserAttachment[] = []): Promise<void> {
+  async onUserMessage(
+    text: string,
+    attachments: UserAttachment[] = [],
+    opts?: { basisNodeId?: string },
+  ): Promise<void> {
     // P3: only the node this turn would continue from must be free — another
     // branch of this session may stream meanwhile. (This mirrors the composer's
     // Stop-not-Send rule; `beginTurn` re-checks the same condition once the basis
-    // is known.)
-    const basis = this.session.activeNodeId;
+    // is known.) `basisNodeId` is the **explicit** basis a hop receipt comes back to:
+    // the turn branches off that node without moving the session's checkout, which is
+    // what lets a receipt land while the user is reading another branch.
+    const basis = opts?.basisNodeId ?? this.session.activeNodeId;
+    if (opts?.basisNodeId !== undefined && !this.session.nodes[opts.basisNodeId]) {
+      return;
+    }
     // The card this send runs on **and** the card the image path below must use are
     // the ones of the node the send came from (its own, else an ancestor's, else the
     // session seed), plus a pending pick made on it. Both are read here, once, before
