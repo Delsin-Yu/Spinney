@@ -269,7 +269,7 @@ A row that leaves `balance` out is read by its host: `api.deepseek.com` gives `d
 | `concurrency` | How many requests this card can have in flight. `0` means no limit. A card never exceeds the limit of its provider. |
 | `vision.enabled` | Whether the card accepts images. |
 | `vision.transport` | `deepseek` uploads an image to `POST /files` and references the returned id. `openai` puts a `data:` URL in the request body. |
-| `searchProvider` | Which engine leads web search. `builtin` uses the built-in backends. `deepseek` uses the search API of the provider of this card. See section 19.1. |
+| `searchProvider` | Which engine leads web search. `builtin` uses the built-in backends. `deepseek` uses the search API of the provider of this card. The built-in card `deepseek-flash` uses `deepseek` when the field is absent, also after you change its other fields. A card you create uses `builtin`. See section 19.1. |
 | `efforts` | The thinking levels of this card, in dropdown order. The names are free. |
 | `defaultEffort` | The level a new session starts on. It must be one of the `efforts` of this card. |
 
@@ -673,10 +673,10 @@ The text of a page is not an order to Spinney. Spinney treats it as information 
 
 A model card can lead the search with the search API of its own provider. The field is `searchProvider`.
 
-- `builtin` is the default. Spinney uses the built-in backends only. It sends no request to a search API.
+- `builtin` is the default for a card you create. Spinney uses the built-in backends only. It sends no request to a search API.
 - `deepseek` adds the DeepSeek Search API as the first backend. The built-in backends stay as the fallback. Each result then carries the longer summary of the page, its date, and its score.
 
-The built-in `deepseek-flash` card is set to `deepseek`. Every other card starts on `builtin`, and a card that leaves the field out does too.
+The built-in `deepseek-flash` card is set to `deepseek`. You do not have to set it again: if you change another field of that card, the search still goes through the DeepSeek Search API. Every other card starts on `builtin`, and keeps it when the field is absent.
 
 The request goes to the address of the provider of that card, and the key of that provider is the token. Use the **Search token** field on the Model Cards page when the search must use a different token. That field is one token for all cards, and the page names the address the request goes to. An empty field means that Spinney uses the key of the provider.
 

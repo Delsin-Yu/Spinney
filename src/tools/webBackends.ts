@@ -593,6 +593,13 @@ export interface Attempt {
   count: number;
   /** One short reason, for the diagnostics line and the self-test table. */
   detail?: string;
+  /**
+   * Why a `disabled` row made no request. Structured (rather than read off `detail`,
+   * which is prose for a human) so the caller can give advice that matches the cause:
+   * "the card says builtin" and "the card opted in but holds no token" need different
+   * sentences, and advising a token for the first one was a dead end.
+   */
+  disabledReason?: 'builtin' | 'no-token' | 'no-base-url';
 }
 
 /** A backend's health, as the runner remembers it for this extension host. */
@@ -742,8 +749,21 @@ export async function attemptBackend(
   const timeoutMs = options.timeoutMs ?? DEFAULT_ATTEMPT_TIMEOUT_MS;
   const api = backend.api;
   const access = options.access;
-  const done = (outcome: Outcome, hits: SearchHit[], detail?: string): { attempt: Attempt; hits: SearchHit[] } => ({
-    attempt: { id: backend.id, label: backend.label, outcome, ms: Date.now() - started, count: hits.length, detail },
+  const done = (
+    outcome: Outcome,
+    hits: SearchHit[],
+    detail?: string,
+    disabledReason?: Attempt['disabledReason'],
+  ): { attempt: Attempt; hits: SearchHit[] } => ({
+    attempt: {
+      id: backend.id,
+      label: backend.label,
+      outcome,
+      ms: Date.now() - started,
+      count: hits.length,
+      detail,
+      ...(disabledReason ? { disabledReason } : {}),
+    },
     hits,
   });
   // A token-bearing row is asked only when the card opted in *and* a token resolved.
@@ -751,13 +771,13 @@ export async function attemptBackend(
   // was needed, so the old behaviour costs exactly what it always did.
   if (api) {
     if (!access || access.provider === 'builtin') {
-      return done('disabled', [], "the card's searchProvider is builtin");
+      return done('disabled', [], "the card's searchProvider is builtin", 'builtin');
     }
     if (!access.token) {
-      return done('disabled', [], 'no token for this provider');
+      return done('disabled', [], 'no token for this provider', 'no-token');
     }
     if (!access.baseUrl) {
-      return done('disabled', [], "the card's provider has no base URL");
+      return done('disabled', [], "the card's provider has no base URL", 'no-base-url');
     }
   }
   const controller = new AbortController();

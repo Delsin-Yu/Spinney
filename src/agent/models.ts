@@ -748,7 +748,11 @@ function parseCardRow(id: string, rawFields: unknown, issues: CatalogIssue[]): M
     oaiModel: '',
     contextWindow: DEFAULT_CONTEXT_WINDOW,
     vision: { enabled: false, transport: 'openai' },
-    searchProvider: 'builtin',
+    // A stored row **of the built-in card** keeps that card's decision: the row exists
+    // because its owner edited another field, and losing the paid row to a field nobody
+    // saw is not a choice they made. An explicit `searchProvider` in the row still wins
+    // (only the absence changes), and a row the user created keeps the keyless chain.
+    searchProvider: id === VENDORED_CARD.id ? VENDORED_CARD.searchProvider : 'builtin',
     efforts: [...BUILTIN_EFFORTS],
     defaultEffort: DEFAULT_EFFORT,
     concurrency: 0,

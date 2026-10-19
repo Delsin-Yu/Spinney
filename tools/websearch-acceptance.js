@@ -332,6 +332,36 @@ async function main() {
         builtin.attempts[0] && builtin.attempts[0].id === 'deepseek' && builtin.attempts[0].outcome === 'disabled',
         JSON.stringify(builtin.attempts[0]),
       );
+      check(
+        'the disabled row carries a structured cause (builtin), so the caller can advise',
+        builtin.attempts[0] && builtin.attempts[0].disabledReason === 'builtin',
+        JSON.stringify(builtin.attempts[0]),
+      );
+
+      webBackends.resetHealth();
+      calls.length = 0;
+      const noToken = await webBackends.runWebSearch('deepseek 模型 发布', 3, {
+        access: { provider: 'deepseek', baseUrl: 'https://api.example', token: '' },
+        attemptTimeoutMs: 2_000,
+      });
+      check(
+        'a card that opted in without a token is disabled with its own cause and no request',
+        noToken.attempts[0] && noToken.attempts[0].disabledReason === 'no-token' &&
+          !calls.some((call) => call.url.includes('/v1/tools/')),
+        JSON.stringify(noToken.attempts[0]),
+      );
+
+      webBackends.resetHealth();
+      calls.length = 0;
+      const noBaseUrl = await webBackends.runWebSearch('deepseek 模型 发布', 3, {
+        access: { provider: 'deepseek', baseUrl: '', token: 'secret-token' },
+        attemptTimeoutMs: 2_000,
+      });
+      check(
+        'a card whose provider has no base URL is disabled with its own cause',
+        noBaseUrl.attempts[0] && noBaseUrl.attempts[0].disabledReason === 'no-base-url',
+        JSON.stringify(noBaseUrl.attempts[0]),
+      );
 
       webBackends.resetHealth();
       calls.length = 0;

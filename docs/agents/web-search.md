@@ -139,12 +139,14 @@ are log fields, like `via=rg|walk`.
 ## The paid row (an opt-in that belongs to the card)
 
 `deepseek` is a **model-card field**, not a setting: `searchProvider` is `'builtin'` (the
-keyless chain — the default, also for every card that leaves the field out) or
-`'deepseek'` (the card provider's own search API leads, the keyless chain stays behind it
-as the fallback). The vendored `deepseek-flash` card declares `deepseek`, so a configured
-install gets the better index with no extra switch; a user's own card never starts
-spending money until its owner ticks the box. `'builtin'` is therefore not "off" — it is
-the tool as it has always been, and it keeps working with no key at all.
+keyless chain — what a card that leaves the field out gets) or `'deepseek'` (the card
+provider's own search API leads, the keyless chain stays behind it as the fallback). The
+vendored `deepseek-flash` card declares `deepseek`, **and a stored row of that card keeps it
+when the field is absent** — a row exists because its owner edited some other field, and
+losing the paid row to a field nobody saw is not a choice they made (an explicit `'builtin'`
+in the row still wins). A user's own card never starts spending money until its owner ticks
+the box. `'builtin'` is therefore not "off" — it is the tool as it has always been, and it
+keeps working with no key at all.
 
 Why the card and not a `spinney.*` setting: the **endpoint and the token belong to the
 card's provider**, and the answer is per **node** (two branches may run on two cards at

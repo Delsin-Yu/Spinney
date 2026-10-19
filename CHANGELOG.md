@@ -32,8 +32,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   because the endpoint and the token are the card provider's: the request goes to that
   provider's address with that provider's API key, and a separate token can be stored in the
   Model Cards page (`spinney.searchKey.deepseek`) when the two are different accounts. The
-  built-in `deepseek-flash` card ships with it on; every other card, and every card that
-  leaves the field out, keeps the keyless chain and spends nothing. Also on the card: when
+  built-in `deepseek-flash` card ships with it on — including a stored row of that card whose
+  owner has already edited another field, where the field's absence means the card decides
+  rather than `builtin`; every card of the user's own, and every card that leaves the field
+  out, keeps the keyless chain and spends nothing. When the paid row is off, the note under
+  the results now names the cause: a card set to `builtin` is told to switch the card, and
+  only a card with no token is told to add one. Also on the card: when
   the local reader finds no text at all in a page (a client-rendered one), `web_fetch` now
   falls back to that provider's fetch API — after the private-address check, on the final
   URL — and says so in the result. New outcomes (`unauthorized`, `no-balance`,

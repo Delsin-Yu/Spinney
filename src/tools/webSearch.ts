@@ -90,11 +90,21 @@ export function makeWebSearchTool(card: CardResolver): AgentTool {
       const disabled = report.attempts.find((attempt) => attempt.id === 'deepseek' && attempt.outcome === 'disabled');
       if (disabled) {
         // The backend the card asked for did not run. Saying why in one sentence is the
-        // difference between "the search is broken" and "the card needs a token".
+        // difference between "the search is broken" and "the card needs a switch", and the
+        // advice has to match the cause: telling an owner whose card says `builtin` to set
+        // a token sends them to a field that changes nothing.
+        const advice =
+          disabled.disabledReason === 'builtin'
+            ? 'set this card\u2019s search provider to deepseek on the Model Cards page (the built-in card needs no token of its own)'
+            : disabled.disabledReason === 'no-token'
+              ? 'give the card\u2019s provider a key, or store a search token in the Model Cards page'
+              : disabled.disabledReason === 'no-base-url'
+                ? 'give the card\u2019s provider a base URL first'
+                : 'open the Model Cards page to see why it is off';
         lines.push(
           '',
           `Note: the card's paid search provider was not used (${disabled.detail}). The keyless backends below are ` +
-            'unaffected; to use it, set the search token in the Model Cards page, or give the card\u2019s provider a key.',
+            `unaffected; to use it, ${advice}.`,
         );
       }
       if (report.matched === 0) {

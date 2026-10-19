@@ -40,7 +40,7 @@ A **model card** is one selectable model:
 | oaiModel | The only thing that travels as `body.model`. |
 | contextWindow | The card's own window, for the context-usage indicator. It is not the API's `max_tokens` output budget. |
 | vision | `{ enabled, transport }` — see below. |
-| searchProvider | `builtin` (the keyless search chain — the default, and what every card that leaves the field out gets) or `deepseek` (that card provider's own search API leads, and the keyless chain stays behind it). A declaration like the vision dialect, never probed; `docs/agents/web-search.md` §"The paid row" has the token order and the cost. |
+| searchProvider | `builtin` (the keyless search chain — what a card that leaves the field out gets) or `deepseek` (that card provider's own search API leads, and the keyless chain stays behind it). A stored row **of the built-in card** keeps `deepseek` when the field is absent (only an explicit value overrides it), so editing another field never quietly turns the paid row off; a row the user created starts at `builtin`. A declaration like the vision dialect, never probed; `docs/agents/web-search.md` §"The paid row" has the token order and the cost. |
 | efforts | A free-form list of thinking levels this card offers. |
 | defaultEffort | The level a session starts on; it must be one of `efforts`. |
 | concurrency | Maximum requests in flight for this card; `0` = unlimited. |

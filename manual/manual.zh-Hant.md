@@ -269,7 +269,7 @@ Spinney 會在頁面中檢查草稿，並在主機中再檢查一次。被拒絕
 | `concurrency` | 此卡片可以同時發出多少個要求。`0` 表示不限。卡片絕不會超過其供應商的上限。 |
 | `vision.enabled` | 卡片是否接受影像。 |
 | `vision.transport` | `deepseek` 把影像上傳到 `POST /files`，並引用傳回的 id。`openai` 把 `data:` URL 放進要求主體。 |
-| `searchProvider` | 由哪個引擎主導網路搜尋。`builtin` 使用內建後端。`deepseek` 使用該卡片所屬供應商的搜尋 API。見 19.1 節。 |
+| `searchProvider` | 由哪個引擎主導網路搜尋。`builtin` 使用內建後端。`deepseek` 使用該卡片所屬供應商的搜尋 API。內建卡片 `deepseek-flash` 在沒有設定該欄位時使用 `deepseek`，即使你改過它的其他欄位。你自己新建的卡片使用 `builtin`。見 19.1 節。 |
 | `efforts` | 此卡片的思考層級，依下拉式選單的順序。名稱可自由填寫。 |
 | `defaultEffort` | 新工作階段開始時使用的層級。它必須是此卡片 `efforts` 中的一個。 |
 
@@ -673,10 +673,10 @@ Agent 可以搜尋網路，並讀取一個頁面。內建後端不需要 API 金
 
 模型卡可以讓自己的供應商用它的搜尋 API 作為搜尋的首選。該欄位是 `searchProvider`。
 
-- `builtin` 是預設值。Spinney 只使用內建後端，不會向任何搜尋 API 傳送要求。
+- `builtin` 是你新建卡片的預設值。Spinney 只使用內建後端，不會向任何搜尋 API 傳送要求。
 - `deepseek` 把 DeepSeek 搜尋 API 作為第一個後端，內建後端仍然作為後備。這時每筆結果都帶上更長的頁面摘要、發佈日期與評分。
 
-內建的 `deepseek-flash` 卡片設為 `deepseek`。其他卡片一律從 `builtin` 開始，留空該欄位的卡片也一樣。
+內建的 `deepseek-flash` 卡片設為 `deepseek`。你不需要再設一次：即使你改過這張卡的其他欄位，搜尋仍然走 DeepSeek 搜尋 API。其他卡片一律從 `builtin` 開始，留空該欄位時也保持 `builtin`。
 
 要求發往該卡片所屬供應商的位址，該供應商的金鑰就是權杖。如果搜尋必須使用另一組權杖，請使用模型卡頁面上的**搜尋權杖**欄位。該欄位是全部卡片共用的一組權杖，頁面上會寫明要求發往哪個位址。留空則表示 Spinney 使用供應商的金鑰。
 
