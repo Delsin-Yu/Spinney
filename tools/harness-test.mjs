@@ -2629,7 +2629,12 @@ async function suiteHop(cx) {
       checks,
     );
   }
-  const childHop = armedPoll.value;
+  const childHop = Array.isArray(armedPoll.state?.hops)
+    ? armedPoll.state.hops.find((h) => h && h.originSessionId === origin.sessionId)
+    : undefined;
+  if (!childHop) {
+    return suiteResult(name, 'FAIL', 'the hop vanished from /state.hops after it was observed', checks);
+  }
   const childId = childHop.targetSessionId;
   cx.ctx.created.push({
     id: childId,
