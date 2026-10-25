@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-25
+
 ### Added
 
 - **A command's timeout is now a default plus a ceiling, not one cap.** `spinney.commandDefaultTimeout`
@@ -782,7 +784,9 @@ everything the extension contains — the baseline the project had reached at th
   `request-timeout` and `request-stall` lines, so a request that has not produced
   its first byte is now visible *while* it waits.
 
-[Unreleased]: https://github.com/Delsin-Yu/Spinney/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Delsin-Yu/Spinney/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/Delsin-Yu/Spinney/releases/tag/v0.4.0
+[0.3.0]: https://github.com/Delsin-Yu/Spinney/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Delsin-Yu/Spinney/releases/tag/v0.2.0
 [0.1.0]: https://github.com/Delsin-Yu/Spinney/releases/tag/v0.1.0
 [0.0.3]: https://github.com/Delsin-Yu/Spinney/releases/tag/v0.0.3
