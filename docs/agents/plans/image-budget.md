@@ -1,7 +1,7 @@
 # Plan: the image budget (bytes, not tokens)
 
-**Status: implementing (P0–P3 approved).** This page is the contract the four slices are
-built against; §3 freezes the interfaces, §4 the file ownership.
+**Status: landed (P0–P3).** This page is the contract the four slices were
+built against; §8 is the landing record. §3 freezes the interfaces, §4 the file ownership.
 
 ## 1. Why: two budgets, and only one of them was tracked
 
