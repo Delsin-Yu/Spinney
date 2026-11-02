@@ -123,10 +123,48 @@ function withAttempts(error: ApiError, attempt: number): ApiError {
   return attempt > 1 ? new ApiError(`${error.message} (after ${attempt} attempts)`, error.status) : error;
 }
 
+/**
+ * How a provider is told **which conversation** a request belongs to, when it asks for
+ * one. It is the third per-row declaration of this kind (after a card's image transport
+ * and a provider's wallet dialect), and like the other two it is a declaration and never
+ * a probe: the user is the one who knows which endpoint they pointed at.
+ *
+ * `opencode` is the OpenCode Console gateway, whose "Go" plan **requires** a stable
+ * `x-opencode-session: ses_…` on every request so it can route a conversation
+ * consistently and reuse its prompt cache. `none` sends no such header — the honest
+ * answer for an OpenAI-compatible endpoint that never asked for one.
+ */
+export type SessionDialect = 'none' | 'opencode';
+
+/** Every value `sessionHeader` accepts, in the order the settings schema offers them. */
+export const SESSION_DIALECTS: readonly SessionDialect[] = ['none', 'opencode'];
+
+/**
+ * True when the value is one of the dialects. The settings parser owns the call: a row
+ * that names an unknown dialect is refused rather than silently sent without a header.
+ */
+export function isSessionDialect(value: unknown): value is SessionDialect {
+  return typeof value === 'string' && (SESSION_DIALECTS as readonly string[]).includes(value);
+}
+
+/**
+ * What this client calls itself on the wire when nothing installed a version. A coding
+ * agent is asked to identify itself rather than look like a generic HTTP library, so
+ * every request carries `spinney/<version>` — see {@link ClientOptions.userAgent}.
+ */
+export const DEFAULT_USER_AGENT = 'spinney';
+
 export interface ClientOptions {
   apiKey: string;
   baseUrl: string;
   model: string;
+  /** Which conversation header this endpoint takes (`ProviderSpec.sessionHeader`). */
+  sessionHeader?: SessionDialect;
+  /**
+   * What the client calls itself on the wire (`spinney/<version>`, installed at
+   * activation from the package manifest). Absent means {@link DEFAULT_USER_AGENT}.
+   */
+  userAgent?: string;
 }
 
 export interface CompletionRequest {
@@ -146,6 +184,15 @@ export interface CompletionRequest {
    * can surface "retrying (2/10)…" while it waits out the backoff.
    */
   onRetry?: RetryReporter;
+  /**
+   * The conversation this request belongs to: a frozen context window's id for a turn,
+   * or a sub-agent's own node id for its own history. Sent as the provider's session
+   * header **only** when that provider's dialect asks for one
+   * ({@link SessionDialect}), and omitted otherwise. The value is opaque to the
+   * provider — it is only ever compared with itself, to route the conversation and to
+   * key its prompt cache.
+   */
+  providerSession?: string;
 }
 
 export class ApiError extends Error {
@@ -192,6 +239,41 @@ export class ApiClient {
     if (typeof patch.model === 'string' && patch.model.trim()) {
       this.options.model = patch.model;
     }
+    if (isSessionDialect(patch.sessionHeader)) {
+      this.options.sessionHeader = patch.sessionHeader;
+    }
+    if (typeof patch.userAgent === 'string' && patch.userAgent.trim()) {
+      this.options.userAgent = patch.userAgent;
+    }
+  }
+
+  /**
+   * The headers every request to this endpoint carries. `Content-Type` is left out for
+   * the multipart upload, whose boundary the runtime sets itself.
+   */
+  private headers(contentType: boolean): Record<string, string> {
+    const headers: Record<string, string> = {
+      Authorization: `Bearer ${this.options.apiKey}`,
+      'User-Agent': this.options.userAgent?.trim() || DEFAULT_USER_AGENT,
+    };
+    if (contentType) {
+      headers['Content-Type'] = 'application/json';
+    }
+    return headers;
+  }
+
+  /**
+   * The conversation header this endpoint's dialect carries, when it has one and the
+   * request names a conversation. The caller's key is opaque and travels verbatim; only
+   * the header name and the `ses_` prefix belong to the dialect. An empty key sends
+   * nothing at all rather than a header the provider would have to ignore.
+   */
+  private conversationHeaders(session: string | undefined): Record<string, string> {
+    const key = (session ?? '').trim();
+    if (this.options.sessionHeader !== 'opencode' || !key) {
+      return {};
+    }
+    return { 'x-opencode-session': `ses_${key}` };
   }
 
   /**
@@ -228,10 +310,13 @@ export class ApiClient {
 
     let response: Response;
     try {
-      // Do NOT set Content-Type: the runtime sets the multipart boundary.
+      // Do NOT set Content-Type: the runtime sets the multipart boundary. No conversation
+      // header either: this is the DeepSeek Files API, so a provider that speaks it is
+      // never the one whose dialect asks for a session id (and no endpoint with that
+      // dialect has a files API at all — a card on it must use the `openai` transport).
       response = await fetch(url, {
         method: 'POST',
-        headers: { Authorization: `Bearer ${this.options.apiKey}` },
+        headers: this.headers(false),
         body: form,
         signal,
       });
@@ -300,7 +385,7 @@ export class ApiClient {
     // after that point is therefore fatal, not retried.
     let attempt = 1;
     while (true) {
-      const opened = await this.postWithRetry(url, payload, { signal, onRetry: request.onRetry }, attempt);
+      const opened = await this.postWithRetry(url, payload, { signal, onRetry: request.onRetry, session: request.providerSession }, attempt);
       attempt = opened.attempt;
       let yielded = false;
       let readError: ApiError | undefined;
@@ -450,9 +535,10 @@ export class ApiClient {
   private async postWithRetry(
     url: string,
     payload: string,
-    opts: { signal?: AbortSignal; onRetry?: RetryReporter },
+    opts: { signal?: AbortSignal; onRetry?: RetryReporter; session?: string },
     attemptStart = 1,
   ): Promise<{ response: Response; attempt: number; watch: AttemptWatch }> {
+    const headers = { ...this.headers(true), ...this.conversationHeaders(opts.session) };
     let last: ApiError | undefined;
     for (let attempt = attemptStart; attempt <= MAX_ATTEMPTS; attempt++) {
       // A request that follows a long silence is the one most likely to be handed
@@ -481,10 +567,7 @@ export class ApiClient {
       try {
         response = await fetch(url, {
           method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${this.options.apiKey}`,
-          },
+          headers,
           body: payload,
           signal: watch.signal,
         });
@@ -617,6 +700,7 @@ export class ApiClient {
     const { response, watch } = await this.postWithRetry(url, JSON.stringify(wellFormedDeep(body)), {
       signal: request.signal,
       onRetry: request.onRetry,
+      session: request.providerSession,
     });
     let data: {
       choices?: Array<{ message?: { content?: string | null } }>;

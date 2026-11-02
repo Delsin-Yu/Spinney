@@ -27,6 +27,12 @@
 // wins with, the reset targets, and the request + normalization `fetchBalance` turns
 // it into against a stubbed `fetch`.
 //
+// And one more: the conversation header. `ProviderSpec.sessionHeader`
+// (`src/agent/apiClient.ts`) is the same kind of declaration — which endpoint has to be
+// told which conversation a request belongs to (the OpenCode Console gateway requires
+// it) — so section 5 pins its host default, the parser's answer, and the header the
+// request really carries, against the same kind of stub.
+//
 // Run by `npm run check:models`, which `vsce package` executes through
 // `vscode:prepublish` — so a drift fails packaging, not the user's session.
 
@@ -185,6 +191,7 @@ const { BALANCE_DIALECTS, isBalanceDialect, emptyBalance, fetchBalance } = requi
 const {
   parseCatalog,
   providerBalanceFromUrl,
+  providerSessionFromUrl,
   defaultsForProvider,
   VENDORED_PROVIDER,
   BUILTIN_PROVIDER_DEFAULTS,
@@ -420,7 +427,149 @@ async function checkWalletFetch() {
   ok('  … WITHOUT a request being attempted', keyless.calls.length === 0, `${keyless.calls.length} request(s)`);
 }
 
-// --- 5. the parser's sentences, and the page's own copy of them ----------------
+// --- 5. the conversation header: a third per-row declaration, never a probe -----
+//
+// `ProviderSpec.sessionHeader` (`src/agent/apiClient.ts`) says which provider is told
+// **which conversation** a request belongs to. The OpenCode Console gateway requires a
+// stable `x-opencode-session` on every request from its "Go" plan up, and the failure it
+// guards against is invisible: a request without one still answers, so only the routing
+// and the prompt cache degrade. Nothing about that shows up in a drift scan either, so
+// the declaration is pinned here — the dialect list, the host default, the parser's
+// answer, and the wire form itself — and the wire half runs against a **stubbed**
+// `globalThis.fetch`, because the header *is* the contract.
+
+const sessionProblems = [];
+const sessionOk = (label, cond, detail) => {
+  console.log(`  [${cond ? 'ok  ' : 'FAIL'}] ${label}${detail ? '  (' + detail + ')' : ''}`);
+  if (!cond) sessionProblems.push(label);
+};
+
+const apiPath = path.join(root, 'out', 'agent', 'apiClient.js');
+const { SESSION_DIALECTS, isSessionDialect, ApiClient } = require(apiPath);
+
+/**
+ * One `complete()` through a stub, answering the headers the request carried. The stub
+ * answers a `200` with a `body`, because that is what the client requires before it reads
+ * an answer at all — and the real `fetch` goes back on in the `finally`, so a throw inside
+ * one case can never leave a fake network installed for the next.
+ */
+async function headersOf(options, session) {
+  const real = globalThis.fetch;
+  const calls = [];
+  globalThis.fetch = async (url, init = {}) => {
+    calls.push({ url: String(url), headers: init.headers ?? {} });
+    return {
+      ok: true,
+      status: 200,
+      statusText: 'OK',
+      body: {},
+      json: async () => ({ choices: [{ message: { content: 'ok' } }] }),
+    };
+  };
+  try {
+    const client = new ApiClient({
+      apiKey: 'sk-session',
+      baseUrl: 'https://opencode.ai/inference/go/openai/v1',
+      model: 'a-wire-name',
+      ...options,
+    });
+    await client.complete({ messages: [], providerSession: session });
+  } finally {
+    globalThis.fetch = real;
+  }
+  return calls[0] ?? { url: '', headers: {} };
+}
+
+async function checkConversationHeader() {
+  console.log('-- the conversation header: the dialect, the host default, the wire --');
+  sessionOk(
+    "SESSION_DIALECTS is none,opencode — the two values a row may declare",
+    SESSION_DIALECTS.join(',') === 'none,opencode',
+    SESSION_DIALECTS.join(','),
+  );
+  sessionOk(
+    '  … and only they pass isSessionDialect()',
+    SESSION_DIALECTS.every((d) => isSessionDialect(d)) && !isSessionDialect('not-a-dialect') && !isSessionDialect(undefined),
+  );
+  sessionOk(
+    'the built-in provider declares none: DeepSeek is never sent a conversation id',
+    VENDORED_PROVIDER.sessionHeader === 'none',
+    VENDORED_PROVIDER.sessionHeader,
+  );
+
+  console.log('-- the dialect a silent row lands on (by host, like `balance`) --');
+  sessionOk(
+    'opencode.ai → opencode',
+    providerSessionFromUrl('https://opencode.ai/inference/go/openai/v1') === 'opencode',
+    providerSessionFromUrl('https://opencode.ai/inference/go/openai/v1'),
+  );
+  sessionOk('  … through any *.opencode.ai host', providerSessionFromUrl('https://console.opencode.ai') === 'opencode');
+  sessionOk(
+    'a deepseek.com row, and a local one, are none',
+    providerSessionFromUrl('https://api.deepseek.com') === 'none' && providerSessionFromUrl('http://localhost:8000/v1') === 'none',
+  );
+  const gatewayRow = parseRow({ url: 'https://opencode.ai/inference/go/openai/v1' });
+  sessionOk(
+    'a row with no `sessionHeader` is read by its host, and parses cleanly',
+    !!gatewayRow.row && gatewayRow.row.sessionHeader === 'opencode' && gatewayRow.errors.length === 0,
+    gatewayRow.errors.join(' | '),
+  );
+  sessionOk(
+    'the alias key `session` is accepted, and it wins over the host default',
+    (() => {
+      const row = parseRow({ url: 'https://api.deepseek.com', session: 'opencode' });
+      return !!row.row && row.row.sessionHeader === 'opencode' && row.errors.length === 0;
+    })(),
+  );
+  sessionOk(
+    '`none` on a gateway row switches the header off',
+    (() => {
+      const row = parseRow({ url: 'https://opencode.ai/inference/go/openai/v1', sessionHeader: 'none' });
+      return !!row.row && row.row.sessionHeader === 'none';
+    })(),
+  );
+  const bogusSession = parseRow({ url: 'https://opencode.ai/inference/go/openai/v1', sessionHeader: 'not-a-dialect' });
+  sessionOk('an unknown dialect makes the row unusable', bogusSession.row === undefined, JSON.stringify(bogusSession.row));
+  sessionOk(
+    '  … with the reason in errors (never silently none)',
+    bogusSession.errors.length === 1 && bogusSession.errors[0].includes('not-a-dialect'),
+    bogusSession.errors.join(' | '),
+  );
+
+  console.log('-- the wire: one POST, its headers, and the path its base URL builds --');
+  const opencode = await headersOf({ sessionHeader: 'opencode', userAgent: 'spinney/9.9.9' }, 'window-1');
+  sessionOk(
+    'opencode: the request carries `x-opencode-session: ses_<the caller’s id>`',
+    opencode.headers['x-opencode-session'] === 'ses_window-1',
+    String(opencode.headers['x-opencode-session']),
+  );
+  sessionOk(
+    '  … to the base URL plus /chat/completions (the Go base ends at /openai/v1)',
+    opencode.url === 'https://opencode.ai/inference/go/openai/v1/chat/completions',
+    opencode.url,
+  );
+  sessionOk('  … still authenticated with the provider key', opencode.headers.Authorization === 'Bearer sk-session', opencode.headers.Authorization);
+  sessionOk(
+    '  … and identifying the client, not a generic HTTP library',
+    opencode.headers['User-Agent'] === 'spinney/9.9.9',
+    String(opencode.headers['User-Agent']),
+  );
+  const none = await headersOf({ sessionHeader: 'none' }, 'window-1');
+  sessionOk('none: no conversation header is invented', !('x-opencode-session' in none.headers), JSON.stringify(none.headers));
+  sessionOk(
+    '  … and the client still names itself',
+    none.headers['User-Agent'] === 'spinney',
+    String(none.headers['User-Agent']),
+  );
+  const empty = await headersOf({ sessionHeader: 'opencode' }, '');
+  sessionOk(
+    'opencode with no conversation named: nothing is sent (never an empty `ses_`)',
+    !('x-opencode-session' in empty.headers),
+    JSON.stringify(empty.headers),
+  );
+}
+
+// --- 6. the parser's sentences, and the page's own copy of them ----------------
 //
 // `src/agent/models.ts` reports an unusable settings row as a **code + arguments**, never
 // as a finished sentence, and it cannot own the translation: it must stay free of
@@ -517,6 +666,16 @@ function summarize() {
     console.error('\nThe dialects are declared in src/agent/balance.ts and landed on a row by src/agent/models.ts.');
     process.exit(1);
   }
+  if (sessionProblems.length) {
+    console.error('check-models: the conversation-header declaration drifted\n');
+    for (const p of sessionProblems) {
+      console.error('  ' + p);
+    }
+    console.error(
+      '\nThe dialect is declared in src/agent/apiClient.ts, landed on a row by src/agent/models.ts, and sent by ApiClient.',
+    );
+    process.exit(1);
+  }
   if (issueProblems.length) {
     console.error('check-models: the catalog-issue sentences drifted\n');
     for (const p of issueProblems) {
@@ -534,9 +693,12 @@ function summarize() {
   );
 }
 
-// The wallet section is awaited, so it hands the process over to the summary above. A
-// throw from inside it is a broken guard, and a broken guard must fail loudly too.
-checkWalletFetch().then(summarize, (err) => {
-  console.error(`check-models: the wallet checks threw — ${err instanceof Error ? err.message : String(err)}`);
-  process.exit(1);
-});
+// The wallet and conversation-header sections are awaited, so they hand the process over
+// to the summary above. A throw from inside one is a broken guard, and a broken guard must
+// fail loudly too.
+checkWalletFetch()
+  .then(checkConversationHeader)
+  .then(summarize, (err) => {
+    console.error(`check-models: the wallet/header checks threw — ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  });

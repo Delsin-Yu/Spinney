@@ -260,6 +260,14 @@ const tick = (ms = 80) => new Promise((r) => setTimeout(r, ms));
   ok('  ... it names the killed background terminal', text.includes('background terminal #' + jobId) && text.includes('npm run build'));
   ok('  ... and counts it', /\b1 background terminal\(s\)/.test(text));
   ok('  ... the system prompt is not stored in the node', !roll.messages.some((m) => m.role === 'system'));
+  // The provider-side conversation: our prompt cache boundary is the **window**, so the new
+  // window must name a new conversation even though it inherits the parent's frozen envelope
+  // ("Continue with current setup"). The parent's window starts at the chain's root here.
+  ok(
+    'the new window names its own provider conversation (never the previous window)',
+    !!run && run.agent.conversationId === roll.id && run.agent.conversationId !== 'root',
+    run && run.agent.conversationId,
+  );
 
   ok("the node's background terminal was killed", childKilled === true);
   ok("another node's job was left alone", otherKilled === false);

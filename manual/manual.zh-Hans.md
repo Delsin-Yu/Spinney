@@ -246,6 +246,7 @@ Spinney 在页面中检查草稿，并在宿主中再次检查。被拒绝的保
 | `name` | 显示名称。Spinney 在模型下拉分组、余额行和 API 密钥提示中显示它。 |
 | `baseUrl` | API 根地址，例如 `https://api.deepseek.com`。请求发往 `POST <baseUrl>/chat/completions`。 |
 | `balance` | Spinney 如何读取剩余额度。见下表。 |
+| `sessionHeader` | Spinney 如何告诉端点一个请求属于哪段对话。`none` 不发送此类请求头。`opencode` 发送 `x-opencode-session`。 |
 | `concurrency` | 可以针对此端点同时在途的请求数。`0` 表示不限。 |
 
 | `balance` 值 | 请求 | 结果 |
@@ -256,6 +257,8 @@ Spinney 在页面中检查草稿，并在宿主中再次检查。被拒绝的保
 | `moonshot` | `GET /users/me/balance` | 可用余额，单位为 CNY。 |
 
 省略 `balance` 的行按其主机来读取：`api.deepseek.com` 得到 `deepseek`，其他任何主机得到 `none`。
+
+`sessionHeader` 有两个值。`none` 不发送请求头。`opencode` 发送 `x-opencode-session: ses_…`，OpenCode Console 网关要求该请求头。省略 `sessionHeader` 的行同样按其主机来读取：`opencode.ai` 得到 `opencode`，其他任何主机得到 `none`。Spinney 为每个上下文窗口发送一个值。新窗口或分叉会开始新的值。子智能体发送自己的值。
 
 ### 6.2 模型卡片字段
 
@@ -555,7 +558,7 @@ Spinney 读取工作区根目录中的 `AGENTS.md`，并把它加入系统提示
 
 Spinney 不发送遥测。它只连接你配置的服务商端点。
 
-一个请求携带你的消息、工具结果和图片。余额读取会向服务商增加一个请求。图片根据卡片的传输方式，以上传方式或请求体内联方式发往服务商。若卡片为网络搜索选择了 `deepseek`，搜索查询也会发往该卡片的服务商；只有在该页面读不到任何文本时，才会把该页面的地址发过去（见 19.1 节）。
+一个请求携带你的消息、工具结果和图片。它还以用户代理的形式携带 Spinney 的名称和版本，以便服务商识别客户端。若服务商的行设置了 `sessionHeader`，请求还会携带上下文窗口的标识。余额读取会向服务商增加一个请求。图片根据卡片的传输方式，以上传方式或请求体内联方式发往服务商。若卡片为网络搜索选择了 `deepseek`，搜索查询也会发往该卡片的服务商；只有在该页面读不到任何文本时，才会把该页面的地址发过去（见 19.1 节）。
 
 扩展不保存已上传图片字节的任何副本。
 

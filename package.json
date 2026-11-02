@@ -2,7 +2,7 @@
   "name": "spinney",
   "displayName": "Spinney",
   "description": "%description%",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "publisher": "DE-YU",
   "license": "MIT",
   "author": {
@@ -226,6 +226,15 @@
                   ],
                   "default": "none",
                   "description": "%spinney.providers.balance.description%"
+                },
+                "sessionHeader": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "opencode"
+                  ],
+                  "default": "none",
+                  "description": "%spinney.providers.sessionHeader.description%"
                 }
               }
             },

@@ -1097,6 +1097,25 @@ export class SessionRuntime {
   }
 
   /**
+   * The id of the node that **starts the context window** `node` lives in: the nearest
+   * ancestor-or-self whose `contextBaseId` is itself, or the chain's first node when the
+   * window is the implicit first one (`contextBase()` answers `undefined` there).
+   *
+   * This is the conversation a provider is told about when its row declares a session
+   * header, and the window — not the epoch — is the right unit: a rollover under "Continue
+   * with current setup" inherits the parent's frozen envelope (`beginTurn`), while the
+   * cacheable prefix restarts at the new window. A fork re-marks the window start on its
+   * own new copy (`contextBaseId: copyId`), so a fork starts a conversation of its own.
+   */
+  private windowStart(session: AgentSession, nodeId: string): string {
+    const base = contextBase(session, nodeId);
+    if (base) {
+      return base;
+    }
+    return pathIds(session, nodeId)[0] ?? nodeId;
+  }
+
+  /**
    * The nodes whose `imageSources` describe the images the next request of `node`'s chain
    * would carry: the chain from its **context base** down — exactly the slice
    * `pathMessages` sends. An image of an older window is not part of a request below it
@@ -2682,6 +2701,14 @@ export class SessionRuntime {
       node.epoch = this.freezeEpoch(node, cardId, effort);
       worker.agent.setToolSchemas(node.epoch.tools);
     }
+    // The provider-side conversation this turn belongs to: the **context window's** id, so
+    // every request of one window names the same conversation across a reload and a new id
+    // starts exactly where the cacheable prefix ends — a rollover, or a fork's root. Not the
+    // epoch's id: a rollover under "current setup" inherits the parent's frozen envelope
+    // while starting a new, shorter window, so the envelope is not the cache boundary. A
+    // provider whose row declares no session header never sees it (models.ts
+    // `sessionHeader`, `apiClient.ts` `SessionDialect`).
+    worker.agent.setProviderSession(this.windowStart(session, node.id));
     // The interruption notice only makes sense when this turn continues from the
     // turn that was actually interrupted. P3 keys the pending notice per node, so
     // the new node's agent inherits its parent's notice (delivered once) or clears
@@ -4805,6 +4832,11 @@ export class SessionRuntime {
       subAgent = sub;
       sub.setCard(subCard);
       sub.setThinkingEffort(subEffort);
+      // **Not** the parent's conversation: a sub-agent sends its own history, so it names
+      // its own — the node it lives on, which survives a resume of that same sub-agent.
+      // Sharing the parent's id would tell the provider two different prefixes are one
+      // conversation.
+      sub.setProviderSession(job.node.id);
       // A sub-agent's history is its **own**: it starts empty, or resumes the conversation
       // stored on its node, and the parent chain's images are never part of its requests. So
       // its budget is computed from its own node's provenance alone — which is also what

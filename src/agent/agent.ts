@@ -501,6 +501,12 @@ export class Agent {
   private thinkingEffort: ThinkingEffort = 'none';
   /** Reply language injected as the prompt's `## Language` line. */
   private replyLanguage: string = prompt.DEFAULT_REPLY_LANGUAGE;
+  /**
+   * The conversation this agent's requests name, when its provider's dialect transmits
+   * one ({@link setProviderSession}): the frozen context window of a turn, or a
+   * sub-agent's own node. Empty means "nothing to name", and nothing is sent.
+   */
+  private providerSession = '';
   /** Provider hook that runs sub-agents for the `spawn_agents` tool. */
   private spawnHandler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null = null;
   /** Provider hook that resumes a finished sub-agent for the `send_agent_message` tool. */
@@ -592,6 +598,20 @@ export class Agent {
   /** Set the reasoning-effort level for subsequent completions. */
   setThinkingEffort(effort: ThinkingEffort): void {
     this.thinkingEffort = effort;
+  }
+
+  /**
+   * Name the conversation this agent's requests belong to — the frozen context window
+   * it sends, or a sub-agent's own node. Only a provider whose `sessionHeader` dialect
+   * asks for one transmits it (`apiClient.ts`), and an empty value sends nothing.
+   */
+  setProviderSession(id: string): void {
+    this.providerSession = id;
+  }
+
+  /** The conversation this agent's requests name ('' when nothing named one). */
+  get conversationId(): string {
+    return this.providerSession;
   }
 
   /** Set the language the agent replies in (the prompt's `## Language` line). */
@@ -1659,6 +1679,10 @@ export class Agent {
           // The wire model name and the provider come from the card, never from
           // this call site — see `ClientRegistry.stream`.
           thinkingEffort: this.thinkingEffort,
+          // The conversation this request names, for the provider whose dialect asks for
+          // one (`SessionDialect`). The provider only ever compares it with the ids it
+          // saw before — routing, and its prompt cache.
+          providerSession: this.providerSession,
           // The client retries transient failures itself (network / 429 / 5xx);
           // mirror each retry into the status line so a slow retry does not look
           // like a hung turn.

@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-02
+
+### Added
+
+- **A provider row can be told which conversation a request belongs to.**
+  `spinney.providers.<id>.sessionHeader` (`none` | `opencode`) sends
+  `x-opencode-session: ses_…` — the header the OpenCode Console gateway requires on every
+  request, its Go plan included, so that it can route a conversation consistently and reuse
+  its prompt cache. It is declared by host like the wallet dialect: a row that leaves it out
+  is `opencode` on `opencode.ai` and `none` everywhere else, so a gateway row works with
+  nothing filled in and the built-in DeepSeek provider is unchanged. The value is the
+  **frozen context window's** id, so one window is one provider-side conversation across a
+  reload, and a new id starts where the cached prefix ends — a context rollover, or a fork's
+  root. A sub-agent names its own node rather than inheriting its parent's, and the two
+  title requests name the window of the session they are about. The Model Cards page has no
+  control for the field; a save from it carries a hand-written value through. Every request
+  also identifies itself as `spinney/<version>` in its `User-Agent`.
+
 ## [0.4.0] - 2026-10-25
 
 ### Added
@@ -784,7 +802,8 @@ everything the extension contains — the baseline the project had reached at th
   `request-timeout` and `request-stall` lines, so a request that has not produced
   its first byte is now visible *while* it waits.
 
-[Unreleased]: https://github.com/Delsin-Yu/Spinney/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/Delsin-Yu/Spinney/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/Delsin-Yu/Spinney/releases/tag/v0.5.0
 [0.4.0]: https://github.com/Delsin-Yu/Spinney/releases/tag/v0.4.0
 [0.3.0]: https://github.com/Delsin-Yu/Spinney/releases/tag/v0.3.0
 [0.2.0]: https://github.com/Delsin-Yu/Spinney/releases/tag/v0.2.0

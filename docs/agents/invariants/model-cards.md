@@ -19,6 +19,7 @@ A **provider node** is one OpenAI-compatible endpoint:
 | name | What the user sees — the dropdown's `optgroup` label, the `wallet <name>: …` line, the nudge text. A row that leaves it out is named after its URL's host (`providerNameFromUrl`: the host, except for the one endpoint this harness ships knowledge about — `api.deepseek.com` → `DeepSeek`). |
 | baseUrl | The API root, e.g. `https://api.deepseek.com`. Every chat request is `POST <baseUrl>/chat/completions` and an image upload is `POST <baseUrl>/files`; the only other request a provider gets is the wallet readout, whose endpoint the `balance` dialect picks. |
 | balance | Which wallet readout this provider has: `none`, or one of the three vendor dialects. A row that leaves it out is declared by host and never probed — see below. |
+| sessionHeader | How this endpoint is told which **conversation** a request belongs to: `none`, or `opencode`. Same rule as `balance` — declared by host, never probed — see below. |
 | concurrency | Maximum requests in flight against that endpoint; `0` = unlimited. |
 
 The API key is **not** in settings. SecretStorage holds one entry per provider —
@@ -145,6 +146,52 @@ OpenRouter / Moonshot) with its own ↺ reset, and the chat's tooltip reads
 `wallet <provider name>: <amounts>`, naming the provider the number came from; the
 per-entry detail shows `granted x + topped up y` only when the dialect reports that
 split, and `spent z` when it reports spend.
+
+### The conversation header is a per-provider declaration too
+
+Not every endpoint is happy to be asked without being told **which conversation** a
+request belongs to. The OpenCode Console gateway requires a stable
+`x-opencode-session: ses_…` on every request — its "Go" plan explicitly — so that it can
+route a conversation consistently and reuse its prompt cache. So the same mechanism as
+the wallet and the image transport carries it: `SessionDialect = 'none' | 'opencode'`
+(the two values `SESSION_DIALECTS` holds and `isSessionDialect()` accepts, both in
+`src/agent/apiClient.ts` — the module that builds the headers), a
+`ProviderSpec.sessionHeader` (`spinney.providers.<id>.sessionHeader`) on the row, and a
+host default: a row that leaves it out is `opencode` on `opencode.ai` and `none`
+everywhere else, so a gateway row works with nothing filled in and the vendored DeepSeek
+provider is never sent a header it did not ask for.
+
+**The value is the conversation, and the conversation is the window.** `ProviderSpec` is
+where the dialect lives, but the id travels **per request**: `SessionRuntime.beginTurn`
+installs the id of the node that **starts the context window** (`windowStart`, i.e. the
+nearest ancestor-or-self that owns a `contextBaseId`, else the chain's first node) on the
+agent that is about to send (`Agent.setProviderSession` →
+`CompletionRequest.providerSession`). So one window is one provider-side conversation
+across a reload and an extension update, and the id changes exactly where the cacheable
+prefix ends — a rollover (`⧉`) or a fork's root, both of which re-mark the window on a new
+node. Deliberately **not** the epoch's id: a rollover under "Continue with current setup"
+inherits the parent's frozen envelope while starting a shorter, new window, so the envelope
+is not the cache boundary. A sub-agent **does not inherit** the window: its history is its
+own, so it names its own node (`runSubAgent`), or the provider would be told two different
+prefixes are one conversation. The two bookkeeping paths (a session title, and the batched
+backfill) name the checked-out window of the session they are about, falling back to the
+session id, because an id is what those endpoints want rather than nothing.
+
+`ApiClient` is the only writer: `conversationHeaders()` returns `{}` unless the client's
+own `sessionHeader` is `opencode` **and** the request named a conversation, and a request
+that names none sends no header at all rather than an empty `ses_`. The image upload is
+deliberately excluded — it is the DeepSeek Files API, which no `opencode` endpoint has,
+so a card on such a provider must use the `openai` image transport.
+
+The same change gave the client a voice: every request now carries
+`User-Agent: spinney/<version>` (the version this window is running,
+`ChatViewProvider.readOwnVersion`), because an endpoint that monitors coding-agent traffic
+asks a client to identify itself rather than show an HTTP library's name.
+
+The page has **no control** for this field: it is host-defaulted, and a save from the Model
+Card Tree page carries a hand-written value through instead of erasing it (the one place a
+page save is told to preserve what it cannot draw). A row that names a dialect this build
+does not know is refused by the parser, exactly like a bad `balance`.
 
 ### `spinney.model` is a card id
 
@@ -297,8 +344,9 @@ apart), and the thinking-level dropdown is built from the **active card's** `eff
 | `setCatalog()` + accessors: `providerSpecs` / `providerById` / `cards` / `cardById` / `resolveCard` / `defaultCard` / `contextWindowFor` / `isVisionCard` / `visionCardsLabel` / `cardDisplayName` / `effortsFor` / `normalizeEffort` / `newId` / `providerNameFromUrl` | `src/agent/models.ts` |
 | `applyModelCards()` / `onModelCardsSaved()` / `refreshKeys()` / `resolveModel()` — read the settings, install the catalog, push to live owners | `ChatViewProvider` (`src/chat/ChatViewProvider.ts`) |
 | `BalanceDialect` / `BALANCE_DIALECTS` / `isBalanceDialect()` / `BalanceEntry` / `Balance` / `emptyBalance()` / `fetchBalance()` — the four dialects, and the one place that reads a wallet (`none` sends no request at all) | `src/agent/balance.ts` |
+| `SessionDialect` / `SESSION_DIALECTS` / `isSessionDialect()` / `DEFAULT_USER_AGENT` — the conversation-header dialects, and the one place that puts one on the wire (`conversationHeaders()`, `headers()`) | `src/agent/apiClient.ts` |
 | `ApiClient` — the SSE transport, its retries and the image upload; it no longer knows about a wallet | `src/agent/apiClient.ts` |
-| `ClientRegistry` — one client per provider, per-provider keys, the two gates, the routing (`body.model` from the card) and the wallet (`balance(spec)`) | `src/agent/clients.ts` |
+| `ClientRegistry` — one client per provider, per-provider keys, the two gates, the routing (`body.model` from the card), the wallet (`balance(spec)`), and the row's declarations installed on its client (`sessionHeader`, the `User-Agent`) | `src/agent/clients.ts` |
 | `RequestGate` — the FIFO, abort-aware slot gate | `src/agent/requestGate.ts` |
 | The page shell + its serializer lifecycle (`MODEL_VIEW_TYPE`, `ModelPanel.create` / `revive`, the `ready` hold, `setTitle` for the `* ` marker) | `src/chat/ModelPanel.ts` |
 | The page controller: the message protocol, `validatePayload` (host authority), `applyDirty` (the tab's `* `), `ISSUE_TEXT` (the parser's sentences in the display language), `apiKeySecretName` | `src/chat/modelTree.ts` |
@@ -306,7 +354,7 @@ apart), and the thinking-level dropdown is built from the **active card's** `eff
 | The command (`spinney.openModelCards`) and the gear the webview asks for (`openModelTree`) | `src/extension.ts` · `media/main.js` |
 | The chat's dropdowns (`postConfig`) and the wallet readout (`refreshBalance()` → the `balance` message) | `src/chat/runtime.ts` |
 | Settings (`model`, `providers`, `modelCards`) | `package.json` |
-| Guards (`npm run check:models` / `check:modeltree`): `spinney.model.default` == the fallback, the two catalog settings exist, no `enum` on `spinney.model`, no model id in `src/**/*.ts` (the catalog module excepted) or `media/*.js` (the vendored bundles excepted), README/docs name only ids the catalog has, every `CATALOG_ISSUE_TEXT` sentence match the page's `ISSUE_TEXT` copy; the page protocol replay (including the unsaved marker: one `dirty` per transition, the strip's two states, a snapshot reporting the draft clean) | `tools/check-models.js` · `tools/check-modeltree.js` |
+| Guards (`npm run check:models` / `check:modeltree`): `spinney.model.default` == the fallback, the two catalog settings exist, no `enum` on `spinney.model`, no model id in `src/**/*.ts` (the catalog module excepted) or `media/*.js` (the vendored bundles excepted), README/docs name only ids the catalog has, every `CATALOG_ISSUE_TEXT` sentence match the page's `ISSUE_TEXT` copy; the wallet declaration (host default, explicit field, reset target, request); the conversation header (dialect list, host default, the parser's answer, and the header a stubbed `fetch` really receives); the page protocol replay (including the unsaved marker: one `dirty` per transition, the strip's two states, a snapshot reporting the draft clean) | `tools/check-models.js` · `tools/check-modeltree.js` |
 
 Every mention of a model id in README/docs must be one the catalog has — today that is
 only the built-in one (`tools/check-models.js` fails an id `MODEL_CATALOG` does not

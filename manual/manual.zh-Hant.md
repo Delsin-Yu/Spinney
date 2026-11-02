@@ -246,6 +246,7 @@ Spinney 會在頁面中檢查草稿，並在主機中再檢查一次。被拒絕
 | `name` | 顯示名稱。Spinney 會在模型下拉式選單的分組、餘額列和 API 金鑰提示中顯示它。 |
 | `baseUrl` | API 根網址，例如 `https://api.deepseek.com`。要求會送到 `POST <baseUrl>/chat/completions`。 |
 | `balance` | Spinney 讀取剩餘額度的方式。請參閱下表。 |
+| `sessionHeader` | Spinney 如何告訴端點一個要求屬於哪一段對話。`none` 不傳送這個要求標頭。`opencode` 傳送 `x-opencode-session`。 |
 | `concurrency` | 同時可以對這個端點發出多少個要求。`0` 表示不限。 |
 
 | `balance` 值 | 要求 | 結果 |
@@ -256,6 +257,8 @@ Spinney 會在頁面中檢查草稿，並在主機中再檢查一次。被拒絕
 | `moonshot` | `GET /users/me/balance` | 可用餘額，以 CNY 計。 |
 
 沒有填 `balance` 的一列會依它的主機來讀取：`api.deepseek.com` 得到 `deepseek`，其他則得到 `none`。
+
+`sessionHeader` 有兩個值。`none` 不傳送要求標頭。`opencode` 傳送 `x-opencode-session: ses_…`，OpenCode Console 閘道要求這個標頭。沒有填 `sessionHeader` 的一列同樣依它的主機來讀取：`opencode.ai` 得到 `opencode`，其他則得到 `none`。Spinney 為每個上下文視窗傳送一個值。新視窗或分叉會開始新的值。子代理傳送自己的值。
 
 ### 6.2 模型卡片欄位
 
@@ -555,7 +558,7 @@ Spinney 讀取工作區根目錄的 `AGENTS.md`，並把它加入系統提示。
 
 Spinney 不傳送任何遙測。它只連線到你設定的供應商端點。
 
-一個要求帶上你的訊息、工具結果和圖片。餘額讀取會對供應商多發一個要求。影像會依卡片的傳輸方式，以檔案上傳或放在要求主體中送到供應商。若卡片為網路搜尋選擇了 `deepseek`，搜尋查詢也會送到該卡片的供應商；只有在該頁面讀不到任何文字時，才會把該頁面的位址送過去（見 19.1 節）。
+一個要求帶上你的訊息、工具結果和圖片。它也以使用者代理的形式帶上 Spinney 的名稱與版本，讓供應商能識別用戶端。若供應商的那一列設定了 `sessionHeader`，要求還會帶上上下文視窗的識別碼。餘額讀取會對供應商多發一個要求。影像會依卡片的傳輸方式，以檔案上傳或放在要求主體中送到供應商。若卡片為網路搜尋選擇了 `deepseek`，搜尋查詢也會送到該卡片的供應商；只有在該頁面讀不到任何文字時，才會把該頁面的位址送過去（見 19.1 節）。
 
 擴充功能不保留已上傳影像位元組的副本。
 

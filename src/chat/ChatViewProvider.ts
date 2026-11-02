@@ -33,6 +33,7 @@ import {
   UserAttachment,
   branchIds,
   detachBranch,
+  epochForNode,
   isSidecar,
   migrateState,
   messageText,
@@ -725,7 +726,13 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     this.storeWritable = this.openStoreLock();
     // The client registry must exist before any runtime builds its agent: it is
     // what turns a card into a provider, its `baseUrl` and its API key.
-    this.clients = new ClientRegistry({ apiKeyFor: (providerId) => this.readApiKeyFor(providerId) });
+    this.clients = new ClientRegistry({
+      apiKeyFor: (providerId) => this.readApiKeyFor(providerId),
+      // What every request calls itself on the wire. A gateway that asks a coding agent to
+      // identify itself must not be shown a generic HTTP library's name, and the version is
+      // the one this window is actually running (`readOwnVersion`).
+      userAgent: this.extensionVersion && this.extensionVersion !== '?' ? `spinney/${this.extensionVersion}` : 'spinney',
+    });
     this.clients.applyCatalog();
     // SecretStorage is asynchronous, so keys are read lazily; this first pass
     // warms them (and logs which providers have one). Nothing can send a turn
@@ -2676,6 +2683,17 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   }
 
   /**
+   * The conversation a **bookkeeping** request about this session names, for a provider
+   * whose row asks for one: the context window the session is looking at, and the
+   * session's own id when it has no frozen envelope yet. A provider whose dialect
+   * requires a session id must never be sent a request without one, which is why this
+   * falls back rather than answering ''.
+   */
+  private sessionConversation(session: AgentSession): string {
+    return epochForNode(session, session.activeNodeId)?.id ?? session.id;
+  }
+
+  /**
    * Generate a title for one session with a single non-streaming completion and
    * apply it. Never throws: no API key, a timeout or an API error falls back to
    * the heuristic (first-prompt) title. A manual rename that lands while the
@@ -2707,6 +2725,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         maxTokens: TITLE_MAX_TOKENS,
         temperature: 0.3,
         signal: controller.signal,
+        providerSession: this.sessionConversation(session),
       });
       title = sanitizeTitle(text, '');
       if (usage) {
@@ -2815,6 +2834,10 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         maxTokens: TITLE_BATCH_MAX_TOKENS,
         temperature: 0.3,
         signal: controller.signal,
+        // One batch covers several sessions, so there is no single conversation to name:
+        // the name is the one of the session whose title request this batch stands in
+        // for — the first — and a provider that requires an id still gets a stable one.
+        providerSession: this.sessionConversation(sessions[0]),
       });
       titles = parseBatchTitles(text, entries.length);
       if (usage) {

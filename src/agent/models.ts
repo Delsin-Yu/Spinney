@@ -4,9 +4,10 @@
  *
  * The model of the world (see `docs/agents/invariants/model-cards.md`):
  *
- *   provider node  → `{ id, name, baseUrl, balance, concurrency }` — an
- *                    OpenAI-compatible endpoint, the dialect its wallet line is read
- *                    in, and how many requests may be in flight against it.
+ *   provider node  → `{ id, name, baseUrl, balance, sessionHeader, concurrency }` —
+ *                    an OpenAI-compatible endpoint, the dialects its wallet line and
+ *                    its conversation header are spoken in, and how many requests may
+ *                    be in flight against it.
  *   model card     → `{ id, name, providerId, oaiModel, contextWindow, vision,
  *                    searchProvider, efforts, defaultEffort, concurrency }` —
  *                    branches off exactly one provider and carries everything a
@@ -38,6 +39,7 @@
 
 import { randomUUID } from 'crypto';
 import { BalanceDialect, BALANCE_DIALECTS, isBalanceDialect } from './balance';
+import { SessionDialect, SESSION_DIALECTS, isSessionDialect } from './apiClient';
 
 /**
  * How a card's images reach the provider. Two mechanisms, named after the vendor
@@ -101,6 +103,13 @@ export interface ProviderSpec {
    * has no parser for.
    */
   balance: BalanceDialect;
+  /**
+   * How this endpoint is told which conversation a request belongs to — the same kind of
+   * declaration as `balance`, and declared by host too when the row leaves it out
+   * (`opencode.ai` → `opencode`). `none` sends no such header: an OpenAI-compatible
+   * endpoint does not ask for one, and the vendored provider keeps answering without it.
+   */
+  sessionHeader: SessionDialect;
   /** Maximum requests in flight against this provider; `0` = unlimited. */
   concurrency: number;
 }
@@ -202,6 +211,8 @@ export const VENDORED_PROVIDER: ProviderSpec = {
   name: 'DeepSeek',
   baseUrl: 'https://api.deepseek.com',
   balance: 'deepseek',
+  // DeepSeek never asked to be told which conversation a request belongs to.
+  sessionHeader: 'none',
   concurrency: 0,
 };
 
@@ -475,20 +486,28 @@ export function newId(): string {
 }
 
 /**
- * A provider name and wallet dialect for a URL. The name is normally its host — a
- * derived name must not invent copy — but the one endpoint this harness ships
- * knowledge about gets its own product name (`api.deepseek.com` → `DeepSeek`),
- * because that is what the built-in provider is called everywhere else. The name
- * stays editable either way.
+ * A provider name, a wallet dialect and a conversation-header dialect for a URL. The
+ * name is normally its host — a derived name must not invent copy — but the endpoints
+ * this harness ships knowledge about get their own product name (`api.deepseek.com` →
+ * `DeepSeek`, `opencode.ai` → `OpenCode`), because that is what those products are
+ * called everywhere else. The name stays editable either way.
  *
- * The dialect is the same knowledge, used where it matters: a provider row that
- * leaves `balance` out is answered by its host. That is a **declaration by host**,
- * not a probe — this table is the whole of what the build knows, and every other
- * endpoint (a local vLLM, a gateway, a vendor nobody wrote a parser for) is
- * honestly `none` until the user says otherwise.
+ * The two dialects are the same knowledge, used where it matters: a provider row that
+ * leaves `balance` or `sessionHeader` out is answered by its host. That is a
+ * **declaration by host**, not a probe — this table is the whole of what the build
+ * knows, and every other endpoint (a local vLLM, a gateway, a vendor nobody wrote a
+ * parser for) is honestly `none` until the user says otherwise.
  */
-const KNOWN_PROVIDER_HOSTS: ReadonlyArray<{ suffix: string; name: string; balance: BalanceDialect }> = [
-  { suffix: 'deepseek.com', name: 'DeepSeek', balance: 'deepseek' },
+const KNOWN_PROVIDER_HOSTS: ReadonlyArray<{
+  suffix: string;
+  name: string;
+  balance: BalanceDialect;
+  session: SessionDialect;
+}> = [
+  { suffix: 'deepseek.com', name: 'DeepSeek', balance: 'deepseek', session: 'none' },
+  // The Console gateway: one endpoint for many vendors, and its "Go" plan requires a
+  // stable session header on every request (see `apiClient.ts` `SessionDialect`).
+  { suffix: 'opencode.ai', name: 'OpenCode', balance: 'none', session: 'opencode' },
 ];
 
 /** The known-host entry for a URL, when this build ships knowledge about that host. */
@@ -521,6 +540,14 @@ export function providerBalanceFromUrl(url: string): BalanceDialect {
 }
 
 /**
+ * The conversation-header dialect a provider row takes when it leaves `sessionHeader`
+ * out. Same table, same rule: only a host this build ships knowledge about declares one.
+ */
+export function providerSessionFromUrl(url: string): SessionDialect {
+  return knownProviderHost(url)?.session ?? 'none';
+}
+
+/**
  * One unusable settings row, as **data rather than a sentence**: `code` names the rule
  * and `args` fills its placeholders. The English line is built here
  * (`CATALOG_ISSUE_TEXT` → `formatIssue`) for the output channel, and the Model Card
@@ -534,6 +561,7 @@ export type CatalogIssueCode =
   | 'provider-name'
   | 'provider-url'
   | 'provider-balance'
+  | 'provider-session'
   | 'provider-unknown-field'
   | 'provider-url-missing'
   | 'row-concurrency'
@@ -567,11 +595,12 @@ export interface CatalogIssue {
  * in the row label, which travels as an argument.
  */
 export const CATALOG_ISSUE_TEXT: Record<CatalogIssueCode, string> = {
-  'provider-not-object': 'providers["{0}"]: expected { name, baseUrl, balance, concurrency }, got {1}',
+  'provider-not-object': 'providers["{0}"]: expected { name, baseUrl, balance, sessionHeader, concurrency }, got {1}',
   'provider-name': 'providers["{0}"]: name must be a non-empty string',
   'provider-url': 'providers["{0}"]: {1} must be a non-empty URL',
   'provider-balance': 'providers["{0}"]: {1} must be one of {2}, got {3}',
-  'provider-unknown-field': 'providers["{0}"]: unknown field "{1}" (expected name, baseUrl, balance, concurrency)',
+  'provider-session': 'providers["{0}"]: {1} must be one of {2}, got {3}',
+  'provider-unknown-field': 'providers["{0}"]: unknown field "{1}" (expected name, baseUrl, balance, sessionHeader, concurrency)',
   'provider-url-missing': 'providers["{0}"]: baseUrl is required',
   'row-concurrency': '{0}["{1}"]: {2} must be 0 (unlimited) or a positive integer, got {3}',
   'card-not-object': 'modelCards["{0}"]: expected an object of card fields, got {1}',
@@ -620,6 +649,7 @@ export interface CatalogParseResult {
 
 const PROVIDER_URL_KEYS = new Set(['baseurl', 'url', 'endpoint']);
 const PROVIDER_BALANCE_KEYS = new Set(['balance', 'wallet']);
+const PROVIDER_SESSION_KEYS = new Set(['sessionheader', 'session']);
 const CARD_PROVIDER_KEYS = new Set(['providerid', 'provider']);
 const CARD_WIRE_KEYS = new Set(['oaimodel', 'model', 'wiremodel']);
 const WINDOW_KEYS = new Set(['contextwindow', 'max_tokens', 'context', 'window']);
@@ -656,6 +686,7 @@ function parseProviderRow(id: string, rawFields: unknown, issues: CatalogIssue[]
   let name = '';
   let baseUrl = '';
   let balance: BalanceDialect | undefined;
+  let sessionHeader: SessionDialect | undefined;
   let concurrency = 0;
   for (const [rawKey, rawValue] of Object.entries(fields)) {
     const key = rawKey.trim().toLowerCase();
@@ -677,6 +708,12 @@ function parseProviderRow(id: string, rawFields: unknown, issues: CatalogIssue[]
         return undefined;
       }
       balance = rawValue;
+    } else if (PROVIDER_SESSION_KEYS.has(key)) {
+      if (!isSessionDialect(rawValue)) {
+        issues.push(issue('provider-session', id, rawKey, SESSION_DIALECTS.join(', '), JSON.stringify(rawValue)));
+        return undefined;
+      }
+      sessionHeader = rawValue;
     } else if (CONCURRENCY_KEYS.has(key)) {
       const value = nonNegativeInt(rawValue);
       if (value === undefined) {
@@ -695,7 +732,15 @@ function parseProviderRow(id: string, rawFields: unknown, issues: CatalogIssue[]
   }
   // An omitted `balance` is answered by the host: this build ships a parser for one
   // endpoint, and a row pointing at it must keep its wallet line without being told.
-  return { id, name: name || providerNameFromUrl(baseUrl), baseUrl, balance: balance ?? providerBalanceFromUrl(baseUrl), concurrency };
+  // `sessionHeader` is answered the same way, by the same table.
+  return {
+    id,
+    name: name || providerNameFromUrl(baseUrl),
+    baseUrl,
+    balance: balance ?? providerBalanceFromUrl(baseUrl),
+    sessionHeader: sessionHeader ?? providerSessionFromUrl(baseUrl),
+    concurrency,
+  };
 }
 
 /**

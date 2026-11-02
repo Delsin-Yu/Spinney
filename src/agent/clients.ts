@@ -28,10 +28,15 @@ import { RequestGate, GateStats } from './requestGate';
 import { StreamChunk, UploadedFile, Usage } from './types';
 import { beginWork } from '../perf';
 
-/** What the registry needs from the host: the key of a provider, and nothing else. */
+/** What the registry needs from the host: the key of a provider, and what to call itself. */
 export interface ClientRegistryHost {
   /** The API key for a provider id (SecretStorage, then the environment), or ''. */
   apiKeyFor(providerId: string): Promise<string>;
+  /**
+   * What every request calls itself on the wire (`spinney/<version>`), installed by the
+   * host at activation. Absent means the product name alone — see `DEFAULT_USER_AGENT`.
+   */
+  userAgent?: string;
 }
 
 /** Reported once, when a request could not start because every slot was taken. */
@@ -58,7 +63,13 @@ export class ClientRegistry {
    */
   applyCatalog(): void {
     for (const provider of providerSpecs()) {
-      this.clients.get(provider.id)?.configure({ baseUrl: provider.baseUrl });
+      // A provider row is where the endpoint's dialects live, so an edit of the URL, of the
+      // wallet dialect or of the conversation header reaches the next request, no reload.
+      this.clients.get(provider.id)?.configure({
+        baseUrl: provider.baseUrl,
+        sessionHeader: provider.sessionHeader,
+        userAgent: this.host.userAgent,
+      });
       this.gateFor(provider.id, provider.concurrency);
     }
     for (const card of cards()) {
@@ -146,12 +157,15 @@ export class ClientRegistry {
   async clientFor(providerId: string): Promise<ApiClient> {
     const provider: ProviderSpec = providerById(providerId);
     const key = await this.keyFor(provider.id);
+    // The row's own declarations travel with the client: which conversation header the
+    // endpoint takes is a property of the endpoint, not of the request.
+    const facts = { sessionHeader: provider.sessionHeader, userAgent: this.host.userAgent };
     let client = this.clients.get(provider.id);
     if (!client) {
-      client = new ApiClient({ apiKey: key, baseUrl: provider.baseUrl, model: '' });
+      client = new ApiClient({ apiKey: key, baseUrl: provider.baseUrl, model: '', ...facts });
       this.clients.set(provider.id, client);
     } else {
-      client.configure({ apiKey: key, baseUrl: provider.baseUrl });
+      client.configure({ apiKey: key, baseUrl: provider.baseUrl, ...facts });
     }
     return client;
   }

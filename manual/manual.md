@@ -246,6 +246,7 @@ The page saves at the **Global** scope of `settings.json`, so the cards belong t
 | `name` | The display name. Spinney shows it in the model dropdown groups, in the wallet line, and in the API key prompt. |
 | `baseUrl` | The API root, for example `https://api.deepseek.com`. A request goes to `POST <baseUrl>/chat/completions`. |
 | `balance` | How Spinney reads the remaining credit. See the table below. |
+| `sessionHeader` | How Spinney tells the endpoint which conversation a request belongs to. `none` sends no such header. `opencode` sends `x-opencode-session`. |
 | `concurrency` | How many requests can be in flight against this endpoint. `0` means no limit. |
 
 | `balance` value | Request | Result |
@@ -256,6 +257,8 @@ The page saves at the **Global** scope of `settings.json`, so the cards belong t
 | `moonshot` | `GET /users/me/balance` | The available balance, in CNY. |
 
 A row that leaves `balance` out is read by its host: `api.deepseek.com` gives `deepseek`, anything else gives `none`.
+
+`sessionHeader` has two values. `none` sends no header. `opencode` sends `x-opencode-session: ses_…`, which the OpenCode Console gateway requires. A row that leaves `sessionHeader` out is read by its host too: `opencode.ai` gives `opencode`, anything else gives `none`. Spinney sends one value for each context window. A new window or a fork starts a new value. A sub-agent sends its own value.
 
 ### 6.2 Model card fields
 
@@ -555,7 +558,7 @@ Run **`Spinney: Show System Prompt`** to read the exact prompt that the model re
 
 Spinney sends no telemetry. It connects only to the provider endpoints that you configure.
 
-A request carries your messages, the tool results, and the images. The wallet read adds one request to the provider. An image goes to the provider as an upload or inside the request body, based on the transport of the card. A card that selects `deepseek` for web search also sends the search query to the provider of that card, and it sends the address of a page there only when that page has no readable text (section 19.1).
+A request carries your messages, the tool results, and the images. It also carries the name and the version of Spinney, as its user agent, so that the provider can identify the client. A provider whose row sets `sessionHeader` also receives the identifier of the context window. The wallet read adds one request to the provider. An image goes to the provider as an upload or inside the request body, based on the transport of the card. A card that selects `deepseek` for web search also sends the search query to the provider of that card, and it sends the address of a page there only when that page has no readable text (section 19.1).
 
 The extension keeps no copy of the uploaded image bytes.
 

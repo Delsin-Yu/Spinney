@@ -15,6 +15,7 @@
 
 import * as vscode from 'vscode';
 import { isBalanceDialect } from '../agent/balance';
+import { isSessionDialect } from '../agent/apiClient';
 import { CardView, ModelPanel, ModelPanelOptions, ModelTreeSave, ModelTreeSnapshot, ProviderView } from './ModelPanel';
 import {
   BUILTIN_CARD_DEFAULTS,
@@ -242,13 +243,22 @@ export class ModelTreeController {
       return;
     }
     const save = payload as ModelTreeSave;
+    // The page draws every provider field it can express, and `sessionHeader` is *not* one of
+    // them: it is a host-defaulted declaration with no control on the page, so a save from the
+    // page must **carry a hand-written value through** instead of erasing it. Only a value this
+    // build knows is carried — anything else heals to the host default on the next read anyway.
+    const storedProviders = this.readRows().providers;
     const providers: Record<string, unknown> = {};
     for (const provider of save.providers) {
+      const stored = storedProviders[provider.id];
+      const fields = stored && typeof stored === 'object' ? (stored as Record<string, unknown>) : {};
+      const sessionHeader = fields.sessionHeader ?? fields.session;
       providers[provider.id] = {
         name: provider.name.trim(),
         baseUrl: provider.baseUrl.trim(),
         concurrency: Math.floor(provider.concurrency) || 0,
         balance: provider.balance,
+        ...(isSessionDialect(sessionHeader) ? { sessionHeader } : {}),
       };
     }
     const cards: Record<string, unknown> = {};
@@ -490,12 +500,21 @@ function isCount(value: unknown): boolean {
  */
 const ISSUE_TEXT: Record<CatalogIssueCode, (args: readonly (string | number)[]) => string> = {
   'provider-not-object': (a) =>
-    vscode.l10n.t('providers["{0}"]: expected { name, baseUrl, balance, concurrency }, got {1}', a[0], a[1]),
+    vscode.l10n.t(
+      'providers["{0}"]: expected { name, baseUrl, balance, sessionHeader, concurrency }, got {1}',
+      a[0],
+      a[1],
+    ),
   'provider-name': (a) => vscode.l10n.t('providers["{0}"]: name must be a non-empty string', a[0]),
   'provider-url': (a) => vscode.l10n.t('providers["{0}"]: {1} must be a non-empty URL', a[0], a[1]),
   'provider-balance': (a) => vscode.l10n.t('providers["{0}"]: {1} must be one of {2}, got {3}', a[0], a[1], a[2], a[3]),
+  'provider-session': (a) => vscode.l10n.t('providers["{0}"]: {1} must be one of {2}, got {3}', a[0], a[1], a[2], a[3]),
   'provider-unknown-field': (a) =>
-    vscode.l10n.t('providers["{0}"]: unknown field "{1}" (expected name, baseUrl, balance, concurrency)', a[0], a[1]),
+    vscode.l10n.t(
+      'providers["{0}"]: unknown field "{1}" (expected name, baseUrl, balance, sessionHeader, concurrency)',
+      a[0],
+      a[1],
+    ),
   'provider-url-missing': (a) => vscode.l10n.t('providers["{0}"]: baseUrl is required', a[0]),
   'row-concurrency': (a) =>
     vscode.l10n.t('{0}["{1}"]: {2} must be 0 (unlimited) or a positive integer, got {3}', a[0], a[1], a[2], a[3]),
