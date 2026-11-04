@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-11-04
+
+### Fixed
+
+- **The built-in model no longer disappears.** `parseCatalog()` now answers the catalog
+  *in force*: the built-in `default` provider and the `deepseek-flash` card are in every
+  result whether or not `spinney.providers` / `spinney.modelCards` declare them, placed
+  first, and a row the settings do declare under one of those ids replaces the built-in
+  one in place. Two things follow. The Model Cards page no longer opens on an empty
+  canvas on a fresh install — the tree is built from that same parser, so it used to draw
+  nothing at all — and adding a model card of your own no longer evicts `deepseek-flash`
+  from the chat's model dropdown, which happened because the vendored card was only a
+  fallback for *nothing* configured and the page's first save wrote its whole draft (the
+  user's rows alone) into the settings. The first save after a fresh install writes both
+  built-in rows explicitly, and `validateBuiltinsSurvive` protects them from then on. The
+  user manual says so in all three languages, and the Model Cards acceptance run pins
+  both cases: a fresh profile's tree is exactly the built-in provider plus the built-in
+  card, and a save of one user card leaves the vendored card in the catalog.
+
 ## [0.5.0] - 2026-11-02
 
 ### Added
