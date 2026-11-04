@@ -202,7 +202,21 @@ fails the build if one reappears).
 
 Those three keys are the **whole** model configuration, and they are all this build
 reads: the pre-model-card settings were never released, so there is no migration path
-to maintain — a profile that has no cards simply runs on the vendored fallback.
+to maintain.
+
+But they are not the whole **catalog**. `parseCatalog()` answers the catalog *in force*:
+the built-in provider (`default`) and the vendored card (`deepseek-flash`) are in the
+result whether or not `settings.json` declares them, put first, and a row the settings do
+declare under one of those ids replaces the built-in one in place. That is what keeps
+every reader on the same answer — a fresh install (neither key written) draws the DeepSeek
+root and the `deepseek-flash` card on the page and offers that card in the chat's dropdown,
+and a profile that declares only cards of its own still has it. Without the seeding the two
+readers disagreed: the page drew nothing (it builds its snapshot from the parser) while the
+chat fell back to the vendored card, and the user's first save — which writes the page's
+whole draft — dropped the built-in rows from the settings, so the vendored model vanished
+from the dropdown the moment a model of their own was added. The first save after a fresh
+install therefore writes both built-in rows explicitly, and from then on
+`validateBuiltinsSurvive` protects them like any other stored built-in row.
 
 The page's saves are written back to `settings.json` at **Global** (user) scope — a
 provider table with keys behind it belongs to the reader, and in no-folder mode there
@@ -246,10 +260,16 @@ the chat tree's visual language and the same vendored layout engine — with:
   hand-authored, not defaulted. A button is disabled while its field already holds the
   default, and only the level list's reset is a *shape* change (it re-measures the
   tree); every other one is a plain edit,
+- **the built-in rows are always on the canvas**: the tree is drawn from
+  `parseCatalog()`, which seeds the `default` provider and the `deepseek-flash` card
+  even when `settings.json` declares neither (`src/agent/models.ts`). So a fresh
+  install opens on a tree with one root and one card instead of an empty canvas, and
+  the user's own rows branch off beside them,
 - **built-in rows cannot be deleted**: the page disables the delete button of the
   built-in provider and of the vendored card, and the host refuses the payload anyway
   (`validateBuiltinsSurvive` — a deletion is implicit, so a crafted save could drop
-  them). Editing and renaming them is fine; only their disappearance is refused,
+  them). Editing and renaming them is fine; only their disappearance is refused. A
+  settings file that never held them gets them written by the page's first save,
 - **client-side validation** mirrored by **host-side validation**
   (`validatePayload` in `src/chat/modelTree.ts`): the host is the authority, rejects a
   bad payload with the reasons, and writes **nothing** — never a half-applied catalog.

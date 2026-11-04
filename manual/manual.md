@@ -278,7 +278,7 @@ A row that leaves `balance` out is read by its host: `api.deepseek.com` gives `d
 
 Spinney probes nothing. The context window, the image support, the transport, and the search engine are your declarations. A wrong `contextWindow` mis-sizes the `ctx` readout.
 
-Built-in rows cannot be deleted. You can edit them.
+Built-in rows cannot be deleted. You can edit them. The page always shows the built-in provider and the built-in `deepseek-flash` card. A fresh profile has no rows in `settings.json`. The page shows both rows, and the first save writes them into `settings.json`.
 
 ### 6.3 Choose a model
 

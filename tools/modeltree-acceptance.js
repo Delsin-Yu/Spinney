@@ -180,6 +180,18 @@ const controllerFor = ({ hasKey = async () => false, cards = {}, providers = {},
       events.cleared.push(providerId);
       keys.delete(apiKeySecretName(providerId));
     },
+    // The search token is one secret per **dialect** (`spinney.searchKey.<dialect>`),
+    // not per provider: the snapshot asks about each, and a save writes/clears them the
+    // same way it does a key. Nothing here stores a value the checks do not look at.
+    hasSearchToken: async (dialect) => keys.has(`spinney.searchKey.${dialect}`),
+    storeSearchToken: async (dialect, token) => {
+      events.stored.push({ dialect, key: token });
+      keys.set(`spinney.searchKey.${dialect}`, token);
+    },
+    clearSearchToken: async (dialect) => {
+      events.cleared.push(`search:${dialect}`);
+      keys.delete(`spinney.searchKey.${dialect}`);
+    },
     onSaved: () => {
       events.saved += 1;
       // What `ChatViewProvider.onModelCardsSaved()` does with the result: re-read
@@ -203,6 +215,9 @@ const card = (over = {}) => ({
   contextWindow: 128000,
   concurrency: 0,
   vision: { enabled: true, transport: 'deepseek' },
+  // The engine that leads web search — `builtin` is what a card the user creates
+  // starts on, and the one field `validatePayload` refuses to see missing.
+  searchProvider: 'builtin',
   efforts: ['none', 'low', 'high'],
   defaultEffort: 'low',
   ...over,
@@ -247,7 +262,7 @@ const trySave = async (rows, payload) => {
         {
           name: c.name, providerId: c.providerId, oaiModel: c.oaiModel,
           contextWindow: c.contextWindow, concurrency: c.concurrency,
-          vision: c.vision, efforts: c.efforts, defaultEffort: c.defaultEffort,
+          vision: c.vision, searchProvider: c.searchProvider, efforts: c.efforts, defaultEffort: c.defaultEffort,
         },
       ]),
     ),
@@ -285,13 +300,18 @@ const snapshots = () => lastPanel.webview.posted.filter((m) => m.type === 'model
     const posts = snapshots();
     ok('`ready` produced exactly one snapshot', posts.length === 1, String(posts.length));
     const snap = posts[0] && posts[0].snapshot;
-    ok('the snapshot lists the provider', !!snap && snap.providers.length === 1 && snap.providers[0].id === 'prov-1');
-    ok('  … with its live key badge', !!snap && snap.providers[0].hasKey === true);
+    // The snapshot is the catalog **in force**: the rows the settings hold *plus* the
+    // built-ins, which are always present (see `parseCatalog` in src/agent/models.ts).
+    // So every lookup below names the row it means instead of trusting an index.
+    const ownProvider = snap && snap.providers.find((p) => p.id === 'prov-1');
+    const ownCard = snap && snap.cards.find((c) => c.id === 'card-1');
+    ok('the snapshot lists the provider the settings hold', !!ownProvider, JSON.stringify(snap && snap.providers.map((p) => p.id)));
+    ok('  … with its live key badge', !!ownProvider && ownProvider.hasKey === true);
     // The stored row above carries no `balance`: the host answers for the host, and
     // `example.test` is nobody this build knows, so the row says "no wallet line".
-    ok('  … with the wallet dialect its host answers for', !!snap && snap.providers[0].balance === 'none', String(snap && snap.providers[0].balance));
-    ok('the snapshot lists the card', !!snap && snap.cards.length === 1 && snap.cards[0].oaiModel === 'wire-one');
-    ok('  … with its own levels', !!snap && snap.cards[0].efforts.join(',') === 'none,low,high');
+    ok('  … with the wallet dialect its host answers for', !!ownProvider && ownProvider.balance === 'none', String(ownProvider && ownProvider.balance));
+    ok('the snapshot lists the card the settings hold', !!ownCard && ownCard.oaiModel === 'wire-one', JSON.stringify(snap && snap.cards.map((c) => c.id)));
+    ok('  … with its own levels', !!ownCard && ownCard.efforts.join(',') === 'none,low,high');
     ok('the default card id is the card', !!snap && snap.defaultCardId === 'card-1');
     ok('a clean settings file reports no errors', !!snap && snap.errors.length === 0);
     ok('the snapshot carries the reset defaults', !!snap && !!snap.defaults && !!snap.defaults.builtin && !!snap.defaults.fresh);
@@ -301,7 +321,36 @@ const snapshots = () => lastPanel.webview.posted.filter((m) => m.type === 'model
     ok('the built-in provider resets to the DeepSeek URL', !!snap && snap.defaults.builtin.provider.baseUrl === 'https://api.deepseek.com');
     ok('  … and to its DeepSeek wallet line', !!snap && snap.defaults.builtin.provider.balance === 'deepseek', String(snap && snap.defaults && snap.defaults.builtin.provider.balance));
     ok('  … while a fresh row resets to no wallet line', !!snap && snap.defaults.fresh.provider.balance === 'none', String(snap && snap.defaults && snap.defaults.fresh.provider.balance));
-    ok('a user row is not built-in', !!snap && snap.cards.every((c) => c.isBuiltin === false));
+    // The built-in rows are in that snapshot too — the bug this run pins down: a page
+    // that drew only what `settings.json` holds had no DeepSeek root and no
+    // `deepseek-flash` card on a fresh profile, and no place to keep them once the
+    // user added a model of their own.
+    const builtinProvider = snap && snap.providers.find((p) => p.id === 'default');
+    const builtinCard = snap && snap.cards.find((c) => c.id === 'deepseek-flash');
+    ok('the snapshot always carries the built-in provider', !!builtinProvider && builtinProvider.isBuiltin === true, JSON.stringify(snap && snap.providers.map((p) => p.id)));
+    ok('  … first, so the tree opens on it', !!snap && snap.providers[0].id === 'default', String(snap && snap.providers[0] && snap.providers[0].id));
+    ok('  … and the built-in card, marked as one', !!builtinCard && builtinCard.isBuiltin === true, JSON.stringify(snap && snap.cards.map((c) => c.id)));
+    ok('a user row is not built-in', !!ownCard && ownCard.isBuiltin === false);
+  }
+
+  console.log('-- a fresh install: the built-in rows are the whole tree --');
+  {
+    // Neither `spinney.providers` nor `spinney.modelCards` exists yet — a profile that
+    // never opened this page. The page must still draw the one endpoint this harness
+    // always has, and the one card it always has, or the user has no row to edit and
+    // no row to keep: that was the bug.
+    const { controller } = controllerFor();
+    controller.open();
+    lastPanel.webview.listeners.forEach((handler) => handler({ type: 'ready' }));
+    await new Promise((r) => setTimeout(r, 0));
+    const snap = snapshots().slice(-1)[0].snapshot;
+    ok('the tree has the built-in provider', snap.providers.length === 1 && snap.providers[0].id === 'default', JSON.stringify(snap.providers.map((p) => p.id)));
+    ok('  … pointing at the DeepSeek endpoint', snap.providers[0].baseUrl === 'https://api.deepseek.com', snap.providers[0].baseUrl);
+    ok('the tree has the built-in card, under that provider',
+      snap.cards.length === 1 && snap.cards[0].id === 'deepseek-flash' && snap.cards[0].providerId === 'default',
+      JSON.stringify(snap.cards.map((c) => c.id)));
+    ok('  … and it is the default card the page marks', snap.defaultCardId === 'deepseek-flash', snap.defaultCardId);
+    ok('  … with no parse error to report', snap.errors.length === 0, snap.errors.join(' | '));
   }
 
   console.log('-- a hand-broken settings file is reported, not hidden --');
@@ -318,7 +367,8 @@ const snapshots = () => lastPanel.webview.posted.filter((m) => m.type === 'model
     ok('the unusable default level is reported', snap.errors.some((e) => e.includes('defaultEffort')), snap.errors.join(' | '));
     ok('  … in the display language, not the parser\'s English line',
       snap.errors.some((e) => e.includes('改用')), snap.errors.join(' | '));
-    ok('  … and the card is still usable on level "low"', snap.cards[0].defaultEffort === 'low', snap.cards[0].defaultEffort);
+    const repaired = snap.cards.find((c) => c.id === 'card-1');
+    ok('  … and the card is still usable on level "low"', !!repaired && repaired.defaultEffort === 'low', String(repaired && repaired.defaultEffort));
   }
 
   console.log('-- an invalid save writes nothing at all --');
@@ -410,7 +460,9 @@ const snapshots = () => lastPanel.webview.posted.filter((m) => m.type === 'model
     ok('the built-in provider\u2019s key was cleared', events.cleared.length === 1 && events.cleared[0] === 'default');
     ok('the host was told exactly once', events.saved === 1, String(events.saved));
     const after = snapshots().slice(-1)[0];
-    ok('a fresh snapshot follows the save', after.snapshot.cards.length === 2);
+    ok('a fresh snapshot follows the save',
+      after.snapshot.cards.some((c) => c.id === 'card-2') && after.snapshot.cards.some((c) => c.id === 'card-1'),
+      JSON.stringify(after.snapshot.cards.map((c) => c.id)));
   }
 
   console.log('-- the wallet line survives the whole page round trip --');
@@ -440,14 +492,14 @@ const snapshots = () => lastPanel.webview.posted.filter((m) => m.type === 'model
     ok('the provider row lands in `spinney.providers` with the dialect the select held',
       !!byKey.providers && byKey.providers['prov-1'].balance === 'openrouter', JSON.stringify(byKey.providers));
     ok('  … and the snapshot the page gets back carries it too',
-      snapshots().slice(-1)[0].snapshot.providers[0].balance === 'openrouter',
-      JSON.stringify(snapshots().slice(-1)[0].snapshot.providers[0]));
+      snapshots().slice(-1)[0].snapshot.providers.find((p) => p.id === 'prov-1').balance === 'openrouter',
+      JSON.stringify(snapshots().slice(-1)[0].snapshot.providers.find((p) => p.id === 'prov-1')));
     ok('  … with every other field of the row untouched',
       byKey.providers['prov-1'].baseUrl === 'https://example.test' && byKey.providers['prov-1'].concurrency === 4,
       JSON.stringify(byKey.providers['prov-1']));
   }
 
-  console.log('-- the catalog the host installs is the saved one --');
+  console.log('-- the catalog the host installs keeps the built-in card --');
   {
     const { controller } = controllerFor();
     save(controller, {
@@ -458,10 +510,14 @@ const snapshots = () => lastPanel.webview.posted.filter((m) => m.type === 'model
       clearedKeys: [],
     });
     await new Promise((r) => setTimeout(r, 0));
-    ok('the saved card is in the live catalog', M.cards().length === 1 && M.cards()[0].oaiModel === 'only-wire', JSON.stringify(M.cardIds()));
+    const saved = M.cards().find((c) => c.id === 'card-1');
+    ok('the saved card is in the live catalog', !!saved && saved.oaiModel === 'only-wire', JSON.stringify(M.cardIds()));
+    // The reported bug: adding a model of your own used to evict the vendored one,
+    // because `cards()` only fell back to it while *nothing* was configured.
+    ok('  … and the built-in card is still in the dropdown', M.cardIds().includes('deepseek-flash'), JSON.stringify(M.cardIds()));
     ok('  … and a name resolves to it', (M.resolveCard('Only Card') || {}).id === 'card-1');
     ok('  … and the wire name does too', (M.resolveCard('only-wire') || {}).id === 'card-1');
-    ok('a level the card does not offer is clamped to its default', M.normalizeEffort(M.cards()[0], 'nonsense') === 'low');
+    ok('a level the card does not offer is clamped to its default', M.normalizeEffort(saved, 'nonsense') === 'low');
   }
 
   console.log('-- the built-in rows are marked, and cannot be removed --');
@@ -544,17 +600,18 @@ const snapshots = () => lastPanel.webview.posted.filter((m) => m.type === 'model
   }
   console.log('-- the transport field is one of the two vendor names --');
   {
+    const cardOf = (parsed, id) => parsed.cards.find((row) => row.id === id);
     const spelled = M.parseCatalog(null, {
       'card-new': { name: 'n', providerId: 'p', oaiModel: 'w', vision: { enabled: true, transport: 'NONSENSE' } },
     });
-    ok('an unknown transport is a rejected row', spelled.cards.length === 0 && spelled.errors.length > 0, JSON.stringify(spelled.errors));
+    ok('an unknown transport is a rejected row', cardOf(spelled, 'card-new') === undefined && spelled.errors.length > 0, JSON.stringify(spelled.errors));
     // A row that leaves the field out takes the default, which is the standard shape:
     // the Files API is one provider's extension, so it is the one you opt into.
     const bare = M.parseCatalog(null, { 'card-bare': { name: 'n', providerId: 'p', oaiModel: 'w' } });
-    ok('a row without a transport defaults to openai', bare.cards[0] && bare.cards[0].vision.transport === 'openai', JSON.stringify(bare.cards[0] && bare.cards[0].vision));
+    ok('a row without a transport defaults to openai', !!cardOf(bare, 'card-bare') && cardOf(bare, 'card-bare').vision.transport === 'openai', JSON.stringify(cardOf(bare, 'card-bare')));
     const bareBool = M.parseCatalog(null, { 'card-bool': { name: 'n', providerId: 'p', oaiModel: 'w', vision: true } });
-    ok('  … and so does the shorthand `vision: true`', bareBool.cards[0] && bareBool.cards[0].vision.transport === 'openai', JSON.stringify(bareBool.cards[0] && bareBool.cards[0].vision));
-    ok('  … while the vendored card stays pinned to deepseek', M.cards()[0].vision.transport === 'deepseek', M.cards()[0].vision.transport);
+    ok('  … and so does the shorthand `vision: true`', !!cardOf(bareBool, 'card-bool') && cardOf(bareBool, 'card-bool').vision.transport === 'openai', JSON.stringify(cardOf(bareBool, 'card-bool')));
+    ok('  … while the vendored card stays pinned to deepseek', cardOf(bare, 'deepseek-flash').vision.transport === 'deepseek', cardOf(bare, 'deepseek-flash').vision.transport);
   }
 
   console.log('-- the wallet line is one of the four dialect names, or answered by the host --');
@@ -590,7 +647,7 @@ const snapshots = () => lastPanel.webview.posted.filter((m) => m.type === 'model
     // row, and the page's save path rejects the save (checked above) — an unknown
     // dialect must not become a wallet readout that quietly shows nothing.
     const misspelled = M.parseCatalog({ 'bad': { name: 'b', baseUrl: 'https://example.test', concurrency: 0, balance: 'PayPal' } }, null);
-    ok('an unknown dialect is a rejected row', misspelled.providers.length === 0 && misspelled.errors.length > 0, JSON.stringify(misspelled.errors));
+    ok('an unknown dialect is a rejected row', !misspelled.providers.some((row) => row.id === 'bad') && misspelled.errors.length > 0, JSON.stringify(misspelled.errors));
     ok('  … and the reason names all four dialects',
       misspelled.errors.some((e) => e.includes('none, deepseek, openrouter, moonshot')), JSON.stringify(misspelled.errors));
   }

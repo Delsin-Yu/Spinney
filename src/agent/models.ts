@@ -22,9 +22,11 @@
  * a stored session, which is the whole point of the indirection.
  *
  * The user's data lives in `spinney.providers` / `spinney.modelCards` (structured
- * data, `settings.json`, edited by the Model Card Tree page). A profile that has
- * neither — a fresh install, or one that never opened the page — gets the vendored
- * fallback below: a single `deepseek-flash` card on the built-in `default` provider.
+ * data, `settings.json`, edited by the Model Card Tree page). The built-in rows below
+ * are **always** part of the catalog, whether or not the settings declare them: a
+ * fresh install (neither key written) shows the `default` provider and the
+ * `deepseek-flash` card in the page, and keeps that card in the chat's dropdown after
+ * the user adds a model of their own — `parseCatalog()` seeds both.
  *
  * Everything derives from here, so changing the vendored fallback is a one-line
  * edit:
@@ -897,6 +899,14 @@ function parseCardRow(id: string, rawFields: unknown, issues: CatalogIssue[]): M
  * `settings.json` should contain; the Model Card Tree page is their editor and
  * writes them back through `configuration.update`. A row that cannot be parsed is
  * skipped and reported, so the settings can never silently half-apply.
+ *
+ * The result is the catalog **in force**, not a transcript of the file: the built-in
+ * provider and the vendored card are added when the settings do not declare them, so
+ * every reader agrees on them. A fresh profile has no rows at all, and both the page
+ * and the chat's dropdown must still show the one model this harness can always talk
+ * to; and a profile that only declares cards of its own must not lose that model,
+ * which is exactly what a bare "parse what is there" answer would do. A row the
+ * settings *do* declare under a built-in id wins — it is that row, edited.
  */
 export function parseCatalog(providersRaw: unknown, cardsRaw: unknown): CatalogParseResult {
   const providers: ProviderSpec[] = [];
@@ -925,6 +935,19 @@ export function parseCatalog(providersRaw: unknown, cardsRaw: unknown): CatalogP
         (push as unknown[]).push(parsed);
       }
     }
+  }
+
+  // The built-in rows are part of every answer, so the page and the chat's dropdown
+  // always agree about them (see the doc comment). They go **first** — the tree's first
+  // root is the built-in provider, and `cards()[0]` is the vendored card — and a row the
+  // settings declare under the same id replaces the built-in one in place, because it
+  // *is* that row after an edit. Copies, never the constants: the page and every reader
+  // get a value of their own.
+  if (!providers.some((row) => row.id === VENDORED_PROVIDER.id)) {
+    providers.unshift({ ...VENDORED_PROVIDER });
+  }
+  if (!cardsOut.some((row) => row.id === VENDORED_CARD.id)) {
+    cardsOut.unshift({ ...VENDORED_CARD, vision: { ...VENDORED_CARD.vision }, efforts: [...VENDORED_CARD.efforts] });
   }
 
   // The English copy is a projection of the issues, never a second source: the output

@@ -209,8 +209,11 @@ const ok = (label, cond, detail) => {
 
 /** One provider row as `parseCatalog` reads it: the row it accepted, and what it reported. */
 function parseRow(fields) {
+  // `parseCatalog` answers the catalog *in force*, which always carries the built-in
+  // provider (see `docs/agents/invariants/model-cards.md`): the row under test is the
+  // one the settings declared under the id `row`, never whatever sits at index 0.
   const { providers, errors } = parseCatalog({ row: fields }, {});
-  return { row: providers[0], errors };
+  return { row: providers.find((row) => row.id === 'row'), errors };
 }
 
 console.log('-- the dialect a silent provider row lands on (by host) --');

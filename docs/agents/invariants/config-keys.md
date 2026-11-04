@@ -126,8 +126,10 @@ to **≥ 1** (a non-positive limit would otherwise deadlock every sub-agent).
   the configured cards (`postConfig`).
 - **No other model key exists.** The pre-model-card settings were never released, so
   there is no migration path: `spinney.providers` + `spinney.modelCards` +
-  `spinney.model` are the whole model configuration, and a profile without them runs
-  on the vendored fallback card.
+  `spinney.model` are the whole model configuration. A profile without them still runs
+  on the vendored `deepseek-flash` card: `parseCatalog()` answers the built-in provider
+  and card in every result, so the settings never have to declare them
+  (`docs/agents/invariants/model-cards.md`).
 - A value that is neither a card id, a card name, nor a wire model name is **not**
   used: `resolveModel` falls back to the first usable card and says so in the output
   channel (a stale id must not silently mis-size the indicator or hide images).
