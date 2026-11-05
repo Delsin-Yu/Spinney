@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-06
+
+### Added
+
+- **One AGENTS.md for every workspace.** The systemwide file `~/.spinney/AGENTS.md`
+  is read once per window beside the workspace's own `AGENTS.md` and injected into
+  the system prompt in front of it, so the rules that hold everywhere — your
+  language, your tools, the shape of an answer — no longer have to be copied into
+  every repository. The new command **`Spinney: Open Global AGENTS.md`**
+  (`spinney.openGlobalAgentsMd`) creates the file when it is missing and opens it for
+  editing; it writes one comment line, because the file's content becomes prompt
+  bytes verbatim. Both files keep the snapshot rule, so an edit lands in the next
+  window, and no-repo mode now has instructions at all (it used to read nothing). The
+  two sections render as `## Global AGENTS.md (all workspaces)` and the existing
+  `## Workspace AGENTS.md (project instructions)`, with one precedence line when both
+  exist — a workspace that conflicts with the global file wins. The rendered prompt
+  of a workspace with only its own file is byte-for-byte what it was; `agentsMdHash`
+  now hashes the rendered sections, so the one drift notice that follows this release
+  is the template hash moving, not a per-file bookkeeping difference.
+
 ## [0.5.1] - 2026-11-04
 
 ### Fixed
@@ -821,7 +841,9 @@ everything the extension contains — the baseline the project had reached at th
   `request-timeout` and `request-stall` lines, so a request that has not produced
   its first byte is now visible *while* it waits.
 
-[Unreleased]: https://github.com/Delsin-Yu/Spinney/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/Delsin-Yu/Spinney/compare/v0.5.1...HEAD
+[0.6.0]: https://github.com/Delsin-Yu/Spinney/releases/tag/v0.6.0
+[0.5.1]: https://github.com/Delsin-Yu/Spinney/releases/tag/v0.5.1
 [0.5.0]: https://github.com/Delsin-Yu/Spinney/releases/tag/v0.5.0
 [0.4.0]: https://github.com/Delsin-Yu/Spinney/releases/tag/v0.4.0
 [0.3.0]: https://github.com/Delsin-Yu/Spinney/releases/tag/v0.3.0
