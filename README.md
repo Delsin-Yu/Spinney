@@ -50,9 +50,9 @@ Everything else is a **model card**: a row of `spinney.modelCards` bound to one 
 
 The manual explains every field, the per-node model rule, and the cache warning a model switch costs.
 
-## Workspace instructions
+## Instructions for the agent
 
-If the workspace root holds an `AGENTS.md` file, Spinney reads it once at start and adds it to the system prompt. Reload the window after you edit that file. Run `Spinney: Show System Prompt` to read the exact prompt the model receives.
+Spinney adds two instruction files to the system prompt: `~/.spinney/AGENTS.md`, which applies to every workspace on this machine, and the workspace root's own `AGENTS.md`. It reads each file once at start, so reload the window after you edit one. Run `Spinney: Open Global AGENTS.md` to create or edit the global file, and `Spinney: Show System Prompt` to read the exact prompt the model receives.
 
 ## Privacy and data
 
@@ -149,9 +149,9 @@ Spinney 是一个 VS Code 扩展。它把智能体放进一个编辑器标签页
 
 手册解释了每个字段、按节点解析模型的规则，以及切换模型要付出的提示词缓存代价。
 
-## 工作区指令
+## 给智能体的指令
 
-如果工作区根目录下存在 `AGENTS.md`，Spinney 会在启动时读取一次，并把它加入系统提示词。编辑该文件后请重新加载窗口。运行 `Spinney: 显示系统提示词` 可以查看模型实际收到的完整提示词。
+Spinney 会把两个指令文件加入系统提示词：`~/.spinney/AGENTS.md`（对本机上的每个工作区生效），以及工作区根目录下的 `AGENTS.md`。每个文件都在启动时读取一次，编辑后请重新加载窗口。运行 `Spinney: 打开全局 AGENTS.md` 可以创建或编辑全局文件，运行 `Spinney: 显示系统提示词` 可以查看模型实际收到的完整提示词。
 
 ## 隐私与数据
 

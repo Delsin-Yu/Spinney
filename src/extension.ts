@@ -203,6 +203,12 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('spinney.showSystemPrompt', () => {
       void chatProvider?.showSystemPrompt();
     }),
+    // The one AGENTS.md a user writes once and wants everywhere: this command creates
+    // it if it is missing and opens the real file (an edit lands in the next window —
+    // the snapshot rule applies to it exactly like the workspace file).
+    vscode.commands.registerCommand('spinney.openGlobalAgentsMd', () => {
+      void chatProvider?.openGlobalAgentsMd();
+    }),
     // The user manual is not chat state: it is a page shipped in the `.vsix`
     // (`manual/`), rendered in an untitled tab for the window's display language.
     vscode.commands.registerCommand('spinney.showManual', () => {

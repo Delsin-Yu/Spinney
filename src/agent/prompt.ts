@@ -13,7 +13,8 @@ import { ThinkingEffort } from './types';
  *   {{identity}}    who the agent is (harness name + model card + reasoning level)
  *   {{environment}} where it runs (OS / shell / workspace)
  *   {{language}}    the reply language (`spinney.replyLanguage`)
- *   {{agentsMd}}    the workspace AGENTS.md snapshot taken at session start
+ *   {{agentsMd}}    the AGENTS.md sections in force — the systemwide one
+ *                   (`~/.spinney/AGENTS.md`), then the workspace one
  *
  * The sub-agent template shares `{{identity}}` / `{{environment}}` but is
  * deliberately **lean** — it never repeats the main prompt.
@@ -24,8 +25,23 @@ import { ThinkingEffort } from './types';
  * the same way the tool list is built: from the agent's capability flags.
  */
 
-/** Heading of the trailing AGENTS.md section (used by the template and the empty-snapshot case). */
+/** Heading of the workspace AGENTS.md section (the workspace root's own file). */
 const AGENTS_MD_HEADING = '## Workspace AGENTS.md (project instructions)';
+
+/**
+ * Heading of the systemwide AGENTS.md section — the one file that applies to
+ * every workspace on this machine. It is rendered **first**, so the workspace's
+ * own instructions are the ones closest to the turn.
+ */
+const GLOBAL_AGENTS_MD_HEADING = '## Global AGENTS.md (all workspaces)';
+
+/**
+ * The precedence line, rendered inside the global section and only when both
+ * sections are present: the systemwide file applies everywhere, so a workspace
+ * that says otherwise is the narrower instruction and wins.
+ */
+const AGENTS_MD_PRECEDENCE =
+  '- The instructions below apply to every workspace; where the two sections conflict, the workspace section wins.';
 
 /**
  * The reply language used when nothing else resolves. It is the floor under
@@ -78,7 +94,9 @@ export const SYSTEM_PROMPT_TEMPLATE = [
   '- Change nothing you were not asked to change; when editing several files, do them one at a time.',
   '- The user can see your thinking and reasoning — do not treat them as private.',
   '',
-  AGENTS_MD_HEADING,
+  // The instruction files — the systemwide `~/.spinney/AGENTS.md` first, then the
+  // workspace root's own `AGENTS.md`. The headings are part of the value
+  // (`agentsMdSection`, below) because each section only exists when its file does.
   '{{agentsMd}}',
 ].join('\n');
 
@@ -223,40 +241,86 @@ export function renderPromptTemplate(template: string, values: Record<string, st
 }
 
 /**
- * Snapshot of the workspace AGENTS.md appended to the system prompt. Set once
- * per session by {@link setAgentsMd}; later edits to AGENTS.md do not propagate.
+ * The two places AGENTS.md instructions come from, as a snapshot.
  *
- * It is the **fallback** for a render, not the only source: {@link systemPrompt}'s
- * `agentsMd` argument lets a caller pass its own snapshot without touching this
- * one (see there — a window-global snapshot cannot describe every session a
- * window serves).
+ * `global` is the **systemwide** file — one per machine, read from
+ * `~/.spinney/AGENTS.md` (or its fallback under global storage, see
+ * `ChatViewProvider.globalAgentsMdPath`) and injected into every session in every
+ * workspace. `workspace` is the open workspace folder's own `AGENTS.md`. Both are
+ * read once per window and never re-read mid-session, so an edit needs a reload;
+ * the summary order is fixed — global first, workspace second.
+ */
+export interface AgentsMdSources {
+  /** The systemwide file's snapshot (null = no such file). */
+  global: string | null;
+  /** The workspace root `AGENTS.md`'s snapshot (null = no such file). */
+  workspace: string | null;
+}
+
+/**
+ * Snapshots of the AGENTS.md files appended to the system prompt. Set once per
+ * window by {@link setAgentsMd} / {@link setGlobalAgentsMd}; later edits to either
+ * file do not propagate.
+ *
+ * They are the **fallback** for a render, not the only source: {@link systemPrompt}'s
+ * `agentsMd` argument lets a caller pass its own snapshot without touching these
+ * (see there — a window-global snapshot cannot describe every session a window
+ * serves).
  */
 let agentsMdSnapshot: string | null = null;
+let globalAgentsMdSnapshot: string | null = null;
 
-/** Fix the workspace AGENTS.md for the session (null = no AGENTS.md). */
+/** Fix the workspace AGENTS.md for the window (null = no AGENTS.md). */
 export function setAgentsMd(content: string | null): void {
   agentsMdSnapshot = content;
 }
 
-/**
- * The AGENTS.md snapshot in force right now, as the render fallback would use it.
- *
- * A caller that freezes a prompt per epoch needs the snapshot's *content* — not to
- * render with it, but to hash it: the freeze records `agentsMdHash`, and the drift
- * check compares that hash against this value, so editing the workspace's AGENTS.md
- * shows up as a change instead of silently rewriting somebody's prefix.
- */
-export function currentAgentsMd(): string | null {
-  return agentsMdSnapshot;
+/** Fix the systemwide AGENTS.md for the window (null = no such file). */
+export function setGlobalAgentsMd(content: string | null): void {
+  globalAgentsMdSnapshot = content;
 }
 
-/** Drop the now-empty trailing AGENTS.md section when there is no snapshot. */
-function stripAgentsMdSection(text: string): string {
-  const suffix = '\n\n' + AGENTS_MD_HEADING;
-  if (!text.endsWith(suffix + '\n')) {
-    return text; // template changed shape; never mangle the output
+/** Both snapshots in force right now — what a render is built from. */
+export function currentAgentsMdSources(): AgentsMdSources {
+  return { global: globalAgentsMdSnapshot, workspace: agentsMdSnapshot };
+}
+
+/**
+ * Compose the `{{agentsMd}}` value: the systemwide section first, then the
+ * workspace section, each dropped entirely when its file is missing or blank. An
+ * empty result means the template's trailing section disappears, so a workspace
+ * with neither file sends no AGENTS.md heading at all.
+ */
+export function agentsMdSection(sources: AgentsMdSources): string {
+  const global = (sources.global ?? '').trim();
+  const workspace = (sources.workspace ?? '').trim();
+  const sections: string[] = [];
+  if (global) {
+    const lines = [GLOBAL_AGENTS_MD_HEADING];
+    if (workspace) {
+      lines.push(AGENTS_MD_PRECEDENCE);
+    }
+    lines.push(global);
+    sections.push(lines.join('\n'));
   }
-  return text.slice(0, text.length - suffix.length - 1);
+  if (workspace) {
+    sections.push([AGENTS_MD_HEADING, workspace].join('\n'));
+  }
+  return sections.join('\n\n');
+}
+
+/**
+ * The AGENTS.md bytes a render right now would carry (`''` when neither file
+ * exists), for the module-global snapshots.
+ *
+ * A caller that freezes a prompt per epoch needs this — not to render with it, but
+ * to hash it: the freeze records `agentsMdHash`, and the drift check compares that
+ * hash against this value, so editing **either** file shows up as a change instead
+ * of silently rewriting somebody's prefix. Hashing the rendered section rather than
+ * the raw file is what makes one hash cover both sources.
+ */
+export function currentAgentsMdSection(): string {
+  return agentsMdSection(currentAgentsMdSources());
 }
 
 /**
@@ -265,32 +329,35 @@ function stripAgentsMdSection(text: string): string {
  * exactly as {@link identityLines} describes them. `facts` defaults to the live
  * environment so the normal path needs no arguments.
  *
- * `agentsMd` selects the workspace AGENTS.md snapshot this render carries:
- * **omitted** (`undefined`) means the module-global snapshot {@link setAgentsMd}
- * fixed, which is what every current caller gets; **`null`** renders the prompt with
- * no AGENTS.md section at all; a string uses *that* snapshot. The third case is what
- * a caller that freezes one prompt per session/epoch needs: a window can serve several
- * sessions, each with its own AGENTS.md, so such a caller passes the snapshot it took
- * for **its** session here instead of rendering whatever the module-global one holds
- * by the time the render happens. Nothing is remembered: the argument never writes
- * the module state back.
+ * `agentsMd` selects the AGENTS.md snapshots this render carries: **omitted**
+ * (`undefined`) means the module-global pair {@link setAgentsMd} /
+ * {@link setGlobalAgentsMd} fixed, which is what every current caller gets; a value
+ * uses *those* snapshots (pass `{ global: null, workspace: null }` for a prompt with
+ * no AGENTS.md section at all). The explicit case is what a caller that freezes one
+ * prompt per session/epoch needs: a window can serve several sessions, each with its
+ * own files, so such a caller passes the snapshots it took for **its** session here
+ * instead of rendering whatever the module-global ones hold by the time the render
+ * happens. Nothing is remembered: the argument never writes the module state back.
  */
 export function systemPrompt(
   model = '',
   effort: ThinkingEffort = 'none',
   language: string = DEFAULT_REPLY_LANGUAGE,
   facts: EnvironmentFacts = currentEnvironmentFacts(),
-  agentsMd?: string | null,
+  agentsMd?: AgentsMdSources,
 ): string {
-  const snapshot = agentsMd === undefined ? agentsMdSnapshot : agentsMd;
-  const body = (snapshot ?? '').trim();
+  const section = agentsMdSection(agentsMd ?? currentAgentsMdSources());
   const text = renderPromptTemplate(SYSTEM_PROMPT_TEMPLATE, {
     identity: identityLines(model, effort).join('\n'),
     environment: environmentSection(facts),
     language: languageLine(language),
-    agentsMd: body,
+    agentsMd: section,
   });
-  return body ? text : stripAgentsMdSection(text);
+  // With no instructions the template's trailing blank line is all that is left,
+  // so the prompt ends where the last written line does (and the AGENTS.md heading
+  // never appears with an empty body). A section that exists is already trimmed,
+  // so this only ever removes that blank tail.
+  return text.replace(/\n+$/, '');
 }
 
 /**

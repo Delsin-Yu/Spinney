@@ -33,7 +33,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { Agent, ImageAccounting } from '../agent/agent';
-import { DEFAULT_REPLY_LANGUAGE, SYSTEM_PROMPT_TEMPLATE, currentAgentsMd } from '../agent/prompt';
+import { DEFAULT_REPLY_LANGUAGE, SYSTEM_PROMPT_TEMPLATE, currentAgentsMdSection } from '../agent/prompt';
 import { Balance, emptyBalance } from '../agent/balance';
 import { ClientRegistry } from '../agent/clients';
 import { AgentEvent, ChatMessage, ContentPart, ThinkingEffort, ToolDefinition, Usage, detectImageMime } from '../agent/types';
@@ -1491,7 +1491,7 @@ export class SessionRuntime {
       wireModel: card.oaiModel,
       vision: isVisionCard(card),
       visionTransport: card.vision.transport === 'deepseek' ? 'deepseek' : 'openai',
-      agentsMdHash: contentHash(currentAgentsMd() ?? ''),
+      agentsMdHash: contentHash(currentAgentsMdSection()),
       templateHash: contentHash(SYSTEM_PROMPT_TEMPLATE),
       toolsetHash: contentHash(JSON.stringify(tools)),
       frozenAt: Date.now(),
@@ -1624,7 +1624,7 @@ export class SessionRuntime {
     if (contentHash(SYSTEM_PROMPT_TEMPLATE) !== epoch.templateHash) {
       reasons.push('prompt');
     }
-    if (contentHash(currentAgentsMd() ?? '') !== epoch.agentsMdHash) {
+    if (contentHash(currentAgentsMdSection()) !== epoch.agentsMdHash) {
       reasons.push('agents.md');
     }
     if (contentHash(JSON.stringify(this.liveToolSchemas(liveCard, view?.kind === 'agent'))) !== epoch.toolsetHash) {

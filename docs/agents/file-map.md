@@ -184,8 +184,9 @@
   (`spawn_*` / `send_*` / `hop_session` / `list_nodes` / `rename_session` /
   `read_image`). The prompt text is **not** here — see `prompt.ts`.
 - `src/agent/prompt.ts` — **the system prompt**: both templates, the
-  `{{placeholder}}` renderer (plus the unresolved-placeholder guard) and the
-  `AGENTS.md` snapshot. One file to read top-to-bottom to see what the model gets.
+  `{{placeholder}}` renderer (plus the unresolved-placeholder guard) and the two
+  `AGENTS.md` snapshots (systemwide + workspace, rendered by `agentsMdSection`). One
+  file to read top-to-bottom to see what the model gets.
 - `src/agent/profile.ts` — `describeAgent(profile, registryTools, facts?)`: the
   prompt **and** the tools array for one (role, model, effort, capabilities)
   profile — the public entry point for "what does the model actually receive".

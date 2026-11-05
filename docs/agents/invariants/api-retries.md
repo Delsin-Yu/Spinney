@@ -339,7 +339,8 @@ Nothing is silent about this either. The host computes the two setups —
   the dropdown back on the frozen values before the send goes out. The composer shows
   both identities (`Sending with: …` / `New setup: …`) and marks Send while this is
   true.
-- `drift: 'harness'` — the shipped prompt template, the workspace AGENTS.md, the tool
+- `drift: 'harness'` — the shipped prompt template, the AGENTS.md instructions
+  (systemwide or workspace), the tool
   schema set, the endpoint facts or the vision/setup shape changed under a frozen
   chain (`reasons` names which: `prompt` / `agents.md` / `tools` / `provider` /
   `images`). A plain send keeps the frozen setup **silently** — that is the point of

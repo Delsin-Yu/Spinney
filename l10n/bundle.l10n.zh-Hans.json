@@ -334,5 +334,8 @@
   "The token is removed with the next save; the provider key is used again.": "令牌将在下次保存时移除；之后重新使用服务商密钥。",
   "Card \"{0}\": the web search engine must be \"builtin\" or \"deepseek\".": "卡片“{0}”：网络搜索引擎必须是 builtin 或 deepseek。",
   "A search token was sent for an engine this build does not know.": "为一个本版本不认识的引擎发送了搜索令牌。",
-  "modelCards[\"{0}\"]: searchProvider must be one of builtin, deepseek, got {1}": "modelCards[\"{0}\"]：searchProvider 必须是 builtin、deepseek 之一，收到 {1}"
+  "modelCards[\"{0}\"]: searchProvider must be one of builtin, deepseek, got {1}": "modelCards[\"{0}\"]：searchProvider 必须是 builtin、deepseek 之一，收到 {1}",
+  "Global instructions for every workspace: Spinney adds this file to the system prompt of every session. Reload the window after you edit it.": "适用于所有工作区的全局指令：Spinney 会把此文件加入每个会话的系统提示词。编辑后请重新加载窗口。",
+  "Spinney: no folder is available for the global AGENTS.md.": "Spinney：没有可存放全局 AGENTS.md 的文件夹。",
+  "Spinney: cannot create the global AGENTS.md ({0}).": "Spinney：无法创建全局 AGENTS.md（{0}）。"
 }

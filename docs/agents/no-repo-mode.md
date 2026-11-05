@@ -83,9 +83,13 @@ modules have no `ExtensionContext`).
   way to find your files — pass an absolute path.
 - The one-shot backfill markers are per-Memento, so moving to `globalState` makes
   each backfill run once in the no-repo bucket as well (idempotent by design).
-- No `AGENTS.md` means the project-instructions section is dropped from the
-  prompt (existing `stripAgentsMdSection` behavior). A *global* instructions file
-  (`<globalStorage>/AGENTS.md`) is deliberately **not** part of this change.
+- With no workspace folder the project-instructions section is dropped from the
+  prompt (there is no `AGENTS.md` to read it from); the **systemwide** file
+  (`~/.spinney/AGENTS.md`, `invariants/agents-md-snapshot.md`) is read in this mode
+  like in any other, and it is the only instruction source a no-folder window has.
+  Its fallback path when a host reports no home directory is
+  `<globalStorage>/AGENTS.md` — global storage, not the scratch root, because the
+  file is about the user and not about the folder.
 - `read_image` needs no absolute path: like the other file tools it resolves
   through `resolvePath()` against the agent root, so a relative path works in
   no-repo mode too. `--path .spinney/screenshots` passed to a command still works

@@ -5,12 +5,17 @@
   (main agent) and `SUB_AGENT_SYSTEM_PROMPT_TEMPLATE` (sub-agents). Static text is
   written literally, top to bottom, so the file reads as the prompt itself; runtime
   values are `{{placeholder}}` holes. `agent.ts` contains no prompt text — its
-  `Agent.systemPrompt` / `Agent.subAgentSystemPrompt` / `Agent.setAgentsMd` are
-  thin wrappers kept for their callers. `Agent.setAgentsMd` is the render
-  **fallback** snapshot, not the only source: `prompt.currentAgentsMd()` exposes
-  that snapshot's *content*, which is what a caller hashes when it freezes a
-  prompt (`Epoch.agentsMdHash`) without rendering anything
-  (`src/agent/prompt.ts`, `setAgentsMd` / `currentAgentsMd`).
+  `Agent.systemPrompt` / `Agent.subAgentSystemPrompt` / `Agent.setAgentsMd` /
+  `Agent.setGlobalAgentsMd` are
+  thin wrappers kept for their callers. The two `set*AgentsMd` setters are the render
+  **fallback** snapshots, not the only source: `prompt.currentAgentsMdSection()`
+  exposes the *rendered* instruction sections, which is what a caller hashes when it
+  freezes a prompt (`Epoch.agentsMdHash`) without rendering anything
+  (`src/agent/prompt.ts`, `setAgentsMd` / `setGlobalAgentsMd` /
+  `agentsMdSection`). Note that the AGENTS.md headings live in that builder rather
+  than in the template: the two sections are optional and ordered (global first), and
+  a single placeholder whose *whole* value is built in one place is what keeps an
+  empty section from leaving a dangling heading behind.
   The one other shipped, model-facing instruction text is
   `SHIPPED_PROMPT_SNIPPETS` in `src/chat/promptSnippets.ts` (the `Plan` /
   `Implement Parallel` snippets). It is **user-turn** text: the composer inserts it
@@ -27,10 +32,11 @@
   `spinney.replyLanguage` by `replyLanguageName` (`auto` → the VS Code display
   language, a tag → its CLDR name), with `DEFAULT_REPLY_LANGUAGE` ('English') as
   the floor when nothing resolves) and
-  `{{agentsMd}}` (the AGENTS.md snapshot in force — the module-global one
-  `setAgentsMd` fixed at activation; `prompt.systemPrompt` takes an optional
-  `agentsMd` argument so a caller *could* pass its own snapshot, but the shipped
-  freeze path passes none, so one snapshot per window is what every epoch renders
+  `{{agentsMd}}` (the AGENTS.md sections in force, built by `agentsMdSection` — the
+  module-global snapshots `setGlobalAgentsMd` / `setAgentsMd` fixed at activation;
+  `prompt.systemPrompt` takes an optional `agentsMd: AgentsMdSources` argument so a
+  caller *could* pass its own pair, but the shipped
+  freeze path passes none, so one pair per window is what every epoch renders
   and hashes. Per-session snapshots are listed in `plans/session-epoch.md` §4.2 and
   are **not** implemented). The
   sub-agent template adds `{{depth}}`, `{{permissions}}`
@@ -106,7 +112,10 @@
     `providerId`, `baseUrl`, `wireModel`, `vision`, `visionTransport`), the frozen
     tool schemas, the content hashes the drift check compares (`templateHash`,
     `agentsMdHash`, `toolsetHash`) and `frozenAt`. `cardId` is a **card id**, never a
-    wire model name.
+    wire model name. `agentsMdHash` is the hash of the **rendered** instruction
+    sections (`currentAgentsMdSection()`), not of one file, so the one hash covers the
+    systemwide file and the workspace file together — a second source needed no second
+    field and no `Epoch` shape change.
   - The stored envelope is validated by **shape at read time**: `normalizeEpoch`
     drops one whose `prompt` is not a string, and `epochForNode` ignores it, so a
     truncated or foreign value can never make a request fail and needs no repair
@@ -126,9 +135,29 @@
 - To read a prompt, run **`Spinney: Show System Prompt`**
   (`ChatViewProvider.showSystemPrompt` → `SessionRuntime.systemPromptText`): it
   renders the **live** setup — the checked-out node's card and level *with any
-  pending dropdown pick*, the current reply language, the AGENTS.md snapshot in
+  pending dropdown pick*, the current reply language, the instruction snapshots in
   force — and opens the result in an editor tab. For a session with no runtime yet it
   renders the default card + level instead. It therefore shows what a **new** node
   would freeze, not the bytes a frozen chain is sending. Showing the frozen bytes
   first, with the live render as a labelled second section, is `plans/session-epoch.md`
   §12 item 2 and is **not** implemented.
+- **Two instruction files, read once per window.** `ChatViewProvider.loadAgentsMd`
+  (activation, and every workspace-folder change) takes both snapshots:
+  - `~/.spinney/AGENTS.md` — the **systemwide** file, from
+    `ChatViewProvider.globalAgentsMdPath` (`os.homedir()`, with the extension's global
+    storage as the fallback for a host that reports no home). It applies to every
+    workspace **and to no-repo mode**, which used to get no instructions at all. It
+    renders first, as `## Global AGENTS.md (all workspaces)`.
+  - `<workspaceRoot>/AGENTS.md` — the workspace's own file, the existing
+    `## Workspace AGENTS.md (project instructions)` section, rendered second.
+  Both go through `Agent.setGlobalAgentsMd` / `Agent.setAgentsMd`, so both are
+  snapshots: an edit lands in the next window, never in a running one. When both exist,
+  `agentsMdSection` adds exactly one precedence line to the global section — the
+  workspace file wins a conflict, because it is the narrower instruction. A workspace
+  with only its own file renders the same bytes it rendered before this change.
+  Sub-agents get **no** AGENTS.md section either way.
+  **`Spinney: Open Global AGENTS.md`** (`ChatViewProvider.openGlobalAgentsMd`) is how
+  the user reaches the systemwide file: it creates `~/.spinney/` and the file (one
+  comment line, since the content is prompt bytes) when they are missing, then opens
+  the real file. It deliberately does not re-read or re-render anything — that would
+  rewrite a frozen epoch's prompt behind the model's back.

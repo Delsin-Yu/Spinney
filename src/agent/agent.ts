@@ -380,9 +380,22 @@ export class Agent {
    * prompt. Call this once when a session starts so the appended instructions
    * are fixed for the session; later edits to AGENTS.md do not propagate to the
    * prompt. Pass null (or omit the call) when no AGENTS.md is present.
+   *
+   * The systemwide file (`~/.spinney/AGENTS.md`) has its own wrapper beside this
+   * one; the prompt renders the systemwide section **before** this one.
    */
   static setAgentsMd(content: string | null): void {
     prompt.setAgentsMd(content);
+  }
+
+  /**
+   * Set a snapshot of the systemwide AGENTS.md (`~/.spinney/AGENTS.md`) — the
+   * instructions that apply to every workspace on this machine. Same lifetime as
+   * {@link setAgentsMd}: fixed for the window, so an edit needs a reload. Pass null
+   * (or omit the call) when the file does not exist.
+   */
+  static setGlobalAgentsMd(content: string | null): void {
+    prompt.setGlobalAgentsMd(content);
   }
 
   /** Fresh conversation history consisting of just the system prompt. */

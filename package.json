@@ -115,6 +115,10 @@
         "title": "%command.spinney.showSystemPrompt.title%"
       },
       {
+        "command": "spinney.openGlobalAgentsMd",
+        "title": "%command.spinney.openGlobalAgentsMd.title%"
+      },
+      {
         "command": "spinney.showManual",
         "title": "%command.spinney.showManual.title%"
       },

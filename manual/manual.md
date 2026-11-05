@@ -130,7 +130,7 @@ The value holds the card, the thinking level, and the reply language. Example: `
 Spinney asks one question before a setup changes. The question is `Continue with current setup` or `Continue with latest setup`. It appears in three cases:
 
 - A change of the model dropdown, the thinking-effort dropdown, or `spinney.replyLanguage` (section 11). Spinney marks the **Send** button. The tooltip is `Send will ask before using the old setup (the one this node froze)`.
-- A change on the harness side: the shipped system prompt, the workspace `AGENTS.md`, the tool set, or the endpoint. Spinney adds a hint entry beside the prompt snippets. The entry carries the `⧉` glyph, and its tooltip is `Continue with the latest setup (forks this tree and sends there)`. A click on it opens the same question.
+- A change on the harness side: the shipped system prompt, the global or workspace `AGENTS.md`, the tool set, or the endpoint. Spinney adds a hint entry beside the prompt snippets. The entry carries the `⧉` glyph, and its tooltip is `Continue with the latest setup (forks this tree and sends there)`. A click on it opens the same question.
 - A continue in a new context window (section 10.3). An empty context makes the latest setup free, so Spinney asks there too.
 
 | Answer | What happens |
@@ -514,7 +514,7 @@ All keys start with `spinney.`. Open the Settings UI, or edit `settings.json`.
 | `spinney.httpApi.enabled` | `false` | Turn on the local HTTP control plane. See section 14. |
 | `spinney.httpApi.port` | `0` | The port of that control plane. `0` lets the system pick one. |
 
-A change applies at once, with one exception: `AGENTS.md` needs a window reload (section 13).
+A change applies at once, with one exception: the `AGENTS.md` files need a window reload (section 13).
 
 ## 12. Commands reference
 
@@ -537,22 +537,32 @@ Every command lives in the Command Palette under `Spinney: `.
 | `Spinney: Set API Key` | Stores an API key for a provider. |
 | `Spinney: Clear API Key` | Erases a stored API key. |
 | `Spinney: Show System Prompt` | Opens the exact prompt that the model receives. |
+| `Spinney: Open Global AGENTS.md` | Opens the instruction file for all workspaces, and creates it when it does not exist. |
 | `Spinney: Show User Manual` | Opens this manual in an editor tab. |
 | `Spinney: Reload Chat Webview` | Builds the chat tab again from the state of the session. |
 | `Spinney: Test Web Search Backends` | Sends one test query to every search backend, and opens a table of the results. |
 
 Spinney adds no default keyboard shortcut.
 
-## 13. Workspace instructions
+## 13. Instructions for the agent
 
-Spinney reads `AGENTS.md` in the workspace root and adds it to the system prompt. Use it for the rules of your project, such as the test command or the code style.
+Spinney adds two instruction files to the system prompt.
 
-Two facts to know:
+| File | Applies to |
+|---|---|
+| `~/.spinney/AGENTS.md` | Every workspace on this machine. |
+| `AGENTS.md` in the workspace root | The open workspace. |
 
-- Spinney reads the file once, when the extension host starts. An edit does not reach a running window. Reload the window after you change the file.
-- With no folder open, Spinney reads nothing.
+The global file holds the rules that you want everywhere. The workspace file holds the rules of the project, such as the test command or the code style. Spinney puts the global instructions first and the workspace instructions second. When the two conflict, the workspace file wins.
 
-Run **`Spinney: Show System Prompt`** to read the exact prompt that the model receives. The content follows the current model card, the thinking effort, the reply language, and the `AGENTS.md` snapshot of the session.
+Four facts to know:
+
+- Spinney reads each file once, when the extension host starts. An edit does not reach a running window. Reload the window after you change a file.
+- Run **`Spinney: Open Global AGENTS.md`** to edit the global file. The command creates the file when it does not exist.
+- The global file applies to every workspace, and to a window with no folder open.
+- With no folder open, Spinney reads no workspace file, because there is no workspace root.
+
+Run **`Spinney: Show System Prompt`** to read the exact prompt that the model receives. The content follows the current model card, the thinking effort, the reply language, and the two instruction snapshots of the session.
 
 ## 14. Privacy and data
 
@@ -599,7 +609,7 @@ Spinney works in a window with no folder open.
 
 - Relative paths in a tool call resolve against a scratch folder in the extension storage, `<extension storage>/no-workspace`. The agent reaches your real files by absolute path.
 - The sessions live in the profile instead of the workspace. Every no-folder window of the profile shows the same sessions. Use one window at a time.
-- Spinney reads no `AGENTS.md`, because there is no workspace root.
+- Spinney reads the global `AGENTS.md` and no workspace `AGENTS.md`, because there is no workspace root.
 - A spilled tool result goes to `<scratch folder>/.spinney/tool-output/`.
 
 Open a folder in the same window, or close one, and Spinney switches the mode at once.

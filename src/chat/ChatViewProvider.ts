@@ -206,6 +206,7 @@ const STORE_DIR_NAME = 'spinney';
  * take the files over.
  */
 const STORE_HEARTBEAT_MS = 15_000;
+
 /**
  * The last assistant text a finished turn produced (used to carry a hopped
  * session's answer back to the session that dispatched it). Reasoning-only
@@ -423,6 +424,22 @@ interface RuntimeConfig {
   thinkingEffort: ThinkingEffort;
   modelFromSettings?: string;
   effortFromSettings?: string;
+}
+
+/**
+ * What a freshly created systemwide `AGENTS.md` starts with: one comment line that
+ * says what the file does.
+ *
+ * It has to be that short, because the file's content becomes system-prompt bytes
+ * verbatim — every column here is sent to the model in every workspace. It is
+ * localized (the user reads it in an editor) and an HTML comment (the model reads it
+ * as an aside, not as an instruction).
+ */
+function globalAgentsMdStub(): string {
+  const note = vscode.l10n.t(
+    'Global instructions for every workspace: Spinney adds this file to the system prompt of every session. Reload the window after you edit it.',
+  );
+  return `<!-- ${note} -->\n`;
 }
 
 /**
@@ -1028,11 +1045,20 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   }
 
   /**
-   * Read AGENTS.md from the workspace root and snapshot it into the agent
-   * prompt. The snapshot is taken once at session start, so later edits to
-   * AGENTS.md do not propagate to the system prompt.
+   * Read the AGENTS.md files into the agent prompt, once per window:
+   *
+   * - the **systemwide** one, `<home>/.spinney/AGENTS.md` — the instructions that
+   *   apply to every workspace on this machine (and the only ones no-repo mode can
+   *   have, where there is no workspace root at all), and
+   * - the workspace root's own `AGENTS.md`.
+   *
+   * Both are snapshots, so later edits do not propagate to the system prompt: the
+   * next window (or a `Developer: Reload Window`) is what re-reads them. The prompt
+   * renders the systemwide section first; see `agentsMdSection` in
+   * `src/agent/prompt.ts`.
    */
   private loadAgentsMd(): void {
+    this.loadGlobalAgentsMd();
     let root: string;
     try {
       root = getWorkspaceRoot();
@@ -1052,8 +1078,84 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   }
 
   /**
+   * Where the systemwide AGENTS.md lives: `~/.spinney/AGENTS.md`.
+   *
+   * The home directory is the point of it — the file has to outlive a profile
+   * switch, an extension rename and a change of workspace, and global storage does
+   * none of that (its folder is named after the extension id and it moves with the
+   * profile). It is the fallback only when a host reports no home directory. Empty
+   * string means there is nowhere to put the file.
+   */
+  private globalAgentsMdPath(): string {
+    let home = '';
+    try {
+      home = os.homedir();
+    } catch {
+      home = '';
+    }
+    if (home) {
+      return path.join(home, '.spinney', 'AGENTS.md');
+    }
+    const storage = this.globalStorage?.fsPath ?? '';
+    return storage ? path.join(storage, 'AGENTS.md') : '';
+  }
+
+  /** Read the systemwide AGENTS.md into the prompt snapshot (see {@link loadAgentsMd}). */
+  private loadGlobalAgentsMd(): void {
+    const file = this.globalAgentsMdPath();
+    if (!file) {
+      Agent.setGlobalAgentsMd(null);
+      return;
+    }
+    try {
+      Agent.setGlobalAgentsMd(fs.readFileSync(file, 'utf8'));
+      this.output.appendLine(`[agents.md] loaded ${file}`);
+    } catch {
+      Agent.setGlobalAgentsMd(null);
+    }
+  }
+
+  /**
+   * `Spinney: Open Global AGENTS.md` — create `~/.spinney/AGENTS.md` if it is
+   * missing and open it for editing.
+   *
+   * A real file, unlike a manual page or the system prompt preview, because the
+   * whole point is to keep editing it. It is a **snapshot** source all the same: an
+   * edit takes effect in the next window, so this command opens the file and stops
+   * there — it never re-renders a prompt behind a frozen epoch's back. The stub it
+   * writes on creation is one comment line saying what the file is, because its
+   * content becomes prompt bytes verbatim.
+   */
+  async openGlobalAgentsMd(): Promise<void> {
+    const file = this.globalAgentsMdPath();
+    if (!file) {
+      void vscode.window.showWarningMessage(
+        vscode.l10n.t('Spinney: no folder is available for the global AGENTS.md.'),
+      );
+      return;
+    }
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      if (!fs.existsSync(file)) {
+        fs.writeFileSync(file, globalAgentsMdStub(), 'utf8');
+      }
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : String(err);
+      void vscode.window.showErrorMessage(
+        vscode.l10n.t('Spinney: cannot create the global AGENTS.md ({0}).', reason),
+      );
+      return;
+    }
+    this.output.appendLine(`[agents.md] opened ${file}`);
+    const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(file));
+    await vscode.window.showTextDocument(doc, { preview: false });
+  }
+
+  /**
    * Called when the set of workspace folders changes (a folder was opened or
-   * closed): re-read AGENTS.md and log the new mode plus the agent root. No
+   * closed): re-read the AGENTS.md snapshots (the systemwide one with the
+   * workspace one — one code path, and re-reading a file that did not change is
+   * harmless) and log the new mode plus the agent root. No
    * chat notice is posted — the conversation must stay clean. `transcriptRoot()`
    * and the prompt's `{{environment}}` line are live (they re-read on each use),
    * so they need no handling here.

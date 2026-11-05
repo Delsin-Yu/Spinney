@@ -174,9 +174,12 @@ no handling.
 - **A wrong window or a missing image capability is a card field:** edit it in the
   Model Card Tree page. (There is no global override and no other model key — the
   pre-model-card settings never shipped.)
-- **Not a setting:** the `AGENTS.md` snapshot is taken once per activation
-  (`loadAgentsMd`), so that one still needs a window reload — see
-  `invariants/agents-md-snapshot.md`.
+- **Not a setting:** the two `AGENTS.md` snapshots (systemwide and workspace) are
+  taken once per activation (`loadAgentsMd`), so an edit to either one still needs a
+  window reload — see `invariants/agents-md-snapshot.md`. The systemwide file's
+  *location* is fixed (`~/.spinney/AGENTS.md`), not a `spinney.*` key, for the same
+  reason a path that only matters once per window does not belong in the settings
+  list.
 
 ### Secrets are the one exception
 `spinney.apiKey` was removed as a setting. Each provider's API key now lives in VS
