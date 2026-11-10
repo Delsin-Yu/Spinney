@@ -91,6 +91,82 @@ export function tailText(s: string, n: number): string {
   return wellFormed(s.slice(splitsPair ? start + 1 : start));
 }
 
+/** How many UTF-8 bytes one code point occupies. */
+function utf8Width(codePoint: number): number {
+  if (codePoint < 0x80) {
+    return 1;
+  }
+  if (codePoint < 0x800) {
+    return 2;
+  }
+  if (codePoint < 0x10000) {
+    return 3;
+  }
+  return 4;
+}
+
+/**
+ * The longest prefix of `s` whose UTF-8 form fits in `maxBytes`, cut at a
+ * character boundary. This is {@link sliceText}'s **byte**-counted sibling: a
+ * budget stated in bytes (what one tool result may cost a request) must not be
+ * spent as if a UTF-16 unit were one byte, because a CJK page costs three and a
+ * 2 KiB character budget would silently become 6 KiB of wire. A pair is one
+ * character and is kept or dropped whole, exactly like the units next to it.
+ */
+export function headByBytes(s: string, maxBytes: number): string {
+  if (maxBytes <= 0) {
+    return '';
+  }
+  let bytes = 0;
+  let i = 0;
+  while (i < s.length) {
+    const codePoint = s.codePointAt(i) ?? 0;
+    const width = utf8Width(codePoint);
+    if (bytes + width > maxBytes) {
+      break;
+    }
+    bytes += width;
+    i += codePoint > 0xffff ? 2 : 1;
+  }
+  return s.slice(0, i);
+}
+
+/**
+ * The last whole characters of `s` whose UTF-8 form fits in `maxBytes` —
+ * {@link headByBytes}'s mirror, for the tail of an excerpt. It walks backwards
+ * (the caller has no prefix length to stop at) and keeps a non-BMP character
+ * only as its two units, so the result never begins with half a pair.
+ */
+export function tailByBytes(s: string, maxBytes: number): string {
+  if (maxBytes <= 0) {
+    return '';
+  }
+  let bytes = 0;
+  let i = s.length;
+  while (i > 0) {
+    const low = s.charCodeAt(i - 1);
+    if (i >= 2 && low >= LOW_START && low <= LOW_END) {
+      const high = s.charCodeAt(i - 2);
+      if (high >= 0xd800 && high <= 0xdbff) {
+        const width = utf8Width(0x10000 + ((high - 0xd800) << 10) + (low - LOW_START));
+        if (bytes + width > maxBytes) {
+          break;
+        }
+        bytes += width;
+        i -= 2;
+        continue;
+      }
+    }
+    const width = utf8Width(low);
+    if (bytes + width > maxBytes) {
+      break;
+    }
+    bytes += width;
+    i -= 1;
+  }
+  return s.slice(i);
+}
+
 /**
  * {@link wellFormed} over a whole value, **copying** its containers: every string
  * inside an array/object tree is fixed and the input is left alone. Used at the

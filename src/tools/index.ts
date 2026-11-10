@@ -233,6 +233,43 @@ function spillDir(): string {
 const DEFAULT_INLINE_LIMIT = 32 * 1024;
 
 /**
+ * The character budget of the preview a spill pointer may inline. The line count
+ * alone is **not** a bound: a minified JSON, a sourcemap or a bundled asset is one
+ * line of megabytes, and this preview once inlined a 7.7 MB `grep` hit whole. The
+ * next request then asked for 2.78 M tokens against a 1,048,576-token window, got
+ * a 400, and the node was unusable from then on because the tool message lives in
+ * `messages` forever. A budget stated in characters (not lines) is what makes the
+ * spill pointer a pointer.
+ */
+const SPILL_PREVIEW_CHARS = 2048;
+
+/**
+ * The preview of a spilled result: the first up-to-8 lines, cut to
+ * {@link SPILL_PREVIEW_CHARS}. `clipText` keeps the cut on a character boundary,
+ * and the caller says in its note that the preview was clipped and why a line
+ * range may not help.
+ */
+function spillPreview(text: string): {
+  preview: string;
+  clipped: boolean;
+  lineCount: number;
+  firstLineChars: number;
+} {
+  const lines = text.split('\n');
+  const firstLineChars = lines[0].length;
+  const joined = lines.slice(0, 8).join('\n');
+  if (joined.length <= SPILL_PREVIEW_CHARS) {
+    return { preview: joined, clipped: false, lineCount: lines.length, firstLineChars };
+  }
+  return {
+    preview: clipText(joined, SPILL_PREVIEW_CHARS, ''),
+    clipped: true,
+    lineCount: lines.length,
+    firstLineChars,
+  };
+}
+
+/**
  * Keep a tool result inline when it is small; otherwise write it to a temp file
  * and return a short pointer (path + size + a preview) so a huge result cannot
  * flood the model's context. On any failure the original text is returned, so a
@@ -255,12 +292,18 @@ export function limitInline(text: string, tool: string): string {
     );
     fs.writeFileSync(file, text, 'utf8');
     const bytes = Buffer.byteLength(text, 'utf8');
-    const lines = text.split('\n');
-    const preview = lines.slice(0, 8).join('\n');
+    const { preview, clipped, lineCount, firstLineChars } = spillPreview(text);
+    const note = clipped
+      ? `Preview clipped at ${SPILL_PREVIEW_CHARS} characters: line 1 alone is ${firstLineChars} ` +
+        `characters, so a smaller line range will not shrink it — search the spilled file for a ` +
+        `short slice instead.\n`
+      : '';
     return (
-      `[${tool}: result is ${bytes} bytes / ${lines.length} lines — too large to inline.\n` +
+      `[${tool}: result is ${bytes} bytes / ${lineCount} lines — too large to inline.\n` +
       `Full result written to: ${file}\n` +
-      `Read it with read_file (line ranges) or grep it with search_files. First lines:]\n${preview}\n…`
+      `${note}` +
+      `Read it with read_file (line ranges) or grep it with search_files. ${clipped ? 'Preview (clipped):' : 'First lines:'}]\n` +
+      `${preview}\n…`
     );
   } catch {
     return text;

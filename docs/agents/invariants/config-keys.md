@@ -97,7 +97,10 @@ the title; the one-time historical backfill is keyed by the Memento marker
 **agent root** — the workspace folder, or the no-repo scratch folder
 `<globalStorage>/no-workspace`; now the root for **both** transcript kinds),
 `maxInlineToolOutput` (bytes, default `32768`; `0` = always inline — above it a
-tool result spills to `<agentRoot>/.spinney/tool-output/`),
+tool result spills to `<agentRoot>/.spinney/tool-output/` and the pointer's preview
+is cut to **2048 characters**, not to a number of lines, because one minified line
+can be megabytes; `read_file` has a separate fixed 256 KiB ceiling, and `Agent`
+caps any single tool result at 512 KiB as a backstop),
 `hopSession.enabled` (default `true` — may the main agent hand a task to a fresh
 session with `hop_session`? Read **live at every turn start** and enforced in the
 handler as well, because a chain that already froze its tool set keeps advertising the

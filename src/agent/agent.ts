@@ -48,7 +48,7 @@ import * as prompt from './prompt';
 import { ToolCapabilities, interceptedDefinitions } from './tools';
 import { formatDuration } from '../duration';
 import { perf } from '../perf';
-import { clipText } from '../text';
+import { clipText, headByBytes, tailByBytes } from '../text';
 
 /**
  * Tools whose result must never carry the generic duration prefix. Two reasons, one
@@ -77,14 +77,45 @@ const DURATION_PREFIX_MIN_MS = 1000;
  * means "this one was slow" instead of costing every result a line, and the common
  * `read_file` / `search_files` round trip reads exactly as it always did. The marker is
  * the FIRST line because an oversized result is spilled by `limitInline`, whose preview
- * keeps only the first 8 lines — a line at the bottom would be the first thing lost,
- * exactly for the slow call whose duration matters most. See `docs/agents/tools.md`.
+ * keeps only the first lines (cut to a small character budget) — a line at the bottom
+ * would be the first thing lost, exactly for the slow call whose duration matters most.
+ * See `docs/agents/tools.md`.
  */
 function withCallDuration(name: string, result: string, ms: number): string {
   if (ms < DURATION_PREFIX_MIN_MS || DURATION_PREFIX_SKIP.has(name)) {
     return result;
   }
   return `[${name} ${formatDuration(ms)}]\n${result}`;
+}
+
+/**
+ * The last line of defence on **one** tool result, counted in bytes. Each tool caps
+ * its own answer (`limitInline` spills, `read_file` has its own ceiling), and this
+ * exists so a tool that forgets cannot make the node unusable: above the ceiling the
+ * text leaves as a head + tail excerpt with an explicit marker, and the model has to
+ * ask for a narrower slice. The incident: one 7.7 MB single-line `grep` hit was
+ * inlined whole, the next request asked for 2.78 M tokens against a 1,048,576-token
+ * window, and every retry from that node was a 400 because the tool message is part
+ * of `messages` from then on.
+ */
+const MAX_TOOL_RESULT_BYTES = 512 * 1024;
+const TOOL_RESULT_HEAD_BYTES = Math.floor(MAX_TOOL_RESULT_BYTES * 0.75);
+const TOOL_RESULT_TAIL_BYTES = MAX_TOOL_RESULT_BYTES - TOOL_RESULT_HEAD_BYTES;
+
+function capToolResult(name: string, result: string): string {
+  const bytes = Buffer.byteLength(result, 'utf8');
+  if (bytes <= MAX_TOOL_RESULT_BYTES) {
+    return result;
+  }
+  const head = headByBytes(result, TOOL_RESULT_HEAD_BYTES);
+  const tail = tailByBytes(result, TOOL_RESULT_TAIL_BYTES);
+  const omitted = bytes - Buffer.byteLength(head, 'utf8') - Buffer.byteLength(tail, 'utf8');
+  return (
+    `[${name}: result was ${bytes} bytes — over the ${MAX_TOOL_RESULT_BYTES}-byte ceiling for ` +
+    `one tool result, so only its head and tail are kept (${omitted} bytes omitted). Ask for a ` +
+    `narrower slice: a line range, or fewer search matches.]\n` +
+    `${head}\n…[${omitted} bytes omitted]…\n${tail}`
+  );
 }
 
 /**
@@ -1383,7 +1414,7 @@ export class Agent {
     );
     // The model reads the marked result; the UI shows the same number on the card, and
     // both come from this one measurement.
-    const content = withCallDuration(call.function.name, result, ms);
+    const content = withCallDuration(call.function.name, capToolResult(call.function.name, result), ms);
     this.onEvent({ type: 'toolEnd', id: call.id, name: call.function.name, content, ms });
     this.messages.push({ role: 'tool', tool_call_id: call.id, content });
   }

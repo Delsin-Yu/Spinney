@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A single-line tool result can no longer kill a node.** An oversized result is
+  spilled to `.spinney/tool-output/` and the answer is a pointer with a preview, but
+  that preview used to be "the first 8 **lines**". A minified file is one line: a
+  `grep` for `splita` in an `ir.json` returned two lines and 7.75 MB, the whole thing
+  was inlined as the preview, and the next request asked for 2,781,817 tokens against
+  a 1,048,576-token window. The provider refused it with a 400, and every retry from
+  that node was refused the same way, because the tool message stays in `messages`.
+  The preview is now cut to **2048 characters** (byte-safe, `headByBytes` /
+  `tailByBytes` in `src/text.ts`), and when it had to be clipped the pointer says so,
+  names the first line's length and tells the model that a smaller line range will
+  not help. `read_file` — which had no cap at all — now answers a range over
+  **256 KiB** with an explicit `[TRUNCATED: …]` head/tail excerpt (never a silent
+  cut, and it warns against using it as `replace_in_file` `oldText`; the hint names
+  `search_files` when one line is wider than the excerpt). `Agent` also caps any one
+  tool result at **512 KiB** before it enters `messages`, so a tool that forgets
+  cannot brick a conversation. `npm run check:unicode` now pins both byte helpers.
+
 ## [0.6.0] - 2026-11-06
 
 ### Added

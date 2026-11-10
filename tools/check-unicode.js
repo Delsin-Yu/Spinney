@@ -22,6 +22,9 @@
  *      same family read from the other end, and the one shape only a head cut has — a pair
  *      straddling that cut is dropped whole, so the kept text loses one unit *and* never
  *      begins on a low half.
+ *   3b. `headByBytes` / `tailByBytes`, the cuts for a budget stated in **bytes** (a tool
+ *      result's ceiling): the budget is respected in UTF-8 bytes, never in UTF-16 units —
+ *      a CJK character costs three — and both cut on a character, so no half is left.
  *   4. `wellFormed`: a valid pair is one character and survives byte-for-byte; each
  *      unpaired half — leading, trailing, or a reversed pair — becomes U+FFFD.
  *   5. `wellFormedDeep` over a message-shaped object: every string fixed, the **input not
@@ -285,6 +288,59 @@ ok(
     T.tailText(INCIDENT, 2) === '\uFFFD…' &&
     T.tailText(INCIDENT, 12) === '**\uFFFD…',
   [1, 3, 4].map((n) => JSON.stringify(T.tailText(INCIDENT, n))).join(' | '),
+);
+
+console.log('-- 3b. headByBytes / tailByBytes: a budget stated in bytes, cut on characters --');
+const BYTES_FAMILY = [
+  { why: 'ascii', s: 'abcdef' },
+  { why: 'CJK (three bytes a character)', s: '日本語です' },
+  { why: 'a pair in context', s: 'a' + CLIP + 'b' },
+  { why: 'an astral CJK glyph', s: 'x' + ASTRAL + 'y' },
+  { why: 'the incident string', s: INCIDENT },
+];
+const bytesWrong = [];
+let byteCuts = 0;
+// A cut splits a pair only when the kept text ends on a high half whose partner is the
+// next unit (head), or begins on a low half whose partner is the previous one (tail).
+const headSplitsPair = (s, len) =>
+  len > 0 && len < s.length && isHigh(s.charCodeAt(len - 1)) && isLow(s.charCodeAt(len));
+const tailSplitsPair = (s, start) =>
+  start > 0 && start < s.length && isHigh(s.charCodeAt(start - 1)) && isLow(s.charCodeAt(start));
+for (const c of BYTES_FAMILY) {
+  for (let maxBytes = 0; maxBytes <= 16; maxBytes++) {
+    const head = T.headByBytes(c.s, maxBytes);
+    const tail = T.tailByBytes(c.s, maxBytes);
+    byteCuts += 2;
+    if (headSplitsPair(c.s, head.length)) bytesWrong.push(`${c.why} n=${maxBytes}: the head cut splits a pair`);
+    if (tailSplitsPair(c.s, c.s.length - tail.length)) bytesWrong.push(`${c.why} n=${maxBytes}: the tail cut splits a pair`);
+    if (Buffer.byteLength(head, 'utf8') > maxBytes) bytesWrong.push(`${c.why} n=${maxBytes}: head is ${Buffer.byteLength(head, 'utf8')} bytes`);
+    if (Buffer.byteLength(tail, 'utf8') > maxBytes) bytesWrong.push(`${c.why} n=${maxBytes}: tail is ${Buffer.byteLength(tail, 'utf8')} bytes`);
+    if (!c.s.startsWith(head)) bytesWrong.push(`${c.why} n=${maxBytes}: head is not a prefix`);
+    if (!c.s.endsWith(tail)) bytesWrong.push(`${c.why} n=${maxBytes}: tail is not a suffix`);
+    if (maxBytes >= Buffer.byteLength(c.s, 'utf8') && (head !== c.s || tail !== c.s)) {
+      bytesWrong.push(`${c.why} n=${maxBytes}: a string that fits was cut`);
+    }
+  }
+}
+ok(
+  'for the whole family, a byte budget is respected and every cut lands on a character',
+  bytesWrong.length === 0,
+  bytesWrong.slice(0, 3).join(' | ') || `${byteCuts} cut(s) checked`,
+);
+ok('n <= 0 is the empty string', T.headByBytes('abc', 0) === '' && T.headByBytes('abc', -1) === '');
+ok('  … and the same for the tail', T.tailByBytes('abc', 0) === '' && T.tailByBytes('abc', -1) === '');
+ok(
+  'CJK is counted in bytes, not UTF-16 units: 8 bytes keep two characters, not three',
+  T.headByBytes('日本語', 8) === '日本' && T.tailByBytes('日本語', 8) === '本語',
+  `${JSON.stringify(T.headByBytes('日本語', 8))} / ${JSON.stringify(T.tailByBytes('日本語', 8))}`,
+);
+ok(
+  'a four-byte pair is never split by either cut',
+  T.headByBytes('a' + CLIP, 4) === 'a' &&
+    T.headByBytes('a' + CLIP, 5) === 'a' + CLIP &&
+    T.tailByBytes('a' + CLIP, 4) === CLIP &&
+    T.tailByBytes('a' + CLIP, 3) === '',
+  `${JSON.stringify(T.headByBytes('a' + CLIP, 4))} / ${JSON.stringify(T.tailByBytes('a' + CLIP, 4))}`,
 );
 
 console.log('-- 4. wellFormed: a pair is one character, a half is a lie --');

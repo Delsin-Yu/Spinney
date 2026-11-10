@@ -501,7 +501,7 @@ Spinney 再次发送请求期间，卡片会显示一行标记，例如 `⟳ 静
 | `spinney.promptSections` | `{}` | 额外的提示词片段，以菜单中的名称为键。与自带片段同名的名称会替换其文本。 |
 | `spinney.commandDefaultTimeout` | `500` | 调用没有传 `timeout` 时，一条命令运行的时间，单位为秒。500 即 8 分 20 秒。它只是默认值，不是上限：调用传入的 `timeout` 按写入的值使用，最多到 `spinney.commandMaxForegroundDuration`。它也是 `background_when_timeout` 在前台运行、随后 Spinney 把命令转入后台的时间。 |
 | `spinney.commandMaxForegroundDuration` | `1800` | 单条命令在前台占用一个回合的最长时间，单位为秒。1800 即 30 分钟。不超过该值的 `timeout` 按写入的值使用。`timeout` 长于该值时，Spinney 拒绝该调用，除非它请求 `background_when_timeout` 或 `start_in_background`。这两个取值都必须自带 `timeout`，否则 Spinney 会拒绝该调用。`start_detached` 从不占用回合，也可以没有截止时间。`join_background` 也不会等待超过该值。 |
-| `spinney.maxInlineToolOutput` | `32768` | 工具结果的大小上限，单位为字节。更大的结果会写入文件。`0` 关闭该上限。 |
+| `spinney.maxInlineToolOutput` | `32768` | 工具结果的大小上限，单位为字节。更大的结果会写入文件。回复中显示的预览最多 2048 个字符。`0` 关闭该上限。 |
 | `spinney.hopSession.enabled` | `true` | 允许智能体用 `hop_session` 把自包含任务交给新会话。已经冻结的会话仍保留该工具，但 Spinney 会拒绝调用。 |
 | `spinney.maxConcurrentSubagents` | `15` | 同时可以运行多少个第 1 层子智能体。多出的任务等待。 |
 | `spinney.maxLevel2Subagents` | `2` | 一个子智能体可以启动多少个子节点。 |
