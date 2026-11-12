@@ -1582,15 +1582,28 @@
   }
 
   /**
-   * The card whose log `messagesEl` currently is.
+   * The card a log container belongs to, or `null` (a row appended into nothing).
    */
-  function logCard() {
-    let node = messagesEl;
+  function cardOfLog(container) {
+    let node = container;
     while (node) {
       if (node.classList && node.classList.contains('node')) return node;
       node = node.parentElement || null;
     }
     return null;
+  }
+
+  /**
+   * The card whose log `messagesEl` currently is.
+   */
+  function logCard() {
+    return cardOfLog(messagesEl);
+  }
+
+  /** The open steps group of the card a log container belongs to, if it has one. */
+  function openGroupOf(container) {
+    const card = cardOfLog(container);
+    return (card && card._openGroup) || null;
   }
 
   /** Is `node` inside `root`'s subtree? (A parent walk, not `contains`.) */
@@ -1603,78 +1616,70 @@
     return false;
   }
 
-  /** The card's steps group, when it has one. */
-  function stepsGroup(card) {
-    const owner = card || logCard();
-    return (owner && owner._steps) || null;
-  }
+  /**
+   * The group rows are being appended to right now, or `null` when the flow itself
+   * (`.node-work`) is the target. It is the live half of the card's own state
+   * (`card._openGroup`): every row builder asks `logTail()` at append time, so
+   * whatever rebinds `messagesEl` (a routed append, the view focus) rebinds this with
+   * it, and the two paths that render a card from nothing reset it.
+   */
+  let openSteps = null;
 
-  /** Where the next process row belongs: the steps group's body, or the log itself. */
+  /** Is a group's **body** being built right now (`paintStepsBody`)? Its rows then
+   * belong to that body, and no new group may open around them. */
+  let paintingStepsBody = false;
+
+  /** Where the next row of the flow belongs: the open group's body, or the log itself. */
   function logTail() {
-    const group = stepsGroup();
-    return group ? group._body : messagesEl;
+    return openSteps ? openSteps._body : messagesEl;
   }
 
   /**
-   * The header's count: one step is a call, and the header says so in one line.
+   * The header's count: one step is a call, and the header says so in one line. A
+   * folded group has no rows to count — its items are still `_lazy` — so it carries
+   * its own number until the click that builds the body (`paintStepsBody`).
    */
   function updateStepsHead(group) {
     if (!group) return;
     let n = 0;
-    for (const child of group._body.children || []) {
-      if (child.dataset && child.dataset.kind === 'tool') n++;
+    if (group._lazy) {
+      n = group._count || 0;
+    } else {
+      for (const child of group._body.children || []) {
+        if (child.dataset && child.dataset.kind === 'tool') n++;
+      }
     }
-    if (group._lazy) n = group._count || 0;
     const label = group._head && group._head.querySelector('.steps-label');
     if (label) label.textContent = n === 1 ? tr('Ran 1 step') : tr('Ran {0} steps', n);
   }
 
   /**
    * Paint the body of a folded group the first time it is opened. A finished card's
-   * steps are not read while they are tucked away, so a cold card builds the run-up,
-   * the header and the answer; the rows are built here, once, on the click that asks
-   * for them.
+   * steps are not read while they are tucked away, so a cold card builds each group's
+   * header, the flow around it and the answer; a group's own rows are built here,
+   * once, on the click that asks for them (`group._lazy`).
    */
   function paintStepsBody(group) {
     if (!group || !group._lazy) return;
     const items = group._lazy;
     group._lazy = null;
     const prevMsg = messagesEl;
+    const prevOpen = openSteps;
+    const prevPainting = paintingStepsBody;
     messagesEl = group._body;
+    openSteps = null;
+    paintingStepsBody = true;
     try {
       for (const item of items) renderItemInto(item);
     } finally {
+      paintingStepsBody = prevPainting;
+      openSteps = prevOpen;
       messagesEl = prevMsg;
     }
     updateStepsHead(group);
   }
 
-  /** The last assistant message in a log's subtree (the turn's final answer). */
-  function lastAssistantRow(log) {
-    let found = null;
-    const visit = (parent) => {
-      for (const child of (parent && parent.children) || []) {
-        if (child.dataset && child.dataset.kind === 'assistant') found = child;
-        visit(child);
-      }
-    };
-    visit(log);
-    return found;
-  }
-
-  /** Move the card's last assistant message out of the group, below its header. */
-  function moveAnswerOut(card, group) {
-    const owner = card || logCard();
-    const g = group || stepsGroup(owner);
-    if (!g || !owner) return;
-    const log = owner.querySelector('.node-work');
-    const last = lastAssistantRow(log);
-    if (last && inSubtree(g._body, last) && g.parentElement) {
-      g.parentElement.appendChild(last);
-    }
-  }
-
-  /** Fold the steps group to its header, or open it. */
+  /** Fold one steps group to its header, or open it. Each group has its own state. */
   function setStepsFold(group, folded) {
     if (!group) return;
     group._folded = !!folded;
@@ -1684,17 +1689,12 @@
   }
 
   /**
-   * The turn's process, under one foldable header. Every row that is not the final
-   * answer belongs inside the body: the reasoning, the tool steps, the prose between
-   * them and the harness notes. The group is born at the **first tool row** — a turn
-   * with no tools has no steps to tuck, so its reasoning and text stay in the flow —
-   * and it is open while the turn runs.
+   * One **new** group: `.steps` with `data-kind="steps"`, its own `Ran N steps` header,
+   * its own `.steps-body` and its own fold state. It is born at the first tool row of a
+   * run and it is open while that run's turn is live; the header click folds it, and a
+   * click always wins for that one group (`_userTouched`).
    */
-  function ensureStepsGroup() {
-    const card = logCard();
-    if (!card || !messagesEl) return null;
-    const existing = stepsGroup(card);
-    if (existing) return existing;
+  function newStepsGroup() {
     const group = el('div', 'steps');
     group.dataset.kind = 'steps';
     const head = el('div', 'steps-head');
@@ -1711,23 +1711,54 @@
       setStepsFold(group, !group._folded);
     });
     messagesEl.appendChild(group);
-    card._steps = group;
+    const card = logCard();
+    if (card) {
+      (card._groups || (card._groups = [])).push(group);
+      card._openGroup = group;
+    }
     updateStepsHead(group);
     setStepsFold(group, false);
     return group;
   }
 
   /**
-   * The turn is over: the **final answer** leaves the group (it is the last assistant
-   * message of the card), and the steps tuck themselves behind the header — unless the
-   * user opened or closed the group by hand, which always wins.
+   * A tool row opens a group when none is open, and extends the one that is: one group
+   * per **contiguous run** of tool rows. A text row ends the run (`closeStepsGroup`), so
+   * the next tool row opens a second group instead of reaching back into the first.
+   */
+  function ensureStepsGroup() {
+    if (paintingStepsBody || !messagesEl) return null;
+    if (openSteps) return openSteps;
+    openSteps = newStepsGroup();
+    return openSteps;
+  }
+
+  /**
+   * An assistant **text** row closes the current run: the prose stays in the flow
+   * (`.node-work`), never inside a group's body, so the next tool row opens a new group
+   * instead of extending this one. Nothing is moved anywhere: a text row is never in a
+   * group, so the turn's final answer is simply the flow's last block.
+   */
+  function closeStepsGroup() {
+    if (!openSteps) return;
+    const card = logCard();
+    if (card && card._openGroup === openSteps) card._openGroup = null;
+    openSteps = null;
+  }
+
+  /**
+   * The turn is over: **every** group of the card tucks itself behind its own header —
+   * a group the user opened or closed by hand (`_userTouched`) stays exactly where they
+   * put it, and the others do not move it. No answer leaves a group here, because no
+   * answer ever entered one.
    */
   function settleSteps(card) {
-    const owner = card || logCard();
-    const group = stepsGroup(owner);
-    if (!group) return;
-    moveAnswerOut(owner, group);
-    if (!group._userTouched) setStepsFold(group, true);
+    if (!card) return;
+    card._openGroup = null;
+    if (openSteps && inSubtree(card, openSteps)) openSteps = null;
+    for (const group of card._groups || []) {
+      if (!group._userTouched) setStepsFold(group, true);
+    }
   }
 
   /**
@@ -1908,11 +1939,16 @@
    */
   function addAssistant(text, error, thinking) {
     if (!messagesEl) return;
+    // A reasoning row that travelled with this item belongs where the reasoning of its
+    // run went: inside the open group if there is one (that is where the live path put
+    // it), else in the flow just above the text.
     const row = thinking ? addThinkingRow(thinking) : null;
     if (!String(text || '').length && !error && row) {
       followActive();
       return row;
     }
+    // The text itself always lives in the flow: it closes the run of steps above it.
+    closeStepsGroup();
     const node = el('div', 'msg assistant' + (error ? ' error' : ''));
     node.dataset.kind = 'assistant';
     const answer = el('div', 'answer');
@@ -1924,7 +1960,7 @@
     // bubble keeps the row it belongs to.
     node._thinkingRow = row;
     renderAnswer(node, true);
-    logTail().appendChild(node);
+    messagesEl.appendChild(node);
     followActive();
     return node;
   }
@@ -1934,7 +1970,10 @@
     // The answer's text takes the message over, so its thinking row is no longer the
     // live one: it collapses to its one line (see `closeActiveRows`).
     closeActiveRows('thinking');
-    const last = logTail().lastElementChild;
+    // A text row closes the run of steps above it: the prose is appended to the log
+    // itself, never into a group's body, and the next tool row opens a new group.
+    closeStepsGroup();
+    const last = messagesEl.lastElementChild;
     if (last && last.dataset.kind === 'assistant' && !last.classList.contains('error')) {
       last._text = (last._text || '') + (text || '');
       renderAnswer(last, false);
@@ -1993,7 +2032,9 @@
     // The message is complete: nothing in it is streaming any more, so its thinking
     // row collapses back to its one line.
     closeActiveRows('thinking');
-    const last = logTail().lastElementChild;
+    // A streaming answer is a text row, and a text row always lives in the flow — the
+    // log's own last child is the one that can still be mid-stream.
+    const last = messagesEl.lastElementChild;
     if (last && last.dataset.kind === 'assistant' && !last.classList.contains('error')) {
       renderAnswer(last, true);
       followActive();
@@ -2329,7 +2370,7 @@
     const node = el('div', 'msg tool ' + (opts.status === 'running' ? 'running' : 'done'));
     node.dataset.id = id;
     node.dataset.kind = 'tool';
-    const mono = MONO_LABEL_TOOLS.has(name);
+    const mono = !opts.title && MONO_LABEL_TOOLS.has(name);
     const head = toolRowHead(name, toolLabel(name, args, opts.title), mono);
     // The call's own duration: `start` for a call that is running, `ms` for one that is
     // already over (a repaint of history). Neither is passed while a call is still
@@ -2353,9 +2394,9 @@
     node._detailEl = detail;
     node._label = toolLabel(name, args, opts.title);
     node._title = opts.title;
-    ensureStepsGroup();
+    const group = ensureStepsGroup();
     logTail().appendChild(node);
-    updateStepsHead(stepsGroup());
+    updateStepsHead(group);
     followActive();
     return node;
   }
@@ -2398,6 +2439,8 @@
     node.dataset.kind = 'tool';
     if (id) node.dataset.id = id;
 
+    // No `title` exists yet at this point — the label is the derived brief and it grows
+    // with the arguments — so a command or a pattern tool is set in monospace here.
     const head = toolRowHead(name || '', args ? toolBrief(name, args) : '', MONO_LABEL_TOOLS.has(name));
     node.appendChild(head);
 
@@ -2420,9 +2463,9 @@
     node._argsText = argsText;
     node._argsEl = argsEl;
 
-    ensureStepsGroup();
+    const group = ensureStepsGroup();
     logTail().appendChild(node);
-    updateStepsHead(stepsGroup());
+    updateStepsHead(group);
     liveBucket(undefined, true)[index] = node;
     followActive();
     return node;
@@ -2484,14 +2527,17 @@
     }
     const label = toolLabel(name, args, title);
     node._label = label;
+    // A `title` reads as normal text: monospace is only for the derived command or
+    // pattern, i.e. when the model gave the step no name of its own.
+    const mono = !title && MONO_LABEL_TOOLS.has(name);
     if (node._rowEl) {
       let labelEl = byClass(node._rowEl, 'tool-label');
       if (!labelEl && label) {
-        labelEl = el('span', 'tool-label' + (MONO_LABEL_TOOLS.has(name) ? ' mono' : ''), label);
+        labelEl = el('span', 'tool-label' + (mono ? ' mono' : ''), label);
         node._rowEl.appendChild(labelEl);
       } else if (labelEl) {
         labelEl.textContent = label;
-        labelEl.classList.toggle('mono', MONO_LABEL_TOOLS.has(name));
+        labelEl.classList.toggle('mono', mono);
       }
       // The arguments are settled, so the call is *running* now: that is the moment
       // its elapsed chip is born.
@@ -2583,6 +2629,42 @@
   }
 
   /**
+   * One item of a **finished** card, split by the same rule the live path follows — but
+   * with every group's body left lazy: a tool item opens a group (or extends the open
+   * one) and its item joins that group's `_lazy` list; a text item closes the run and is
+   * painted in the flow (never inside a group); a reasoning row — or a notice, a
+   * `HARNESS` block — that arrives while a run is open rides that group's body, and one
+   * that arrives with no run open is the flow's own line.
+   */
+  function paintFinishedItem(item) {
+    // The text of a turn always lives in the flow, and it closes the run of steps above
+    // it: `addAssistant` renders the reasoning row that travels with the item where the
+    // live path put it (inside the open group) and then closes the run before the prose
+    // is appended to the log.
+    if (item.kind === 'assistant' && (String(item.text || '').length > 0 || !!item.error)) {
+      renderItemInto(item);
+      return;
+    }
+    if (item.kind === 'tool') {
+      const group = ensureStepsGroup();
+      if (group) {
+        if (!group._lazy) group._lazy = [];
+        group._lazy.push(item);
+        group._count = (group._count || 0) + 1;
+        updateStepsHead(group);
+        // A finished card's groups are folded: its rows come with the click.
+        if (!group._userTouched) setStepsFold(group, true);
+        return;
+      }
+    }
+    if (openSteps) {
+      (openSteps._lazy || (openSteps._lazy = [])).push(item);
+      return;
+    }
+    renderItemInto(item);
+  }
+
+  /**
    * Render a node's stored items into its card: the first `user` item to the pinned
    * ask (`.node-ask`), everything else into the log (`.node-work`) **in order**, so
    * the model's final answer is simply the last markdown block of the one flow. There
@@ -2612,9 +2694,12 @@
     const keepWork = scrollMemory(workEl);
     workEl.innerHTML = '';
     askEl.innerHTML = '';
-    // A full render replaces the log, and its steps group with it: the next render that
-    // has steps builds a fresh one (`ensureStepsGroup`).
-    card._steps = null;
+    // A full render replaces the log, and its steps groups with it: the next render that
+    // has steps builds fresh ones (`ensureStepsGroup`), and the old list must not point
+    // at elements the wipe above detached.
+    card._openGroup = null;
+    card._groups = [];
+    openSteps = null;
     // A window belongs to the list it was painted from; a full render replaces it.
     workEl._virt = null;
     const prevMsg = messagesEl;
@@ -2653,31 +2738,25 @@
         raf: null,
       });
     } else {
-      const toolAt = work.findIndex((item) => item.kind === 'tool');
-      // A finished card that has steps paints its run-up, the header and the answer;
-      // the body is built on the click that opens the group (`paintStepsBody`), because
-      // a folded log is not read. A card still streaming is never re-rendered from a
-      // slice — the live path appends into it — so it takes the plain path and settles
-      // when its turn ends.
-      if (toolAt >= 0 && !runningNodes.has(card.dataset ? card.dataset.id : '')) {
-        for (let i = 0; i < toolAt; i++) renderItemInto(work[i]);
-        const group = ensureStepsGroup();
-        const rest = work.slice(toolAt);
-        const answerItem = rest.length && rest[rest.length - 1].kind === 'assistant' ? rest.pop() : null;
-        group._lazy = rest;
-        group._count = rest.filter((item) => item.kind === 'tool').length;
-        updateStepsHead(group);
-        if (answerItem) {
-          renderItemInto(answerItem);
-          moveAnswerOut(card, group);
-        }
-        if (!group._userTouched) setStepsFold(group, true);
-      } else {
-        for (const item of work) renderItemInto(item);
+      const hasSteps = work.some((item) => item.kind === 'tool');
+      // A finished card splits its items with the same rule the live path uses — one
+      // group per contiguous run of tool rows, the text always in the flow — but it
+      // leaves each group's **body** lazy (`paintStepsBody`), because a folded log is
+      // not read. A card still streaming is never re-rendered from a slice: the live
+      // path appends into it and opens each group as its tool rows arrive.
+      const lazyGroups = hasSteps && !!virtual && !runningNodes.has(card.dataset ? card.dataset.id : '');
+      for (const item of work) {
+        if (lazyGroups) paintFinishedItem(item);
+        else renderItemInto(item);
       }
+      // The render is over: nothing is open any more, so the next routed append (a
+      // notice, a continued turn) starts in the flow.
+      closeStepsGroup();
     }
     messagesEl = prevMsg;
     promptEl = prevPrompt;
+    // The flow's own open group belongs to the card this container belongs to.
+    openSteps = openGroupOf(prevMsg);
     // The log shows when it holds anything — and it holds the answer of a pure-text turn
     // too, because the answer is the flow's last block. A card with no items at all
     // (a row the `tree` described and no `path` has filled yet) hides the empty box
@@ -2775,10 +2854,12 @@
     const below = items.length - state.end;
     const prevMsg = messagesEl;
     const prevPrompt = promptEl;
+    const prevOpen = openSteps;
     // A page of finished history is not the live turn: nothing here may pan the tree.
     suppressFollow = true;
     messagesEl = container;
     promptEl = state.promptEl;
+    openSteps = null;
     state.top = null;
     state.bottom = null;
     try {
@@ -2795,6 +2876,7 @@
       for (const child of keep) container.appendChild(child);
     } finally {
       suppressFollow = false;
+      openSteps = prevOpen;
       messagesEl = prevMsg;
       promptEl = prevPrompt;
     }
@@ -4147,6 +4229,9 @@
     // The routed transcript is the card's log — the one scroller, which is where every
     // row (and the final answer) lives.
     messagesEl = card ? card.querySelector('.node-work') : null;
+    // The run of steps a card had open is that card's own state, so the flow's open
+    // group follows the log it is bound to.
+    openSteps = (card && card._openGroup) || null;
     promptEl = card ? card.querySelector('.node-ask') : null;
     // The send pane lives at the bottom of the checked-out node's card, and only
     // there: a sub-agent branch is read-only (driven by the main agent through
@@ -4395,8 +4480,12 @@
     const prevPrompt = promptEl;
     const prevRouting = routingSubAgent;
     const prevNode = routingNodeId;
+    const prevOpen = openSteps;
     messagesEl = itemsEl;
     promptEl = card.querySelector('.node-ask');
+    // The routed append continues the run that card already has open — two nodes can
+    // stream at once, so the group is per card and follows the log it is bound to.
+    openSteps = card._openGroup || null;
     routingSubAgent = true;
     routingNodeId = nodeId;
     // Does this append add an item of its own to the card's log? Then the card owns this
@@ -4413,6 +4502,7 @@
     } finally {
       messagesEl = prevMsg;
       promptEl = prevPrompt;
+      openSteps = prevOpen;
       routingSubAgent = prevRouting;
       routingNodeId = prevNode;
     }
@@ -6921,6 +7011,7 @@
         runningNodes = new Set();
         lockedNodes = new Set();
         messagesEl = null;
+        openSteps = null;
         // A new session has no checked-out node, so it has no frozen setup to drift
         // from either: the identities (and the fork hint) go with the tree.
         SETUP = null;

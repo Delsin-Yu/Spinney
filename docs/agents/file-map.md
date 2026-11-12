@@ -454,31 +454,35 @@
   background job cards + `.bgnotify` notification blocks, and the window-global
   terminal dock).
   **A turn card is one essay.** `.node-ask` pins the user's prompt and `.node-work` is the
-  card's **only scroller**, holding every row of the turn in order — the rows before the
-  first tool call, then the **steps group** (`.steps`, `data-kind="steps"`): a
-  `Ran N steps` / `Ran 1 step` header over a `.steps-body` with the tool rows, the
-  thinking rows, the notices and the `HARNESS` blocks. The group is open while the turn
-  runs and tucks itself behind the header when the reply finishes (a click toggles it and
-  always wins); the model's final answer is lifted out of it and is the **last block** of
-  the flow, with no frame of its own (`.msg.assistant` carries no background or border).
-  A cold card paints only the run-up, the header and the answer — the body is built on
-  the click that opens it (`paintStepsBody`), which is also why the old scroll window now
-  applies only to a tool-less long turn. The two rows are *thinking* (`.msg.thinking-row`
-  — open while its turn runs, one ellipsised line after, no label; the open form is normal
-  prose, capped at 240 px with its own scrollbar, and carries the usage line
+  card's **only scroller**, holding every row of the turn in order. The process is grouped
+  **per run of tool rows**: a tool row opens a `.steps` group (`data-kind="steps"`) with a
+  `Ran N steps` / `Ran 1 step` header over its own `.steps-body`, and the next assistant
+  **text** closes it — the prose is appended to `.node-work` itself, never into a group's
+  body, and the following tool row opens a second group. So a turn can hold several groups,
+  each with its own count, its own body and its own fold state (open while its turn runs,
+  folded when it ends, and a click on that header always wins); thinking rows ride the open
+  group, or the log when none is open. **Nothing is moved out of a group**: the turn's final
+  answer is simply the flow's last text block, with no frame of its own (`.msg.assistant`
+  carries no background or border). A cold card paints the flow and each group's header and
+  leaves every body lazy until that group's own header is clicked (`paintStepsBody`, per
+  group), which is also why the old scroll window now applies only to a tool-less long turn.
+  The two rows are *thinking* (`.msg.thinking-row` — open while its turn runs, one
+  ellipsised line after, no label; the open form is normal prose at 13 px `--text`, capped at
+  240 px with its own scrollbar, and carries the usage line
   `[Prompt: {0} + Completion: {1}, Cache Hit: {2}, Cache Miss: {3}]`) and *tool*
-  (`.msg.tool` — one line: a status dot, a bold `tr()`-localized verb from `TOOL_VERBS`,
-  the label from `DisplayItem.title` or `toolBrief()` in monospace for a
-  command/pattern, and the elapsed chip; a click expands `.tool-detail` in place — the
-  `> args` line, the result, an error, the usage line, all in normal text colour).
+  (`.msg.tool` — one line: a status dot, a bold `tr()`-localized verb from `TOOL_VERBS` in
+  `--accent-dim`, the label from `DisplayItem.title` or `toolBrief()` in 12 px
+  `--text-dim` — monospace and 11 px only for a **derived** command/pattern, i.e. only when
+  there is no `title` — and the elapsed chip; a click expands `.tool-detail` in place — the
+  `> args` line, the result, an error, the usage line, all 11 px `--text-dim`).
   `renderItemInto` (the history repaint) goes through the **same** `addTool` /
-  `makeThinkingRow` / `addAssistant` the live path uses, and `tools/check-webview.js`
-  pins that equivalence. While a thinking row is open, its 240 px box carries its own
-  small green **follow** dot (`attachRowLock`), whose click `stopPropagation`s the row's
-  click (which opens and closes the row).
-  The log carries one green dot (`attachLock`): green means **following** the newest
-  content, an upward scroll releases it and the bottom re-engages it — it never hides or
-  blocks the scrollbar, and a programmatic pin or a growing turn can never release it.
+  `makeThinkingRow` / `addAssistant` the live path uses and splits the items with the same
+  per-run rule, and `tools/check-webview.js` pins both halves. While a thinking row is
+  open, its 240 px box carries its own small green **follow** dot (`attachRowLock`), whose
+  click `stopPropagation`s the row's click (which opens and closes the row). The log
+  carries one green dot (`attachLock`): green means **following** the newest content, an
+  upward scroll releases it and the bottom re-engages it — it never hides or blocks the
+  scrollbar, and a programmatic pin or a growing turn can never release it.
   Every string it displays goes through its own `tr(message, ...args)` (defined at
   the top of the file): the host has no `vscode.l10n` inside a webview, so it
   injects the catalog as `window.__spinneyL10n` and `tr()` looks the English source
@@ -590,6 +594,12 @@
   floating menus). Every
   size inside `#composer` is a fixed px value: the input dock's controls and
   fonts never scale with its host card.
+  The card's reading height is one number in one place — `--node-max-h` (840 px), which a
+  drag raises per card through an inline `max-height` and nothing writes an inline height
+  — and the log's **three type levels** live here with it: the prose and the reasoning at
+  13 px `--text`, a tool row's verb in `--accent-dim` with its label at 12 px `--text-dim`
+  (11 px monospace for a *derived* command/pattern only), the expanded `.tool-detail` at
+  11 px `--text-dim`, and the usage line as the faintest footnote.
 - `media/vendor/markdown-it/` — **vendored, pinned** Markdown renderer
   (`@14.3.1`, MIT): `markdown-it.min.js` (the file the webview loads), `LICENSE`,
   `PROVENANCE.md` (hashes + the third-party code inlined in the bundle). Not an npm
