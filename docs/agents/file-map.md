@@ -452,17 +452,23 @@
   background job cards + `.bgnotify` notification blocks, and the window-global
   terminal dock).
   **A turn card is one essay.** `.node-ask` pins the user's prompt and `.node-work` is the
-  card's **only scroller**, holding every row of the turn in order — the thinking rows, the
-  tool rows, the notices, the `HARNESS` blocks and the assistant's markdown, with the
-  model's final answer as the **last block** of that flow. There is no second zone an
-  answer could live in: nothing is promoted, measured or folded per card any more, so a
-  live turn and a repaint cannot disagree. The two rows are *thinking* (`.msg.thinking-row`
-  — open while its turn runs, one ellipsised line after, no label; a click toggles it and
-  the open form carries the usage line `[Prompt: {0} + Completion: {1}, Cache Hit: {2},
-  Cache Miss: {3}]`) and *tool* (`.msg.tool` — one line: a status dot, a bold
-  `tr()`-localized verb from `TOOL_VERBS`, the label from `DisplayItem.title` or
-  `toolBrief()` in monospace for a command/pattern, and the elapsed chip; a click expands
-  `.tool-detail` in place — the `> args` line, the result, an error, the usage line).
+  card's **only scroller**, holding every row of the turn in order — the rows before the
+  first tool call, then the **steps group** (`.steps`, `data-kind="steps"`): a
+  `Ran N steps` / `Ran 1 step` header over a `.steps-body` with the tool rows, the
+  thinking rows, the notices and the `HARNESS` blocks. The group is open while the turn
+  runs and tucks itself behind the header when the reply finishes (a click toggles it and
+  always wins); the model's final answer is lifted out of it and is the **last block** of
+  the flow, with no frame of its own (`.msg.assistant` carries no background or border).
+  A cold card paints only the run-up, the header and the answer — the body is built on
+  the click that opens it (`paintStepsBody`), which is also why the old scroll window now
+  applies only to a tool-less long turn. The two rows are *thinking* (`.msg.thinking-row`
+  — open while its turn runs, one ellipsised line after, no label; the open form is normal
+  prose, capped at 240 px with its own scrollbar, and carries the usage line
+  `[Prompt: {0} + Completion: {1}, Cache Hit: {2}, Cache Miss: {3}]`) and *tool*
+  (`.msg.tool` — one line: a status dot, a bold `tr()`-localized verb from `TOOL_VERBS`,
+  the label from `DisplayItem.title` or `toolBrief()` in monospace for a
+  command/pattern, and the elapsed chip; a click expands `.tool-detail` in place — the
+  `> args` line, the result, an error, the usage line, all in normal text colour).
   `renderItemInto` (the history repaint) goes through the **same** `addTool` /
   `makeThinkingRow` / `addAssistant` the live path uses, and `tools/check-webview.js`
   pins that equivalence.

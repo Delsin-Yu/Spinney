@@ -1387,6 +1387,11 @@
     row.classList.toggle('open', row._open);
     const usage = row.querySelector('.usage-line');
     if (usage) usage.classList.toggle('hidden', !row._open);
+    // Opening puts the reader back at the end of the reasoning.
+    if (row._open && row._textEl) {
+      row._textEl._userScrolled = false;
+      row._textEl.scrollTop = row._textEl.scrollHeight;
+    }
   }
 
   /**
@@ -1438,6 +1443,155 @@
   }
 
   /**
+   * The card whose log `messagesEl` currently is.
+   */
+  function logCard() {
+    let node = messagesEl;
+    while (node) {
+      if (node.classList && node.classList.contains('node')) return node;
+      node = node.parentElement || null;
+    }
+    return null;
+  }
+
+  /** Is `node` inside `root`'s subtree? (A parent walk, not `contains`.) */
+  function inSubtree(root, node) {
+    let cur = node;
+    while (cur) {
+      if (cur === root) return true;
+      cur = cur.parentElement || null;
+    }
+    return false;
+  }
+
+  /** The card's steps group, when it has one. */
+  function stepsGroup(card) {
+    const owner = card || logCard();
+    return (owner && owner._steps) || null;
+  }
+
+  /** Where the next process row belongs: the steps group's body, or the log itself. */
+  function logTail() {
+    const group = stepsGroup();
+    return group ? group._body : messagesEl;
+  }
+
+  /**
+   * The header's count: one step is a call, and the header says so in one line.
+   */
+  function updateStepsHead(group) {
+    if (!group) return;
+    let n = 0;
+    for (const child of group._body.children || []) {
+      if (child.dataset && child.dataset.kind === 'tool') n++;
+    }
+    if (group._lazy) n = group._count || 0;
+    const label = group._head && group._head.querySelector('.steps-label');
+    if (label) label.textContent = n === 1 ? tr('Ran 1 step') : tr('Ran {0} steps', n);
+  }
+
+  /**
+   * Paint the body of a folded group the first time it is opened. A finished card's
+   * steps are not read while they are tucked away, so a cold card builds the run-up,
+   * the header and the answer; the rows are built here, once, on the click that asks
+   * for them.
+   */
+  function paintStepsBody(group) {
+    if (!group || !group._lazy) return;
+    const items = group._lazy;
+    group._lazy = null;
+    const prevMsg = messagesEl;
+    messagesEl = group._body;
+    try {
+      for (const item of items) renderItemInto(item);
+    } finally {
+      messagesEl = prevMsg;
+    }
+    updateStepsHead(group);
+  }
+
+  /** The last assistant message in a log's subtree (the turn's final answer). */
+  function lastAssistantRow(log) {
+    let found = null;
+    const visit = (parent) => {
+      for (const child of (parent && parent.children) || []) {
+        if (child.dataset && child.dataset.kind === 'assistant') found = child;
+        visit(child);
+      }
+    };
+    visit(log);
+    return found;
+  }
+
+  /** Move the card's last assistant message out of the group, below its header. */
+  function moveAnswerOut(card, group) {
+    const owner = card || logCard();
+    const g = group || stepsGroup(owner);
+    if (!g || !owner) return;
+    const log = owner.querySelector('.node-work');
+    const last = lastAssistantRow(log);
+    if (last && inSubtree(g._body, last) && g.parentElement) {
+      g.parentElement.appendChild(last);
+    }
+  }
+
+  /** Fold the steps group to its header, or open it. */
+  function setStepsFold(group, folded) {
+    if (!group) return;
+    group._folded = !!folded;
+    group.classList.toggle('steps-folded', group._folded);
+    const chev = group._head && group._head.querySelector('.chev');
+    if (chev) chev.classList.toggle('open', !group._folded);
+  }
+
+  /**
+   * The turn's process, under one foldable header. Every row that is not the final
+   * answer belongs inside the body: the reasoning, the tool steps, the prose between
+   * them and the harness notes. The group is born at the **first tool row** — a turn
+   * with no tools has no steps to tuck, so its reasoning and text stay in the flow —
+   * and it is open while the turn runs.
+   */
+  function ensureStepsGroup() {
+    const card = logCard();
+    if (!card || !messagesEl) return null;
+    const existing = stepsGroup(card);
+    if (existing) return existing;
+    const group = el('div', 'steps');
+    group.dataset.kind = 'steps';
+    const head = el('div', 'steps-head');
+    head.appendChild(el('span', 'chev open', '▶'));
+    head.appendChild(el('span', 'steps-label'));
+    const body = el('div', 'steps-body');
+    group.appendChild(head);
+    group.appendChild(body);
+    group._head = head;
+    group._body = body;
+    head.addEventListener('click', () => {
+      group._userTouched = true;
+      if (group._folded) paintStepsBody(group);
+      setStepsFold(group, !group._folded);
+    });
+    messagesEl.appendChild(group);
+    card._steps = group;
+    updateStepsHead(group);
+    setStepsFold(group, false);
+    return group;
+  }
+
+  /**
+   * The turn is over: the **final answer** leaves the group (it is the last assistant
+   * message of the card), and the steps tuck themselves behind the header — unless the
+   * user opened or closed the group by hand, which always wins.
+   */
+  function settleSteps(card) {
+    const owner = card || logCard();
+    const group = stepsGroup(owner);
+    if (!group) return;
+    moveAnswerOut(owner, group);
+    if (!group._userTouched) setStepsFold(group, true);
+  }
+
+  /**
    * The turn is over: every row of the card takes its resting state — a thinking row
    * collapses to its one line, a tool row folds — except the ones the user opened by
    * hand (`_userTouched`), which stay exactly where they were put. Read off the card's
@@ -1450,6 +1604,7 @@
       const kind = row.dataset ? row.dataset.kind : '';
       if (kind === 'thinking' || kind === 'tool') clearActiveRow(row);
     }
+    settleSteps(card);
   }
 
   /**
@@ -1506,7 +1661,7 @@
     if (!messagesEl) return;
     const node = el('div', 'notice ' + (kind || 'info'), text);
     node.dataset.kind = 'notice';
-    messagesEl.appendChild(node);
+    logTail().appendChild(node);
     followActive();
     return node;
   }
@@ -1548,7 +1703,7 @@
     node.dataset.kind = 'harness';
     node.appendChild(el('span', 'harness-badge', tr('HARNESS')));
     node.appendChild(el('span', 'harness-text', text));
-    messagesEl.appendChild(node);
+    logTail().appendChild(node);
     followActive();
     return node;
   }
@@ -1575,6 +1730,11 @@
     row._textEl = text;
     row._usageEl = usage;
     row._open = false;
+    // While the row is open, the deltas keep the box at its newest line — unless the
+    // reader scrolled up inside it, which is a claim the stream does not take back.
+    text.addEventListener('scroll', () => {
+      text._userScrolled = !(text.scrollTop + text.clientHeight >= text.scrollHeight - 8);
+    });
     row.addEventListener('click', () => {
       markRowTouched(row);
       setThinkingOpen(row, !isRowOpen(row));
@@ -1585,7 +1745,7 @@
   /** A thinking row appended to the log's flow — the history path's one entry. */
   function addThinkingRow(text) {
     const row = makeThinkingRow(text);
-    messagesEl.appendChild(row);
+    logTail().appendChild(row);
     return row;
   }
 
@@ -1596,7 +1756,7 @@
    * always adds a new one.
    */
   function ensureThinkingRow() {
-    const last = messagesEl ? messagesEl.lastElementChild : null;
+    const last = messagesEl ? logTail().lastElementChild : null;
     if (last && last.dataset && last.dataset.kind === 'thinking') return last;
     return addThinkingRow('');
   }
@@ -1626,7 +1786,7 @@
     // bubble keeps the row it belongs to.
     node._thinkingRow = row;
     renderAnswer(node, true);
-    messagesEl.appendChild(node);
+    logTail().appendChild(node);
     followActive();
     return node;
   }
@@ -1636,7 +1796,7 @@
     // The answer's text takes the message over, so its thinking row is no longer the
     // live one: it collapses to its one line (see `closeActiveRows`).
     closeActiveRows('thinking');
-    const last = messagesEl.lastElementChild;
+    const last = logTail().lastElementChild;
     if (last && last.dataset.kind === 'assistant' && !last.classList.contains('error')) {
       last._text = (last._text || '') + (text || '');
       renderAnswer(last, false);
@@ -1695,7 +1855,7 @@
     // The message is complete: nothing in it is streaming any more, so its thinking
     // row collapses back to its one line.
     closeActiveRows('thinking');
-    const last = messagesEl.lastElementChild;
+    const last = logTail().lastElementChild;
     if (last && last.dataset.kind === 'assistant' && !last.classList.contains('error')) {
       renderAnswer(last, true);
       followActive();
@@ -1725,6 +1885,9 @@
     // The row receiving the deltas is the live one: expanded, and it collapses on its
     // own the moment something else takes over (see `clearActiveRow`).
     setActiveRow(row);
+    // The open form has a height cap, so the newest reasoning is kept in view the same
+    // way the log is: follow the end unless the reader scrolled the box by hand.
+    if (row._open && !row._textEl._userScrolled) row._textEl.scrollTop = row._textEl.scrollHeight;
     followActive();
     return row;
   }
@@ -1804,7 +1967,7 @@
    */
   function appendUsage(usage) {
     if (!messagesEl) return;
-    let target = messagesEl.lastElementChild;
+    let target = logTail().lastElementChild;
     let row = null;
     while (target) {
       const kind = target.dataset.kind;
@@ -2051,7 +2214,9 @@
     node._detailEl = detail;
     node._label = toolLabel(name, args, opts.title);
     node._title = opts.title;
-    messagesEl.appendChild(node);
+    ensureStepsGroup();
+    logTail().appendChild(node);
+    updateStepsHead(stepsGroup());
     followActive();
     return node;
   }
@@ -2116,7 +2281,9 @@
     node._argsText = argsText;
     node._argsEl = argsEl;
 
-    messagesEl.appendChild(node);
+    ensureStepsGroup();
+    logTail().appendChild(node);
+    updateStepsHead(stepsGroup());
     liveBucket(undefined, true)[index] = node;
     followActive();
     return node;
@@ -2271,7 +2438,7 @@
     if (item.content) {
       node.appendChild(el('pre', 'bgnotify-output', item.content));
     }
-    messagesEl.appendChild(node);
+    logTail().appendChild(node);
     followActive();
     return node;
   }
@@ -2306,6 +2473,9 @@
     const keepWork = scrollMemory(workEl);
     workEl.innerHTML = '';
     askEl.innerHTML = '';
+    // A full render replaces the log, and its steps group with it: the next render that
+    // has steps builds a fresh one (`ensureStepsGroup`).
+    card._steps = null;
     // A window belongs to the list it was painted from; a full render replaces it.
     workEl._virt = null;
     const prevMsg = messagesEl;
@@ -2324,7 +2494,7 @@
       }
       work.push(item);
     }
-    if (virtual && work.length > VIRTUAL_ITEM_THRESHOLD) {
+    if (virtual && !work.some((item) => item.kind === 'tool') && work.length > VIRTUAL_ITEM_THRESHOLD) {
       if (!workEl._virtScroll) {
         const container = workEl;
         workEl._virtScroll = () => onItemsWindowScroll(container);
@@ -2344,7 +2514,28 @@
         raf: null,
       });
     } else {
-      for (const item of work) renderItemInto(item);
+      const toolAt = work.findIndex((item) => item.kind === 'tool');
+      // A finished card that has steps paints its run-up, the header and the answer;
+      // the body is built on the click that opens the group (`paintStepsBody`), because
+      // a folded log is not read. A card still streaming is never re-rendered from a
+      // slice — the live path appends into it — so it takes the plain path and settles
+      // when its turn ends.
+      if (toolAt >= 0 && !runningNodes.has(card.dataset ? card.dataset.id : '')) {
+        for (let i = 0; i < toolAt; i++) renderItemInto(work[i]);
+        const group = ensureStepsGroup();
+        const rest = work.slice(toolAt);
+        const answerItem = rest.length && rest[rest.length - 1].kind === 'assistant' ? rest.pop() : null;
+        group._lazy = rest;
+        group._count = rest.filter((item) => item.kind === 'tool').length;
+        updateStepsHead(group);
+        if (answerItem) {
+          renderItemInto(answerItem);
+          moveAnswerOut(card, group);
+        }
+        if (!group._userTouched) setStepsFold(group, true);
+      } else {
+        for (const item of work) renderItemInto(item);
+      }
     }
     messagesEl = prevMsg;
     promptEl = prevPrompt;

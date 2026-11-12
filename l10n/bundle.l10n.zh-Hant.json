@@ -363,5 +363,7 @@
   "Spawned": "派發",
   "Hopped": "跳轉",
   "Finished": "完成",
-  "Renamed": "重新命名"
+  "Renamed": "重新命名",
+  "Ran 1 step": "執行了 1 個步驟",
+  "Ran {0} steps": "執行了 {0} 個步驟"
 }

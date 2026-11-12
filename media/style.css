@@ -408,13 +408,16 @@ button.icon-btn {
 }
 
 .msg.assistant {
-  align-self: flex-start;
-  background: var(--assistant-bg);
-  border: 1px solid var(--border);
-  border-bottom-left-radius: 2px;
+  align-self: stretch;
+  max-width: 100%;
+  padding: 0;
+  background: none;
+  border: none;
+  border-radius: 0;
 }
 
 .msg.assistant.error {
+  padding: 8px 11px;
   background: var(--error-bg);
   color: var(--error-text);
   border-color: var(--error-bg);
@@ -556,9 +559,9 @@ button.icon-btn {
 }
 
 .thinking-row .thinking-text {
-  color: var(--text-dim);
-  font-style: italic;
-  font-size: 12px;
+  color: var(--text);
+  font-style: normal;
+  font-size: 13px;
   line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
@@ -568,19 +571,21 @@ button.icon-btn {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  opacity: 0.85;
 }
 
 .thinking-row:hover .thinking-text {
   opacity: 1;
 }
 
-/* Open: the whole paragraph, at the size it reads at, with the usage line under it. */
+/* Open: the whole paragraph, at the size it reads at, with the usage line under it —
+   but never taller than a reading window: the reasoning scrolls inside its own box
+   instead of pushing the turn below the fold. */
 .thinking-row.open .thinking-text {
   white-space: pre-wrap;
-  overflow: visible;
+  overflow: auto;
   text-overflow: clip;
-  opacity: 1;
+  max-height: 240px;
+  scrollbar-gutter: stable;
 }
 
 /* The usage line is part of the *open* form only (main.js adds/removes `hidden`), so
@@ -634,6 +639,66 @@ button.icon-btn {
   background: var(--success);
 }
 
+/* ---- The steps group --------------------------------------------------------
+   The turn's process lives in one group: the reasoning, the tool lines, the prose
+   between them and the harness notes, under a `Ran N steps` header. The group is open
+   while the turn runs and tucks itself behind the header when the reply finishes; the
+   final answer is lifted out of it and reads as the last block of the flow, in no
+   frame of its own. Nothing here is dimmed or italic: a step is text like any other,
+   and the only marks are the verb, the label and the status dot. */
+.steps {
+  display: block;
+  margin: 0;
+}
+
+.steps-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 2px 4px;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.steps-head:hover {
+  color: var(--text);
+}
+
+.steps-head .chev {
+  flex: 0 0 auto;
+  display: inline-block;
+  font-size: 9px;
+  line-height: 1;
+  transition: transform 0.12s ease;
+}
+
+.steps-head .chev.open {
+  transform: rotate(90deg);
+}
+
+.steps-label {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.steps.steps-folded .steps-body {
+  display: none;
+}
+
+.steps-body {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  min-width: 0;
+}
+
 .tool-verb {
   flex: 0 0 auto;
   font-weight: 700;
@@ -657,7 +722,7 @@ button.icon-btn {
 .tool-label.mono {
   font-family: "Consolas", "Courier New", monospace;
   font-size: 11px;
-  color: var(--text-dim);
+  color: var(--text);
 }
 
 /* The expanded detail, in place under the row: the `> args` line, the result, an error
@@ -671,7 +736,7 @@ button.icon-btn {
   border-radius: 0 6px 6px 0;
   max-height: 260px;
   overflow: auto;
-  color: var(--text-dim);
+  color: var(--text);
   scrollbar-gutter: stable;
 }
 
@@ -683,7 +748,7 @@ button.icon-btn {
 .tool-args-line {
   font-family: "Consolas", "Courier New", monospace;
   font-size: 11px;
-  color: var(--accent-dim);
+  color: var(--text);
   white-space: pre-wrap;
   word-break: break-word;
   margin-bottom: 4px;
@@ -695,7 +760,7 @@ button.icon-btn {
   margin: 0;
   font-family: "Consolas", "Courier New", monospace;
   font-size: 11px;
-  color: var(--text-dim);
+  color: var(--text);
   white-space: pre-wrap;
   word-break: break-word;
   user-select: text;

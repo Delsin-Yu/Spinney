@@ -66,11 +66,17 @@ containers and no more:
   card exists, and it stays out of the scroller so scrolling a long turn never hides the
   question.
 - **`.node-work`** — the card's **only scroller**, holding every row of the turn in the
-  order it happened: the thinking rows, the tool rows, the notices, the background and
-  sub-agent notices, the `HARNESS` blocks and the assistant's own markdown. The model's
-  **final answer is simply the last markdown block** of that flow — there is no second
-  place an answer could live, so there is nothing for a live turn and a repaint to
-  disagree about.
+  order it happened. The rows before the first tool call are in the log itself; everything
+  from that call onward lives in the **steps group** (`.steps`, `data-kind="steps"`) —
+  a `Ran N steps` header (`Ran 1 step` when it is one) over a `.steps-body` holding the
+  tool rows, the reasoning, the notices, the background and sub-agent notices and the
+  `HARNESS` blocks. The group is **open while the turn runs** and **tucks itself behind
+  the header when the reply finishes**; a click on the header toggles it, and a click
+  always wins over the resting state. The model's **final answer is lifted out of the
+  group** when the turn ends and renders as the flow's last markdown block, in no frame of
+  its own (`.msg.assistant` has no background or border; the error variant keeps its tint).
+  A turn with no tool calls has no group at all: its reasoning line and its answer are the
+  flow.
 
 That is the whole structure. It replaced a three-zone card (`ask` / `work` / `answer`)
 whose third zone was a *move* of the log's trailing answer run, and the machinery that
@@ -84,29 +90,40 @@ went with it is deliberately **gone**, not disabled: `promoteAnswer` / `demoteAn
 read), and every measured pass was a chance to move a reader. One flow needs no
 measurement at all — the card's own cap bounds the log, and a long turn scrolls in it.
 
+**A cold card builds only what it shows.** A finished card with steps paints its run-up,
+the header and the answer; the body is empty until the click that opens the group
+(`paintStepsBody` builds it once, from `group._lazy`). That is also why the old
+scroll *window* now applies only to a tool-less long turn: a card with steps is bounded by
+the fold instead, and `renderNodeItems` skips `paintItemsWindow` for it.
+
 **The two rows.** A tool call and a piece of reasoning are *lines in the essay*, not boxes
 stacked on it, and each has one renderer used by both the live path and the history
 repaint:
 
 - **a thinking row** (`.msg.thinking-row`, `data-kind="thinking"`) — no header, no
-  chevron, no label: the row *is* the control. Open (while its turn runs) it is the dimmed
-  italic paragraph, and its tail is the turn's usage line
-  (`[Prompt: {0} + Completion: {1}, Cache Hit: {2}, Cache Miss: {3}]`). Closed it is one
-  line of the same text, ellipsised in CSS. \`setThinkingOpen\` owns the two states;
-  \`_open\` mirrors the class.
+  chevron, no label: the row *is* the control. Open (while its turn runs) it is the
+  paragraph in the same type as the prose (no dim, no italic), capped at **240 px** with
+  its own scrollbar so a long reasoning cannot push the turn below the fold, and its tail
+  is the turn's usage line
+  (`[Prompt: {0} + Completion: {1}, Cache Hit: {2}, Cache Miss: {3}]`); the stream keeps
+  the box at its newest line unless the reader scrolled it. Closed it is one line of the
+  same text, ellipsised in CSS. `setThinkingOpen` owns the two states; `_open` mirrors the
+  class.
 - **a tool row** (`.msg.tool`) — one line: a small status dot, the bold verb, the label and
-  the elapsed chip. The verb is per tool and `tr()`-localized (\`TOOL_VERBS\`: Read /
+  the elapsed chip. The verb is per tool and `tr()`-localized (`TOOL_VERBS`: Read /
   Viewed / Wrote / Edited / Appended / Listed / Searched / Recalled / Ran / Checked /
   Waited / Killed / Fetched / Spawned / Hopped / Finished / Renamed; a name no verb knows
   keeps its own name). The label is **`DisplayItem.title`** — the `title` argument every
   tool schema carries, read out of the call's arguments on the host
   (`toolTitleFromArgs`) and stored on the item, so a clipped argument string can never lose
-  it — else \`toolBrief()\`'s path/command/pattern, set in monospace for a command or a
+  it — else `toolBrief()`'s path/command/pattern, set in monospace for a command or a
   pattern. The detail (`.tool-detail`) is folded at rest and a click toggles it: the
   `> command / args` line, a `pre` block with the full result (the existing UI caps still
-  apply: args ~8 KiB, result ~32 KiB, enforced host-side by \`clipForUi\`), the error text
-  when there is one, and the usage line. A running row's dot pulses and its chip ticks
-  (250 ms); a finished row's dot goes plain and its chip freezes at the host's `ms`.
+  apply: args ~8 KiB, result ~32 KiB, enforced host-side by `clipForUi`), the error text
+  when there is one, and the usage line. The data is in normal text colour (monospace for
+  the command and the output, because it is code); the usage line stays the one dimmed
+  footnote. A running row's dot pulses and its chip ticks (250 ms); a finished row's dot
+  goes plain and its chip freezes at the host's `ms`.
 
 Both are also the reason a card no longer grows a block per call: a step that took ten
 tools is ten one-line rows, and the reader who wants the output opens the one they care

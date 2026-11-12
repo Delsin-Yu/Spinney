@@ -2838,11 +2838,10 @@ if (contextLabel !== 'ctx 50%') {
     );
   }
 
-  // A finished node with more than 60 *work* items renders a window whose items are
-  // the newest ones (`_needsBottomScroll` opens a finished card at its newest
-  // content). The window is the work list only: the trailing answer run is lifted
-  // out into zone 3 and is never paginated, so the fixture needs work items that are
-  // NOT answers — 61 tool calls, then the answer.
+  // A finished node whose turn has steps renders its run-up, the `Ran N steps` header
+  // and the final answer. The body is built on the click that opens it
+  // (`paintStepsBody`): a folded log is not read, so a cold 61-step card must not
+  // build 61 rows for it.
   const LONG = 'burst-long';
   const LONG_WORK = 61;
   const items = [];
@@ -2864,35 +2863,36 @@ if (contextLabel !== 'ctx 50%') {
   if (!longItems) {
     problems.push('the long-transcript fixture produced no `.node-work` container');
   } else {
-    const rendered = longItems.children.length;
-    // 24 rendered items + at most two spacers (above/below).
-    if (rendered > 26) {
-      problems.push(`a 61-item finished card rendered ${rendered} element(s) in one go — it must window the list`);
-    }
-    if (!findByClass(longCard, 'node-items-spacer')) {
-      problems.push('a windowed transcript has no spacer standing in for the items outside the window');
-    }
-    // The numbers are read off the spacers rather than the item text: the sandbox
-    // DOM does not aggregate `textContent`, and "how many items are above/below the
-    // window" is exactly what says *which* slice was rendered. A finished card opens
-    // at its newest content, so 61 work items must render the last 24 with 37 above
-    // and nothing below.
-    const spacers = Array.prototype.slice
-      .call(longItems.children)
-      .filter((child) => (child.className || '').indexOf('node-items-spacer') >= 0);
-    const above = spacers.find((child) => (child.className || '').indexOf('above') >= 0);
-    const below = spacers.find((child) => (child.className || '').indexOf('below') >= 0);
-    const aboveCount = above && above.dataset ? Number(above.dataset.items) : null;
-    // 61 tool rows and the answer: one flow, so the window is taken over all 62 items.
-    const TOTAL = LONG_WORK + 1;
-    if (aboveCount !== TOTAL - 24) {
-      problems.push(
-        `a windowed 62-item card reports ${aboveCount} item(s) above the window, expected ${TOTAL - 24} ` +
-          '(the window must be the newest page, because a finished card opens at its newest content)',
-      );
-    }
-    if (below) {
-      problems.push('a windowed card shows a spacer below its newest page — there is nothing newer to stand in for');
+    const group = findByClass(longCard, 'steps');
+    const head = group ? findByClass(group, 'steps-head') : null;
+    const body = group ? findByClass(group, 'steps-body') : null;
+    const label = head ? findByClass(head, 'steps-label') : null;
+    if (!group) {
+      problems.push('a 61-step finished card has no steps group (the steps must tuck under `Ran N steps`)');
+    } else {
+      if (!group.classList.contains('steps-folded')) {
+        problems.push('a finished card leaves its steps open — the reply is over, so they tuck themselves');
+      }
+      if (body && body.children.length) {
+        problems.push(
+          `a folded steps group built ${body.children.length} row(s) before it was opened (a cold card builds only the header and the answer)`,
+        );
+      }
+      if (!label || !/61/.test(label.textContent || '')) {
+        problems.push(`the steps header reads ${JSON.stringify(label && label.textContent)}, expected "Ran 61 steps"`);
+      }
+      // One click opens it, and that is the moment the rows are built — once.
+      if (head && head._listeners && typeof head._listeners.click === 'function') {
+        head._listeners.click({ stopPropagation() {} });
+      }
+      if (group.classList.contains('steps-folded')) {
+        problems.push('clicking the steps header does not open the group');
+      }
+      if (body && body.children.length !== LONG_WORK) {
+        problems.push(
+          `opening the steps built ${body.children.length} row(s), expected ${LONG_WORK}`,
+        );
+      }
     }
 
     // --- (j) the answer is the last block of the one flow, and one dot ----------
@@ -2935,48 +2935,53 @@ if (contextLabel !== 'ctx 50%') {
       problems.push('the green .scroll-lock-dot is not in .node-work-wrap (the log is the only scroller that follows a turn)');
     }
 
-    // --- (k) scrolling the window must not lose the answer -----------------------
-    // `paintItemsWindow` rebuilds every element it paints, so the answer — the last
-    // block of the window — has to come back at the end of the newly painted slice. The
-    // window's own scroll handler is rAF-throttled, so this check runs one task later
-    // (the same reason the perf probes at the bottom of this file are deferred).
-    const scroll = longItems._listeners && longItems._listeners.scroll;
-    if (typeof scroll !== 'function') {
-      problems.push('a windowed log has no scroll handler — the window could never extend');
-    } else {
-      longItems.scrollTop = 0; // at the top edge, so the window extends upward
-      scroll();
-      setTimeout(() => {
-        const work = findByClass(longCard, 'node-work');
-        // The repaint really happened: the window grew upward by one page, so the
-        // spacer above it now stands in for 37 - 24 items.
-        const topSpacer = work
-          ? work.children.find((child) => (child.className || '').indexOf('node-items-spacer') >= 0)
-          : null;
-        const topCount = topSpacer && topSpacer.dataset ? Number(topSpacer.dataset.items) : null;
-        if (topCount !== TOTAL - 24 - 24) {
-          problems.push(
-            `scrolling a windowed log left ${topCount} item(s) above the window, expected ${TOTAL - 24 - 24} ` +
-              '(the window did not extend, so this check cannot see the repaint at all)',
-          );
-        }
-        const kids = work ? work.children : [];
-        let tail = null;
-        for (let i = kids.length - 1; i >= 0; i--) {
-          if ((kids[i].className || '').indexOf('node-items-spacer') < 0) {
-            tail = kids[i];
-            break;
-          }
-        }
-        if (!tail || (tail.dataset || {}).kind !== 'assistant') {
-          problems.push(
-            'scrolling a windowed log lost the answer as the last block of .node-work (a repaint is not an append)',
-          );
-        }
-        if (dotsIn(longCard) !== 1) {
-          problems.push(`a windowed repaint left ${dotsIn(longCard)} green .scroll-lock-dot(s), expected exactly 1`);
-        }
-      }, 30);
+    // --- (k) a folded log has no window to extend -------------------------------
+    // The steps fold took the job the scroll window existed for: a long turn now keeps
+    // its items behind a collapsed header and builds the body on the click that opens
+    // it, so a card with steps has no scroll window and no spacer.
+    if (longItems._virtScroll) {
+      problems.push('a card with steps still installed the scroll window — the fold is what bounds it now');
+    }
+  }
+}
+
+// --- A long *tool-less* turn still windows ------------------------------------
+// `renderNodeItems` windows a finished node past 60 items, but only when it has no
+// steps (`paintStepsBody` builds a steps body on demand instead). The mechanism is
+// unchanged, so one fixture keeps it honest.
+{
+  const W = 'window-only';
+  const WNODE = 'window-only-n';
+  const items = [];
+  for (let i = 0; i < 61; i++) items.push({ kind: 'assistant', text: 'line ' + i });
+  const windowNode = (id, parentId, children) =>
+    Object.assign(
+      { id, parentId, children, title: id, status: 'done', createdAt: 0, preview: id, usage: null, size: null },
+    );
+  dispatch({ type: 'reset' });
+  dispatch({
+    type: 'tree',
+    viewId: W,
+    activeId: W,
+    rootId: W,
+    nodes: [windowNode(W, null, [])],
+  });
+  dispatch({ type: 'path', ids: [W], nodes: [{ id: W, status: 'done', items }] });
+  const card = elementById('tree-canvas').children.find((c) => c.dataset && c.dataset.id === W) || null;
+  const work = card ? findByClass(card, 'node-work') : null;
+  if (!work) {
+    problems.push(`the tool-less long fixture produced no card (${WNODE} is gone)`);
+  } else {
+    if (!findByClass(card, 'node-items-spacer')) {
+      problems.push('a long tool-less turn does not window its items');
+    }
+    const spacers = Array.prototype.slice
+      .call(work.children)
+      .filter((child) => (child.className || '').indexOf('node-items-spacer') >= 0);
+    const above = spacers.find((child) => (child.className || '').indexOf('above') >= 0);
+    const aboveCount = above && above.dataset ? Number(above.dataset.items) : null;
+    if (aboveCount !== 61 - 24) {
+      problems.push(`a windowed tool-less turn reports ${aboveCount} item(s) above the window, expected ${61 - 24}`);
     }
   }
 }
@@ -3620,7 +3625,18 @@ if (contextLabel !== 'ctx 50%') {
   };
   const rowsOf = () => {
     const log = logOf();
-    return log ? log.children : [];
+    if (!log) return [];
+    const out = [];
+    for (const child of log.children) {
+      out.push(child);
+      // The steps group is a row container of its own: its rows are part of the same
+      // essay, one fold deeper.
+      if (child.classList && child.classList.contains('steps')) {
+        const body = findByClass(child, 'steps-body');
+        if (body) for (const row of body.children) out.push(row);
+      }
+    }
+    return out;
   };
   const lastOf = (kind) =>
     rowsOf()
@@ -3861,10 +3877,15 @@ if (contextLabel !== 'ctx 50%') {
     dispatch({ type: 'path', ids: [NODE], nodes: [{ id: NODE, status: 'done', items }] });
     const log = logOf();
     const kids = log ? log.children : [];
+    // A finished turn with steps paints its run-up, the steps group (folded, its body
+    // built on the click) and the answer; opening the group is what renders the rows.
+    const steps = log ? findByClass(log, 'steps') : null;
+    const stepsHead = steps ? findByClass(steps, 'steps-head') : null;
+    if (stepsHead) clickOf(stepsHead, 'the steps header');
     const kinds = kids.map((child) => (child.dataset || {}).kind);
-    if (kinds.join(',') !== 'thinking,assistant,tool') {
+    if (kinds.join(',') !== 'thinking,assistant,steps') {
       problems.push(
-        `a repainted turn renders ${JSON.stringify(kinds)} in its log, expected "thinking,assistant,tool" (the rows of one ` +
+        `a repainted turn renders ${JSON.stringify(kinds)} in its log, expected "thinking,assistant,steps" (the rows of one ` +
           'essay, in the order they happened)',
       );
     }
@@ -3999,8 +4020,8 @@ if (contextLabel !== 'ctx 50%') {
       problems.push('the flow fixture rendered no .node-work');
     } else {
       const kinds = kindsIn(log);
-      if (kinds.join(',') !== 'thinking,tool,harness,assistant') {
-        problems.push(`a finished turn renders ${JSON.stringify(kinds)} in its log, expected thinking,tool,harness,assistant`);
+      if (kinds.join(',') !== 'thinking,steps,assistant') {
+        problems.push(`a finished turn renders ${JSON.stringify(kinds)} in its log, expected thinking,steps,assistant`);
       }
       const last = log.children[log.children.length - 1];
       if (!last || (last.dataset || {}).kind !== 'assistant' || !hasClass(last, 'assistant')) {
@@ -4394,6 +4415,11 @@ if (contextLabel !== 'ctx 50%') {
         { kind: 'tool', name: 'read_file', args: '{"path":"a"}', content: 'ok', status: 'done' },
       ],
     );
+    const legacySteps = findByClass(card, 'steps');
+    const legacyHead = legacySteps ? findByClass(legacySteps, 'steps-head') : null;
+    if (legacyHead && legacyHead._listeners && typeof legacyHead._listeners.click === 'function') {
+      legacyHead._listeners.click({ stopPropagation() {} });
+    }
     const tool = findByClass(card, 'tool');
     if (!tool) {
       problems.push('a legacy tool item no longer renders a tool card on a repaint');
