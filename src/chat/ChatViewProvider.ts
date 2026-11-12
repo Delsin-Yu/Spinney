@@ -59,6 +59,12 @@ import {
   turnCount,
 } from './sessionTitles';
 import { agentRootInfo, getWorkspaceRoot, resolvePath } from '../tools';
+import { AgentsMdSources, systemPrompt } from '../agent/prompt';
+import {
+  globalAgentsMdPath as liveGlobalAgentsMdPath,
+  liveAgentsMdSources,
+  resetAgentsMdCache,
+} from './agentsMd';
 import { defaultSessionTitle, l10nDiagnostics } from '../i18n';
 import { buildChatShell } from './webviewShell';
 import { BackgroundHub } from './backgroundHub';
@@ -1061,17 +1067,19 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   }
 
   /**
-   * Read the AGENTS.md files into the agent prompt, once per window:
+   * Read the AGENTS.md files into the window's **fallback snapshot**:
    *
    * - the **systemwide** one, `<home>/.spinney/AGENTS.md` — the instructions that
    *   apply to every workspace on this machine (and the only ones no-repo mode can
    *   have, where there is no workspace root at all), and
    * - the workspace root's own `AGENTS.md`.
    *
-   * Both are snapshots, so later edits do not propagate to the system prompt: the
-   * next window (or a `Developer: Reload Window`) is what re-reads them. The prompt
-   * renders the systemwide section first; see `agentsMdSection` in
-   * `src/agent/prompt.ts`.
+   * Neither is the source of truth any more: `agentsMdSources()` reads both files **at
+   * use** through a small mtime cache (`src/chat/agentsMd.ts`), so an edit made while
+   * VS Code was closed — or during a session — is seen by the next drift check and the
+   * next freeze. What is set here is the floor: a file that exists but cannot be read for
+   * any reason other than "it is gone" falls back to this snapshot, so a transient
+   * failure cannot silently drop the instructions from the prompt.
    */
   private loadAgentsMd(): void {
     this.loadGlobalAgentsMd();
@@ -1087,10 +1095,21 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     try {
       const content = fs.readFileSync(agentsMdPath, 'utf8');
       Agent.setAgentsMd(content);
-      this.output.appendLine(`[agents.md] loaded ${agentsMdPath}`);
+      this.output.appendLine(`[agents.md] fallback snapshot ${agentsMdPath}`);
     } catch {
       Agent.setAgentsMd(null);
     }
+  }
+
+  /**
+   * The instructions **as they are on disk right now** — the reader every prompt path and
+   * the drift check share (`docs/agents/invariants/system-prompt.md`). It is what
+   * `freezeEpoch` renders and hashes, and what `setupState` hashes again, so an edit is
+   * seen by the next check instead of needing a window reload. `resetAgentsMdCache` on a
+   * workspace-folder change, because the workspace path is part of the key.
+   */
+  agentsMdSources(): AgentsMdSources {
+    return liveAgentsMdSources(this.globalStorage?.fsPath ?? '');
   }
 
   /**
@@ -1103,20 +1122,10 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    * string means there is nowhere to put the file.
    */
   private globalAgentsMdPath(): string {
-    let home = '';
-    try {
-      home = os.homedir();
-    } catch {
-      home = '';
-    }
-    if (home) {
-      return path.join(home, '.spinney', 'AGENTS.md');
-    }
-    const storage = this.globalStorage?.fsPath ?? '';
-    return storage ? path.join(storage, 'AGENTS.md') : '';
+    return liveGlobalAgentsMdPath(this.globalStorage?.fsPath ?? '');
   }
 
-  /** Read the systemwide AGENTS.md into the prompt snapshot (see {@link loadAgentsMd}). */
+  /** Read the systemwide AGENTS.md into the window's fallback snapshot (see {@link loadAgentsMd}). */
   private loadGlobalAgentsMd(): void {
     const file = this.globalAgentsMdPath();
     if (!file) {
@@ -1125,7 +1134,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     }
     try {
       Agent.setGlobalAgentsMd(fs.readFileSync(file, 'utf8'));
-      this.output.appendLine(`[agents.md] loaded ${file}`);
+      this.output.appendLine(`[agents.md] fallback snapshot ${file}`);
     } catch {
       Agent.setGlobalAgentsMd(null);
     }
@@ -1177,6 +1186,9 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    * so they need no handling here.
    */
   public onWorkspaceFoldersChanged(): void {
+    // The workspace path is part of the live reader's cache key: a folder change must not
+    // keep answering with the previous workspace's instructions.
+    resetAgentsMdCache();
     this.loadAgentsMd();
     const info = agentRootInfo();
     this.output.appendLine(`[workspace] folders changed → ${info.kind} mode; agent root = ${info.root}`);
@@ -1357,12 +1369,17 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   systemPrompt(): string {
     const rt = this.runtimes.get(this.activeSessionId);
     const card = resolveCard(this.defaultModel);
+    // A session runtime renders its own preview (the node in view, its pending pick, the
+    // instructions on disk right now); with no runtime this is the same render for the
+    // default card.
     return rt
       ? rt.systemPromptText()
-      : Agent.systemPrompt(
+      : systemPrompt(
           cardDisplayName(card),
           normalizeEffort(card, this.defaultThinkingEffort),
           this.getConfig().replyLanguage,
+          undefined,
+          this.agentsMdSources(),
         );
   }
 
@@ -5045,70 +5062,106 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       rt.postNotice('warning', this.readOnlyNotice());
       return;
     }
-    // The setup gate: a plain send always uses the checked-out chain's frozen setup, so a
-    // pick made on that chain has to be confirmed before it is discarded. Dismissing the
-    // dialog sends nothing — "default send always uses the old setup" has to be true even
-    // when the user walks away from the question.
-    if (rt.hasUserDrift()) {
-      const choice = await this.askSetups('user');
-      if (!choice) {
-        return;
-      }
-      if (choice === 'current') {
-        rt.discardPendingSetup();
-      } else if (!this.forkFor(rt)) {
-        return;
-      }
+    // A window the provider already refused is refused **here** too: the same request
+    // cannot be sent again, and the composer's new-epoch entry is the way out
+    // (`newContextEntry`). The Send button is already disabled there; this is the
+    // host-side half of one rule, so a stale or scripted send cannot walk into it.
+    if (rt.contextStateLive() === 'full') {
+      rt.postNotice(
+        'warning',
+        vscode.l10n.t(
+          'This context window is full, so the request was not sent. Use “Continue with new context” to carry the conversation into a new window.',
+        ),
+      );
+      return;
     }
     // A send is the moment a key matters: nudge once (never block — the request
     // itself reports the real error).
     void this.warnMissingApiKey();
     await rt.onUserMessage(text, attachments);
-    // The composer holds the text until this point: a question answered with "No" must not
-    // eat what the user typed (`composerClear`).
+    // The composer holds the text until this point: a refused send must not eat what the
+    // user typed (`composerClear`).
     this.postTo(rt.sessionId, { type: 'composerClear' });
   }
 
   /**
-   * The composer's "send with the latest setup" entry: ask, then send into the tree the
-   * answer names. `Continue with current setup` here means "do not fork after all" — the
-   * user asked for the question, not necessarily for the fork.
+   * The composer's **one** new-epoch entry (`newContextTurn`) — the replacement for the
+   * three entries that used to disagree: the card's `⧉ Continue in a new window`, the
+   * harness-drift `⧉` hint, and the modal a plain send raised when the user changed the
+   * model / effort / language.
+   *
+   * The backend is the **trigger**, never a choice of the webview
+   * (`SessionRuntime.newEpochTrigger`):
+   *
+   *  - context `near`/`full` → a **new context window** (`rolloverContext`), the only
+   *    answer to a history that no longer fits. Its preconditions are re-checked here
+   *    (a node, not a sidecar, not running, no conversational child) and a failure is a
+   *    notice — nothing is started, nothing is killed.
+   *  - setup drift only → a **fork** under the live setup (`forkTree`), so the old tree
+   *    keeps the bytes and the provider cache entry it was built with. The composer's
+   *    text becomes a normal send in the new tree; with an empty box there is nothing to
+   *    send and the fork alone is the whole action.
+   *
+   * Then **one** modal question (the details differ per backend), and after the answer
+   * the trigger is re-validated: the state may have changed while the question was open
+   * (a turn finished, a dropdown moved, the window filled), and sending under an answer
+   * given for a different state would be the bug this check exists for. Dismissing the
+   * modal sends nothing, kills nothing and leaves the composer's text alone.
    */
-  private async forkAndSend(rt: SessionRuntime, text: string, attachments: UserAttachment[]): Promise<void> {
+  private async newContextEntry(
+    rt: SessionRuntime,
+    text: string,
+    attachments: UserAttachment[],
+  ): Promise<void> {
+    if (this.isHeld()) {
+      rt.postNotice(
+        'warning',
+        vscode.l10n.t('An external controller is rebooting the window; please wait a moment.'),
+      );
+      return;
+    }
     if (this.readOnly) {
       rt.postNotice('warning', this.readOnlyNotice());
       return;
     }
-    const choice = await this.askSetups('user');
-    if (!choice) {
+    const trigger = rt.newEpochTrigger();
+    if (!trigger) {
+      rt.postNotice(
+        'info',
+        vscode.l10n.t('Nothing to do: this conversation is on its own setup, and its context window has room left.'),
+      );
       return;
     }
-    if (choice === 'latest') {
-      if (!this.forkFor(rt)) {
-        return;
-      }
-    } else {
-      rt.discardPendingSetup();
-    }
-    await this.dispatchUserMessage(rt, text, attachments);
-  }
-
-  /**
-   * Continue a near-full or refused chain in a **new node**: ask which setup it should
-   * start with, gate the kills when the node still owns work, then start it. Both branches
-   * are free — a new context has no cached prefix to lose — which is exactly why the user
-   * gets the choice here (`docs/agents/plans/session-epoch.md` §4.5).
-   */
-  private async rolloverWithSetup(rt: SessionRuntime, id: string): Promise<void> {
-    if (this.readOnly) {
-      rt.postNotice('warning', this.readOnlyNotice());
+    const nodeId = rt.session.activeNodeId ?? '';
+    if (trigger === 'context' && !rt.canRollover(nodeId)) {
+      // One predicate covers all four preconditions, and `false` here means the state
+      // moved between the click and this line.
+      rt.postNotice(
+        'warning',
+        vscode.l10n.t('Could not continue in a new context here — wait for the running turn to finish and try again.'),
+      );
       return;
     }
-    const choice = await this.askSetups('rollover');
-    if (!choice) {
+    const answer = await this.confirmEpochChange(rt, trigger);
+    if (!answer) {
       return;
     }
-    const work = rt.lockedWorkCount(id);
+    if (rt.newEpochTrigger() !== trigger) {
+      rt.postNotice(
+        'warning',
+        vscode.l10n.t('Nothing was sent: the setup or the context window changed while the question was open. Try again.'),
+      );
+      return;
+    }
+    if (trigger === 'drift') {
+      await this.forkEntry(rt, text, attachments);
+      return;
+    }
+    // The new window inherits the checked-out chain's frozen epoch (`'current'`): the
+    // question this entry asks is about the *window*, not about the setup, and a window
+    // that inherits keeps the bytes the conversation was already written in. Acting on a
+    // drift is still available afterwards — the composer's entry stays offerable.
+    const work = rt.lockedWorkCount(nodeId);
     if (work > 0) {
       const ok = await this.confirmKillBackgrounds(
         vscode.l10n.t('{0} piece(s) of work are still running here (background terminals and sub-agents). Continuing in a new window stops them; what they produced stays in the transcript.', work),
@@ -5119,13 +5172,88 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         return;
       }
     }
-    const started = await rt.rolloverContext(id, choice);
+    const started = await rt.rolloverContext(nodeId, 'current', {
+      text,
+      handoff: answer === 'summary' ? 'summary' : 'continue',
+    });
     if (!started) {
       rt.postNotice(
         'warning',
         vscode.l10n.t('Could not continue in a new context here — wait for the running turn to finish and try again.'),
       );
+      return;
     }
+    this.postTo(rt.sessionId, { type: 'composerClear' });
+  }
+
+  /**
+   * The fork half of the new-epoch entry: copy the tree under the live setup, then send
+   * the composer's text there as an ordinary turn (`onUserMessage`), attachments and all.
+   * An empty box forks only — there is no user message to invent.
+   */
+  private async forkEntry(rt: SessionRuntime, text: string, attachments: UserAttachment[]): Promise<void> {
+    if (!this.forkFor(rt)) {
+      return;
+    }
+    if (!text.trim() && attachments.length === 0) {
+      return;
+    }
+    void this.warnMissingApiKey();
+    await rt.onUserMessage(text, attachments);
+    this.postTo(rt.sessionId, { type: 'composerClear' });
+  }
+
+  /**
+   * The one modal question the new-epoch entry asks, and its answer:
+   *
+   *  - a **context** continuation asks how the previous window is handed over — a written
+   *    summary (one extra request, `handoff: 'summary'`) or the pointer to the previous
+   *    branch, which the new window can read itself (`'continue'`). Neither costs the
+   *    other's work, so this is a real choice.
+   *  - a **setup** change asks whether the history may be re-sent under the new
+   *    configuration. It cannot be silent: the provider has never seen those bytes under
+   *    that card, so the request misses its prefix cache — and the number says how much
+   *    history is about to be re-read.
+   *
+   * `null` means the user dismissed it: nothing is sent, nothing is killed, and the
+   * composer keeps its text.
+   */
+  private async confirmEpochChange(
+    rt: SessionRuntime,
+    trigger: 'context' | 'drift',
+  ): Promise<'summary' | 'continue' | boolean | null> {
+    if (trigger === 'context') {
+      const summaryLabel = vscode.l10n.t('Write a handoff summary');
+      const continueLabel = vscode.l10n.t('Just continue');
+      const pick = await vscode.window.showWarningMessage(
+        vscode.l10n.t('Continue in a new context window?'),
+        {
+          modal: true,
+          detail: vscode.l10n.t(
+            'The agent that takes over continues this conversation in a new window. It can either receive a handoff summary (one extra request) or be pointed at the previous branch and read the record itself.',
+          ),
+        },
+        summaryLabel,
+        continueLabel,
+      );
+      if (pick === summaryLabel) {
+        return 'summary';
+      }
+      return pick === continueLabel ? 'continue' : null;
+    }
+    const continueLabel = vscode.l10n.t('Continue');
+    const pick = await vscode.window.showWarningMessage(
+      vscode.l10n.t('Continue with the new workspace or model configuration?'),
+      {
+        modal: true,
+        detail: vscode.l10n.t(
+          'The conversation history (about {0} tokens for the current model) will be sent to the provider under the new configuration. This request will miss the provider\u2019s cache.',
+          rt.chainPromptTokensLive(),
+        ),
+      },
+      continueLabel,
+    );
+    return pick === continueLabel;
   }
 
   /** The one read-only sentence, in one place. */
@@ -5133,30 +5261,6 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     return vscode.l10n.t(
       'Another window owns this workspace\u2019s sessions, so this window is read-only. Close that window (or use it) to continue here.',
     );
-  }
-
-  /**
-   * Ask which setup a continuation should use. The first action is the default (Enter) and
-   * is always the conservative one — the setup that is already frozen — because the
-   * alternative starts a new tree; dismissing the dialog changes nothing at all.
-   */
-  private async askSetups(kind: 'user' | 'rollover'): Promise<'current' | 'latest' | null> {
-    const currentLabel = vscode.l10n.t('Continue with current setup');
-    const latestLabel = vscode.l10n.t('Continue with latest setup');
-    const header = vscode.l10n.t('Continue with a new setup?');
-    const detail =
-      kind === 'user'
-        ? vscode.l10n.t(
-            'This conversation is frozen on its own setup, so a plain send always uses it. Continuing with the latest setup copies this tree into a new one; this tree keeps its setup and its prompt cache.',
-          )
-        : vscode.l10n.t(
-            'A new context window starts empty, so the latest setup costs nothing here. Continuing with the current setup keeps this conversation on the setup it was frozen with.',
-          );
-    const pick = await vscode.window.showWarningMessage(header, { modal: true, detail }, currentLabel, latestLabel);
-    if (pick === latestLabel) {
-      return 'latest';
-    }
-    return pick === currentLabel ? 'current' : null;
   }
 
   /** Fork the checked-out tree under the live setup; `null` when it cannot be done. */
@@ -5260,34 +5364,18 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         return;
       case 'userMessage':
         return this.dispatchUserMessage(rt, String(message.text ?? ''), message.attachments ?? []);
-      case 'forkTurn':
-        // The composer's new-setup entry: same question as the drift gate, but asked
-        // explicitly, and the answer may be "keep this setup" (then nothing forks).
-        return void this.forkAndSend(rt, String(message.text ?? ''), message.attachments ?? []);
+      case 'newContextTurn':
+        // The composer's ONE new-epoch entry: a new context window when the chain is
+        // near/full, a fork under the live setup when only the setup drifted. The host
+        // picks the backend, asks one modal question and re-validates the trigger
+        // (`newContextEntry`), so the webview never has to know which case it is in.
+        return void this.newContextEntry(rt, String(message.text ?? ''), message.attachments ?? []);
       case 'continueTurn':
         // The ▶ button on a card whose turn was interrupted / failed: the harness
         // writes the message (see `SessionRuntime.continueFrom`), so the reboot
         // hold and the per-node "already running" refusal stay in that one place.
         void rt.continueFrom(String(message.id ?? ''));
         return;
-      case 'rolloverTurn': {
-        // The rollover variant of the ▶ button: the window is full, so the turn
-        // continues in a new, empty context window (see
-        // `docs/agents/invariants/context-rollover.md`). Starting one STOPS whatever is
-        // still running on that node — its background terminals and its sub-agent
-        // subtree — because their results could never reach the new window. That is the
-        // same destructive step the delete/clear paths gate behind a modal, so it is
-        // gated here too, and only when there is actually something to stop.
-        const id = String(message.id ?? '');
-        if (!rt.canRollover(id)) {
-          // Not a context-window failure after all: the ordinary in-place continue is
-          // the right action, so the button can never dead-end.
-          void rt.continueFrom(id);
-          return;
-        }
-        void this.rolloverWithSetup(rt, id);
-        return;
-      }
       case 'checkout':
         rt.handleCheckout(String(message.id ?? ''));
         return;

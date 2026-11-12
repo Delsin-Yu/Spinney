@@ -214,27 +214,39 @@ body {
   width: auto;
 }
 
-/* The harness-drift hint (`#new-setup-btn`): `main.js` creates it lazily, right
-   beside the snippets button, and only while the prompt template / AGENTS.md / tool
-   schemas / provider moved away from the checked-out node's frozen setup. Same icon
-   island as its neighbours, so the row does not shift when it appears. */
-#composer-controls #new-setup-btn {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 22px;
-  height: 22px;
-  font-size: 12px;
-  padding: 0;
-  flex: 0 0 auto;
+/* The composer's one new-epoch entry (`#new-context-btn`), immediately left of Send:
+   `Continue with new context`, or `Compact and Continue` while the box is empty
+   (`docs/agents/invariants/context-rollover.md`). It is a quiet secondary button —
+   Send stays the primary action and the two never swap — and `main.js`
+   (`updateComposerButtons`) owns its label, its `hidden` class and its disabled state.
+   The label is a sentence, so it ellipsizes instead of wrapping the row. */
+#actions #new-context-btn {
+  max-width: 190px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--accent);
+  background: transparent;
+  border: 1px dashed var(--accent-dim);
+}
+
+#actions #new-context-btn:hover:not(:disabled) {
+  background: var(--accent-dim);
+  border-color: var(--accent-dim);
+  color: var(--bg);
+}
+
+#actions #new-context-btn:disabled,
+#actions #send-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 /* The composer's two identities (§4.2): `Sending with:` (the checked-out node's
    frozen setup — what a send actually uses) above `New setup:` (what a new node
-   would freeze). Quiet and small: it states a fact, it does not warn — the `drift`
-   mark on the Send button is what says the next click will ask. Both lines ellipsize
-   rather than wrap, so the pane's height never changes with a long model name. */
+   would freeze). Quiet and small: it states a fact, it does not warn — acting on the
+   difference is the new-epoch button's click. Both lines ellipsize rather than wrap,
+   so the pane's height never changes with a long model name. */
 .composer-ident {
   display: flex;
   flex-direction: column;
@@ -361,23 +373,6 @@ button.icon-btn {
 
 #send-btn:hover {
   background: var(--accent);
-}
-
-/* The user changed the model / effort / language dropdown, so the next send would
-   use a different setup than the one the checked-out node froze: the host asks
-   first. The button is deliberately NOT disabled — clicking it *is* how the
-   question gets asked — so the mark is a shape (dashed, warning-coloured), not a
-   grey-out. `main.js`'s `renderSetupIdentity` sets the class and the tooltip. */
-#send-btn.drift {
-  background: transparent;
-  border: 1px dashed var(--warn);
-  color: var(--warn);
-}
-
-#send-btn.drift:hover {
-  background: var(--warn);
-  border-color: var(--warn);
-  color: var(--bg);
 }
 
 #stop-btn {
@@ -1677,11 +1672,10 @@ button.icon-btn {
 
 /* ▶ Continue / ↻ Retry: the per-card "run it again for me" button. Only rendered
    while the node is a terminal tip (see `syncContinueButton` in main.js), so it is
-   always an actionable affordance rather than decoration. `.node-window` is the
-   second element of that family: the `⧉` entry that stands *beside* a repair when a
-   failed turn's window is at or above 90% — the same box, a meaning of its own. */
-.node-continue,
-.node-window {
+   always an actionable affordance rather than decoration. A new *context window* is
+   not offered on a card any more — every new-epoch transition is the composer's one
+   `#new-context-btn`. */
+.node-continue {
   flex: 0 0 auto;
   margin-left: 6px;
   padding: 1px 6px;
@@ -1694,43 +1688,7 @@ button.icon-btn {
   cursor: pointer;
   white-space: nowrap;
 }
-.node-continue:hover,
-.node-window:hover {
-  background: var(--accent-dim);
-  border-color: var(--accent-dim);
-  color: var(--bg);
-}
-
-/* The rollover variant of that button (P4): the turn died on a provider
-   context-length error, which retrying cannot fix, so the click opens a new,
-   empty window instead. Same family and same box as `.node-continue` — only the
-   accent changes (the warning colour), because this is the click that ends the
-   current window and stops whatever is still running in it. */
-.node-rollover {
-  color: var(--warn);
-  border-color: var(--warn);
-}
-
-.node-rollover:hover {
-  background: var(--warn);
-  border-color: var(--warn);
-  color: var(--bg);
-}
-
-/* The same `⧉` entry, offered as a *suggestion* (§4.3): from 90% of the card's
-   window the user may open a fresh one, but nothing is broken and nothing is
-   forced — so it is dashed and quiet instead of the warning shape the hard
-   trigger (a provider refusal) uses. `.node-window` always wears this shape: it
-   only ever appears as that suggestion, beside a repair. */
-.node-continue.node-near,
-.node-window.node-near {
-  color: var(--text);
-  border-color: var(--accent-dim);
-  border-style: dashed;
-}
-
-.node-continue.node-near:hover,
-.node-window.node-near:hover {
+.node-continue:hover {
   background: var(--accent-dim);
   border-color: var(--accent-dim);
   color: var(--bg);

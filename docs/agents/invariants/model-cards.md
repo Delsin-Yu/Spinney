@@ -168,9 +168,10 @@ nearest ancestor-or-self that owns a `contextBaseId`, else the chain's first nod
 agent that is about to send (`Agent.setProviderSession` →
 `CompletionRequest.providerSession`). So one window is one provider-side conversation
 across a reload and an extension update, and the id changes exactly where the cacheable
-prefix ends — a rollover (`⧉`) or a fork's root, both of which re-mark the window on a new
-node. Deliberately **not** the epoch's id: a rollover under "Continue with current setup"
-inherits the parent's frozen envelope while starting a shorter, new window, so the envelope
+prefix ends — a rollover (the composer's `Continue with new context`) or a fork's root,
+both of which re-mark the window on a new
+node. Deliberately **not** the epoch's id: a rollover inherits the parent's frozen
+envelope while starting a shorter, new window, so the envelope
 is not the cache boundary. A sub-agent **does not inherit** the window: its history is its
 own, so it names its own node (`runSubAgent`), or the provider would be told two different
 prefixes are one conversation. The two bookkeeping paths (a session title, and the batched

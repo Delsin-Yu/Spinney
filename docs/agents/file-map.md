@@ -68,6 +68,14 @@
   markdown-it, `media/tree.js`, `media/main.js`), the CSP nonce, `window.__spinneyL10n`
   and the element ids, per-caller `mediaVersion`. One template, because `media/main.js`
   fetches its whole surface by element id. Guarded by `npm run check:webview`.
+- `src/chat/agentsMd.ts` — the two AGENTS.md instruction files, **read at use**
+  (`liveAgentsMdSources`, `globalAgentsMdPath`, `workspaceAgentsMdPath`,
+  `resetAgentsMdCache`): an mtime cache (one `statSync` per file per use, a
+  `readFileSync` only when the file moved) so an edit made while VS Code was closed —
+  or during a session — is what the next `freezeEpoch` renders and what the next
+  `setupState` drift check hashes. The window snapshots
+  (`Agent.setAgentsMd` / `setGlobalAgentsMd`) are the fallback for a file that cannot be
+  read at all. `RuntimeHost.agentsMdSources()` is the seam the runtime uses.
 - `src/chat/imagePick.ts` — `pickImageAttachment`: the one image picker, returning
   `{ kind: 'picked', dataUrl, name }` / `cancelled` / `failed`. Used by
   `SessionRuntime.handlePickImage`.

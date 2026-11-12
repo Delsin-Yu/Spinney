@@ -33,6 +33,10 @@
   const inputEl = document.getElementById('input');
   const sendBtn = document.getElementById('send-btn');
   const stopBtn = document.getElementById('stop-btn');
+  // The composer's ONE new-epoch entry (`Continue with new context`): the button that
+  // replaces the per-card `⧉`, the drift `⧉` hint and the ask-on-send modal. Its label,
+  // visibility and disabled state are owned by `updateComposerButtons` below.
+  const newContextBtn = document.getElementById('new-context-btn');
   const statusDot = document.getElementById('status-dot');
   const statusText = document.getElementById('status-text');
   const attachmentsEl = document.getElementById('attachments');
@@ -3999,143 +4003,83 @@
       if (typeof msg.contextPct === 'number') treeNodes[msg.id].contextPct = msg.contextPct;
     }
     if (card) syncContinueButton(card, treeNodes[msg.id] || { id: msg.id, status: msg.status, children: [] });
+    // The context state is half of what the composer's own two buttons read (a refused
+    // request disables Send and offers the new-epoch entry), and it can arrive *after*
+    // the tree was drawn — exactly how a turn dies on a context-length error.
+    updateComposerButtons();
   }
 
   /**
-   * The ▶ Continue / ↻ Retry / ⧉ Continue in a new window entries on a card whose
-   * turn ended without an answer: interrupted by the user, or failed — an API error
-   * that outlived the client's transparent retries. Clicking one asks the harness to
-   * run a turn from that node with a message the harness writes itself, so the user
-   * never has to type "continue".
+   * The ▶ Continue / ↻ Retry entries on a card whose turn ended without an answer:
+   * interrupted by the user, or failed — an API error that outlived the client's
+   * transparent retries. Clicking one asks the harness to run a turn from that node
+   * with a message the harness writes itself, so the user never has to type
+   * "continue".
    *
-   * One meaning per element — the *variant* follows the node's state:
-   *  - `error` + context `full` → the rollover replaces the repair: the turn died
-   *    because the provider refused an oversized request, which retrying cannot fix,
-   *    so the harness opens a new, empty context window and continues there
-   *    (`rolloverTurn`), on the one `.node-continue` element.
-   *  - `error` + context `near` → **both**: `↻ Retry` on `.node-continue` and the `⧉`
-   *    entry beside it, on its own `.node-window` element. A `near` window is a
-   *    *size*, not a refusal — nothing about this request was rejected — so the retry
-   *    is a real repair and must not hide the suggestion; and the `⧉` entry has no
-   *    other way in, so the retry must not be hidden by it either. The second element
-   *    wears `node-rollover node-near`, the quiet dashed shape of a suggestion.
-   *  - context `near` with no failure (`done`, `interrupted`) → the `⧉` entry alone,
-   *    as a *suggestion*: the `node-near` class softens it and the tooltip carries the
-   *    percentage, because this one is the user's call, not a failure to repair.
-   *  - `error` (any other failure) → `↻ Retry`, in place.
+   * One element, one meaning, and the *variant* follows the node's status:
+   *  - `error` (any failure) → `↻ Retry`, in place;
    *  - `interrupted` → `▶ Continue`, in place.
-   * The context state itself is the host's judgement and is never derived here.
-   * Each element is created once and only its text used to change; a sync now also
-   * fixes its class list and `dataset.action`, so a card that goes Retry → rollover
-   * (or back) is correct, and every click handler reads the action at click time.
+   * A new *context window* is not offered here any more: every new-epoch transition —
+   * a full window, a near-full one, and a setup that moved away from the frozen one —
+   * is the composer's single `#new-context-btn` (`updateNewContextButton`), so a card
+   * never carries a second, differently-worded entry for the same act.
    *
    * Shown only where continuing makes sense: a conversational turn node (never a
    * sidecar — a sub-agent window or job card has no conversation of its own here),
    * not currently running, and a *tip* of its branch (a node that already has a
    * turn child has been continued; the new failure, if any, shows on that child).
-   * A `full` window is a *failure* mode, so it keeps the old gate — it only ever
-   * arrives on an `error`. The `near` entry does not: a long conversation that
-   * just *finished* above 90% is exactly the case it is for, so it shows on a `done`
-   * tip as well.
+   * The element is created once; a sync fixes its text, title and `dataset.action`,
+   * and the click handler reads the action at click time.
    */
   function syncContinueButton(card, meta) {
     const id = meta && meta.id;
     // `byClass`, not `querySelector`: a miss must be observable (the offline
     // webview checker's DOM stub answers a plain-class miss with a shared stub).
     const btn = byClass(card, 'node-continue');
-    const alt = byClass(card, 'node-window');
     const terminal = !!meta && (meta.status === 'interrupted' || meta.status === 'error');
     const hasTurnChild = !!meta && (meta.children || []).some((c) => {
       const child = treeNodes[c];
       return child && !isSidecarKind(child.kind);
     });
-    // The host's context state (§4.3): `full` — the provider refused an oversized
-    // request; `near` — the latest prompt usage is at least 90% of the card's
-    // window; `ok` — otherwise. `contextPct` only ever reaches a tooltip.
-    const context = meta ? meta.context : undefined;
     const failed = !!meta && meta.status === 'error';
-    // `full` is the provider's refusal of *this* request, so retrying it is pointless
-    // and the rollover takes the only slot.
-    const full = failed && context === 'full';
-    // The 90% entry is about the size of the chain, never a failure mode.
-    const near = !full && context === 'near';
-    // A failure that still has a repair *and* the 90% entry: both, side by side.
-    const beside = failed && near;
-    // True while the rollover is the whole button rather than the entry beside one.
-    const rollover = full || (near && !beside);
-    const pct = meta && typeof meta.contextPct === 'number' ? Math.round(meta.contextPct) : 0;
-    const label = rollover
-      ? tr('⧉ Continue in a new window')
-      : failed
-        ? tr('↻ Retry')
-        : tr('▶ Continue');
-    const title = full
-      ? tr('Ask the harness to continue this turn in a new, empty context window (the current one is full)')
-      : rollover
-        ? tr('Context is {0}% full - continue in a new window', pct)
-        : failed
-          ? tr('Ask the harness to retry this turn (it sends the message for you)')
-          : tr('Ask the harness to continue from here (it sends the message for you)');
-    const action = rollover ? 'rollover' : failed ? 'retry' : 'continue';
-    const show = !!id && (terminal || near) && !hasTurnChild && !isSidecarKind(meta.kind) && !runningNodes.has(id);
+    const label = failed ? tr('↻ Retry') : tr('▶ Continue');
+    const title = failed
+      ? tr('Ask the harness to retry this turn (it sends the message for you)')
+      : tr('Ask the harness to continue from here (it sends the message for you)');
+    const action = failed ? 'retry' : 'continue';
+    const show = !!id && terminal && !hasTurnChild && !isSidecarKind(meta.kind) && !runningNodes.has(id);
     if (!show) {
       if (btn) btn.remove();
-      if (alt) alt.remove();
       return;
     }
     // Created on demand, into the head and before the delete button (the far right
     // is the delete button's). The action is read at *click* time: the same element
-    // is reused as the node's state changes (Retry ⇄ rollover), so a captured action
+    // is reused as the node's status changes (Retry ⇄ Continue), so a captured action
     // would go stale and post the wrong request.
-    const create = (className, text, tooltip, act) => {
-      const button = el('button', className, text);
-      button.title = tooltip;
-      button.dataset.action = act;
-      button.addEventListener('click', (ev) => {
-        ev.stopPropagation();
-        const kind = button.dataset.action;
-        vscode.postMessage(kind === 'rollover' ? { type: 'rolloverTurn', id } : { type: 'continueTurn', id });
-      });
-      const head = byClass(card, 'node-head');
-      // Keep the delete button at the far right of the head.
-      const del = head ? byClass(head, 'node-del') : null;
-      if (!head) {
-        card.appendChild(button);
-      } else if (del && head.insertBefore) {
-        head.insertBefore(button, del);
-      } else {
-        head.appendChild(button);
-      }
-      return button;
-    };
-    // The repair — or the rollover itself, when it owns the slot.
     if (btn) {
       btn.textContent = label;
       btn.title = title;
-      btn.classList.toggle('node-rollover', rollover);
-      btn.classList.toggle('node-near', near && !beside);
       btn.dataset.action = action;
-    } else {
-      create(
-        'node-continue' + (rollover ? ' node-rollover' : '') + (near && !beside ? ' node-near' : ''),
-        label,
-        title,
-        action,
-      );
+      return;
     }
-    // The `⧉` entry beside a repair: its own element, always in the suggestion's
-    // shape, created after the repair so the head reads `↻ Retry`, `⧉ …`, delete.
-    if (beside) {
-      const altLabel = tr('⧉ Continue in a new window');
-      const altTitle = tr('Context is {0}% full - continue in a new window', pct);
-      if (alt) {
-        alt.textContent = altLabel;
-        alt.title = altTitle;
-      } else {
-        create('node-window node-rollover node-near', altLabel, altTitle, 'rollover');
-      }
-    } else if (alt) {
-      alt.remove();
+    const button = el('button', 'node-continue', label);
+    button.title = title;
+    button.dataset.action = action;
+    button.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      // The action is read at click time: the same element is reused as the node's
+      // status changes, so a captured action would post the wrong request.
+      vscode.postMessage({ type: 'continueTurn', id });
+    });
+    const head = byClass(card, 'node-head');
+    // Keep the delete button at the far right of the head.
+    const del = head ? byClass(head, 'node-del') : null;
+    if (!head) {
+      card.appendChild(button);
+    } else if (del && head.insertBefore) {
+      head.insertBefore(button, del);
+    } else {
+      head.appendChild(button);
     }
   }
 
@@ -4165,10 +4109,11 @@
     // Read-only when the checked-out node is a sub-agent branch (the host additionally
     // refuses a send into a node that still owns work — Stop is the way out there), or when
     // this window does not own the workspace's sessions at all (`readOnly`, set from
-    // `state`): the composer must agree with the host in both cases.
+    // `state`): the composer must agree with the host in both cases. The Send / new-epoch
+    // buttons are not touched here — `updateComposerButtons` owns both, and it is called
+    // right after this one by every entry point.
     const readonly = isAgent || readOnly;
     inputEl.disabled = readonly;
-    sendBtn.disabled = readonly;
     attachBtn.disabled = readonly;
     snippetsBtn.disabled = readonly;
   }
@@ -5801,25 +5746,101 @@
     return !!treeActiveId && lockedNodes.has(treeActiveId);
   }
 
+  /** Whether the composer holds something to send: text, or at least one attachment. */
+  function hasComposerContent() {
+    return !!String(inputEl.value || '').trim() || pendingAttachments.length > 0;
+  }
+
+  /** Whether the *view focus* node is a sidecar card (a sub-agent window / job card). */
+  function focusIsAgent() {
+    const node = treeNodes[treeActiveId];
+    return !!(node && isSidecarKind(node.kind));
+  }
+
+  /**
+   * The host's context state of the *view focus* node: `'ok' | 'near' | 'full'`, or
+   * `undefined` before the tree arrived. It is shipped data (`tree` / `nodeUpdate`,
+   * §4.3) and is never derived here — the webview holds no copy of a provider fact.
+   */
+  function focusContext() {
+    const node = treeNodes[treeActiveId];
+    return node ? node.context : undefined;
+  }
+
+  /**
+   * Whether the host says a **new epoch** is available for this composer: the
+   * checked-out chain's setup drifted from the live one (`config.setup.drift` — the
+   * user moved a dropdown, or the prompt / AGENTS.md / tool set / endpoint moved), or
+   * its context window is near or past full. Those are the three situations the
+   * composer's one entry exists for; the two facts come from the host, never from a
+   * computation of this side.
+   */
+  function newEpochAvailable() {
+    const drift = !!(SETUP && SETUP.drift);
+    const context = focusContext();
+    return drift || context === 'near' || context === 'full';
+  }
+
+  /** Why the new-epoch entry cannot be used right now (`''` = it can). */
+  function newContextBlockedReason() {
+    if (readOnly) return READ_ONLY_TITLE;
+    if (focusIsAgent()) return tr('A sub-agent branch cannot start a new context window');
+    if (!hasComposerContent()) return tr('Type a message or attach an image to continue in a new context');
+    return '';
+  }
+
+  /**
+   * The composer's **one** new-epoch entry (`#new-context-btn`, beside Send): the
+   * single way to move a conversation into a new epoch, whether the reason is a setup
+   * that moved away from the frozen one or a context window that is near or past full.
+   * It replaces the three entries that used to disagree — the per-card `⧉ Continue in a
+   * new window`, the harness-drift `⧉` hint and the modal a plain send raised.
+   *
+   * The label follows the box: with something to send the click carries that text into
+   * the new epoch, with an empty box it is the compaction entry. It is shown only while
+   * the host says a new epoch is available, and never while the focused node is doing
+   * something (Stop owns the row then, and both other buttons hide). It is disabled —
+   * with a tooltip that says why — when there is nothing to send, in a read-only window,
+   * or on a sub-agent branch; the host re-checks all of it and answers with a notice
+   * when a stale click arrives.
+   */
+  function updateNewContextButton() {
+    const hasContent = hasComposerContent();
+    newContextBtn.textContent = hasContent ? tr('Continue with new context') : tr('Compact and Continue');
+    const reason = newContextBlockedReason();
+    const show = newEpochAvailable() && !focusIsRunning() && !focusIsLocked();
+    newContextBtn.classList.toggle('hidden', !show);
+    newContextBtn.disabled = !!reason;
+    newContextBtn.title = reason
+      ? reason
+      : hasContent
+        ? tr('Send this message in a new context window or under the new setup (the harness asks first)')
+        : tr('Compact this conversation and continue in a new context window (the harness asks first)');
+  }
+
   /**
    * The composer shows Stop and hides Send while the view focus node is *doing
    * something* — streaming a turn, or still owning unfinished work (`lockedNodes`) —
    * and Send otherwise. One button, one meaning: stop what this node is doing.
    * Driven by the per-node sets, never by the session-level `busy` flag. Called
-   * whenever `state`, the tree, the focused path or either set changes.
+   * whenever `state`, the tree, the focused path, either set, the input or the pending
+   * attachments change — and it owns the new-epoch entry too.
+   *
+   * Send is **disabled** where it cannot act instead of silently doing nothing: an
+   * empty box, a full context window (the request would be refused), a read-only window
+   * and a sub-agent branch. Enter goes through the same button, so a disabled Send
+   * means Enter does nothing as well.
    */
   function updateComposerButtons() {
+    const hasContent = hasComposerContent();
+    const context = focusContext();
     if (readOnly) {
       // One owner window per workspace: this one may read the sessions, nothing more.
       stopBtn.classList.add('hidden');
       sendBtn.classList.remove('hidden');
       sendBtn.disabled = true;
       sendBtn.title = READ_ONLY_TITLE;
-      return;
-    }
-    sendBtn.disabled = false;
-    sendBtn.title = '';
-    if (focusIsRunning() || focusIsLocked()) {
+    } else if (focusIsRunning() || focusIsLocked()) {
       stopBtn.classList.remove('hidden');
       sendBtn.classList.add('hidden');
       // The same button has two scopes, so say which one applies: a node that owns
@@ -5831,7 +5852,16 @@
     } else {
       stopBtn.classList.add('hidden');
       sendBtn.classList.remove('hidden');
+      sendBtn.disabled = !hasContent || context === 'full' || focusIsAgent();
+      sendBtn.title = !hasContent
+        ? tr('Type a message or attach an image to send')
+        : context === 'full'
+          ? tr('The context window is full; continue in a new one first')
+          : focusIsAgent()
+            ? tr('A sub-agent branch is read-only')
+            : '';
     }
+    updateNewContextButton();
   }
 
   /**
@@ -6184,6 +6214,8 @@
       attachmentsEl.appendChild(item);
     }
     attachmentsEl.classList.toggle('hidden', pendingAttachments.length === 0);
+    // The pending list is half of "has content", so both composer buttons follow it.
+    updateComposerButtons();
   }
 
   function handlePaste(event) {
@@ -6209,14 +6241,13 @@
   // what a *new* node would freeze is the live one (`setup.live`). The host compares
   // them and says which kind of drift it found — `'user'` (the dropdowns moved) or
   // `'harness'` (the template / AGENTS.md / tool schemas / provider moved). This side
-  // only shows the two identities and, for harness drift, the one entry point that
-  // drift needs; it never computes drift itself.
+  // only shows the two identities; it never computes drift itself. Acting on a drift is
+  // the composer's one new-epoch button (`updateNewContextButton`), which reads
+  // `setup.drift` and nothing else.
   let SETUP = null;
   // The two-line identity block, created lazily: it exists only while the user has
   // drifted, so an untouched session carries no extra DOM.
   let composerIdent = null;   // { box, sending, live }
-  // The harness-drift entry point, created lazily next to the snippets button.
-  let newSetupBtn = null;
 
   /**
    * One identity as a single line: the card, then its effort and reply language.
@@ -6254,42 +6285,12 @@
   }
 
   /**
-   * The harness-drift hint: one extra icon button beside the snippets button. Its
-   * click is the user's own "continue with the latest setup" — the host forks the
-   * current tree, freezes the live setup on the new root and sends the composer's
-   * content there (`forkTurn`), so the old tree (and its prompt cache) is untouched.
-   * Built lazily: a session with no harness drift never grows the button.
-   */
-  function ensureNewSetupButton() {
-    if (newSetupBtn) return newSetupBtn;
-    const btn = el('button', 'icon-btn new-setup-btn');
-    btn.id = 'new-setup-btn';
-    btn.type = 'button';
-    // The same `⧉` glyph the card's rollover entry uses, and just as deliberately
-    // untranslated as `CTX` / `×`: a symbol, not a word. The tooltip carries the
-    // explanation and *is* translated.
-    btn.textContent = '⧉';
-    const title = tr('Continue with the latest setup (forks this tree and sends there)');
-    btn.title = title;
-    btn.setAttribute('aria-label', title);
-    btn.addEventListener('click', forkTurn);
-    const controls = document.getElementById('composer-controls');
-    if (controls) {
-      if (snippetsBtn && snippetsBtn.parentElement === controls) controls.insertBefore(btn, snippetsBtn);
-      else controls.insertBefore(btn, controls.firstChild);
-    }
-    newSetupBtn = btn;
-    return btn;
-  }
-
-  /**
-   * Show what the composer is about to send *with*: both identities while the user's
-   * dropdowns have drifted from the checked-out node's frozen setup, and the fork
-   * entry point while the *harness* moved instead (§4.2).
-   *
-   * Send is deliberately never disabled here: a default send keeps the node's setup,
-   * and asking first is the host's modal — the `drift` class only says "this click
-   * will ask".
+   * Show what the composer is about to send *with*, while the two setups disagree:
+   * the node's frozen setup (`Sending with:`) and what a new node would freeze
+   * (`New setup:`, shown when the user moved a dropdown, §4.2). The block states a
+   * fact and nothing else — the *entry point* for acting on a disagreement is the
+   * composer's one new-epoch button (`updateNewContextButton`), whatever caused it,
+   * and a plain send still keeps the frozen setup silently.
    */
   function renderSetupIdentity() {
     const setup = SETUP || {};
@@ -6303,28 +6304,24 @@
     } else if (composerIdent) {
       composerIdent.box.classList.add('hidden');
     }
-    if (sendBtn) {
-      sendBtn.classList.toggle('drift', userDrift);
-      sendBtn.title = userDrift
-        ? tr('Send will ask before using the old setup (the one this node froze)')
-        : '';
-    }
-    if (drift === 'harness') {
-      ensureNewSetupButton().classList.remove('hidden');
-    } else if (newSetupBtn) {
-      newSetupBtn.classList.add('hidden');
-    }
+    // Any drift — the user's or the harness's — is the new-epoch entry's business, so
+    // the button's visibility and disabled state are re-read here.
+    updateNewContextButton();
   }
 
   /**
-   * Fork the current tree under the live setup and send the composer's content there
-   * (`#new-setup-btn`, §4.2). The message carries the very same text and attachments
-   * a Send would, and the input is *not* cleared: only the host knows whether it took
-   * the turn, and it says so with `composerClear`.
+   * The new-epoch click (`#new-context-btn`): the composer's text and attachments
+   * travel with it, exactly like a Send's. The host decides the backend (a new context
+   * window, or a fork under the live setup), asks one modal question and re-validates
+   * the trigger, so a stale click is answered with a notice. The input is *not* cleared
+   * here — only the host knows whether it took the turn, and it says so with
+   * `composerClear`.
    */
-  function forkTurn() {
+  function newContextTurn() {
+    if (newContextBtn.disabled) return;
+    setFollow(true);
     vscode.postMessage({
-      type: 'forkTurn',
+      type: 'newContextTurn',
       text: inputEl.value.trim(),
       attachments: pendingAttachments,
     });
@@ -6333,18 +6330,17 @@
   // ---- Messaging ----
   function send() {
     const text = inputEl.value.trim();
+    // Enter and the button are one path: a disabled Send does nothing at all (§4.2).
     // Sending targets the view focus node, so only *that* node being live blocks it
-    // (the button is hidden in that case anyway); a run elsewhere in the session is
-    // exactly the "start a new concurrent run here" case (spec §1). A node that still
-    // owns unfinished work shows Stop instead, so there is no Send to press — the host
-    // refuses it too in case a message arrives anyway (`lockedNodes`).
-    if (readOnly || (!text && pendingAttachments.length === 0) || focusIsRunning() || focusIsLocked()) return;
+    // (it shows Stop then, and Send is hidden anyway); a run elsewhere in the session
+    // is exactly the "start a new concurrent run here" case (spec §1).
+    if (sendBtn.disabled || readOnly || focusIsRunning() || focusIsLocked()) return;
+    if (!text && pendingAttachments.length === 0) return;
     setFollow(true);
     vscode.postMessage({ type: 'userMessage', text, attachments: pendingAttachments });
-    // The composer is *not* cleared here (§4.4): Send may open the "which setup?"
-    // modal, and a modal answered with No must not have eaten the user's text. The
-    // host clears the box — attachments and all — with `composerClear` once it really
-    // took the message.
+    // The composer is *not* cleared here (§4.4): a send that the host refuses must not
+    // have eaten the user's text. The host clears the box — attachments and all — with
+    // `composerClear` once it really took the message.
   }
 
   // The input never scales with anything, so its height cap is a constant.
@@ -6802,6 +6798,7 @@
 
   // ---- Input handlers ----
   sendBtn.addEventListener('click', send);
+  newContextBtn.addEventListener('click', newContextTurn);
   stopBtn.addEventListener('click', () => {
     setStatus(tr('Stopping…'));
     // Stop only the view focus node's run (spec §3.2): other nodes stay running.
@@ -6843,11 +6840,17 @@
   inputEl.addEventListener('keydown', (event) => {
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
-      send();
+      // Enter is the Send button's other face: a disabled Send means Enter does
+      // nothing too, instead of sending something the button refuses to.
+      if (!sendBtn.disabled) send();
     }
   });
 
-  inputEl.addEventListener('input', autoGrow);
+  inputEl.addEventListener('input', () => {
+    autoGrow();
+    // Typing changes "has content", which both composer buttons read.
+    updateComposerButtons();
+  });
 
   document.addEventListener('click', (event) => {
     const target = event.target;

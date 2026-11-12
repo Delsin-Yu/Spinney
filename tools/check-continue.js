@@ -707,7 +707,7 @@ async function main() {
   }
 
   // ---- (8) the deleted helpers ----------------------------------------------
-  console.log('-- (8) the two deleted continue helpers are gone from src/ --');
+  console.log('-- (8) the deleted continue helpers are gone from src/ --');
   {
     const files = sourceFiles(path.join(root, 'src'));
     ok('the sweep really read src/', files.length > 20, `${files.length} file(s)`);
@@ -721,6 +721,25 @@ async function main() {
       }
     }
     ok('neither `CONTINUE_MESSAGE` nor `buildFailureContinue` is left anywhere in src/', hits.length === 0, hits.join('; ') || 'no hits');
+
+    // The same statement for the setup modal a plain send used to raise: "a send always
+    // asks" is the rule this feature reversed (`docs/agents/invariants/api-retries.md`),
+    // so the three helpers that implemented it must be gone — a leftover copy would be a
+    // second answer to a question the composer's one button now owns.
+    const modalHits = [];
+    for (const file of files) {
+      const text = fs.readFileSync(file, 'utf8');
+      for (const needle of ['askSetups', 'discardPendingSetup', 'hasUserDrift']) {
+        if (text.includes(needle)) {
+          modalHits.push(`${path.relative(root, file)}: ${needle}`);
+        }
+      }
+    }
+    ok(
+      'the retired setup modal (`askSetups` / `discardPendingSetup` / `hasUserDrift`) is gone from src/',
+      modalHits.length === 0,
+      modalHits.join('; ') || 'no hits',
+    );
   }
 }
 

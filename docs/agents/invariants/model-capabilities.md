@@ -126,7 +126,8 @@ nothing is compared against the declared `contextWindow` or against
 `MAX_REQUEST_IMAGE_BYTES`. `windowFullReason()` is the classifier **both** consumers
 run through: it returns the kind, and `nodeContextFull` (`chat/runtime.ts`) only asks
 whether it is defined — which is why both kinds make a node context-full and offer
-the same `⧉` rollover. `parseContextLengthError()` remains the **token-half reader**,
+the same rollover entry in the composer. `parseContextLengthError()` remains the
+**token-half reader**,
 and no caller ever reads the window and the refused size it matched — the only
 question asked of it is whether the failure *is* that refusal — which is why the
 fields are never compared or written back. `usage.prompt_tokens`

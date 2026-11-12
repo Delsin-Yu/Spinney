@@ -45,15 +45,16 @@ The tree holds one card per turn. A new turn goes below the turn it answers. The
 | Control | What it does |
 |---|---|
 | Input box | Holds your message. `Enter` sends, `Shift+Enter` adds a line. |
-| **Send** | Sends the message and starts a turn. Spinney marks this button when the setup changed (section 3.4). |
+| **Send** | Sends the message and starts a turn. The button is disabled in four cases: the input box is empty, the context window is full (section 10.3), this window is read-only, or the checked-out node is a sub-agent branch. `Enter` sends only through this button, so it does nothing while the button is disabled. |
+| **Continue with new context** | The one entry for a change of epoch (section 3.4 and section 10.3). The button shows only when Spinney can start a new epoch: the setup changed, the context window is near full, or the context window is full. The label is `Compact and Continue` while the input box is empty. A click asks one question first, and a dismissed question sends nothing. |
 | **Stop** | Ends the turn at the checked-out node. It kills the background terminals and the sub-agents of that node too. Nothing continues. The tooltip is `Stop this turn` or `Stop this node: kill its background tasks and sub-agents (nothing is sent to the model)`. |
 | Prompt snippets | Opens a menu of pre-written instructions. A click inserts the text into the input box. Nothing is sent. Spinney ships `Plan` and `Implement Parallel`. Add your own rows with `spinney.promptSections` (section 11). |
 | **Attach image** | Opens a file picker. You can also paste an image into the input box. See section 9. |
-| Model dropdown | Picks the model card for a new node. A send that continues this conversation asks first (section 3.4). The list groups the cards by provider. |
+| Model dropdown | Picks the model card for a new node. A send that continues this conversation keeps the frozen setup (section 3.4). The list groups the cards by provider. |
 | Gear button | Opens the model-cards page. The tooltip is `Manage model cards…`. |
 | Thinking-effort dropdown | Picks the thinking level. The list is the list of the active card. |
 
-**Send** and **Stop** are one button with two meanings. The button shows **Stop** while the checked-out node runs a turn, or while that node still owns unfinished work.
+**Send** and **Stop** are one button with two meanings. The button shows **Stop** while the checked-out node runs a turn, or while that node still owns unfinished work. **Stop** replaces both other buttons, so **Send** and **Continue with new context** go away while it shows.
 
 A node owns unfinished work while a background terminal or a sub-agent batch runs, or while a completion notice waits for it. You cannot send into such a node. There is no queue. Press **Stop** first, or send from another node.
 
@@ -127,18 +128,21 @@ A pick of another model card, thinking level, or reply language makes the live s
 
 The value holds the card, the thinking level, and the reply language. Example: `Sending with: deepseek-flash · medium · English`.
 
-Spinney asks one question before a setup changes. The question is `Continue with current setup` or `Continue with latest setup`. It appears in three cases:
+Spinney does not ask this question on a plain send. A plain send always uses the frozen setup. The two identity lines say so, and the frozen setup keeps the prompt cache of the provider.
 
-- A change of the model dropdown, the thinking-effort dropdown, or `spinney.replyLanguage` (section 11). Spinney marks the **Send** button. The tooltip is `Send will ask before using the old setup (the one this node froze)`.
-- A change on the harness side: the shipped system prompt, the global or workspace `AGENTS.md`, the tool set, or the endpoint. Spinney adds a hint entry beside the prompt snippets. The entry carries the `⧉` glyph, and its tooltip is `Continue with the latest setup (forks this tree and sends there)`. A click on it opens the same question.
-- A continue in a new context window (section 10.3). An empty context makes the latest setup free, so Spinney asks there too.
+The composer holds one button for every change of epoch: **Continue with new context**. It shows in three cases:
 
-| Answer | What happens |
-|---|---|
-| `Continue with current setup` | The send uses the frozen setup. Spinney discards your pick. The model dropdown and the thinking-effort dropdown show the frozen values again. |
-| `Continue with latest setup` | Spinney copies this tree into a new tree. The new tree starts with the latest setup. The old tree keeps its own setup, and its prompt cache. |
+- A change of the model dropdown, the thinking-effort dropdown, or `spinney.replyLanguage` (section 11).
+- A change on the harness side: the shipped system prompt, the global or workspace `AGENTS.md`, the tool set, or the endpoint.
+- A context window that is near full or full (section 10.3).
 
-Press `Escape`, or click the close button, to dismiss the question. A dismissed question sends nothing, and Spinney keeps your text in the input box.
+A click on **Continue with new context** asks one question. The question depends on the case:
+
+- Setup change only: `Continue with the new workspace or model configuration?` The text names the size of the history in tokens. The answer is **Continue**. Spinney copies this tree into a new tree, and the new tree starts with the latest setup. The old tree keeps its own setup and its prompt cache.
+- Near-full or full context window: `Continue in a new context window?` The answers are **Write a handoff summary** and **Just continue** (section 10.3).
+
+Press `Escape`, or click the close button, to dismiss the question. A dismissed question sends nothing, kills nothing, and Spinney keeps your text in the input box. Spinney checks the state again before it acts, so a change during the question sends nothing and shows a message.
+
 
 A session can hold several trees. Spinney places the new tree beside the current one. The view shows the trees side by side, moves to the new tree, and each tree stays interactive. Check out a node of the tree that you want to continue, then send.
 
@@ -288,7 +292,7 @@ The model and the effort belong to the node, not to the tab:
 2. A follow-up uses the card and the level of the nearest ancestor.
 3. A new session starts on `spinney.model`, or on the built-in `deepseek-flash` card.
 
-A pick in a dropdown sets the live setup. A new node freezes the live setup. A send that continues a frozen conversation keeps the frozen setup, and it asks first (section 3.4). A checkout drops the pick, and the dropdowns follow the checked-out node.
+A pick in a dropdown sets the live setup. A new node freezes the live setup. A send that continues a frozen conversation keeps the frozen setup (section 3.4). A checkout drops the pick, and the dropdowns follow the checked-out node.
 
 A model, effort, or reply-language change never rewrites the setup of a frozen conversation. The new value applies to the next new node.
 
@@ -446,35 +450,30 @@ When every attempt fails, the turn still ends in an error, and the card keeps it
 
 ### 10.2 The card buttons
 
-A card can carry one of three buttons, or two of them at once. The buttons depend on the state of the node.
+A card can carry one of two buttons. The button depends on the state of the node.
 
 | Node state | Button | What it does |
 |---|---|---|
 | `interrupted` | **▶ Continue** | Resumes the turn in the same card. The partial output stays. The agent is told nothing. When **Stop** stopped a tool call in the middle, the agent gets one short note that names that call, and the card shows the note. |
 | `error` | **↻ Retry** | Resumes the turn in the same card, from where it stopped. The finished rounds of the turn stay, so the agent does not repeat that work. The agent is told nothing. |
-| `error`, context at or above 90%, but not full | **↻ Retry** and **⧉ Continue in a new window** | Two buttons. Retry resumes the turn in this window. The other one offers a new window. Its tooltip shows the percentage. See section 10.3. |
-| `interrupted`, context at or above 90% | **⧉ Continue in a new window** | Offers a new context window. The tooltip shows the percentage. See section 10.3. |
-| `error`, context full | **⧉ Continue in a new window** | Starts a new context window. The window can be full by tokens or by image bytes. See section 10.3. |
+
+A card never holds a button for a new context window. The composer holds that entry, for every change of epoch (section 3.4 and section 10.3).
 
 A button carries the work. You do not type the instruction yourself. A **Stop** followed by a new message behaves as before: your message starts a normal turn (section 4.3).
 
 ### 10.3 A full context window
 
-A context window is full when the provider answers with a context-length error. A request also carries its images as uploaded bytes, and the provider caps these bytes at 200 MB for one request. A refusal for that reason is also a full window. For example, the message reads `Total image size exceeds the limit: max 200 MB per request, got 203 MB`. Spinney does not guess a limit from the `ctx` readout. The card shows a **⚠️** message, and the button becomes **⧉ Continue in a new window**.
+A context window is full when the provider answers with a context-length error. A request also carries its images as uploaded bytes, and the provider caps these bytes at 200 MB for one request. A refusal for that reason is also a full window. For example, the message reads `Total image size exceeds the limit: max 200 MB per request, got 203 MB`. Spinney does not guess a limit from the `ctx` readout. The card shows a **⚠️** message. The composer shows **Continue with new context**, and **Send** is disabled.
 
-Spinney offers this button before a failure too. A card whose turn ended without an answer offers it from about 90% of the `contextWindow` of the card. The tooltip carries the number, for example `Context 93% full - continue in a new window`. This offer is a suggestion, not a repair. Nothing failed, so the button stands alone. A card that failed at or above 90% shows it beside **↻ Retry** instead: the provider refused nothing, so both actions stay open.
+Spinney offers this button before a failure too. The button shows from about 90% of the `contextWindow` of the card. Nothing failed there, so the click is your own decision. A plain send at that point is still a normal send.
 
-In both cases, Spinney asks which setup the new node must start with (section 3.4):
+1. Click **Continue with new context**. The composer sends your message into the new window. If the node still owns running work, a modal asks first. It names the work that will stop.
+2. Answer the question `Continue in a new context window?`:
+   - `Write a handoff summary`. The agent that takes over receives a summary of this conversation. The summary costs one extra request. This answer is a plan for a later release, so for now it continues like the second answer.
+   - `Just continue`. Spinney points the new agent at the previous branch. The agent reads the transcript on disk when it needs a detail.
+3. Spinney opens a new card below that node. The edge is dashed, the title is `Context window {0}`, and the badge is `CTX`.
 
-- `Continue with current setup`. The new node keeps the setup of the conversation above it.
-- `Continue with latest setup`. The new node freezes the latest setup.
-
-Both answers are free here. A new context window starts empty, so it has no cached prefix to lose.
-
-1. Click **⧉ Continue in a new window**. If the node still owns running work, a modal asks first. It names the work that will stop.
-2. Spinney opens a new card below that node. The edge is dashed, the title is `Context window {0}`, and the badge is `CTX`.
-
-The new window starts with the system prompt and one harness message. That message holds your last request and the last answer, in a shortened form. Nothing else goes to the model. Attachments cannot cross, so the message names them instead.
+The new window starts with the system prompt, one harness message, and your message. The harness message holds the size of the previous window, your last request, and the last answer, in a shortened form. It also names the transcript file of the previous window. Attachments cannot cross, so the message names them instead.
 
 The old branch stays usable. You can send into it again, or press **▶ Continue** there, until it overflows again.
 
@@ -482,7 +481,7 @@ The `CTX` tooltip is `This node starts a new context window; the branch above it
 
 Two details that are not faults:
 
-- The new card carries no pinned user message. A harness-opened turn has none.
+- The pinned user message of the new card is your message.
 - The harness text is English, whatever the display language.
 
 ## 11. Settings reference

@@ -65,8 +65,9 @@
   reports back in text; `sub-agents.md`). Nothing is rewritten, so no cached prefix is
   invalidated. It degrades by capability: a depth-2 sub-agent (which cannot spawn) is
   told to report the failure instead, and a non-vision card never sees `read_image` at
-  all. The same sentence names the `⧉` rollover as the other way forward, since a new
-  window starts without the images too (`context-rollover.md`).
+  all. The same sentence names the rollover entry (`Continue with new context`) as the
+  other way forward, since a new window starts without the images too
+  (`context-rollover.md`).
 - **Four constants, two budgets — do not confuse them.** `MAX_REQUEST_IMAGE_BYTES` is
   the provider's **per-request** ceiling (200 MB, less a safety margin at the use
   site); `INLINE_REQUEST_BODY_BYTES` (48 MiB) is the inline transport's own body cap;
