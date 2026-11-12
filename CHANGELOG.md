@@ -27,6 +27,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   carries a small green dot of its own: it follows the newest line, a scroll up releases
   it, and a scroll back to the end engages it again; clicking the dot toggles it, and the
   click does not open or close the row.
+- **The reply language covers the reasoning and the step titles.** The `## Language` line
+  now says the agent's reasoning (the thinking block) and the short `exec_command` step
+  title use the same language as the answer, while code, file paths, command output and
+  identifiers stay verbatim; the title's own schema description says the same.
 - **One entry for every new context.** A new-epoch transition used to have three
   inconsistent entries: the per-card `⧉ Continue in a new window`, a composer `⧉` shown
   only for a harness drift, and a modal raised by a plain send after a model/effort
@@ -145,9 +149,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The card is 840 px high by default** (`--node-max-h`, was 1200); the drag-resize still
   raises it.
 - **Three type levels** for visual clearance: the reasoning is the brightest text (13 px,
-  normal), a tool row's verb is `--accent-dim` with a 12 px `--text-dim` label (11 px
-  monospace only when the label is a derived command or pattern), and the expanded detail
-  is one level further down (11 px `--text-dim`). The usage line stays the faintest.
+  normal), the tool row is one grey line (the verb and the 12 px label both `--text-dim`,
+  11 px monospace only when the label is a derived command or pattern; its status dot is
+  gone and the ticking elapsed chip is the running cue), and the expanded detail is one
+  level further down (11 px `--text-dim`). The usage line stays the faintest.
 - **The steps tuck under one fold, and the final answer is plain flow text.** A turn
   with tool calls now puts everything from its first tool call onward into one `.steps`
   group under a `Ran N steps` header (or `Ran 1 step`): the reasoning, the tool lines,
@@ -186,6 +191,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A message that streams text and reasoning alternately is one row and one block.** The
+  webview routed each delta by the log's last child, so a reasoning delta that arrived
+  after the message's text had started began a second row after the text, and the next
+  text delta began a second block — one answer split into alternating fragments. A
+  reasoning delta now joins its own message's row (above the answer, in place, without
+  re-opening it), whatever order the provider streams them in.
 - **Applying a prompt snippet enables Send, like typing does.** `insertSnippet` wrote the
   input's value directly and never refreshed the composer, so both composer buttons kept
   the state of the old content until a key was pressed; `composerClear` had the same
