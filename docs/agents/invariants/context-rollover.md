@@ -203,7 +203,7 @@ the user changed model / effort / language. All three are gone from `src/` and `
 | --- | --- |
 | label, with content | `Continue with new context` |
 | label, empty box | `Compact and Continue` |
-| shown when | the host says a new epoch is available — setup drift (`config.setup.drift`), or the focused chain's `context` is `near` / `full` |
+| shown when | the host says a new epoch is available — setup drift (`config.setup.drift`), or the focused chain's `context` is `near` / `full` — **and** the box has content or the context is `near` / `full`: the empty-box form is the compaction entry, so a setup drift with an empty box hides the button |
 | hidden when | the focused node is running or locked: Stop owns the row, and both other buttons hide with it |
 | disabled when | the window is read-only, or the focused node is a sub-agent branch (the tooltip says which). An **empty box does not disable it**: there it is the compaction entry, the one click a full window has left |
 | click | posts `{ type: 'newContextTurn', text, attachments }` — the same content a Send would carry |

@@ -6136,9 +6136,15 @@
    */
   function updateNewContextButton() {
     const hasContent = hasComposerContent();
+    const context = focusContext();
+    // The empty-box form is the *compaction* entry, so it only exists when there is
+    // something to compact: a setup drift with an empty box has nothing to send and
+    // nothing to compact, and the button hides instead of offering "Compact and
+    // Continue" for a window that is not full.
+    const compactable = context === 'near' || context === 'full';
     newContextBtn.textContent = hasContent ? tr('Continue with new context') : tr('Compact and Continue');
     const reason = newContextBlockedReason();
-    const show = newEpochAvailable() && !focusIsRunning() && !focusIsLocked();
+    const show = newEpochAvailable() && (hasContent || compactable) && !focusIsRunning() && !focusIsLocked();
     newContextBtn.classList.toggle('hidden', !show);
     newContextBtn.disabled = !!reason;
     newContextBtn.title = reason

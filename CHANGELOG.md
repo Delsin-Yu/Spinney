@@ -198,6 +198,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The compaction entry only exists when there is something to compact.** With an
+  empty input box the new-epoch button now shows only when the focused chain's context is
+  `near` or `full`; a setup drift alone used to show it as `Compact and Continue` for a
+  window that was nowhere near full, where there was neither a message to carry nor a
+  window to compact.
 - **A reload carries its own continue.** `hvsc reboot --continue` lost its message
   whenever the supervisor died with the reload — which a daemon started from inside the
   window always did, because the extension host's teardown kills that process tree: the

@@ -1450,13 +1450,11 @@ if (contextLabel !== 'ctx 50%') {
   if (!sendBtn.disabled) {
     problems.push('an empty composer leaves Send enabled (an empty send must be a disabled state)');
   }
-  if (newContextBtn.disabled) {
-    problems.push('an empty composer disables the new-epoch button (it must stay available as the compaction entry)');
-  }
-  if (!/Compact and Continue/.test(String(newContextBtn.textContent || ''))) {
-    problems.push(
-      `an empty composer leaves the new-epoch button reading ${JSON.stringify(newContextBtn.textContent)}, expected "Compact and Continue"`,
-    );
+  // The drift is the only reason for a new epoch here and the box is empty: there is
+  // nothing to send and nothing to compact, so the entry hides rather than offering
+  // "Compact and Continue" for a window that is not full.
+  if (!hidden(newContextBtn)) {
+    problems.push('an empty composer under a setup drift shows the new-epoch button (nothing to send, nothing to compact)');
   }
   if (!sendBtn.title) {
     problems.push('the disabled Send button of an empty composer carries no reason');
@@ -1520,12 +1518,11 @@ if (contextLabel !== 'ctx 50%') {
       problems.push('posting `newContextTurn` cleared the input (the host clears it with `composerClear`)');
     }
   }
-  // …and the label follows an empty box: the compaction entry.
+  // …and an empty box under the drift hides the entry: the compaction label is only for
+  // a window that is near or full.
   typeInto('');
-  if (!/Compact and Continue/.test(String(newContextBtn.textContent || ''))) {
-    problems.push(
-      `the new-epoch button reads ${JSON.stringify(newContextBtn.textContent)} with an empty box, expected "Compact and Continue"`,
-    );
+  if (!hidden(newContextBtn)) {
+    problems.push('the new-epoch button stays visible with an empty box under a drift (there is nothing to compact)');
   }
 
   // Back to no drift: the identity block goes away, and the new-epoch button goes with
@@ -1598,6 +1595,17 @@ if (contextLabel !== 'ctx 50%') {
   if (!/Continue with new context/.test(String(newContextBtn.textContent || ''))) {
     problems.push('the new-epoch button of a near-full window does not read "Continue with new context"');
   }
+
+  // 2b. …and with an empty box it is the compaction entry: still shown, because there
+  //     is something to compact.
+  typeInto('');
+  if (hidden(newContextBtn)) {
+    problems.push('a near-full window hides the new-epoch button when the box is empty (the compaction entry must stay)');
+  }
+  if (!/Compact and Continue/.test(String(newContextBtn.textContent || ''))) {
+    problems.push('a near-full window with an empty box does not read "Compact and Continue"');
+  }
+  typeInto('a message');
 
   // 3. The context is `full`: available, and Send is disabled (the request would be
   //    refused again — the entry is the way out).
