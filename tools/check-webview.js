@@ -14,11 +14,12 @@
 //   (a) no handler throws, and
 //   (b) the UI follows the message — the effort dropdown, the model list, the
 //       image affordances, the context readout, the wallet readout and the
-//       composer's Send/Stop pair are checked explicitly, plus the P2 background
-//       docks (each job has to end up in the card of the node that owns it), the
-//       **window-global terminal dock** (`#term-dock`: one row per job of every
-//       session, the same body the card renders, kill / ✕ / clear, only the changed
-//       row repainted, and no layout call from the dock), and the **one essay** a turn
+//       composer's Send/Stop pair are checked explicitly (a prompt snippet and the
+//       host's `composerClear` must refresh that pair the way typing does), plus the
+//       P2 background docks (each job has to end up in the card of the node that owns
+//       it), the **window-global terminal dock** (`#term-dock`: one row per job of
+//       every session, the same body the card renders, kill / ✕ / clear, only the
+//       changed row repainted, and no layout call from the dock), and the **one essay** a turn
 //       card is — the thinking row that opens while its turn runs and collapses to a
 //       single line, the tool row that is one bold verb + label + chip with its detail
 //       one click away, the final answer as the last block of the one scroller, and the
@@ -1081,6 +1082,12 @@ if (contextLabel !== 'ctx 50%') {
       if (typeof itemClick !== 'function') {
         problems.push('a snippet menu item has no click handler');
       } else {
+        // The box starts empty *and* refreshed (the same path typing takes), so a
+        // disabled Send below can only mean the insertion did not refresh it.
+        input.value = '';
+        if (typeof input._listeners?.input === 'function') input._listeners.input({ target: input });
+        const send = elementById('send-btn');
+        const newContext = elementById('new-context-btn');
         itemClick({ stopPropagation() {} });
         if (!String(input.value).includes('This is a planning task.')) {
           problems.push(`choosing a snippet did not put its text in the input (${JSON.stringify(input.value)})`);
@@ -1090,6 +1097,22 @@ if (contextLabel !== 'ctx 50%') {
         }
         if (menus().length !== 0) {
           problems.push('the snippet menu stays open after a snippet was chosen');
+        }
+        // A snippet is a programmatic write, so it fires no `input` event: the menu has
+        // to refresh the composer itself, exactly like typing does. Otherwise the box
+        // holds the text while both buttons still read an empty one — the user has to
+        // type a character before Send wakes up.
+        if (send.disabled) {
+          problems.push(
+            'choosing a snippet leaves Send disabled — the box holds the snippet, so the ' +
+              'insertion must refresh the composer instead of waiting for the next keystroke',
+          );
+        }
+        if (!/Continue with new context/.test(String(newContext.textContent || ''))) {
+          problems.push(
+            `choosing a snippet leaves the new-epoch button reading ${JSON.stringify(newContext.textContent)}, ` +
+              'expected "Continue with new context"',
+          );
         }
       }
     }
@@ -1116,6 +1139,34 @@ if (contextLabel !== 'ctx 50%') {
       problems.push(`a snippet inserted into a non-empty input produced ${JSON.stringify(input.value)}`);
     }
     input.value = '';
+
+    // The other programmatic write: the host really took the message, so it empties the
+    // box with `composerClear`. The box is *non-empty and refreshed* first — Send live,
+    // as after typing — so a still-live Send after the clear can only mean the handler
+    // forgot to refresh the buttons over a now-empty composer.
+    input.value = 'the host will take this';
+    if (typeof input._listeners?.input === 'function') input._listeners.input({ target: input });
+    const sendAfterClear = elementById('send-btn');
+    const newContextAfterClear = elementById('new-context-btn');
+    if (sendAfterClear.disabled) {
+      problems.push('a non-empty composer leaves Send disabled (the fixture for the `composerClear` check is wrong)');
+    }
+    dispatch({ type: 'composerClear' });
+    if (String(input.value) !== '') {
+      problems.push(`\`composerClear\` left ${JSON.stringify(input.value)} in the input`);
+    }
+    if (!sendAfterClear.disabled) {
+      problems.push(
+        '`composerClear` empties the input but leaves Send enabled — clearing is a programmatic ' +
+          'write, so it must refresh the composer instead of waiting for the next keystroke',
+      );
+    }
+    if (!/Compact and Continue/.test(String(newContextAfterClear.textContent || ''))) {
+      problems.push(
+        `after \`composerClear\` the new-epoch button reads ${JSON.stringify(newContextAfterClear.textContent)}, ` +
+          'expected "Compact and Continue"',
+      );
+    }
   }
 }
 
