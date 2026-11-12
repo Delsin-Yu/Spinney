@@ -1,6 +1,6 @@
 import { AgentTool } from '../agent/types';
 import { listTranscriptSessions, searchTranscripts, TranscriptKind } from '../chat/transcript';
-import { ensureNotAborted, limitInline } from './index';
+import { ensureNotAborted, limitInline, searchTimeoutError, searchTimeoutSeconds } from './index';
 
 /**
  * `search_transcripts` reads the JSONL dumps written by `src/chat/transcript.ts`
@@ -12,6 +12,10 @@ import { ensureNotAborted, limitInline } from './index';
  * The roots are supplied by the provider (they depend on
  * `spinney.subAgentTranscriptDir` and the global-storage path), resolved at
  * call time so a settings change needs no tool rebuild.
+ *
+ * The search shares `spinney.searchTimeoutSeconds` with `search_files`: one hard
+ * budget for the whole call, and a budget stop answers an `Error:` line with no hits
+ * and no count, so a partial page never reads as "the end of the history".
  */
 export function makeSearchTranscriptsTool(getRoots: () => string[]): AgentTool {
   return {
@@ -20,7 +24,7 @@ export function makeSearchTranscriptsTool(getRoots: () => string[]): AgentTool {
       function: {
         name: 'search_transcripts',
         description:
-          'Search the on-disk transcripts of every session (and sub-agent run) for a regex pattern — use this to recall what happened in a previous conversation. Transcripts are JSONL files at <root>/<sessionId>/<nodeId>.jsonl: line 1 is a meta record (kind, session title, node, status, prompt, summary, tool stats) and each following line is one API message rendered as "[role] text → tool(args)". Returns "file:line: text" hits with the ABSOLUTE path, so `read_file <path>` with those line numbers shows the full untruncated record. These folders normally live outside the workspace (extension global storage), so search_files cannot reach them. Omit `query` to get an index of sessions (id, file count, size, last write, titles) — with `sessionId` it lists that session\'s files instead. Optional: sessionId (limit to one session), kind ("session" = main-agent turns, "subagent" = sub-agent runs), caseSensitive (default false), maxResults (default 50, cap 300), context (0-10 neighbouring lines, "-" separators).',
+          'Search the on-disk transcripts of every session (and sub-agent run) for a regex pattern — use this to recall what happened in a previous conversation. Transcripts are JSONL files at <root>/<sessionId>/<nodeId>.jsonl: line 1 is a meta record (kind, session title, node, status, prompt, summary, tool stats) and each following line is one API message rendered as "[role] text → tool(args)". Returns "file:line: text" hits with the ABSOLUTE path, so `read_file <path>` with those line numbers shows the full untruncated record. These folders normally live outside the workspace (extension global storage), so search_files cannot reach them. Omit `query` to get an index of sessions (id, file count, size, last write, titles) — with `sessionId` it lists that session\'s files instead. Optional: sessionId (limit to one session), kind ("session" = main-agent turns, "subagent" = sub-agent runs), caseSensitive (default false), maxResults (default 50, cap 300), context (0-10 neighbouring lines, "-" separators). Every call has ONE hard time budget (spinney.searchTimeoutSeconds, 10 s by default): when it runs out the result is an `Error: search_transcripts timed out …` line with no hits and no count — then pass sessionId to search one session instead of every session.',
         parameters: {
           type: 'object',
           properties: {
@@ -50,6 +54,10 @@ export function makeSearchTranscriptsTool(getRoots: () => string[]): AgentTool {
       if (!query.trim()) {
         return limitInline(listTranscriptSessions(roots, sessionId).text, 'search_transcripts');
       }
+      // One hard budget for the whole call, read live — the same setting and the same
+      // shape of answer as `search_files`.
+      const timeoutSec = searchTimeoutSeconds();
+      const started = Date.now();
       let result;
       try {
         // The await sits *inside* this try on purpose: a regex that fails to
@@ -63,9 +71,16 @@ export function makeSearchTranscriptsTool(getRoots: () => string[]): AgentTool {
           caseSensitive: args.caseSensitive === true,
           maxResults: typeof args.maxResults === 'number' ? args.maxResults : undefined,
           context: typeof args.context === 'number' ? args.context : undefined,
+          deadlineAt: started + timeoutSec * 1000,
         });
       } catch (err) {
         return `Error: invalid regex: ${err instanceof Error ? err.message : String(err)}`;
+      }
+      ensureNotAborted(signal);
+      if (result.timedOut || Date.now() >= started + timeoutSec * 1000) {
+        // No hits and no count: a page that stopped mid-history must not read as the
+        // end of the history.
+        return searchTimeoutError('search_transcripts', roots.join(', '), timeoutSec);
       }
       return limitInline(result.text, 'search_transcripts');
     },

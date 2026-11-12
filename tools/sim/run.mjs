@@ -450,7 +450,7 @@ async function selftest(flags) {
   const again = buildFixture({ root: flags.fixture, seed: flags.seed });
   c.add('the fixture is 3000-4000 files (under the search tool cap)', stats.files >= 3000 && stats.files <= 4000, `${stats.files} files`);
   c.add('three components are present', ['chart-engine', 'cjk-typography', 'vendor-tables'].every((id) => stats.byComponent[id]), Object.keys(stats.byComponent).join(', '));
-  c.add('files above the 1 MB cap exist', stats.oversized.length >= 3, `${stats.oversized.length}`);
+  c.add('files above the 8 MB per-file cap exist', stats.oversized.length >= 3, `${stats.oversized.length}`);
   c.add('font-like binaries under the cap exist', stats.fonts.length >= 4, `${stats.fonts.length}`);
   c.add(`the hit-heavy token is in a bounded set of files`, stats.tokenFiles > 0 && stats.tokenFiles <= 50, `${stats.tokenFiles} files`);
   c.add('a re-run rewrites nothing', again.written === 0, `written ${again.written}`);

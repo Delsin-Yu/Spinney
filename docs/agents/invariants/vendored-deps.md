@@ -1,16 +1,17 @@
 # Invariant: vendored dependencies are pinned forever
 
-Two assets under `media/vendor/` are **vendored, frozen** copies of published npm
-tarballs, shipped inside the `.vsix`:
+Three assets under `media/vendor/` are **vendored, frozen** copies of published
+artifacts, shipped inside the `.vsix`:
 
 | Asset | Vendored copy | Pin record |
 |---|---|---|
 | tree layout engine `non-layered-tidy-tree-layout@2.0.2` (MIT) | `media/vendor/non-layered-tidy-tree-layout/` | that directory's `PROVENANCE.md` |
 | Markdown renderer `markdown-it@14.3.1` (MIT) | `media/vendor/markdown-it/` | that directory's `PROVENANCE.md` |
+| ripgrep `14.1.1` binary, one per platform-architecture (MIT) | `media/vendor/ripgrep/<platform>-<arch>/rg` | `media/vendor/ripgrep/PROVENANCE.md` |
 
 ## Rules
 
-1. **Do not add either of them to `package.json`.** Neither is a dependency, a
+1. **Do not add either browser bundle to `package.json`.** Neither is a dependency, a
    `devDependency` or a `file:` link, and nothing is resolved from npm at
    install/build/package time, so no install script, no registry compromise and no
    version drift can reach the shipped webview payload. One caveat that does **not**
@@ -19,12 +20,16 @@ tarballs, shipped inside the `.vsix`:
    *transitive* dev dependency of `@vscode/vsce`. That copy is resolved at build time
    only, is never shipped, and is never what the webview loads — the vendored bundle is.
    Its existence is not a reason to relax the pin, and no runtime code may import from
-   `node_modules`.
+   `node_modules`. The same goes for ripgrep: it is **not** an npm dependency
+   (`@vscode/ripgrep` is not installed), the binary comes from the upstream GitHub
+   release and is checked in.
 2. **Do not edit the vendored files.** They are byte-exact copies of the published
    tarball, and their sha256s are recorded in each `PROVENANCE.md`. An edit invalidates
    the audit trail. The engine's `dist/` is what the webview loads and its `src/` exists
    only so the minified bundle can be re-audited offline; for `markdown-it` only the
-   minified browser bundle ships (`LICENSE` + `PROVENANCE.md` are the paperwork).
+   minified browser bundle ships (`LICENSE` + `PROVENANCE.md` are the paperwork). For
+   ripgrep only the `rg` binary ships — not `doc/`, not `README.md`, not the shell
+   completions.
 3. **Do not update a version.** "Pinned forever" is the design. A new version would
    need a fresh supply-chain audit (see the checklist below) and a new `PROVENANCE.md`
    before it may be vendored — including a later patch of a package already vendored.
@@ -32,11 +37,44 @@ tarballs, shipped inside the `.vsix`:
    (same nonce, before `media/tree.js`) and the `markdown-it` `<script>` the webview
    renderer needs. `media/tree.js` throws a clear error if
    `window.nonLayeredTidyTreeLayout` is missing — do not add a silent fallback layout.
+   Ripgrep has no load order: it is spawned, never loaded.
 5. The vendored bundles must stay `eval`/`Function`-free so the webview CSP needs no
    `'unsafe-eval'`. Re-check with:
    `grep -c "eval(\|new Function" media/vendor/non-layered-tidy-tree-layout/dist/*.js`
    and `grep -c "eval(\|new Function" media/vendor/markdown-it/markdown-it.min.js`
-   (both must print `0`).
+   (both must print `0`). The ripgrep binary is outside the webview and outside the
+   CSP entirely: it is the tool's child process.
+
+## ripgrep: the third asset, and why it is vendored
+
+`search_files` runs `rg` in a child process (`src/tools/searchFiles.ts`) — that is what
+keeps a whole-tree scan off the extension host's only JS thread. Until the vendoring,
+the binary was borrowed from the host: VS Code's bundled `ripgrep-universal` under
+`vscode.env.appRoot`, the older single-binary `@vscode/ripgrep`, then `rg` on `PATH`.
+Borrowing meant a search's execution path depended on the host build (a re-shuffle of
+VS Code's layout silently demoted every search to the in-process walk), and a broken
+candidate used to disable ripgrep for the whole session. So:
+
+- **The probe order is: vendored → `env.appRoot` → `PATH`.** `media/vendor/ripgrep/`
+  is the only entry whose existence the extension itself guarantees, on every platform
+  and inside the `.vsix` as much as in a checkout (`path.resolve(__dirname, '../..')`
+  from the compiled `out/tools/`).
+- **A failing candidate is forgotten alone.** A spawn failure marks *that* path
+  unusable and the next candidate is tried; only when none is left does the in-process
+  walk run (inside the same time budget).
+- **Five directories, not six.** ripgrep `14.1.1` publishes no `aarch64-pc-windows-msvc`
+  asset, so `win32-arm64/` is absent by design and the probe falls through to the host's
+  own arm64 build. The `linux-x64` binary is the musl build (static) and `linux-arm64`
+  the gnu build, because those are the two 14.1.1 publishes. `PROVENANCE.md` records
+  both decisions verbatim; do not "fill in" the missing directory with a copy of
+  another architecture.
+- **The binaries are `-text` in `.gitattributes`** (`media/vendor/** -text`), and the
+  POSIX ones need `mode 100755` in the index — a user on Linux or macOS must be able to
+  spawn them.
+- **Re-verifying without that platform:** `sha256sum media/vendor/ripgrep/*/rg`,
+  `file` for the machine class, and `rg --version` for the one binary the developer's
+  machine can run. The hashes, sizes and the archive URLs are in
+  `media/vendor/ripgrep/PROVENANCE.md`.
 
 ## Engine semantics `media/tree.js` depends on
 
@@ -123,9 +161,12 @@ numbers quoted above.
 - `media/vendor/markdown-it/PROVENANCE.md` — pin record for the Markdown renderer:
   version, tarball integrity, sha256/byte count, and the third-party code inlined in
   its bundle.
+- `media/vendor/ripgrep/PROVENANCE.md` — pin record for the search binary: release
+  URLs, archive and binary sha256s, the MIT text, and the artifact that 14.1.1 does not
+  publish.
 - `THIRD_PARTY_NOTICES.md` (repository root, shipped in the `.vsix`) — the
-  redistribution notice: both bundles, their copyright lines and the paths of the
-  bundled `LICENSE` files.
+  redistribution notice: all three assets, their copyright lines and the paths of the
+  bundled `LICENSE`/`PROVENANCE` files.
 - The pre-vendoring survey (registry/OSV JSONs, benchmark scripts, prior-art notes)
   was removed from the repository when it went open source. The `PROVENANCE.md` files
   above are the surviving pin records: version, tarball integrity, per-file sha256, and

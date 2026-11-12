@@ -16,9 +16,17 @@ import {
   limitInline,
   resolvePath,
   searchExcludeGlobs,
+  searchTimeoutError,
+  searchTimeoutSeconds,
 } from './index';
 
-const MAX_SEARCH_FILE = 1_000_000;
+/**
+ * Files larger than this are not searched. Raised from 1 MB to 8 MB: a search's job is
+ * to tell *excluded* from *absent*, and a bundled minified file or a generated table is
+ * text that has to answer — while past 8 MB a single file can still eat the whole
+ * budget of a call.
+ */
+const MAX_SEARCH_FILE = 8 * 1024 * 1024;
 const MAX_SEARCH_FILES = 4000;
 const MAX_SEARCH_MATCHES = 300;
 const MAX_CONTEXT_LINES = 10;
@@ -30,18 +38,6 @@ const MAX_CONTEXT_LINES = 10;
  * the fallback walk needs this; rg does it itself.
  */
 const BINARY_SNIFF_BYTES = 8192;
-
-/**
- * Wall-clock ceiling for one search. The match cap is the common stop; this bounds
- * the rest — a pattern that matches almost nothing inside a huge tree, which is the
- * measured 17.6 s-per-no-match case this tool was rebuilt from. With ripgrep the
- * child is killed at the deadline (the host never waits on it); the fallback walk
- * checks it between files.
- */
-const SEARCH_DEADLINE_MS = 20_000;
-
-/** `.git` is never worth walking, whatever the settings say. */
-const ALWAYS_EXCLUDED = '**/.git/**';
 
 /**
  * How many ripgrep children may be in flight at once — the host-side **work budget**
@@ -66,11 +62,27 @@ const rgGate = new RequestGate(RG_CONCURRENCY);
 const RG_BIN = process.platform === 'win32' ? 'rg.exe' : 'rg';
 
 /**
+ * The extension's own root: this file compiles to `out/tools/`, so two levels up is the
+ * folder `package.json` sits in — and `media/vendor/ripgrep/` is inside it, in the
+ * `.vsix` as much as in a checkout.
+ */
+const EXTENSION_ROOT = path.resolve(__dirname, '..', '..');
+
+/**
  * The scope echo: "the search was narrowed by your settings / ignore files", so the
  * model can tell *excluded* from *absent*. Without it, a hitless search reads as
  * "this does not exist" and the model goes back to walking the tree by hand.
  */
 const SCOPE_NOTE = '\n…[scope: search.exclude/files.exclude/.gitignore honored]';
+
+/**
+ * The same echo for a search **outside** the open workspace folder: `search.exclude` and
+ * `files.exclude` describe the workspace, so they are not applied out there — only the
+ * directories that are never worth walking are, in both execution paths.
+ */
+const OUTSIDE_SCOPE_NOTE =
+  '\n…[scope: the root is outside the workspace — search.exclude/files.exclude not applied; .git and ' +
+  'node_modules/out/dist/build/.spinney are always skipped]';
 
 /** Why a search stopped before it had scanned everything. */
 type CapReason = 'none' | 'matches' | 'wall' | 'files';
@@ -81,7 +93,7 @@ interface SearchOutcome {
   matches: number;
   files: number;
   reason: CapReason;
-  /** How many exclusions were in effect. */
+  /** How many `search.exclude` / `files.exclude` patterns were in effect (0 outside the workspace). */
   scope: number;
   via: 'rg' | 'walk';
   /** How long the child waited for a slot in the work budget (0 for the walk). */
@@ -103,8 +115,11 @@ interface SearchOptions {
   glob: RegExp | null;
   context: number;
   maxResults: number;
+  /** `search.exclude` + `files.exclude` — empty when the root is not inside the workspace. */
   excludes: string[];
   display: (full: string) => string;
+  /** `Date.now()` when the call's one budget is spent — shared by rg and the walk. */
+  deadlineAt: number;
   signal?: AbortSignal;
 }
 
@@ -116,17 +131,14 @@ function searchCapNote(reason: CapReason, maxResults: number, skippedLarge: numb
       `reached the ${maxResults}-match cap (hard cap ${MAX_SEARCH_MATCHES}) — results may be incomplete; ` +
         'narrow the pattern, add a glob, or raise maxResults',
     );
-  } else if (reason === 'wall') {
-    notes.push(
-      `hit the ${SEARCH_DEADLINE_MS / 1000}s search deadline — results may be incomplete; ` +
-        'narrow the pattern, add a glob, or exclude more of the tree',
-    );
   } else if (reason === 'files') {
     notes.push(
       `stopped after ${MAX_SEARCH_FILES} files — results may be incomplete; ` +
         'narrow the pattern, add a glob, or exclude more of the tree',
     );
   }
+  // `wall` has no note: a search that runs out of its budget answers an `Error:` line
+  // instead of a partial page, so there is nothing here to hand the model as results.
   if (skippedLarge > 0) {
     notes.push(`skipped ${skippedLarge} file(s) larger than ${MAX_SEARCH_FILE} bytes`);
   }
@@ -136,66 +148,98 @@ function searchCapNote(reason: CapReason, maxResults: number, skippedLarge: numb
 // ---- ripgrep -----------------------------------------------------------------
 
 /**
- * Where VS Code's bundled ripgrep lives under `vscode.env.appRoot`. Current builds
- * ship the *universal* package, one binary per platform-architecture under
- * `bin/<platform>-<arch>/`; older builds shipped `@vscode/ripgrep` with a single
- * `bin/rg` (a folder that still exists and is empty on a current build — which is
- * why the universal path is tried too). Unpacked comes first (a packaged VS Code
- * keeps the binary outside `node_modules.asar`), and plain `rg` on PATH is the last
- * resort: only the spawn `error` event can say whether that one exists.
+ * Every place a ripgrep binary may live, **in the order they are probed**:
+ *
+ * 1. the extension's own vendored copy — `media/vendor/ripgrep/<platform>-<arch>/rg`,
+ *    downloaded from the official BurntSushi/ripgrep release (see that folder's
+ *    `PROVENANCE.md`). It is first because it is the one binary whose existence the
+ *    extension itself guarantees, on every platform and in the `.vsix` as much as in a
+ *    checkout, so a search does not depend on what the host happens to bundle;
+ * 2. VS Code's bundled ripgrep under `vscode.env.appRoot`. Current builds ship the
+ *    *universal* package, one binary per platform-architecture under `bin/<platform>-<arch>/`;
+ *    older builds shipped `@vscode/ripgrep` with a single `bin/rg` (a folder that still
+ *    exists and is empty on a current build — which is why the universal path is tried
+ *    too). Unpacked comes first (a packaged VS Code keeps the binary outside
+ *    `node_modules.asar`);
+ * 3. plain `rg` on `PATH` — only the spawn can say whether that one exists.
  */
 function ripgrepCandidates(): string[] {
-  const relative = [
-    `node_modules.asar.unpacked/@vscode/ripgrep/bin/${RG_BIN}`,
-    `node_modules/@vscode/ripgrep/bin/${RG_BIN}`,
-    `node_modules.asar.unpacked/@vscode/ripgrep-universal/bin/${process.platform}-${process.arch}/${RG_BIN}`,
-    `node_modules/@vscode/ripgrep-universal/bin/${process.platform}-${process.arch}/${RG_BIN}`,
-  ];
   const appRoot = vscode.env.appRoot;
-  const bundled = appRoot ? relative.map((rel) => path.join(appRoot, rel)) : [];
-  return [...bundled, RG_BIN];
+  const bundled = appRoot
+    ? [
+        `node_modules.asar.unpacked/@vscode/ripgrep/bin/${RG_BIN}`,
+        `node_modules/@vscode/ripgrep/bin/${RG_BIN}`,
+        `node_modules.asar.unpacked/@vscode/ripgrep-universal/bin/${process.platform}-${process.arch}/${RG_BIN}`,
+        `node_modules/@vscode/ripgrep-universal/bin/${process.platform}-${process.arch}/${RG_BIN}`,
+      ].map((rel) => path.join(appRoot, rel))
+    : [];
+  return [
+    path.join(EXTENSION_ROOT, 'media', 'vendor', 'ripgrep', `${process.platform}-${process.arch}`, RG_BIN),
+    ...bundled,
+    RG_BIN,
+  ];
 }
 
 /**
- * The resolved ripgrep command, or `false` once a spawn proved there is none. The
- * verdict is cached: the answer cannot change inside a session, and probing a
- * missing binary on every call would cost a failed spawn each time.
+ * The candidates that are already known **not** to work on this machine: an absolute
+ * path that does not exist, or a binary that failed to spawn. Only the candidate that
+ * failed is forgotten — one broken binary must not disable ripgrep for the session,
+ * which is what a single "rg is gone" verdict used to do.
  */
-let ripgrepVerdict: string | false | null = null;
+const rgUnusable = new Set<string>();
+/** A vendored/bundled binary that ran this session: logged once, not once per search. */
+let rgReported: string | null = null;
 
-function resolveRipgrep(): string | null {
-  if (ripgrepVerdict !== null) {
-    return ripgrepVerdict === false ? null : ripgrepVerdict;
-  }
+/** The next candidate worth probing, or `null` once every one of them is unusable. */
+function nextRipgrep(): string | null {
   for (const candidate of ripgrepCandidates()) {
+    if (rgUnusable.has(candidate)) {
+      continue;
+    }
     if (candidate === RG_BIN) {
       // PATH: only the spawn 'error' event can answer.
-      ripgrepVerdict = candidate;
-      perf(() => `search rg=PATH (${RG_BIN})`);
+      if (rgReported !== candidate) {
+        rgReported = candidate;
+        perf(() => `search rg=PATH (${RG_BIN})`);
+      }
       return candidate;
     }
     try {
-      if (fs.existsSync(candidate)) {
-        ripgrepVerdict = candidate;
-        // Logged once per session: whether this build can reach VS Code's bundled ripgrep
-        // decides whether the fix is in play at all, and a report from a machine where it
-        // silently fell back to the in-process walk would otherwise look identical.
-        perf(() => `search rg=${candidate}`);
-        return candidate;
+      if (!fs.existsSync(candidate)) {
+        rgUnusable.add(candidate);
+        continue;
       }
     } catch {
-      // Unreadable candidate: try the next one.
+      rgUnusable.add(candidate);
+      continue;
     }
+    if (rgReported !== candidate) {
+      rgReported = candidate;
+      // Logged once per session: which ripgrep answered decides whether the vendored
+      // binary (or the host's) is in play at all, and a report from a machine that
+      // silently fell back to the in-process walk would otherwise look identical.
+      perf(() => `search rg=${candidate}`);
+    }
+    return candidate;
   }
-  ripgrepVerdict = false;
-  perf('search rg=missing (every search falls back to the in-process walk — the fix is NOT in play)');
+  if (rgReported !== 'missing') {
+    rgReported = 'missing';
+    perf('search rg=missing (no vendored, bundled or PATH rg — searches use the in-process walk)');
+  }
   return null;
 }
 
-/** Give up on ripgrep for this session (a missing binary, or one that cannot run). */
-function forgetRipgrep(): void {
-  ripgrepVerdict = false;
-  perf('search rg spawn failed — this session falls back to the in-process walk');
+/**
+ * Give up on **one** binary (a spawn failure, or a file that exists and cannot run):
+ * that candidate is dropped from the probe list and the next one is tried, so a stale
+ * bundled `rg` no longer costs the session its ripgrep.
+ */
+function forgetRipgrep(command: string): void {
+  rgUnusable.add(command);
+  if (rgReported === command) {
+    rgReported = null;
+  }
+  perf(() => `search rg=${command} cannot run — trying the next candidate`);
 }
 
 /**
@@ -207,8 +251,10 @@ function forgetRipgrep(): void {
  * cwd'd in, and `-e` keeps a pattern starting with `-` from being read as a flag.
  *
  * No `--no-ignore`: honouring `.gitignore`/`.ignore` is deliberate. `--hidden` keeps
- * dot-directories searchable (the old walk did search them); `.git` is excluded
- * explicitly, since it is the one hidden tree that is always huge.
+ * dot-directories searchable (the old walk did search them). `SKIP_DIRS` goes in as
+ * globs so rg prunes exactly the directories the walk does — `.git` first among them,
+ * since it is the one hidden tree that is always huge, and `out/`, `dist/`,
+ * `node_modules/` and the agent's own `.spinney/` scratch after it.
  */
 function rgArgs(opts: SearchOptions): string[] {
   const args = [
@@ -229,6 +275,9 @@ function rgArgs(opts: SearchOptions): string[] {
   }
   if (opts.rawGlob) {
     args.push(`--glob=${opts.rawGlob}`);
+  }
+  for (const dir of SKIP_DIRS) {
+    args.push(`--glob=!**/${dir}/**`);
   }
   for (const exclude of opts.excludes) {
     args.push(`--glob=!${exclude}`);
@@ -293,16 +342,29 @@ function looksBinary(buffer: Buffer): boolean {
 }
 
 /**
+ * What one ripgrep attempt answered: the hits (possibly a budget stop), a **refusal**
+ * of the query itself (`outcome: null` — the pattern is outside rg's dialect, so the
+ * walk is the honest answer and the next candidate would refuse it too), or a binary
+ * that **could not run** (`candidateDead` — that candidate is forgotten and the next
+ * one is tried).
+ */
+interface RgAttempt {
+  outcome: SearchOutcome | null;
+  candidateDead: boolean;
+}
+
+/**
  * Run ripgrep for one search in a **child process** — off the extension host's only
  * JS thread, which is the whole point: a "does this exist?" search no longer has to
  * scan the tree on the thread the UI runs on.
  *
- * The child is killed the moment `maxResults` matches are in, and again at the
- * wall-clock deadline. Resolves `null` when rg could not run at all (no binary, or a
- * pattern/glob it refused), so the caller can fall back to the walk; otherwise it
- * resolves with the hits collected so far.
+ * The child is killed the moment `maxResults` matches are in, and again when the
+ * call's one budget (`opts.deadlineAt`) runs out — the timer is armed with whatever is
+ * *left* of it, so a slot queued behind the work budget comes out of the same budget.
+ * Resolves with `outcome: null` when rg cannot answer this query, so the caller can
+ * fall back to the walk; otherwise it resolves with the hits collected so far.
  */
-async function runRipgrep(command: string, opts: SearchOptions): Promise<SearchOutcome | null> {
+async function runRipgrep(command: string, opts: SearchOptions): Promise<RgAttempt> {
   // Take a slot before the child exists: this is the work budget (see RG_CONCURRENCY).
   // The wait is reported on the `search-files` line: with fifteen sub-agents searching at
   // once it is the number that says whether the budget is doing its job.
@@ -315,6 +377,25 @@ async function runRipgrep(command: string, opts: SearchOptions): Promise<SearchO
   }
   /** The slot wait only — measured *before* the child exists, never the scan's own time. */
   const gateWaitMs = Date.now() - gateStarted;
+  // The budget is one budget: a call that spent it waiting for a slot has nothing left
+  // for the child, and says so without spawning anything.
+  const remaining = opts.deadlineAt - Date.now();
+  if (remaining <= 0) {
+    rgGate.release();
+    return {
+      outcome: {
+        results: [],
+        matches: 0,
+        files: 0,
+        reason: 'wall',
+        scope: opts.excludes.length,
+        via: 'rg',
+        waitMs: gateWaitMs,
+        skippedLarge: 0,
+      },
+      candidateDead: false,
+    };
+  }
   // Counted as live host work for the whole lifetime of the child: the scan runs off the
   // loop, but its output is read and parsed *on* it, which is what a `lag blocked` line
   // has to be able to name (`work=[rg:6]` with the gate in place, `rg:14` without it).
@@ -324,7 +405,7 @@ async function runRipgrep(command: string, opts: SearchOptions): Promise<SearchO
     rgGate.release();
     endWork();
   };
-  return new Promise<SearchOutcome | null>((resolve) => {
+  return new Promise<RgAttempt>((resolve) => {
     let child: ChildProcess;
     try {
       child = spawn(command, rgArgs(opts), {
@@ -334,7 +415,8 @@ async function runRipgrep(command: string, opts: SearchOptions): Promise<SearchO
       });
     } catch {
       releaseSlot();
-      resolve(null);
+      forgetRipgrep(command);
+      resolve({ outcome: null, candidateDead: true });
       return;
     }
 
@@ -346,6 +428,7 @@ async function runRipgrep(command: string, opts: SearchOptions): Promise<SearchO
     let searched = 0;
     let reason: CapReason = 'none';
     let refused = false;
+    let dead = false;
     let settled = false;
     let buffered = '';
     let deadline: ReturnType<typeof setTimeout> | undefined;
@@ -361,23 +444,25 @@ async function runRipgrep(command: string, opts: SearchOptions): Promise<SearchO
         clearTimeout(deadline);
       }
       opts.signal?.removeEventListener('abort', onAbort);
-      resolve(
-        refused
-          ? null
-          : {
-              results,
-              matches,
-              // `searched` is rg's own count from its `end` event, which a killed run
-              // never reaches; `seen` is the files we actually saw hits in, so the
-              // larger of the two is the honest answer.
-              files: Math.max(searched, seen.size),
-              reason,
-              scope: opts.excludes.length,
-              via: 'rg',
-              waitMs: gateWaitMs,
-              skippedLarge: 0,
-            },
-      );
+      resolve({
+        outcome:
+          refused || dead
+            ? null
+            : {
+                results,
+                matches,
+                // `searched` is rg's own count from its `end` event, which a killed run
+                // never reaches; `seen` is the files we actually saw hits in, so the
+                // larger of the two is the honest answer.
+                files: Math.max(searched, seen.size),
+                reason,
+                scope: opts.excludes.length,
+                via: 'rg',
+                waitMs: gateWaitMs,
+                skippedLarge: 0,
+              },
+        candidateDead: dead,
+      });
     };
 
     const kill = (): void => {
@@ -479,10 +564,12 @@ async function runRipgrep(command: string, opts: SearchOptions): Promise<SearchO
     child.stderr?.on('data', () => undefined);
 
     child.on('error', () => {
-      // A start failure (ENOENT for `rg` on PATH, or an unusable bundled binary).
-      // This call uses the walk, and rg is given up on for the session.
-      forgetRipgrep();
-      refused = true;
+      // A start failure (ENOENT for `rg` on PATH, or a binary that cannot run). Only
+      // THIS candidate is forgotten; the caller tries the next one, and only when none
+      // is left does the walk run.
+      forgetRipgrep(command);
+      dead = true;
+      kill();
       finish();
     });
 
@@ -500,7 +587,7 @@ async function runRipgrep(command: string, opts: SearchOptions): Promise<SearchO
       finish();
     });
 
-    deadline = setTimeout(() => stop('wall'), SEARCH_DEADLINE_MS);
+    deadline = setTimeout(() => stop('wall'), Math.max(0, opts.deadlineAt - Date.now()));
     if (opts.signal) {
       opts.signal.addEventListener('abort', onAbort, { once: true });
       if (opts.signal.aborted) {
@@ -527,7 +614,9 @@ async function runWalk(opts: SearchOptions): Promise<SearchOutcome> {
   let skippedLarge = 0;
   let reason: CapReason = 'none';
   const excludePatterns = opts.excludes.map(globToRegex);
-  const deadlineAt = Date.now() + SEARCH_DEADLINE_MS;
+  // The same single budget the rg attempt was given: whatever is left of it, not a
+  // fresh twenty seconds on top.
+  const deadlineAt = opts.deadlineAt;
 
   /**
    * Does a root-relative path fall under an exclusion? A directory is probed as
@@ -636,6 +725,12 @@ async function runWalk(opts: SearchOptions): Promise<SearchOutcome> {
   };
 
   await walk(opts.root, '');
+  // The walk only checks the clock between files, so the last one can carry it past the
+  // budget: a search that finished *late* ran out of time just the same, and must answer
+  // the timeout instead of a page that is missing whatever it did not reach.
+  if (reason === 'none' && Date.now() >= deadlineAt) {
+    reason = 'wall';
+  }
   return {
     results,
     matches,
@@ -663,7 +758,7 @@ export const searchFilesTool: AgentTool = {
     function: {
       name: 'search_files',
       description:
-        'Search files in the workspace for a regex pattern and return matching "file:line: text" lines (paths are relative to the harness root; absolute when no folder is open). `path` may be a file or a directory (default = the harness root: the workspace folder, or the harness scratch folder when no folder is open). An optional glob (e.g. "**/*.ts") filters which files are searched; caseSensitive defaults to false; maxResults caps the matches (default 200, hard cap 300); context adds up to 10 surrounding lines per match (context lines use "-" separators, e.g. "src/a.ts-11- text"). Heavy dirs (node_modules/.git/out...) are skipped automatically. The search honors `search.exclude`, `files.exclude` and `.gitignore`, so a path the user excluded is never reported; the result says so when an exclusion was in effect. Binary files are skipped. When the search stops before scanning everything (match cap / oversized files / the deadline) the result ends with an explicit note — never treat a capped result as complete. Prefer this over searching through the shell: the result tells excluded from absent instead of reading as "nothing found".',
+        'Search files for a regex pattern and return matching "file:line: text" lines (paths are relative to the harness root; absolute when no folder is open). `path` may be a file or a directory (default = the harness root: the workspace folder, or the harness scratch folder when no folder is open). An optional glob (e.g. "**/*.ts") filters which files are searched; caseSensitive defaults to false; maxResults caps the matches (default 200, hard cap 300); context adds up to 10 surrounding lines per match (context lines use "-" separators, e.g. "src/a.ts-11- text"). Prefer MANY SMALL CHEAP searches to one wide one: a narrow path plus a tight pattern is answered in milliseconds, while a whole-tree scan of a vague pattern can only end in nothing or a timeout. Every call has ONE hard time budget — spinney.searchTimeoutSeconds, 10 seconds by default — shared by the whole call, so narrowing the path, tightening the pattern, adding a glob or lowering context is how you stay inside it; when the budget runs out the result is an `Error: search_files timed out after N s …` line with NO hits and no count, and the answer is to search a smaller part of the tree (if even a simple query times out, ask the user to raise spinney.searchTimeoutSeconds). Inside the workspace the search honors `search.exclude`, `files.exclude` and `.gitignore`, so a path the user excluded is never reported and the result says so (`…[scope: …]`); a root OUTSIDE the workspace is searched without those two settings, because they describe the workspace. `.git` and node_modules/out/dist/build/.spinney are skipped in both cases, and binary files are skipped too. When the search stops before scanning everything (match cap / file ceiling / oversized files) the result ends with an explicit note — never treat a capped result as complete. Prefer this over searching through the shell: the result tells excluded from absent instead of reading as "nothing found", and the shell has no budget behind it.',
       parameters: {
         type: 'object',
         properties: {
@@ -718,18 +813,27 @@ export const searchFilesTool: AgentTool = {
     }
 
     const started = Date.now();
+    // ONE budget for the whole call, read live: the rg child, a slot queued behind the
+    // work budget, and the fallback walk all draw from it — a search cannot spend ten
+    // seconds in ripgrep and ten more in the walk.
+    const timeoutSec = searchTimeoutSeconds();
+    const deadlineAt = started + timeoutSec * 1000;
 
-    /** Assemble (and log) one search's result. */
-    const report = (outcome: SearchOutcome, scoped: boolean): string => {
-      const scope = scoped ? SCOPE_NOTE : '';
-      const text = outcome.results.length
-        ? outcome.results.join('\n') + searchCapNote(outcome.reason, maxResults, outcome.skippedLarge) + scope
-        : `(no matches)${scope}`;
+    /** Assemble (and log) one search's result. A budget stop answers an `Error:` line. */
+    const report = (outcome: SearchOutcome, scopeNote: string): string => {
       perf(
         () =>
           `search-files ms=${Date.now() - started} files=${outcome.files} matches=${outcome.matches} ` +
           `capped=${outcome.reason} via=${outcome.via} scope=${outcome.scope} wait=${outcome.waitMs}ms`,
       );
+      // A timeout is not a partial result: no hits and no count, because a page that
+      // stops mid-tree reads as "this is all there is".
+      if (outcome.reason === 'wall') {
+        return searchTimeoutError('search_files', root, timeoutSec);
+      }
+      const text = outcome.results.length
+        ? outcome.results.join('\n') + searchCapNote(outcome.reason, maxResults, outcome.skippedLarge) + scopeNote
+        : `(no matches)${scopeNote}`;
       return limitInline(text, 'search_files');
     };
 
@@ -774,12 +878,17 @@ export const searchFilesTool: AgentTool = {
           waitMs: 0,
           skippedLarge: 0,
         },
-        false,
+        '',
       );
     }
 
-    // The user's own exclusions, plus `.git` — which is never worth walking.
-    const excludes = [...new Set([...searchExcludeGlobs(), ALWAYS_EXCLUDED])];
+    // `search.exclude` / `files.exclude` describe the WORKSPACE, so they only apply when
+    // the search root is inside the open folder — a search out in the global storage or
+    // another repository is not narrowed by this workspace's settings. `SKIP_DIRS`
+    // (node_modules, .git, out, dist, build, .spinney) is a property of the tool, not of
+    // the workspace, and always applies — to rg as `--glob` negations and to the walk.
+    const insideWorkspace = isInsideWorkspace(wsRoot, root);
+    const excludes = insideWorkspace ? [...new Set(searchExcludeGlobs())] : [];
     const options: SearchOptions = {
       root,
       rawPattern: pattern,
@@ -791,18 +900,53 @@ export const searchFilesTool: AgentTool = {
       maxResults,
       excludes,
       display,
+      deadlineAt,
       signal,
     };
 
-    const rg = resolveRipgrep();
+    // Every candidate in order, and only THIS candidate is dropped on a spawn failure:
+    // `nextRipgrep()` walks the vendored binary, VS Code's bundled ones and then PATH,
+    // skipping whatever already failed. Only when none is left does the walk run — inside
+    // the same budget.
     let outcome: SearchOutcome | null = null;
-    if (rg) {
-      outcome = await runRipgrep(rg, options);
+    for (;;) {
+      const rg = nextRipgrep();
+      if (!rg) {
+        break;
+      }
+      const attempt = await runRipgrep(rg, options);
+      if (attempt.outcome) {
+        outcome = attempt.outcome;
+        break;
+      }
+      if (!attempt.candidateDead) {
+        // rg ran and refused the query (a pattern outside its dialect): the next
+        // candidate would refuse it too, so the walk is the honest answer.
+        break;
+      }
     }
     ensureNotAborted(signal);
     if (!outcome) {
       outcome = await runWalk(options);
     }
-    return report(outcome, excludes.length > 0 || hasIgnoreFile(root));
+    const scopeNote = insideWorkspace
+      ? excludes.length > 0 || hasIgnoreFile(root)
+        ? SCOPE_NOTE
+        : ''
+      : OUTSIDE_SCOPE_NOTE;
+    return report(outcome, scopeNote);
   },
 };
+
+/**
+ * Is `root` inside the open workspace folder? A parent of it is **outside**: the two
+ * `*.exclude` settings describe what the workspace contains, and a search above it is
+ * asking a different question.
+ */
+function isInsideWorkspace(wsRoot: string | null, root: string): boolean {
+  if (!wsRoot) {
+    return false;
+  }
+  const rel = path.relative(wsRoot, root);
+  return rel === '' || (!rel.startsWith('..') && !path.isAbsolute(rel));
+}

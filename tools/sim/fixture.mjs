@@ -9,7 +9,7 @@
  *   engine", a "CJK typography engine" and a "vendor tables" package — with generated
  *   numeric tables, dense text/locale files (CJK strings throughout), several sub-1 MB
  *   **binary assets that look like real fonts** (so the search path's binary handling is
- *   exercised), and a few text files **above the 1 MB search cap**. Roughly 3 700 files
+ *   exercised), and a few text files **above the 8 MB per-file search cap**. Roughly 3 700 files
  *   at scale 1, which stays under `MAX_SEARCH_FILES` (4000) so a whole-tree search can
  *   still finish with `capped=none` — the harness needs a *complete* scan to be
  *   comparable run to run.
@@ -44,8 +44,9 @@ export const SEARCH_TOKEN = 'SimMarker';
 export const ANCHOR_TOKEN = 'SimAnchorGtable';
 /** Present nowhere: the whole-tree hitless round. */
 export const NEVER_MATCHES = 'zzz-sim-never-matches-zzz';
-/** `src/tools/searchFiles.ts` skips a file whose size exceeds this. */
-export const OVERSIZE_BYTES = 1_000_000;
+/** `src/tools/searchFiles.ts` skips a file whose size exceeds this (8 MB since the
+ * workspace-invariant search; it used to be 1 MB). */
+export const OVERSIZE_BYTES = 8 * 1024 * 1024;
 /** Default tree size; keep the total under the tool's 4000-file ceiling. */
 export const DEFAULT_FILES = 3700;
 
