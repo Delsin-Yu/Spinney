@@ -461,7 +461,9 @@
   body, and the following tool row opens a second group. So a turn can hold several groups,
   each with its own count, its own body and its own fold state (open while its turn runs,
   folded when it ends, and a click on that header always wins); thinking rows ride the open
-  group, or the log when none is open. **Nothing is moved out of a group**: the turn's final
+  group, or the log when none is open. A message's reasoning that trails a run joins that
+  group's body even when its text arrived first, so the live turn and a repaint put it in
+  the same place. **Nothing is moved out of a group**: the turn's final
   answer is simply the flow's last text block, with no frame of its own (`.msg.assistant`
   carries no background or border). A cold card paints the flow and each group's header and
   leaves every body lazy until that group's own header is clicked (`paintStepsBody`, per

@@ -1939,19 +1939,15 @@
    */
   function addAssistant(text, error, thinking) {
     if (!messagesEl) return;
-    // An item that carries its own text closes the run of steps above it, and that
-    // closure comes **before** its reasoning: the item's row belongs above its own bubble
-    // — where the live path puts the row of a message whose text started first
-    // (`appendThinking`) — rather than inside a group its own text ends (which would also
-    // build a row into a group body a finished card keeps empty until the click). An item
-    // that is only its reasoning still rides the open group.
+    // The reasoning of this item is placed **first**, before the run above it is closed:
+    // it belongs where the reasoning of that run went — inside the open group's body
+    // when there is one, which is exactly where the live turn put it (`appendThinking`),
+    // and in the flow only when no run is open. Closing the run first would lift the row
+    // out of the group on a repaint while the live turn had left it in the body, so one
+    // card read two different ways depending on whether it had been repainted.
     const onlyRow = !String(text || '').length && !error && !!thinking;
-    if (!onlyRow) closeStepsGroup();
-    // A reasoning row that travelled with this item belongs where the reasoning of its
-    // run went: inside the open group if there is one (that is where the live path put
-    // it), else in the flow just above the text.
     const row = thinking ? addThinkingRow(thinking) : null;
-    if (!String(text || '').length && !error && row) {
+    if (onlyRow && row) {
       followActive();
       return row;
     }
@@ -2084,7 +2080,16 @@
         // its row is the one the renderer would have put above it, so it is created
         // there — never appended past the text, which is where the second row came from.
         row = makeThinkingRow('');
-        messagesEl.insertBefore(row, bubble);
+        // Reasoning that trails a run of steps belongs to that run: it joins the
+        // group's own body, the same place a repaint of the item puts it
+        // (`paintFinishedItem` queues the row into the body). Only a message with no run
+        // above it keeps its row directly above the bubble, in the flow.
+        const prev = bubble.previousElementSibling;
+        if (prev && prev.dataset && prev.dataset.kind === 'steps' && !prev._lazy) {
+          prev._body.appendChild(row);
+        } else {
+          messagesEl.insertBefore(row, bubble);
+        }
         bubble._thinkingRow = row;
       }
       textNodeOf(row._textEl).appendData(text);
@@ -2675,6 +2680,15 @@
     // live path put it (inside the open group) and then closes the run before the prose
     // is appended to the log.
     if (item.kind === 'assistant' && (String(item.text || '').length > 0 || !!item.error)) {
+      // The reasoning travels with the text but belongs to the run above it, and this
+      // group's body is still empty (`_lazy` holds its rows until the click that builds
+      // it). The row joins that queue, so it lands in the body in its original order
+      // instead of being appended before the tool rows the body receives later.
+      if (openSteps && openSteps._lazy && item.thinking) {
+        openSteps._lazy.push({ kind: 'assistant', thinking: item.thinking });
+        renderItemInto({ ...item, thinking: undefined });
+        return;
+      }
       renderItemInto(item);
       return;
     }

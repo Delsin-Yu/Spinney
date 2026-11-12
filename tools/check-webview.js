@@ -466,6 +466,16 @@ function makeElement(id) {
     get firstElementChild() {
       return this.children.length > 0 ? this.children[0] : null;
     },
+    // The reasoning of a message whose text came first looks at what the bubble follows,
+    // to join the run of steps above it: an append that lands in the wrong container is
+    // exactly the "one card read two ways" this stub exists to catch, so the neighbour is
+    // resolved rather than left undefined.
+    get previousElementSibling() {
+      const parent = this.parentElement;
+      if (!parent || !Array.isArray(parent.children)) return null;
+      const at = parent.children.indexOf(this);
+      return at > 0 ? parent.children[at - 1] : null;
+    },
     classList: {
       _set: new Set(),
       toggle(name, force) {
@@ -4281,9 +4291,8 @@ if (contextLabel !== 'ctx 50%') {
   // (a) A live turn: thinking, a run of one step, the reasoning and the text of the
   // message that follows it, a second run of two steps, the final answer. The text
   // between the two runs must be a **top-level** block, and the second message's
-  // reasoning is the row *above its own text* — one message is one row and one block,
-  // whatever order the provider streamed the two halves in (a `thinkingDelta` after the
-  // text started joins that row in place, it does not open a second one after it).
+  // reasoning rides the run it trails, inside that group's body — the same place a
+  // repaint of the item puts it — while its prose stays in the flow.
   const mountEmpty = (status) => {
     dispatch({ type: 'reset' });
     dispatch({ type: 'tree', viewId: NODE, activeId: NODE, rootId: NODE, nodes: [node(NODE, status)] });
@@ -4304,11 +4313,11 @@ if (contextLabel !== 'ctx 50%') {
   dispatch({ type: 'done', nodeId: NODE });
 
   const liveKinds = kindsOf();
-  if (liveKinds.join(',') !== 'thinking,steps,thinking,assistant,steps,assistant') {
+  if (liveKinds.join(',') !== 'thinking,steps,assistant,steps,assistant') {
     problems.push(
       `a live turn of two runs renders ${JSON.stringify(liveKinds)} in its log, expected ` +
-        '"thinking,steps,thinking,assistant,steps,assistant" (one group per run of tool rows, the second message\'s one ' +
-        'row above its own text, and the text between the runs in the flow)',
+        '"thinking,steps,assistant,steps,assistant" (one group per run of tool rows, the second message\'s reasoning ' +
+        'inside the run it trails, and the text between the runs in the flow)',
     );
   }
   {
