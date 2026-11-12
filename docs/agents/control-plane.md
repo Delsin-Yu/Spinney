@@ -106,9 +106,9 @@ terminal, a running sub-agent batch, or a completion notice already queued for i
 exactly the set `runningNodes()` / `lockedNodes()` reports — the hop stays armed: its
 answer is recorded on `hop.pendingReturn`, `kickHopWork` re-checks once a second, and
 every later turn end refreshes the answer. The receipt is queued only when the child is
-idle, and the hop is retired **there**, not at the first turn end. A `start_detached`
-job is not part of that set by design: it never reports back, so a dev server cannot
-hold a hop forever. This wait is not cosmetic: without it the hop returned at the
+idle, and the hop is retired **there**, not at the first turn end. A detached job
+(`run_type: "detached"`) is not part of that set by design: it never reports back, so a
+dev server cannot hold a hop forever. This wait is not cosmetic: without it the hop returned at the
 child's first turn end while its gate run continued in the background, and the origin
 went on to clear the child's repo lock and run its own commands on the same working tree.
 
@@ -122,7 +122,7 @@ Guards: **one hop per origin session** (a hop in another session is independent,
 sessions can hop at once), the origin and the return node must exist, `returnNodeId` is
 refused with `fire_and_forget`, a hop is refused while its session owns a running
 **node** background terminal (`rt.hasRunningNodeBackground()` in `handleHopSession` — a
-`start_detached` job is fire-and-forget and deliberately does not block a hop), and the
+detached job is fire-and-forget and deliberately does not block a hop), and the
 whole tool is off while `spinney.hopSession.enabled` is `false` (`hopEnabled`, apart from
 `canHop`, so `list_nodes` / `rename_session` stay). Deleting a session retires every hop
 that touches it (origin or child). The bookkeeping is in memory only: a window reload

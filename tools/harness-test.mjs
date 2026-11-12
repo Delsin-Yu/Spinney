@@ -97,7 +97,7 @@ Suites:
   sessions      two POST /session/start sessions: distinct, listed, message ownership
   concurrency   both sessions report a live run at the same time
   navigation    POST /navigate + POST /continue on one session, another keeps running
-  background    a start_in_background job's ownership as reported by /state
+  background    a run_type "background" job's ownership as reported by /state
   signals       a finished job's notice lands INSIDE the owning node: no new node,
                 unchanged node count, backgroundNodes still the turn node
   branch        two nodes of ONE session stream at once; node-scoped POST /stop
@@ -989,7 +989,7 @@ function longRunPrompt(runId, label, ms = 15000) {
 
 /** A prompt that makes the agent start an exec_command in the background. */
 function backgroundPrompt(runId) {
-  const args = JSON.stringify({ command: sleepCmd(25000), timeout_behavior: 'start_in_background' });
+  const args = JSON.stringify({ command: sleepCmd(25000), run_type: 'background' });
   return (
     `HARNESS-TEST ${runId} BG: call the exec_command tool exactly once with ${args}, ` +
     'then reply with the returned background id and nothing else. Do not call any other tool.'
@@ -1002,11 +1002,7 @@ function backgroundPrompt(runId) {
  * end, and the origin resumed while the child still owned the job.
  */
 function hopBusyChildPrompt(runId) {
-  const args = JSON.stringify({
-    command: sleepCmd(30000),
-    timeout: 120,
-    timeout_behavior: 'start_in_background',
-  });
+  const args = JSON.stringify({ command: sleepCmd(30000), run_type: 'background' });
   return (
     `HARNESS-TEST ${runId} HOP-CHILD: call the exec_command tool exactly once with ${args}, ` +
     'then reply with the single word "ok" and end your turn immediately. ' +
@@ -1022,7 +1018,7 @@ function hopBusyChildPrompt(runId) {
  * finding them in a dump can only mean the host injected them.
  */
 function signalPrompt(runId, { jobMs = 6000, busyMs = 12000 } = {}) {
-  const job = JSON.stringify({ command: sleepCmd(jobMs), timeout_behavior: 'start_in_background' });
+  const job = JSON.stringify({ command: sleepCmd(jobMs), run_type: 'background' });
   const wait = JSON.stringify({ command: sleepCmd(busyMs) });
   return (
     `HARNESS-TEST ${runId} SIG: a timing check of background terminals. ` +
@@ -1529,7 +1525,7 @@ async function suiteBackground(cx) {
       `${dump.parsed.messages.length} message(s)`,
     );
     bgCalls = toolCallsOf(dump.parsed, 'exec_command').filter(
-      (c) => c.args && c.args.timeout_behavior === 'start_in_background',
+      (c) => c.args && c.args.run_type === 'background',
     );
   }
   if (observed.ok && bgCalls.length > 0) {
@@ -1720,9 +1716,9 @@ async function suiteSignals(cx) {
     const read = await readTranscript(cx, sessionId, ownerNode, { waitMs: jobBudgetMs });
     const calls = read.skip
       ? []
-      : toolCallsOf(read.parsed, 'exec_command').filter((c) => c.args && c.args.timeout_behavior === 'start_in_background');
+      : toolCallsOf(read.parsed, 'exec_command').filter((c) => c.args && c.args.run_type === 'background');
     if (read.skip || calls.length === 0) {
-      checks.subskip('the run started a background job', read.skip ?? `${calls.length} start_in_background call(s) in the dump`);
+      checks.subskip('the run started a background job', read.skip ?? `${calls.length} run_type "background" call(s) in the dump`);
       return suiteResult(name, 'SKIP', 'inconclusive: no background job observable (the prompt may not have driven one)', checks);
     }
     checks.check(
@@ -1880,7 +1876,7 @@ async function signalsWithoutNotice(cx, checks, { name, sessionId, ownerNode, wa
   }
   const read = readTranscriptNow(cx, sessionId, ownerNode);
   const absorbed = read
-    ? ['join_background', 'kill_background'].some((tool) => toolCallsOf(read.parsed, tool).length > 0)
+    ? ['wait_for_command', 'kill_command'].some((tool) => toolCallsOf(read.parsed, tool).length > 0)
     : false;
   if (absorbed) {
     checks.subskip(
@@ -2293,7 +2289,7 @@ function suiteSelftest(cx) {
     '\n' +
     JSON.stringify({ type: 'message', index: 0, role: 'user', content: 'hello MARK' }) +
     '\n' +
-    JSON.stringify({ type: 'message', index: 1, role: 'assistant', content: '', tool_calls: [{ id: 'c1', function: { name: 'exec_command', arguments: '{"timeout_behavior":"start_in_background"}' } }] }) +
+    JSON.stringify({ type: 'message', index: 1, role: 'assistant', content: '', tool_calls: [{ id: 'c1', function: { name: 'exec_command', arguments: '{"run_type":"background"}' } }] }) +
     '\n';
   const t = parseTranscriptJsonl(jsonl);
   checks.check('parseTranscriptJsonl reads meta + messages', t.meta.nodeId === 'n1' && t.messages.length === 2 && t.lines === 3);
@@ -2303,7 +2299,7 @@ function suiteSelftest(cx) {
   checks.check('transcriptText spans meta and messages', transcriptText(t).includes('hello MARK') && transcriptText(t).includes('n1'));
   checks.check(
     'toolCallsOf parses arguments',
-    toolCallsOf(t, 'exec_command')[0]?.args.timeout_behavior === 'start_in_background' &&
+    toolCallsOf(t, 'exec_command')[0]?.args.run_type === 'background' &&
       toolCallsOf(t, 'read_file').length === 0,
   );
   checks.check(
@@ -2323,7 +2319,7 @@ function suiteSelftest(cx) {
   const sigCall = {
     role: 'assistant',
     content: '',
-    tool_calls: [{ id: 'c1', function: { name: 'exec_command', arguments: '{"timeout_behavior":"start_in_background"}' } }],
+    tool_calls: [{ id: 'c1', function: { name: 'exec_command', arguments: '{"run_type":"background"}' } }],
   };
   const mid = findSignalNotice(
     parseTranscriptJsonl(
@@ -2376,7 +2372,7 @@ function suiteSelftest(cx) {
   checks.check(
     'signalPrompt drives a background job then two foreground rounds',
     signalPrompt('RID').includes('HARNESS-TEST RID SIG') &&
-      signalPrompt('RID').includes('"timeout_behavior":"start_in_background"') &&
+      signalPrompt('RID').includes('"run_type":"background"') &&
       signalPrompt('RID').includes('6000') &&
       signalPrompt('RID', { jobMs: 1500 }).includes('1500'),
   );
@@ -2405,7 +2401,7 @@ function suiteSelftest(cx) {
     'longRunPrompt / backgroundPrompt carry the marker + tool args',
     longRunPrompt('RID', 'A').includes('HARNESS-TEST RID A') &&
       longRunPrompt('RID', 'A').includes('exec_command') &&
-      backgroundPrompt('RID').includes('"timeout_behavior":"start_in_background"'),
+      backgroundPrompt('RID').includes('"run_type":"background"'),
   );
 
   // -- branch helpers

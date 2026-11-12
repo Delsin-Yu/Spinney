@@ -1,169 +1,150 @@
 import { AgentTool } from '../agent/types';
 import type { BackgroundAccess } from '../chat/backgroundHub';
 import { formatDuration } from '../duration';
-import { remainingBudgetMs, type BackgroundTask } from './background';
-import { commandMaxForegroundDurationSec } from './execCommand';
+import type { BackgroundTask } from './background';
 import { limitInline } from './index';
 
-/**
- * The budget a task was started with, or `null` when it has none. Kept as a tiny
- * helper because both tools quote it and both need the same answer: a job without
- * a budget keeps the wording it had before budgets existed.
- */
-function budgetMsOf(task: BackgroundTask): number | null {
-  return typeof task.timeoutMs === 'number' ? task.timeoutMs : null;
-}
+/** What `wait_for_command` waits when the call states no `seconds` of its own. */
+const DEFAULT_WAIT_SEC = 30;
+/** The shortest and longest wait one call may ask for (clamped, never refused). */
+const MIN_WAIT_SEC = 1;
+const MAX_WAIT_SEC = 300;
 
 /**
- * The refusal a `join_background` returns when the job is **detached**
- * (`start_detached`): session-wide and fire-and-forget. Whether or not the call
- * gave it a deadline, no completion notice ever comes back for it and no turn ever
- * waits for it, so there is nothing for a join to return — and nothing a refusal
- * takes away from the agent either.
+ * The wait length a `wait_for_command` call asks for, in seconds: `seconds` when it
+ * is a usable number, else {@link DEFAULT_WAIT_SEC}, clamped to
+ * [{@link MIN_WAIT_SEC}, {@link MAX_WAIT_SEC}].
  *
- * It is refused *outright*, finished or still running. The status does not matter:
- * the two reasons a join could ever be useful — a bounded wait, or a notice to
- * come back on — do not exist for this job, and `check_background_terminal` answers
- * exactly what a join would have (the accumulated output, and the exit code once
- * there is one). Same voice as the two refusals below: name the id, say nothing
- * changed, and name both tools that *do* work.
+ * Clamped rather than refused on purpose: a wait is a bend of the turn, not a
+ * malformed call, and a model that asked for 10 minutes can act on "you waited
+ * 300 s" in the same answer instead of losing a round trip to an argument error.
  */
-function refuseJoinDetached(id: number): string {
-  return (
-    `Background terminal ${id} is a detached job (timeout_behavior "start_detached"): it is session-wide and ` +
-    `fire-and-forget, so it never sends a completion notice and no turn ever waits for it — joining it is ` +
-    `meaningless and this join was refused; nothing changed. ` +
-    `Read it with check_background_terminal(${id}) instead: it reports the job's accumulated output, and its ` +
-    `exit code once the job has ended. ` +
-    `If you want to end the command rather than let it run, call kill_background(${id}).`
-  );
+function waitSeconds(args: Record<string, unknown>): number {
+  const raw = typeof args.seconds === 'number' && Number.isFinite(args.seconds) ? args.seconds : DEFAULT_WAIT_SEC;
+  return Math.min(MAX_WAIT_SEC, Math.max(MIN_WAIT_SEC, raw));
+}
+
+/** A timer that never keeps the extension host alive on its own. */
+function delay(ms: number): Promise<'timeout'> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => resolve('timeout'), ms);
+    (timer as unknown as { unref?: () => void }).unref?.();
+  });
+}
+
+/** One line of status, used by both tools so the two never disagree on a job's state. */
+function statusLine(task: BackgroundTask): string {
+  const dur = formatDuration((task.finishedAt ?? Date.now()) - task.startedAt);
+  if (task.killed) {
+    return task.killUnconfirmed
+      ? `Command ${task.id} was killed after ${dur}, but the process tree did not report an exit. (command: ${task.command})`
+      : `Command ${task.id} was killed after ${dur}. (command: ${task.command})`;
+  }
+  if (task.status === 'running') {
+    return `Command ${task.id} is running. (command: ${task.command}, ${dur} elapsed)`;
+  }
+  return `Command ${task.id} finished with exit code ${task.exitCode ?? 'unknown'} after ${dur}.`;
 }
 
 /**
- * The refusal a gated `join_background` returns when the job has **no deadline**:
- * nothing bounds it, so waiting on it could hold the turn for as long as it likes.
+ * What `wait_for_command` answers when the command outlived the wait.
  *
- * This is guidance, not a malformed call, so it is a plain tool result (an
- * `Error:` prefix would tell the model its arguments were wrong and invite a
- * retry with the same pid). It is also deliberately imperative — the *action* the
- * agent is asked to take is to end its turn, because the completion notice is
- * what will reach it: the refusal itself changed nothing.
+ * It is a **plain result**, not an `Error:`: nothing was malformed — the command
+ * simply is still running — and an `Error:` would invite a retry with the same id,
+ * which is the only thing this text exists to steer away from. The wait itself
+ * changed nothing, so the sentence says that too, then names the three moves that
+ * are actually left: read the status, wait again, or end the command and run a
+ * quieter one.
  */
-function refuseJoinNoDeadline(id: number, limitSec: number): string {
-  return (
-    `Background terminal ${id} has no deadline, so it can run longer than the ${limitSec} s a turn may wait, ` +
-    `and this join was refused — nothing changed. ` +
-    `End your turn instead: the completion notice for id ${id} will reach you when it finishes ` +
-    `(check_background_terminal(${id}) reports it sooner). ` +
-    `If you want to end the command rather than wait for it, call kill_background(${id}).`
+function waitTimedOutText(task: BackgroundTask, waitedSec: number): string {
+  const dur = formatDuration((task.finishedAt ?? Date.now()) - task.startedAt);
+  const out = task.handle.getOutput().trim();
+  const detached = task.detached
+    ? ` This job is detached, so no completion notice will arrive for it either: its result is read only by ` +
+      `asking again (check_command(${task.id}) or another wait_for_command(${task.id})).`
+    : '';
+  return limitInline(
+    `Command ${task.id} is still running after this ${waitedSec} s wait (command: ${task.command}, ${dur} elapsed); ` +
+      `nothing changed and the command keeps running.${detached} ` +
+      `This is not a failure: the command simply outlived the wait. ` +
+      `check_command(${task.id}) is a status read, not a wait; wait_for_command(${task.id}) may be called again ` +
+      `to wait longer; kill_command(${task.id}) stops it, and if it is noisier or slower than the work needs, ` +
+      `killing it and running a quieter command is the other way out.` +
+      (out ? `\nOutput so far:\n${out}` : ''),
+    'wait_for_command',
   );
 }
 
-/**
- * The refusal a gated `join_background` returns when the job *has* a budget but
- * more of it is left than a turn may wait. Names the remaining budget and the
- * budget it was started with, so the model can tell "wait a little longer" from
- * "this job is still 25 minutes away".
- */
-function refuseJoinOverBudget(id: number, limitSec: number, remainingMs: number, budgetMs: number): string {
-  return (
-    `Background terminal ${id} has ${formatDuration(remainingMs)} of its ${formatDuration(budgetMs)} budget left, ` +
-    `which is longer than the ${limitSec} s a turn may wait, so this join was refused and nothing changed. ` +
-    `End your turn instead: the completion notice for id ${id} will reach you when it finishes ` +
-    `(check_background_terminal(${id}) reports it sooner). ` +
-    `If you want to end the command rather than wait for it, call kill_background(${id}).`
-  );
-}
-
-export function makeCheckBackgroundTool(getAccess: () => BackgroundAccess | null): AgentTool {
+export function makeCheckCommandTool(getAccess: () => BackgroundAccess | null): AgentTool {
   return {
     definition: {
       type: 'function',
       function: {
-        name: 'check_background_terminal',
+        name: 'check_command',
         description:
-          'Check the status of a background terminal started by exec_command (timeout_behavior = background_when_timeout / start_in_background / start_detached). Returns whether it is running or finished, its exit code (when finished), and the output accumulated so far. This is a status read, not a wait: a job that has not finished answers the same thing however often it is asked, and calling it in a loop only burns round-trips. A node job (background_when_timeout / start_in_background) notifies you when it ends, so continue other work or end your turn instead of polling; a detached job (start_detached) never notifies, so read it once when you actually need its result.',
+          'Report the status of a command started by exec_command (its id is returned by the call). Answers whether it is running or finished, its exit code (when finished) and the output accumulated so far. This is a status read, not a wait: a command that has not finished answers the same thing however often it is asked. Do not poll a running command. A node job (run_type "background", or a foreground call moved to the background) notifies you by itself when it ends, so continue other work or end your turn; a detached job (run_type "detached") never notifies, so read it once when you actually need its result. Use wait_for_command to wait for a command instead of checking it repeatedly.',
         parameters: {
           type: 'object',
           properties: {
-            pid: { type: 'number', description: 'The background terminal id returned by exec_command.' },
+            pid: { type: 'number', description: 'The command id returned by exec_command.' },
           },
           required: ['pid'],
         },
       },
     },
-    async execute(args, signal) {
+    async execute(args) {
       const access = getAccess();
       const sessionId = access?.currentOwner()?.sessionId ?? null;
       if (!access || !sessionId) {
-        return 'Error: background terminals are not available in this session.';
+        return 'Error: commands are not available in this session.';
       }
       const id = Number(args.pid);
       if (!Number.isFinite(id)) {
-        return 'Error: check_background_terminal requires a numeric pid.';
+        return 'Error: check_command requires a numeric pid.';
       }
       // Ids are session-local, so a job spawned from another branch of the same
       // session still resolves: the hub maps the id back to its owning node.
       const task = access.hub.lookup(sessionId, id)?.task;
       if (!task) {
-        return `Error: no background terminal with id ${id}.`;
+        return `Error: no command with id ${id}.`;
       }
-      // Elapsed time of the job the agent is asking about: a running task is
-      // measured to now, a finished (or killed) one to its recorded finish time so
-      // the number is stable across repeated checks.
-      const dur = formatDuration((task.finishedAt ?? Date.now()) - task.startedAt);
       const out = task.handle.getOutput().trim();
-      // The budget a job was given, when it has one. It is quoted next to the
-      // elapsed time so one line answers both halves of "how long has this been
-      // going, and how long may it go": without it a model cannot tell a job that
-      // is nearly out of time from one that has barely started.
-      const budget = budgetMsOf(task);
-      // "Killed" alone would claim a clean end. A kill that could not be confirmed
-      // (no exit observed before the deadline) is said out loud, so the model does
-      // not treat a process tree that may still be alive as gone. A kill the budget
-      // caused outranks both: it is the one ending the agent should expect, and the
-      // one where "killed" alone would look like the user's doing.
-      const statusLine = task.killed
-        ? task.killReason === 'timeout' && budget !== null
-          ? `Background terminal ${id} was killed after ${dur} — its ${formatDuration(budget)} budget ran out. (command: ${task.command})`
-          : task.killUnconfirmed
-            ? `Background terminal ${id} was killed after ${dur}, but the process tree did not report an exit. (command: ${task.command})`
-            : `Background terminal ${id} was killed after ${dur}. (command: ${task.command})`
-        : task.status === 'running'
-          ? budget !== null
-            ? `Background terminal ${id} is running. (command: ${task.command}, ${dur} of its ${formatDuration(budget)} budget elapsed)`
-            : `Background terminal ${id} is running. (command: ${task.command}, ${dur} elapsed)`
-          : `Background terminal ${id} finished with exit code ${task.exitCode ?? 'unknown'} after ${dur}.`;
       const outLine = out ? `\nOutput:\n${out}` : '';
-      // A running job answers the same thing however often it is asked, and in the
-      // field an agent answered that with 46 checks back to back — so the status line
-      // carries what to do instead, at the moment the model is looking at it. A node
-      // job will wake the turn on its own; a detached one never will, and its reader
+      // A running command answers the same thing however often it is asked, and in
+      // the field an agent answered that with 46 checks back to back — so the status
+      // line carries what to do instead, at the moment the model is looking at it. A
+      // node job wakes the turn on its own; a detached one never will, and its reader
       // is told the difference rather than promised a notice that cannot come.
       const hint =
         task.status !== 'running'
           ? ''
           : task.detached
-            ? `\nThis job never notifies: read it once when you actually need the result, not in a loop.`
+            ? `\nThis job never notifies: read it once when you actually need the result, not in a loop. ` +
+              `wait_for_command(${id}) waits for it up to the seconds you give.`
             : `\nYou may continue with other work or end your turn: the completion notice for id ${id} will ` +
-              `reach you when it finishes. Do not poll it — this is a status read, not a wait.`;
-      return limitInline(`${statusLine}${hint}${outLine}`, 'check_background_terminal');
+              `reach you when it finishes. Do not poll it — this is a status read, not a wait; ` +
+              `wait_for_command(${id}) waits for it and returns the moment it ends.`;
+      return limitInline(`${statusLine(task)}${hint}${outLine}`, 'check_command');
     },
   };
 }
 
-export function makeKillBackgroundTool(getAccess: () => BackgroundAccess | null): AgentTool {
+export function makeWaitForCommandTool(getAccess: () => BackgroundAccess | null): AgentTool {
   return {
     definition: {
       type: 'function',
       function: {
-        name: 'kill_background',
+        name: 'wait_for_command',
         description:
-          'Kill a background terminal identified by its pid (returned by exec_command). The process tree is torn down. Returns a short confirmation. Use when a long-running command no longer needs to keep running.',
+          'Wait for a command started by exec_command, up to `seconds` (default 30, clamped to 1–300), and return its result. It returns the moment the command ends — if it ends inside the wait, the answer is its exit code and full output and no separate completion notice is sent. If the wait runs out first, the answer is a normal result saying the command is still running: you may call wait_for_command again, read it with check_command, or kill it with kill_command and run a quieter command instead. Respects Stop. Use it instead of sleeping or polling: it is the one way to wait. It works on a detached job too, but no notice will arrive after that wait.',
         parameters: {
           type: 'object',
           properties: {
-            pid: { type: 'number', description: 'The background terminal id returned by exec_command.' },
+            pid: { type: 'number', description: 'The command id returned by exec_command.' },
+            seconds: {
+              type: 'number',
+              description: 'How long to wait, in seconds (default 30, clamped to 1–300).',
+            },
           },
           required: ['pid'],
         },
@@ -173,18 +154,125 @@ export function makeKillBackgroundTool(getAccess: () => BackgroundAccess | null)
       const access = getAccess();
       const sessionId = access?.currentOwner()?.sessionId ?? null;
       if (!access || !sessionId) {
-        return 'Error: background terminals are not available in this session.';
+        return 'Error: commands are not available in this session.';
       }
       const id = Number(args.pid);
       if (!Number.isFinite(id)) {
-        return 'Error: kill_background requires a numeric pid.';
+        return 'Error: wait_for_command requires a numeric pid.';
       }
       const task = access.hub.lookup(sessionId, id)?.task;
       if (!task) {
-        return `Error: no background terminal with id ${id}.`;
+        return `Error: no command with id ${id}.`;
+      }
+      const waitedSec = waitSeconds(args);
+      // A command that already ended returns its result at once: there is no wait to
+      // bound, and a refusal or a timeout sentence would tell the agent to expect
+      // something for a job that is already over.
+      if (task.status !== 'running') {
+        const out = task.handle.getOutput().trim();
+        const dur = formatDuration((task.finishedAt ?? Date.now()) - task.startedAt);
+        const resultLine = task.killed
+          ? `Command ${id} was killed after ${dur}.`
+          : `Command ${id} finished with exit code ${task.exitCode ?? 'unknown'} after ${dur}.`;
+        return limitInline(`${resultLine}${out ? `\nOutput:\n${out}` : ''}`, 'wait_for_command');
+      }
+      // Suppress the completion notice for the duration of the wait: the wait's own
+      // result is what tells the agent, exactly as the old join tool did. A detached
+      // job keeps `notifyAgent` false whatever happens — that flag is its identity.
+      task.notifyAgent = false;
+      // A wait has to be cancellable on three sides: the turn's Stop, the timeout,
+      // and the command ending. The hub's own wait resolves on the command and
+      // rejects on an abort, so the timeout aborts a local controller — which also
+      // takes the waiter back out of the task, so a timed-out wait leaves no trace.
+      const controller = new AbortController();
+      const onAbort = () => controller.abort();
+      if (signal) {
+        if (signal.aborted) {
+          task.notifyAgent = !task.detached;
+          return '[command wait was interrupted]';
+        }
+        signal.addEventListener('abort', onAbort, { once: true });
+      }
+      try {
+        const outcome = await Promise.race([
+          access.hub.waitFor(sessionId, id, controller.signal).then(
+            () => 'done' as const,
+            // The hub rejects on an abort, and only on an abort (an unknown id was
+            // answered above) — but a Stop and a vanished job are different news.
+            () => (signal?.aborted ? ('aborted' as const) : ('gone' as const)),
+          ),
+          delay(waitedSec * 1000),
+        ]);
+        if (outcome === 'aborted') {
+          // The wait itself was interrupted (Stop): the command keeps running, so it
+          // must be able to notify again when it ends.
+          controller.abort();
+          task.notifyAgent = !task.detached;
+          return '[command wait was interrupted]';
+        }
+        if (outcome === 'gone') {
+          controller.abort();
+          task.notifyAgent = !task.detached;
+          return `Error: command ${id} disappeared while waiting for it.`;
+        }
+        if (outcome === 'timeout') {
+          controller.abort();
+          task.notifyAgent = !task.detached;
+          return waitTimedOutText(task, waitedSec);
+        }
+      } finally {
+        if (signal) {
+          signal.removeEventListener('abort', onAbort);
+        }
+      }
+      const done = access.hub.lookup(sessionId, id)?.task;
+      if (!done) {
+        return `Error: command ${id} disappeared.`;
+      }
+      // The wait carried the outcome, so the job's own notice is not sent for it.
+      const out = done.handle.getOutput().trim();
+      const dur = formatDuration((done.finishedAt ?? Date.now()) - done.startedAt);
+      const resultLine = done.killed
+        ? `Command ${id} was killed after ${dur}.`
+        : `Command ${id} finished with exit code ${done.exitCode ?? 'unknown'} after ${dur}.`;
+      return limitInline(`${resultLine}${out ? `\nOutput:\n${out}` : ''}`, 'wait_for_command');
+    },
+  };
+}
+
+export function makeKillCommandTool(getAccess: () => BackgroundAccess | null): AgentTool {
+  return {
+    definition: {
+      type: 'function',
+      function: {
+        name: 'kill_command',
+        description:
+          'Kill a command started by exec_command, by its id. The process tree is torn down and a short confirmation is returned. Use it when a long-running command is no longer needed, or when a command is noisier or slower than the work requires and a quieter one would do.',
+        parameters: {
+          type: 'object',
+          properties: {
+            pid: { type: 'number', description: 'The command id returned by exec_command.' },
+          },
+          required: ['pid'],
+        },
+      },
+    },
+    async execute(args) {
+      const access = getAccess();
+      const sessionId = access?.currentOwner()?.sessionId ?? null;
+      if (!access || !sessionId) {
+        return 'Error: commands are not available in this session.';
+      }
+      const id = Number(args.pid);
+      if (!Number.isFinite(id)) {
+        return 'Error: kill_command requires a numeric pid.';
+      }
+      const task = access.hub.lookup(sessionId, id)?.task;
+      if (!task) {
+        return `Error: no command with id ${id}.`;
       }
       if (task.status !== 'running') {
-        return `Background terminal ${id} is not running (exit code ${task.exitCode ?? 'unknown'}).`;
+        return `Command ${id} is not running (exit code ${task.exitCode ?? 'unknown'}).`;
       }
       // Tool-initiated kill: the tool result is the signal the agent sees, so the
       // separate completion notice is suppressed (`notifyAgent: false`). The kill
@@ -203,102 +291,9 @@ export function makeKillBackgroundTool(getAccess: () => BackgroundAccess | null)
       }
       const dur = formatDuration((killed.finishedAt ?? Date.now()) - killed.startedAt);
       if (killed.killUnconfirmed) {
-        return `Killed background terminal ${id} after ${dur}, but the process tree did not report an exit (command: ${killed.command}).`;
+        return `Killed command ${id} after ${dur}, but the process tree did not report an exit (command: ${killed.command}).`;
       }
-      return `Killed background terminal ${id} after ${dur} (command: ${killed.command}).`;
-    },
-  };
-}
-
-export function makeJoinBackgroundTool(getAccess: () => BackgroundAccess | null): AgentTool {
-  return {
-    definition: {
-      type: 'function',
-      function: {
-        name: 'join_background',
-        description:
-          'Block until a background terminal (by pid) finishes, then return its final exit code and full accumulated output. Respects Stop. Use to wait for a command you moved to the background and collect its result. A join is refused while the job still has more than the maximum of its budget left (spinney.commandMaxForegroundDuration, 1800 s unless changed), because a turn must never wait longer than that — end your turn instead and let the completion notice arrive. A detached job (start_detached) is refused outright: it never notifies, so check_background_terminal is how its result is read.',
-        parameters: {
-          type: 'object',
-          properties: {
-            pid: { type: 'number', description: 'The background terminal id returned by exec_command.' },
-          },
-          required: ['pid'],
-        },
-      },
-    },
-    async execute(args, signal) {
-      const access = getAccess();
-      const sessionId = access?.currentOwner()?.sessionId ?? null;
-      if (!access || !sessionId) {
-        return 'Error: background terminals are not available in this session.';
-      }
-      const id = Number(args.pid);
-      if (!Number.isFinite(id)) {
-        return 'Error: join_background requires a numeric pid.';
-      }
-      const task = access.hub.lookup(sessionId, id)?.task;
-      if (!task) {
-        return `Error: no background terminal with id ${id}.`;
-      }
-      // A detached job is refused outright — before the finished check, and
-      // regardless of status. The two things a join ever gives back are a *bounded
-      // wait* and the *result*: a detached job has no notice to come back on and is
-      // explicitly not something a turn waits for, while `check_background_terminal`
-      // returns its output (and its exit code, once there is one) at once. Refusing
-      // it also cannot mislead: the refusal says there is no notice, so nothing here
-      // tells the agent to expect one.
-      if (task.detached) {
-        return refuseJoinDetached(id);
-      }
-      // The join gate, and the reason it exists: `join_background` used to block
-      // until the job finished, so a job with hours to go held the turn for hours.
-      // A turn may not wait longer than the foreground limit, so a join is only
-      // allowed once the *remaining* budget fits inside it — by then the wait is
-      // bounded, and returning the final result in the same turn is worth it.
-      // Everything longer ends the turn instead: the completion notice brings the
-      // agent back, which is the same wake-up without the stall.
-      //
-      // A job that already finished is not gated: waiting on it returns at once, so
-      // there is no wait to bound (and refusing would tell the agent to expect a
-      // notice for a job that already ended). The gate is evaluated *before* the
-      // task is touched, because a refused join must leave everything as it was.
-      if (task.status !== 'finished') {
-        const limitSec = commandMaxForegroundDurationSec();
-        const remaining = remainingBudgetMs(task);
-        const budget = budgetMsOf(task);
-        // `remaining === null` is the frozen contract's "no deadline"; the budget is
-        // checked alongside it because it is what the over-budget message quotes.
-        if (remaining === null || budget === null) {
-          return refuseJoinNoDeadline(id, limitSec);
-        }
-        if (remaining > limitSec * 1000) {
-          return refuseJoinOverBudget(id, limitSec, remaining, budget);
-        }
-      }
-      // Suppress the separate completion notification: the join result (or an
-      // interruption) tells the agent. On interruption re-enable it so a later
-      // natural finish still notifies.
-      task.notifyAgent = false;
-      try {
-        await access.hub.waitFor(sessionId, id, signal);
-      } catch (err) {
-        task.notifyAgent = true;
-        if (signal?.aborted) {
-          return '[command join was interrupted]';
-        }
-        return `Error: ${err instanceof Error ? err.message : String(err)}`;
-      }
-      const done = access.hub.lookup(sessionId, id)?.task;
-      if (!done) {
-        return `Error: background terminal ${id} disappeared.`;
-      }
-      const out = done.handle.getOutput().trim();
-      const dur = formatDuration((done.finishedAt ?? Date.now()) - done.startedAt);
-      const resultLine = done.killed
-        ? `Background terminal ${id} was killed after ${dur}.`
-        : `Background terminal ${id} finished with exit code ${done.exitCode ?? 'unknown'} after ${dur}.`;
-      return limitInline(`${resultLine}${out ? `\nOutput:\n${out}` : ''}`, 'join_background');
+      return `Killed command ${id} after ${dur} (command: ${killed.command}).`;
     },
   };
 }

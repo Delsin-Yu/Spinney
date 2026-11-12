@@ -14,8 +14,8 @@
  * through {@link BackgroundHub.setHooks}, and the tools reach the hub through a
  * {@link BackgroundAccess}. It is smoke-testable with a fake `CommandHandle`.
  *
- * A **detached** job (`exec_command`'s `timeout_behavior: "start_detached"`) is a
- * task in that same bucket with `detached: true` — not a second kind of bucket:
+ * A **detached** job (`exec_command`'s `run_type: "detached"`) is a task in that
+ * same bucket with `detached: true` — not a second kind of bucket:
  * it keeps its owner, its id, its card and its place in every listing and kill,
  * and only its lock and its notice are off (see {@link BackgroundTask.detached}).
  */
@@ -101,15 +101,14 @@ export class BackgroundHub {
    * session-local id. The id is minted here (never in the registry) so it is
    * unique across every node of the session.
    *
-   * `timeoutMs`, when set, is the job's **budget** — it is forwarded unchanged to
-   * the registry, which arms the deadline that kills the job (see
-   * {@link BackgroundRegistry.register}). The completion notice is always wanted
-   * here: the caller that owns the outcome (`exec_command`) reports it in its own
-   * tool result, and the hub's notice is what tells the agent about a job that
-   * ends later, on its own or at its deadline.
+   * A job has **no deadline**: nothing in the hub or the registry ends it on its
+   * own, so it runs until its process ends or something kills it. The completion
+   * notice is always wanted here: the caller that owns the outcome
+   * (`exec_command`) reports it in its own tool result, and the hub's notice is
+   * what tells the agent about a job that ends later, on its own.
    *
-   * `detached` (`exec_command`'s `start_detached`) is forwarded as well: the job
-   * stays owned by this `(session, node)` — it keeps its card, its id and its
+   * `detached` (`exec_command`'s `run_type: "detached"`) is forwarded as well: the
+   * job stays owned by this `(session, node)` — it keeps its card, its id and its
    * place in every session-wide listing and kill — but it locks no node and never
    * notifies (see {@link BackgroundTask.detached}). Nothing is re-keyed for it:
    * the hub has one bucket per `(session, node)` and a detached job is a flag on a
@@ -120,11 +119,10 @@ export class BackgroundHub {
     handle: CommandHandle,
     command: string,
     cwd: string,
-    timeoutMs?: number,
     detached = false,
   ): number {
     const id = this.mintId(owner.sessionId);
-    this.registryFor(owner).register(handle, command, cwd, true, id, timeoutMs, detached);
+    this.registryFor(owner).register(handle, command, cwd, true, id, detached);
     this.ownerIndex(owner.sessionId).set(id, owner);
     const task = this.findRegistry(owner.sessionId, owner.nodeId)?.get(id);
     if (task) {

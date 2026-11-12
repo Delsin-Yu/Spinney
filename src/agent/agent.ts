@@ -59,9 +59,9 @@ import { clipText, headByBytes, tailByBytes } from '../text';
  */
 const DURATION_PREFIX_SKIP = new Set([
   'exec_command',
-  'check_background_terminal',
-  'kill_background',
-  'join_background',
+  'check_command',
+  'wait_for_command',
+  'kill_command',
   'spawn_agents',
   'spawn_readonly_agents',
   'send_agent_message',

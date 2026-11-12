@@ -225,8 +225,8 @@ export function spawnShellCommand(command: string, cwd: string, opts: { killOnTr
 
 /**
  * A single background terminal. `id` is the opaque token handed to the agent
- * (not a real OS pid) — it is what `check_background_terminal` /
- * `kill_background` / `join_background` accept.
+ * (not a real OS pid) — it is what `check_command` / `wait_for_command` /
+ * `kill_command` accept.
  */
 export interface BackgroundTask {
   /** Opaque token given to the agent (a monotonic counter per registry). */
@@ -236,41 +236,29 @@ export interface BackgroundTask {
   startedAt: number;
   /** Host clock (ms) when the process ended; null while it still runs. */
   finishedAt: number | null;
-  /**
-   * The job's **budget**: the total time (ms) it is allowed to run. Set only when
-   * the spawn was given one (the `timeoutMs` argument of
-   * {@link BackgroundRegistry.register}); a job without it runs until it ends or
-   * is killed, exactly as it did before budgets existed.
-   */
-  timeoutMs?: number;
-  /**
-   * Host clock (ms) at which the budget runs out — `startedAt + timeoutMs`, the
-   * absolute form of {@link timeoutMs}. A deadline rather than a countdown, so
-   * the remaining budget can be read at any moment ({@link remainingBudgetMs}).
-   * Set together with {@link timeoutMs}.
-   */
-  deadlineAt?: number;
   status: 'running' | 'finished';
   exitCode: number | null;
-  /** True when the process was killed (by the user or via kill_background). */
+  /** True when the process was killed (by the user, Stop, or kill_command). */
   killed: boolean;
   /**
    * Why the process was killed; `undefined` when it ended on its own (the normal
    * case — a natural finish is never given a reason). The registry sets it in its
    * single kill path, one rule per caller, deliberately simple:
    *
-   *  - `'stop'` — {@link BackgroundRegistry.kill}: the `kill_background` tool, the
+   *  - `'stop'` — {@link BackgroundRegistry.kill}: the `kill_command` tool, the
    *    Stop button and the job card's own kill all arrive through that *one*
    *    method and are not distinguishable from inside the registry;
    *  - `'rollover'` — {@link BackgroundRegistry.killAll}: the job died because its
    *    session or node was deleted, the conversation was cleared, or the window
    *    rolled over and tore the session down;
-   *  - `'timeout'` — the job's own {@link timeoutMs} budget expired;
    *  - `'user'` — reserved for a kill a caller *knows* the user asked for directly;
    *    the registry never sets it itself (every such kill reads as `'stop'`, see
    *    above).
+   *
+   * There is no `'timeout'` any more: a job has **no deadline** (nothing ends it
+   * on its own), so the only endings are its own exit and a kill.
    */
-  killReason?: 'user' | 'stop' | 'timeout' | 'rollover';
+  killReason?: 'user' | 'stop' | 'rollover';
   /**
    * True when a kill could not be confirmed within its deadline (the kill was
    * issued, but no `exit` was observed — see {@link KillOutcome}). Optional so a
@@ -282,7 +270,7 @@ export interface BackgroundTask {
    * The in-flight kill confirmation, set by the registry the moment a kill is
    * issued. The registry does not wait for it (Stop and the terminal card must
    * stay instantaneous); a caller that must report the kill honestly — the
-   * `kill_background` tool — awaits it and then reads {@link killUnconfirmed}.
+   * `kill_command` tool — awaits it and then reads {@link killUnconfirmed}.
    */
   killConfirm?: Promise<KillOutcome>;
   /** True when captured output hit OUTPUT_CAP and was truncated. */
@@ -290,18 +278,18 @@ export interface BackgroundTask {
   handle: CommandHandle;
   /**
    * When false, the harness should not emit a completion notification to the
-   * agent — used when the agent caused the transition itself (kill_background /
-   * join_background), where the tool result already informs it.
+   * agent — used when the agent caused the transition itself (kill_command /
+   * wait_for_command), where the tool result already informs it.
    */
   notifyAgent: boolean;
   /**
-   * True for a **detached** job (`exec_command`'s `timeout_behavior:
-   * "start_detached"`): session-wide and fire-and-forget. It is still owned by the
-   * node that started it — its card renders in that node's column and it is torn
-   * down (killed) with that node's session — but it **locks no node** (the
-   * composer never turns into Stop for it) and it **never sends a completion
-   * notice**, so nothing but `check_background_terminal` ever reads its outcome.
-   * Joining it is refused outright (`src/tools/backgroundTools.ts`).
+   * True for a **detached** job (`exec_command`'s `run_type: "detached"`):
+   * session-wide and fire-and-forget. It is still owned by the node that started
+   * it — its card renders in that node's column and it is torn down (killed) with
+   * that node's session — but it **locks no node** (the composer never turns into
+   * Stop for it) and it **never sends a completion notice**, so nothing but
+   * `check_command` ever reads its outcome. `wait_for_command` waits on it without
+   * a notice to follow.
    *
    * Set once, at registration ({@link BackgroundRegistry.register}), and never
    * changed afterwards. The registry sets `notifyAgent: false` together with it,
@@ -316,30 +304,8 @@ export interface BackgroundTask {
    * stays in the "pending delivery" panel state until this flips true.
    */
   delivered: boolean;
-  /** Pending waiters (join_background) awaiting this task's completion. */
+  /** Pending waiters (wait_for_command) awaiting this task's completion. */
   waiters: Array<(task: BackgroundTask) => void>;
-}
-
-/**
- * How much of a task's budget is left, in milliseconds: `null` when the job was
- * given no budget (`timeoutMs` unset), otherwise `max(0, deadlineAt - now)` — a
- * job already past its deadline reads `0`, never a negative number, so a caller
- * can show "budget exhausted" without a special case.
- *
- * It is a plain clock read, not a state read: a task that finished early still
- * reports the time its deadline has left, so a caller that cares about the
- * *outcome* reads {@link BackgroundTask.status} alongside it.
- */
-export function remainingBudgetMs(task: BackgroundTask): number | null {
-  if (task.timeoutMs === undefined || task.deadlineAt === undefined) {
-    return null;
-  }
-  return Math.max(0, task.deadlineAt - Date.now());
-}
-
-/** The budget as seconds for the `bg register` line: `600s`, `1.5s`, or `none`. */
-function budgetLabel(timeoutMs: number | undefined): string {
-  return timeoutMs === undefined ? 'none' : `${timeoutMs / 1000}s`;
 }
 
 /**
@@ -349,14 +315,6 @@ function budgetLabel(timeoutMs: number | undefined): string {
  */
 export class BackgroundRegistry {
   private tasks = new Map<number, BackgroundTask>();
-  /**
-   * Armed budget timers, by task id: one per job that was given a `timeoutMs`
-   * budget. Kept here rather than on {@link BackgroundTask} so the task stays a
-   * plain data record, and cleared the moment the job ends (`complete`) or is
-   * forgotten (`remove` / `clearAll`) — a job that finishes on its own must leave
-   * no timer behind.
-   */
-  private budgetTimers = new Map<number, ReturnType<typeof setTimeout>>();
   private counter = 0;
   private onFinish: ((task: BackgroundTask) => void) | null = null;
   private onUpdated: (() => void) | null = null;
@@ -374,14 +332,9 @@ export class BackgroundRegistry {
    * caller (`BackgroundHub`, which needs session-local ids that are unique across
    * every node of a session); without it the registry's own counter is used.
    *
-   * `timeoutMs`, when it is a positive finite number, is the job's **budget**: the
-   * total time it may run. It is stored on the task (`timeoutMs` / `deadlineAt`,
-   * readable again via {@link remainingBudgetMs}) and armed as exactly **one**
-   * `setTimeout` for the time left, which kills the job through the same path Stop
-   * uses (see {@link expireBudget}). The timer is `unref()`ed — a budget is not a
-   * reason for the extension host to stay alive — and cleared in {@link complete},
-   * so a command that ends by itself leaves no timer behind. Any other value
-   * (absent, 0, negative, Infinity, NaN) means no budget and no timer.
+   * A job has **no deadline**: nothing in this registry ends it on its own. It
+   * runs until its process ends or until something kills it (Stop, the card's kill
+   * button, `kill_command`, or the session being torn down).
    *
    * `detached` marks the job as fire-and-forget ({@link BackgroundTask.detached}):
    * session-wide, never locking a node and never notifying. It is recorded on the
@@ -396,7 +349,6 @@ export class BackgroundRegistry {
     cwd: string,
     notifyAgent = true,
     id?: number,
-    timeoutMs?: number,
     detached = false,
   ): number {
     const taskId = id ?? ++this.counter;
@@ -418,67 +370,17 @@ export class BackgroundRegistry {
     };
     this.tasks.set(taskId, task);
 
-    if (typeof timeoutMs === 'number' && Number.isFinite(timeoutMs) && timeoutMs > 0) {
-      task.timeoutMs = timeoutMs;
-      task.deadlineAt = task.startedAt + timeoutMs;
-      // Armed for the *remaining* time (the deadline is the source of truth, the
-      // timer is only the wake-up), which is what makes a re-armed budget — or a
-      // deadline computed before a slow spawn — fire at the right moment.
-      const timer = setTimeout(
-        () => this.expireBudget(taskId),
-        Math.max(0, task.deadlineAt - Date.now()),
-      );
-      // Same trick as `src/perf.ts`: unref optionally, so a host that only holds a
-      // budget timer can still exit.
-      (timer as unknown as { unref?: () => void }).unref?.();
-      this.budgetTimers.set(taskId, timer);
-    }
-
     handle.child.on('close', (code) => this.complete(task, code));
     handle.child.on('error', () => this.complete(task, null));
 
-    perf(`bg register id=${taskId} pid=${handle.child.pid ?? 'none'} budget=${budgetLabel(task.timeoutMs)}`);
+    perf(`bg register id=${taskId} pid=${handle.child.pid ?? 'none'} detached=${detached}`);
     this.onUpdated?.();
     return taskId;
   }
 
   /**
-   * The budget ran out. The job is killed **exactly** like a Stop or a
-   * `kill_background` — through {@link killTask}, which is the single kill path in
-   * this registry — with `killReason: 'timeout'`. No second kill path exists here
-   * on purpose: whatever Stop guarantees (the immediate `finished` transition, the
-   * detached confirmation, the hook, the `killed` flag) a deadline guarantees too.
-   */
-  private expireBudget(id: number): void {
-    this.budgetTimers.delete(id);
-    const task = this.tasks.get(id);
-    if (!task || task.status !== 'running') {
-      return;
-    }
-    // A budget expiry is an event of its own, and it is ours rather than the agent's:
-    // the `bg kill` line below is written only when the confirmation *fails*, so a
-    // clean expiry would otherwise leave nothing in the log but the registration —
-    // exactly the "which job ate three hours, and why did it end" question this line
-    // answers.
-    perf(
-      `bg expire id=${task.id} pid=${task.handle.child.pid ?? 'none'} ` +
-        `budget=${budgetLabel(task.timeoutMs)} ms=${Date.now() - task.startedAt}`,
-    );
-    this.killTask(task, 'timeout');
-  }
-
-  /** Disarm a task's budget timer (idempotent, and a no-op without one). */
-  private clearBudgetTimer(id: number): void {
-    const timer = this.budgetTimers.get(id);
-    if (timer) {
-      clearTimeout(timer);
-      this.budgetTimers.delete(id);
-    }
-  }
-
-  /**
    * Mark a task as finished exactly once: capture the exit code, resolve any
-   * waiting joiners, fire the completion hook, and refresh the UI. Also called
+   * waiting waiters, fire the completion hook, and refresh the UI. Also called
    * synchronously by `kill` so a killed task reads as finished immediately
    * (rather than waiting for the OS to deliver the close event).
    */
@@ -486,9 +388,6 @@ export class BackgroundRegistry {
     if (task.status === 'finished') {
       return;
     }
-    // The job is over, so its budget can no longer expire: disarm the timer here
-    // (it is the one place every ending goes through) so nothing is left to fire.
-    this.clearBudgetTimer(task.id);
     task.status = 'finished';
     // Stamped before the hook so an observer (the finish notice / the panel) can
     // already read the elapsed time off the task.
@@ -548,7 +447,7 @@ export class BackgroundRegistry {
    * the outcome awaits `task.killConfirm` and then reads `task.killUnconfirmed`.
    *
    * Everything that arrives here is recorded as `killReason: 'stop'`: the
-   * `kill_background` tool, the Stop button and the job card's kill are one
+   * `kill_command` tool, the Stop button and the job card's kill are one
    * method from the registry's point of view (see {@link BackgroundTask.killReason}).
    */
   kill(id: number, opts?: { notifyAgent?: boolean }): BackgroundTask | undefined {
@@ -566,12 +465,12 @@ export class BackgroundRegistry {
   /**
    * The one kill path: mark the job killed, record **why**, hand the process tree
    * to the handle, confirm the kill detached, and transition to `finished`
-   * immediately so a subsequent check_background_terminal reads "finished" and the
+   * immediately so a subsequent check_command reads "finished" and the
    * completion notice is delivered without waiting for the OS close event.
    *
-   * `kill`, `killAll` and the budget timer all funnel through here, so a job that
-   * ran out of budget dies exactly like one the user stopped — the only difference
-   * is {@link BackgroundTask.killReason}.
+   * `kill` and `killAll` both funnel through here, so a job the Stop button ends
+   * dies exactly like one the agent ended with `kill_command` — the only
+   * difference is {@link BackgroundTask.killReason}.
    */
   private killTask(task: BackgroundTask, reason: BackgroundTask['killReason'], notifyAgent?: boolean): void {
     if (notifyAgent === false) {
@@ -616,7 +515,7 @@ export class BackgroundRegistry {
 
   /**
    * Resolve when a background terminal finishes. Rejects with `interrupted` if
-   * the supplied signal aborts first (so `join_background` honours Stop).
+   * the supplied signal aborts first (so `wait_for_command` honours Stop).
    */
   waitFor(id: number, signal?: AbortSignal): Promise<BackgroundTask> {
     const task = this.tasks.get(id);
@@ -676,15 +575,11 @@ export class BackgroundRegistry {
   }
 
   remove(id: number): void {
-    this.clearBudgetTimer(id);
     this.tasks.delete(id);
   }
 
   /** Drop every tracked task (finished or not); used when a session is cleared. */
   clearAll(): void {
-    for (const task of this.tasks.values()) {
-      this.clearBudgetTimer(task.id);
-    }
     this.tasks.clear();
     this.onUpdated?.();
   }

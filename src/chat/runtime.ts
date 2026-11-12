@@ -200,35 +200,29 @@ const ROLLOVER_ANSWER_CAP = 1000;
 const ROLLOVER_SETTLE_TIMEOUT_MS = 2000;
 
 /**
- * Fallback when `spinney.commandMaxForegroundDuration` is absent or not a positive
- * number: the 30 minutes the setting ships with.
+ * Fallback when `spinney.subAgentSyncSeconds` is absent or not a positive number: the
+ * 5 minutes the setting ships with.
  */
-const DEFAULT_COMMAND_MAX_FOREGROUND_DURATION_SEC = 1800;
+const DEFAULT_SUB_AGENT_SYNC_SEC = 300;
 
 /**
- * **Nothing may hold a turn longer than this** — `spinney.commandMaxForegroundDuration`
- * in seconds, read live so an edited setting applies to the next call without a
- * reload. The chat-side half of the rule: a sub-agent batch (`spawn_agents`) or a
- * resume (`send_agent_message`) that is still running when the budget runs out stops
- * holding the turn — the tool returns the ids and the summaries arrive later as a
- * completion notice.
+ * How long a `spawn_agents` / `send_agent_message` call in `sync` mode may hold the
+ * turn — `spinney.subAgentSyncSeconds` in seconds, read live so an edited setting
+ * applies to the next call without a reload. A batch still running when that window
+ * runs out stops holding the turn: the tool returns the ids and the summaries arrive
+ * later as one completion notice.
  *
- * The setting is the **ceiling**, not a command's default: `exec_command` gives a
- * command `spinney.commandDefaultTimeout` when the call states none, and only the
- * ceiling can refuse a stated `timeout`. A join and a batch wait are still bounded by
- * the ceiling, because both are the turn being held.
- *
- * This is a deliberate **local** copy of `commandMaxForegroundDurationSec()` in
- * `src/tools/execCommand.ts` (the command-side half): importing that one would make
- * the chat layer depend on the tools layer for a single number — a cycle across the
- * seam — so the same small read is repeated here, under the same name, rather than
- * shared. Keep the two in step.
+ * This is the **sub-agent** half of the turn, and it is deliberately its own setting:
+ * a command's foreground slice (`spinney.execForegroundSeconds`) is about one process
+ * and hands over to a background job, while this one is about a batch of conversations
+ * and hands over to a batch notice. Keeping them apart means tuning one never silently
+ * moves the other.
  */
-function commandMaxForegroundDurationSec(): number {
-  const configured = vscode.workspace.getConfiguration('spinney').get<number>('commandMaxForegroundDuration');
+function subAgentSyncSeconds(): number {
+  const configured = vscode.workspace.getConfiguration('spinney').get<number>('subAgentSyncSeconds');
   return typeof configured === 'number' && Number.isFinite(configured) && configured > 0
     ? configured
-    : DEFAULT_COMMAND_MAX_FOREGROUND_DURATION_SEC;
+    : DEFAULT_SUB_AGENT_SYNC_SEC;
 }
 
 /**
@@ -254,22 +248,6 @@ function batchEscapeNote(limitMs: number): string {
     `The batch is still running after ${limitMs / 1000} s; it is now delivered as a batch notice. ` +
     'End your turn: the notice carries every summary when the last one finishes.'
   );
-}
-
-/**
- * True when a finished background job was ended by the **budget**
- * (`spinney.commandMaxForegroundDuration`) rather than by the user or by its own exit.
- * That is the one ending whose completion notice has to name the budget: the command
- * was promoted to the background so the turn could end, so "was killed by the user"
- * would blame the wrong cause and hide the reason the work stopped.
- *
- * `killReason` is stamped by the tools layer (`src/tools/background.ts`, which owns the
- * command side of the same rule) and travels on the task the hub hands this runtime; a
- * task with no reason — or with `user` / `stop` / `rollover` — keeps the pre-existing
- * wording (see `buildBackgroundSignal`).
- */
-function isBudgetKill(task: BackgroundTask): boolean {
-  return task.killReason === 'timeout';
 }
 
 /**
@@ -4436,7 +4414,20 @@ export class SessionRuntime {
     // them, a read-only sub-agent had no network tool at all — the research tools
     // are the shell, which a read-only sub-agent correctly does not get).
     const read = ['read_file', 'list_dir', 'search_files', 'search_transcripts', 'web_search', 'web_fetch'];
-    const writeTools = ['write_file', 'replace_in_file', 'append_file', 'exec_command'];
+    // The three management tools travel with `exec_command`, because this model promotes
+    // a foreground command by itself: a sub-agent's `npm run compile` becomes a
+    // background job after `spinney.execForegroundSeconds`, and the id it is handed is
+    // worthless unless it can read, wait for or end that job. Read-only sub-agents keep
+    // none of the four (see the block below).
+    const writeTools = [
+      'write_file',
+      'replace_in_file',
+      'append_file',
+      'exec_command',
+      'check_command',
+      'wait_for_command',
+      'kill_command',
+    ];
     if (write) {
       return base.subset([...read, ...writeTools]);
     }
@@ -4586,9 +4577,9 @@ export class SessionRuntime {
       return Promise.resolve(JSON.stringify({ resumed: true, id: node.id, async: true }));
     }
     // `sync` is **bounded** exactly like `spawn_agents`: the resume is awaited at most
-    // `spinney.commandMaxForegroundDuration`, and a target that is still running when
-    // the budget runs out stops holding the turn — the result is delivered later
-    // through the same batch-notice path `async` uses (`deliverResumeAsync`).
+    // `spinney.subAgentSyncSeconds`, and a target that is still running when that
+    // window runs out stops holding the turn — the result is delivered later through
+    // the same batch-notice path `async` uses (`deliverResumeAsync`).
     //
     // INVARIANT — delivered **exactly once**: the tool result is the only delivery on
     // the normal path (it settles the card below, D1), the notice is the only delivery
@@ -4601,7 +4592,7 @@ export class SessionRuntime {
       finished = true;
       return r;
     });
-    const limitMs = commandMaxForegroundDurationSec() * 1000;
+    const limitMs = subAgentSyncSeconds() * 1000;
     const settled = await Promise.race([all.then(() => null), delay(limitMs).then(() => 'timeout' as const)]);
     if (settled === 'timeout') {
       void all.then((r) => this.deliverResumeAsync(node, r), () => {});
@@ -4778,9 +4769,9 @@ export class SessionRuntime {
     }
 
     // `sync` is **bounded**: the batch runs exactly as before, but the turn is not held
-    // for it. `Promise.race` gives up at `spinney.commandMaxForegroundDuration` and the
-    // batch is then delivered by the *async* path — one batch notice when the last job
-    // finishes — instead of by this tool result.
+    // for it. `Promise.race` gives up at `spinney.subAgentSyncSeconds` and the batch is
+    // then delivered by the *async* path — one batch notice when the last job finishes
+    // — instead of by this tool result.
     //
     // INVARIANT — the batch is delivered **exactly once**: on the normal path the tool
     // result is the only delivery (it settles the cards below, D1) and no notice is ever
@@ -4788,7 +4779,7 @@ export class SessionRuntime {
     // cards when it lands, `settleSignals`). That is why the escape branch must not
     // touch `job.node.delivered`: marking it here would make the notice render as an
     // already-delivered batch and the summaries would never reach the model.
-    const limitMs = commandMaxForegroundDurationSec() * 1000;
+    const limitMs = subAgentSyncSeconds() * 1000;
     const all = Promise.allSettled(tasks);
     const settled = await Promise.race([all.then(() => null), delay(limitMs).then(() => 'timeout' as const)]);
     if (settled === 'timeout') {
@@ -5436,8 +5427,8 @@ export class SessionRuntime {
       // without ever building a `SignalNotice`: nothing is queued for a tool boundary
       // (`takeSignalsFor`), nothing is injected into an idle owner (`drainSignals`) and
       // nothing is written back — the agent is *never* told, because a fire-and-forget
-      // job was never the agent's to wait for. It asks instead:
-      // `check_background_terminal`.
+      // job was never the agent's to wait for. It asks instead: `check_command` or
+      // `wait_for_command`.
       //
       // The **card** still settles, exactly as it does for a tool-initiated kill (which
       // is the other ending no notice follows): the terminal state has just gone onto
@@ -5522,19 +5513,13 @@ export class SessionRuntime {
     // How long the job ran. `finishedAt` is set by the registry's `complete()`, which
     // every ending goes through (natural exit, kill, session teardown).
     const took = formatDuration((task.finishedAt ?? Date.now()) - task.startedAt);
-    // A job the **budget** ended is not the same news as one the user killed: the
-    // command was promoted to the background to keep the turn within
-    // `spinney.commandMaxForegroundDuration`, so what the reader has to learn is that
-    // the budget it was given ran out — not that somebody stopped its work. The
-    // verdict replaces the whole clause (which is why the sentence is assembled from
-    // `verdict` below rather than from `outcome` + `after …`): "was killed after 30m 0s
-    // — its 30m 0s budget ran out after 30m 0s" would say the same thing three times.
-    const budgetKilled = isBudgetKill(task);
-    const verdict = budgetKilled
-      ? `was killed after ${took} — its ${formatDuration(commandMaxForegroundDurationSec() * 1000)} budget ran out`
-      : task.killed
-        ? `was killed by the user after ${took}`
-        : `finished with exit code ${task.exitCode ?? 'unknown'} after ${took}`;
+    // A job has no deadline any more, so there are exactly two endings to report: it
+    // exited on its own, or something killed it (Stop, the card's kill, kill_command,
+    // or the session going away). The verdict replaces the whole clause, which is why
+    // the sentence is assembled from it rather than from `outcome` + `after …`.
+    const verdict = task.killed
+      ? `was killed by the user after ${took}`
+      : `finished with exit code ${task.exitCode ?? 'unknown'} after ${took}`;
     const output = this.truncateField(task.handle.getOutput().trim(), 1200);
     const text = `Background command \`${cmd}\` (id ${task.id}) ${verdict}.${output ? `\nOutput:\n${output}` : ''}`;
     // The card's status text is the compact token form shown next to the `#id` — not

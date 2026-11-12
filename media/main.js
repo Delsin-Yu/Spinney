@@ -3060,7 +3060,7 @@
    * owned by the node that started it and keeps updating (it is the only place the job
    * is visible at all), but the job locks no node and never notifies: the composer never
    * turns into Stop for it, and no completion notice will ever reach the agent, which
-   * reads the outcome with `check_background_terminal` if it wants it.
+   * reads the outcome with `check_command` or `wait_for_command` if it wants it.
    *
    * A compact 9px dock token like `CTX` / `SUB` / `BG`, placed the way they are (just
    * before the status chip) and created/removed lazily, so a repaint can never stack
@@ -3079,7 +3079,7 @@
     if (wanted && !badge) {
       badge = el('span', 'node-shared-badge', 'shared');
       badge.title =
-        'This job does not block the composer and will not notify the agent; read its result with check_background_terminal.';
+        'This job does not block the composer and will not notify the agent; read its result with check_command or wait_for_command.';
       const head = card.querySelector('.node-head');
       const status = head.querySelector('.node-status');
       if (status) head.insertBefore(badge, status); else head.appendChild(badge);

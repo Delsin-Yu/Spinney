@@ -40,7 +40,7 @@
 
 > **Oversized results spill to a file.** Every tool whose output is unbounded
 > (`search_files`, `search_transcripts`, `list_dir`, `exec_command`,
-> `check_background_terminal`, `join_background`) runs its result through
+> `check_command`, `wait_for_command`) runs its result through
 > `limitInline()`: above
 > `spinney.maxInlineToolOutput`
 > (default 32768 bytes, `0` = always inline) the full text is written to
@@ -69,201 +69,181 @@
 > is a backstop for a tool that forgets — the failure mode it prevents is a node
 > that can never send again, not a single expensive turn. `read_image` is
 > unaffected: its tool message is a short confirmation, never the bytes.
-| `exec_command` | `command` (alias `cmd`), `cwd?`, `timeout?`, `timeout_behavior?` | Runs through the detected shell (`getShell()`), returns combined stdout+stderr trimmed, and **always leads with a timing line that also names the working directory** (`[exit 0 in 3.4s · cwd D:\repo]`, `[command exited with code 3 in 3.4s · cwd …]`, … — see "Timing in tool results"). **It is not a search tool.** No `grep` / `rg` / `findstr` / `Select-String` / `find`: `search_files` and `search_transcripts` answer a search with exclusions, a scope echo, binary skipping and one hard time budget, while a shell grep has no budget at all — one wide pattern can hold the turn for minutes and report nothing when it is killed. The one case that belongs here is a genuinely large sweep (a whole drive, several repositories) that needs a long-running job: that is a background job, not a foreground grep. The model-facing point of the `cwd` half is behavioural: every command already starts in the harness root, and a model that sees the directory on every result stops prefixing the same `cd <root> && …` to every command (in the transcripts of one workspace: 10 333 `exec_command` calls, **1** used the `cwd` argument and ~3 400 carried a redundant `cd` to the root). `cwd` is **relative to the harness root or absolute**; it is resolved through `resolvePath` (so `/d/…` means `D:\…` on Windows, see "Path base") and **checked before the spawn**: a missing path or a file answers `the working directory "x" → <resolved> does not exist / is not a directory. Pass cwd relative to the harness root (…), or omit cwd to run in the root.` — without that check, `spawn` reports the failure as `spawn <shell.exe> ENOENT`, blaming the shell and teaching the model that the `cwd` argument is broken. `timeout` is in **seconds** and is the command's **total budget** — foreground plus background, with **no ceiling** — because the two numbers that bound a command are a **default** and a **ceiling**: `spinney.commandDefaultTimeout` (seconds, default **500**; `DEFAULT_COMMAND_DEFAULT_TIMEOUT_SEC`) is what a call that states no `timeout` gets, and `spinney.commandMaxForegroundDuration` (seconds, default **1800** = 30 minutes; `DEFAULT_COMMAND_MAX_FOREGROUND_SEC`, both in `src/tools/execCommand.ts`) is the longest a call may hold the turn — both read live per call, so a settings change applies to the next command, and a stated `timeout` at or below the ceiling is **honored as given**, never clipped to the default. There are no other timeout keys — `spinney.commandTimeout` and `spinney.commandTimeoutMax` are gone. **`timeout_behavior` defaults to `stop_when_timeout`**, and its four values are the whole model: they are the **job's identity**, not a mode — each one decides what is registered, whether the call locks its node's composer, whether it notifies, and whether the job can be joined (the value table, the budget matrix and the verbatim messages are in "Timeout, budgets and the `exec` diagnostics" below): timeout omitted and no behavior → killed at the **default**; `timeout` at or below the ceiling with no behavior or `stop_when_timeout` → killed at the **stated** timeout (above or below the default); `timeout > ceiling` with no behavior or `stop_when_timeout` → **refused before the spawn** (a command that may run that long must say *which* background job it is); `timeout > default` with `background_when_timeout` → promoted at the **default**, the hub getting the **rest** of the budget (`timeout − default`) as the job's own deadline; `timeout ≤ default` with `background_when_timeout` → killed at the timeout, **not** promoted, because the budget is spent exactly when the slice ends; `background_when_timeout` **or** `start_in_background` with `timeout` omitted → **refused before the spawn**, because a node job with no deadline holds its node's composer on Stop until it is killed — an unbounded lifetime belongs to `start_detached`; `start_in_background` → the whole budget as the deadline, launched immediately (id back at once, and no foreground time to report); `start_detached` → a **detached**, session-wide job that locks no node's composer and notifies nobody, launched immediately (id back at once, no deadline when `timeout` is omitted), which `join_background` **refuses** and whose outcome is read only by asking: read it with `check_background_terminal`, end it with `kill_background`. `timeout` is a total budget and not a hold on the turn, which is why `timeout: 99999` with `start_in_background` is accepted outright. Errors/timeouts/aborts are prefixed with a `[...]` note. With **no background access** (a bare `ToolRegistry`, which is what the acceptance drivers build) the default `stop_when_timeout` path needs no hub and must not throw — `npm run check:cwd` depends on that — while an explicit background value there answers `Background terminals are not available in this session.` The description and the system prompt both state the other half of that contract: **never background the command inside the shell** (`&`, `nohup`, `disown`, `Start-Process`) — a process the harness did not spawn has no card, no `id` and no notice, so it can neither be joined nor killed by Stop — and **never hand the work to a long-lived process the harness does not own** (an editor addon, a test bridge, a build server): its children sit outside the spawned tree, so Stop cannot reach them and their output is never reported, which is worse than a lost card. `timeout_behavior` is the only tracked way to outlive the call. |
-| `check_background_terminal` | `pid` | Status of a background terminal (running / finished, exit code, output so far), with the elapsed time in the answer: `Background terminal 3 is running. (command: …, 3.4s elapsed)`, `Background terminal 3 finished with exit code 0 after 3.4s.`, or `Background terminal 3 was killed after 3.1s. (command: …)`. A job with a **budget** names it: `Background terminal 3 is running. (command: …, 12m 30s of its 30m 0s budget elapsed)`. An ending the budget caused is told apart from a kill — `Background terminal 3 was killed after 30m 0s — its 30m 0s budget ran out. (command: …)` — because "killed" alone would blame the user for an ending the harness chose (`killReason: 'timeout'`). A kill that could not be confirmed adds `, but the process tree did not report an exit`. A **running** answer appends one line of instruction after that status line (and before any output): `You may continue with other work or end your turn: the completion notice for id 3 will reach you when it finishes. Do not poll it — this is a status read, not a wait.` — or, for a **detached** job, `This job never notifies: read it once when you actually need the result, not in a loop.` The tool description says the same thing up front, because the field failure it prevents is real: an agent answered a promoted job with 46 back-to-back checks. |
-| `kill_background` | `pid` | Kills a background terminal's process tree, answering `Killed background terminal 3 after 3.4s (command: …).` — or `Killed background terminal 3 after 3.4s, but the process tree did not report an exit (command: …).` when no exit was observed, because "killed" alone would claim a clean end the OS never reported. Tool-initiated kills suppress the injected completion notice. |
-| `join_background` | `pid` | Blocks until the background terminal finishes and returns its final exit code + output, naming the duration (`Background terminal 3 finished with exit code 0 after 3.4s.`). Honours Stop. **Gated by the same ceiling**: a job that still has more of its budget left than a turn may wait is refused outright, in a **plain result** (not an `Error:` — nothing was malformed, and an `Error:` would invite a retry with the same id): `Background terminal 3 has 27m 30s of its 30m 0s budget left, which is longer than the 900 s a turn may wait, so this join was refused and nothing changed. End your turn instead: the completion notice for id 3 will reach you when it finishes (check_background_terminal(3) reports it sooner). If you want to end the command rather than wait for it, call kill_background(3).` A job with **no deadline** — `remainingBudgetMs(task)` → `null`, which after this change only `start_detached` can register (`background_when_timeout` / `start_in_background` both refuse an omitted `timeout`) — is refused for the same reason: `Background terminal 3 has no deadline, so it can run longer than the 900 s a turn may wait, and this join was refused — nothing changed. End your turn instead: the completion notice for id 3 will reach you when it finishes (check_background_terminal(3) reports it sooner). If you want to end the command rather than wait for it, call kill_background(3).` A detached job is answered by the detached refusal below instead (that check runs first). A finished job is never gated (there is no wait to bound, and a refusal would tell the model to expect a notice for a job that already ended); a job with ≤ the ceiling left joins exactly as before. A **detached** job (`start_detached`) is refused **outright**, whatever its status (the check runs before the finished check), saying: `Background terminal 3 is a detached job (timeout_behavior "start_detached"): it is session-wide and fire-and-forget, so it never sends a completion notice and no turn ever waits for it — joining it is meaningless and this join was refused; nothing changed. Read it with check_background_terminal(3) instead: it reports the job's accumulated output, and its exit code once the job has ended. If you want to end the command rather than let it run, call kill_background(3).` |
+| `exec_command` | `command` (alias `cmd`), `cwd?`, `run_type?` | Runs through the detected shell (`getShell()`), returns combined stdout+stderr trimmed, and **always leads with a timing line that also names the working directory** (`[exit 0 in 3.4s · cwd D:\repo]`, `[command exited with code 3 in 3.4s · cwd …]`, … — see "Timing in tool results"). **It is not a search tool.** No `grep` / `rg` / `findstr` / `Select-String` / `find`: `search_files` and `search_transcripts` answer a search with exclusions, a scope echo, binary skipping and one hard time budget, while a shell grep has no budget at all — one wide pattern can hold the turn and report nothing. The one case that belongs here is a genuinely large sweep (a whole drive, several repositories) that needs a long-running job: that is a background job, not a foreground grep. The model-facing point of the `cwd` half is behavioural: every command already starts in the harness root, and a model that sees the directory on every result stops prefixing the same `cd <root> && …` to every command (in the transcripts of one workspace: 10 333 `exec_command` calls, **1** used the `cwd` argument and ~3 400 carried a redundant `cd` to the root). `cwd` is **relative to the harness root or absolute**; it is resolved through `resolvePath` (so `/d/…` means `D:\…` on Windows, see "Path base") and **checked before the spawn**: a missing path or a file answers `the working directory "x" → <resolved> does not exist / is not a directory. Pass cwd relative to the harness root (…), or omit cwd to run in the root.` — without that check, `spawn` reports the failure as `spawn <shell.exe> ENOENT`, blaming the shell and teaching the model that the `cwd` argument is broken. **`run_type` is the one knob and it says what the call is** — `foreground` (the default: run it in this turn and return the output; a command still running after `spinney.execForegroundSeconds`, default **30** s, is **moved to the background**, never killed and never refused), `background` (a node job from the start: its id back at once, the composer shows Stop until it ends, and its completion notice reaches the agent) or `detached` (a session-wide, fire-and-forget job: locks no node, never notifies). There is **no per-call timeout and no deadline**: a job runs until its process ends or something kills it. A call that still sends `timeout` or `timeout_behavior` is refused **before anything is spawned** with the exact sentence in "Run types and the `exec` diagnostics" below. Errors/aborts are prefixed with a `[...]` note. With **no background access** (a bare `ToolRegistry`, which is what the acceptance drivers build) a foreground call still runs, it is just never promoted (there is nowhere to hand it to) — `npm run check:cwd` depends on that — while `background` / `detached` there answer `Background terminals are not available in this session.` The description and the system prompt both state the other half of that contract: **never background the command inside the shell** (`&`, `nohup`, `disown`, `Start-Process`) — a process the harness did not spawn has no card, no `id` and no notice, so it can neither be waited for nor killed by Stop — and **never hand the work to a long-lived process the harness does not own** (an editor addon, a test bridge, a build server): its children sit outside the spawned tree, so Stop cannot reach them and their output is never reported, which is worse than a lost card. The description also states the two habits the tools exist for: **never sleep to wait** for a command and **never poll** a running one — `wait_for_command` waits, `check_command` is a status read. |
+| `check_command` | `pid` | Status of a command started by `exec_command`: running / finished, the exit code, the output so far, with the elapsed time — `Command 3 is running. (command: …, 3.4s elapsed)`, `Command 3 finished with exit code 0 after 3.4s.`, `Command 3 was killed after 3.1s. (command: …)`. A kill that could not be confirmed adds `, but the process tree did not report an exit`. It is a **status read, not a wait**: a running answer appends one line of instruction after the status line (which stays byte-identical) and before the output — `You may continue with other work or end your turn: the completion notice for id 3 will reach you when it finishes. Do not poll it — this is a status read, not a wait; wait_for_command(3) waits for it and returns the moment it ends.` — or, for a **detached** job, `This job never notifies: read it once when you actually need the result, not in a loop. wait_for_command(3) waits for it up to the seconds you give.` The tool description says the same thing up front, because the field failure it prevents is real: an agent answered a promoted job with 46 back-to-back checks. |
+| `wait_for_command` | `pid`, `seconds?` | **The wait.** Waits at most `seconds` (default **30**, clamped to **1–300**) and returns the moment the command ends: if it ends inside the wait the answer is its result (`Command 3 finished with exit code 0 after 3.4s.` plus the full output) and the separate completion notice is suppressed (`notifyAgent = false`, exactly as the old `join_background` did). If the wait runs out first the answer is a **normal result, never an `Error:`** — nothing was malformed, the command simply outlived the wait — and it restores the notice: `Command 3 is still running after this 30 s wait (command: …, 42s elapsed); nothing changed and the command keeps running. This is not a failure: the command simply outlived the wait. check_command(3) is a status read, not a wait; wait_for_command(3) may be called again to wait longer; kill_command(3) stops it, and if it is noisier or slower than the work needs, killing it and running a quieter command is the other way out.` It honours **Stop** (`[command wait was interrupted]`, with the notice restored and the command untouched) and it works on a **detached** job too — its timeout text adds `This job is detached, so no completion notice will arrive for it either: its result is read only by asking again`. A command that already ended returns its result at once. |
+| `kill_command` | `pid` | Kills the command's process tree, answering `Killed command 3 after 3.4s (command: …).` — or `Killed command 3 after 3.4s, but the process tree did not report an exit (command: …).` when no exit was observed, because "killed" alone would claim a clean end the OS never reported. A tool-initiated kill suppresses the injected completion notice, and a command that already ended answers `Command 3 is not running (exit code …).` instead of killing twice. |
 | `web_search` | `query`, `count?` | Registry tool, **keyless and configless**. Runs the built-in backend chain (`src/tools/webBackends.ts`) over one query: machine formats first (`bing-rss`, `hn`, `stackexchange`, `github` JSON/RSS), then the region-relevant HTML engines (`so360`/`baidu`/`sogou` with `data-mdurl`/`data-url` real URLs, `bing` as a fallback), merging and de-duplicating (`normalizeUrl`: no fragment, no tracking parameters, no `www.`, no trailing slash) until `count` (default 8, max 20) or a 25 s budget is spent. Every attempt is classified (`ok`/`empty`/`parse-empty`/`unexpected`/`blocked`/`rate-limited`/`http-error`/`timeout`/`aborted`) and a failure opens a cooldown — `blocked`/`parse-empty` 30 min, `rate-limited` 10 min, `timeout`/`http-error` 2 min ×3 — held **in memory for the extension host** (a reload forgets it). The header names the winner (`… from bing-rss(10) in 717ms`) and an `attempts:` line names every outcome, skipped backends included; a silent engine swap would be undebuggable. All backends in cooldown are tried anyway, so "nothing answered" still arrives as a per-backend diagnosis. The result carries the untrusted-data sentence. Measured on the target network: 6 relevant Chinese results in 717 ms, answered by `bing-rss`. One row (`deepseek`) is a **card-declared opt-in**: it POSTs to the card provider’s `/v1/tools/search` with that provider’s own key (or the `spinney.searchKey.deepseek` override), is billed per request, is spaced to the account’s 5 QPS, and answers `disabled` without a request when the card says `builtin` (`docs/agents/web-search.md` §"The paid row"). |
 | `web_fetch` | `url` | Registry tool. Fetches one http(s) URL and returns it as Markdown (HTML), verbatim text, or pretty JSON. Follows redirects by hand (`redirect: 'manual'`, max 5) so **every hop** is re-checked, sends a browser User-Agent, honours the page charset through `decodeBody` (`gbk`/`gb2312`/`gb18030` → `gbk`, `latin1` → `windows-1252`), streams the body and stops at **2 MB**, and gates on content type (no binaries/PDF). `publicUrlProblem` refuses `localhost`/`*.local`/`*.internal` and every private, loopback, link-local, CGNAT and reserved range — the parse half being WHATWG `new URL()`, which normalizes `2130706433`, `0x7f.0.0.1` and `127.0.0.1\@evil.com` to the host the socket would use. **Runs no JavaScript**: a client-rendered page comes back thin and the result says so. HTML → Markdown is hand-written (`src/tools/webHtml.ts`, zero dependencies): script/style/nav/header/footer/iframe/svg dropped, headings/paragraphs/lists/links/emphasis/code/tables kept, and never a space inserted at a tag boundary (CJK). DNS rebinding between the check and the connection is a documented residual risk. When the card’s `searchProvider` is `deepseek` and the local extraction comes back **empty**, `POST <baseUrl>/v1/tools/fetch` is tried — after the same address check, on the final URL — and its Markdown is returned marked `via the provider's fetch API`; a per-URL 403/404 is a sentence, not a cooldown. |
 | `read_image` | `path`, `rect?` | Not a registry tool — handled by the Agent. Reads the image and queues it for injection as a `user`-role image block; **how** depends on the card's `vision.transport` (`tryReadImage`, `src/agent/agent.ts`): a `deepseek` card **uploads** it to the Files API and injects `{ type: 'file', file_id }`, answering `Loaded image <path> -> file-api-… (…, N KiB)`; an `openai` card uploads nothing — the bytes ride along inline as a `data:` URL in an `image_url` part and the confirmation reads `Loaded image <path> inline (N KiB)`. Either way the tool message carries only the short confirmation, never the bytes. `rect` is an optional region (`{x, y, w, h}`, in **source pixels**) and the bytes are **transformed before the upload** (`transformImage`, `src/agent/imageTransform.ts`), so the bytes that ever reach the request are the small ones: crop to `rect` — validated by `normalizeRect` against the size `readImageSize` read from the header (PNG `IHDR`, JPEG `SOFn`), clamped to the image, a malformed one answered as an error sentence — then downscale to a longest side of `IMAGE_TARGET_MAX_SIDE` (1024). PNG and JPEG are done **natively**; GIF / WebP / interlaced or 16-bit PNG **pass through unchanged** (and stay covered by the brake below). A transformed result is re-encoded as PNG, one format for every upload; `changed: false` means `bytes` is the input, verbatim. Because the endpoint charges a **flat** cost per image (it resizes to ~800×800 and bills ~384 tokens whatever was uploaded), `rect` costs the same as the whole image and shows that region at full detail — which makes it a **zoom**, not only a saving. The tool result therefore names the **source** dimensions (the transform's `sourceWidth` / `sourceHeight`, not the reduced ones) and tells the model how to zoom — re-read with a `rect` over the region of interest — so a model that wants detail re-reads with a small `rect` instead of asking for a bigger image. **Before the upload, a brake runs.** The runtime supplies the accounting (`setImageAccounting`: the bytes behind every image part the next request would carry) and the ceiling is the card's transport — `MAX_REQUEST_IMAGE_BYTES` (200 MB) for a `deepseek` upload, `INLINE_REQUEST_BODY_BYTES` (48 MiB) for the inline one — less the `IMAGE_BUDGET_RATIO` (0.9) margin, because the next request already carries what is in use and a brake that fired exactly at the wall would arrive one image too late. An image that would cross it is **not attached**: the call answers with an ordinary `Error:` line naming how much is in use and **what to do instead** — delegate the looking to a sub-agent (`spawn_agents`), because a fresh, empty history can carry images this chain can no longer carry and reports back in text. The refusal is a **decision aid, not a failure of the tool**: the image was readable and the call was well-formed, and the chain simply cannot spend the bytes — so the sentence also forbids describing an image that was never seen and retrying that same call, and names the `⧉` rollover (a new window starts without the images too) as the other way forward. It degrades by capability: a depth-2 sub-agent (which cannot spawn) is told to report the failure instead of delegating, and a non-vision card never sees `read_image` at all. Only valid on the vision model; unsupported format/too large (>64 MiB) return a friendly error. The call is **timed like any other**, so a slow read is marked by the generic prefix. |
-| `spawn_agents` | `agents`, `mode` | Orchestrated by the provider. Spawns parallel sub-agent branches (`write` REQUIRED, `model?`), `mode: 'sync'` waits at most `spinney.commandMaxForegroundDuration` and returns summaries + each agent's `stats` + `transcript` path. A batch still running at the limit **escapes** — it must not hold the turn — and the result becomes `{"spawned":N,"async":true,"escaped":true,"waitedMs":300000,"ids":[…],"done":[…],"running":[…],"note":"The batch is still running after 300 s; it is now delivered as a batch notice. End your turn: the notice carries every summary when the last one finishes.","transcriptDir":…}`, with every summary arriving later as that one batch notice. `'async'` returns `{ spawned, async:true, ids, transcriptDir }` and delivers the same notice when the batch settles (unchanged). The batch is delivered **exactly once** — the tool result on the normal path, the notice on the escape path — which is why the escape branch must not mark the cards delivered (`node.delivered`), or the notice would render as an already-delivered batch and the summaries would never reach the model. Only on agents whose `canSpawn` is true (`depth < 2 && write`) — a read-only sub-agent never sees it. Two caps beyond the depth limit: a **level-1** batch is bounded by `spinney.maxConcurrentSubagents` (default **15**, `SubAgentPool`, the surplus queues) and each parent may start at most `spinney.maxLevel2Subagents` (default **2**) depth-2 children (`runtime.ts:3301-3309`), past which the spawn returns `Error: this sub-agent may start at most N sub-sub-agents (M already started).` |
+| `spawn_agents` | `agents`, `mode` | Orchestrated by the provider. Spawns parallel sub-agent branches (`write` REQUIRED, `model?`), `mode: 'sync'` waits at most `spinney.subAgentSyncSeconds` (default 300) and returns summaries + each agent's `stats` + `transcript` path. A batch still running at the limit **escapes** — it must not hold the turn — and the result becomes `{"spawned":N,"async":true,"escaped":true,"waitedMs":300000,"ids":[…],"done":[…],"running":[…],"note":"The batch is still running after 300 s; it is now delivered as a batch notice. End your turn: the notice carries every summary when the last one finishes.","transcriptDir":…}`, with every summary arriving later as that one batch notice. `'async'` returns `{ spawned, async:true, ids, transcriptDir }` and delivers the same notice when the batch settles (unchanged). The batch is delivered **exactly once** — the tool result on the normal path, the notice on the escape path — which is why the escape branch must not mark the cards delivered (`node.delivered`), or the notice would render as an already-delivered batch and the summaries would never reach the model. Only on agents whose `canSpawn` is true (`depth < 2 && write`) — a read-only sub-agent never sees it. Two caps beyond the depth limit: a **level-1** batch is bounded by `spinney.maxConcurrentSubagents` (default **15**, `SubAgentPool`, the surplus queues) and each parent may start at most `spinney.maxLevel2Subagents` (default **2**) depth-2 children (`runtime.ts:3301-3309`), past which the spawn returns `Error: this sub-agent may start at most N sub-sub-agents (M already started).` |
 | `spawn_readonly_agents` | `agents`, `mode` | Read-only fan-out variant: the agent specs have **no `write` field**, so a child can never be writable. Exposed only when `canSpawnReadOnly` (`depth < 2 && !write`), i.e. to a read-only depth-1 sub-agent. Same result shape as `spawn_agents`. |
-| `send_agent_message` | `id`, `message`, `write?`, `model?`, `mode` | Orchestrated by the provider. Resumes a finished sub-agent (`id` from a prior `spawn_agents`) with a follow-up. `sync` waits at most the same limit (`spinney.commandMaxForegroundDuration`) and otherwise escapes through the same batch-notice path (`{"resumed":true,"async":true,"escaped":true,"waitedMs":…,"note":…}`, one delivery either way), `async` returns `{ resumed, id, async:true }` and delivers the result as a notice. `model` is resolved to a card (id / display name / wire name; unknown ⇒ `Error: unknown model "…".`). Only on agents whose `canSpawn` is true (`depth < 2 && write`). The `write?` override is honoured **only for the main agent**; a sub-agent caller goes through `handleSubAgentSendMessage`, which requires the target to be its own direct child and caps `write` at `caller.write && target.write` (no promotion). |
+| `send_agent_message` | `id`, `message`, `write?`, `model?`, `mode` | Orchestrated by the provider. Resumes a finished sub-agent (`id` from a prior `spawn_agents`) with a follow-up. `sync` waits at most the same window (`spinney.subAgentSyncSeconds`) and otherwise escapes through the same batch-notice path (`{"resumed":true,"async":true,"escaped":true,"waitedMs":…,"note":…}`, one delivery either way), `async` returns `{ resumed, id, async:true }` and delivers the result as a notice. `model` is resolved to a card (id / display name / wire name; unknown ⇒ `Error: unknown model "…".`). Only on agents whose `canSpawn` is true (`depth < 2 && write`). The `write?` override is honoured **only for the main agent**; a sub-agent caller goes through `handleSubAgentSendMessage`, which requires the target to be its own direct child and caps `write` at `caller.write && target.write` (no promotion). |
 | `send_readonly_agent_message` | `id`, `message`, `model?`, `mode` | Read-only resume variant: **no `write` override exists** (and a smuggled key is pinned to `false`). Exposed only when `canSpawnReadOnly` (`depth < 2 && !write`), i.e. to a read-only depth-1 sub-agent. Same result shape as `send_agent_message`. |
 | `hop_session` | `prompt`, `title?`, `mode?`, `returnNodeId?` | Orchestrated by the provider. Hands a self-contained task to a **fresh session** and gets its answer back: the hop is queued (the current turn ends), the new session runs `prompt` as its first message, and when that session is **idle** (its last turn ended and it owns no running background job, sub-agent batch or queued notice) the harness delivers the new session's final answer as an injected user message beginning `[session hop receipt] The task you dispatched to the new session "…" (…) has finished (status: …).` followed by its final reply (`src/chat/ChatViewProvider.ts`, `maybeDeliverHopReturn` / `deliverHopReturn`). A turn ending is not enough: the hop stays armed and re-checks once a second while the child still works, and each later turn end refreshes the answer. The answer lands as a **new branch off the node the hop was dispatched from**; `returnNodeId` overrides that branch point, and `mode: "fire_and_forget"` skips the return trip entirely (no receipt, nothing written into the origin's tree; `returnNodeId` is refused there). The receipt is not a user send: it does not focus the origin's tab, move its checkout, clear its composer, or ask the frozen-setup question, and it waits for a busy return node instead of being dropped. Main agent only, and only while `spinney.hopSession.enabled` is on (`hopEnabled`, apart from `canHop`); one hop per origin session, refused while a background terminal runs. See "Hop and hop back" in `docs/agents/control-plane.md`. |
 | `list_nodes` | — | Orchestrated by the provider. Renders the active session's chat tree — one indented line per node, `- <id>  [<kind>[, delivered][, status][, checked out]] parent=<id>  <title>` (the ` parent=<id>` part is omitted for the root) — so the agent can name a node (e.g. `hop_session`'s `returnNodeId`). The kind mark is `turn` / `agent` / `bg` and the bracket also carries `delivered` for a sidecar whose notice already reached its reader, so `kind:'bg'` job cards **do** appear here (a sub-agent's line shows its `agentStatus`). Main agent only (same `canHop` gate). |
 | `rename_session` | `title`, `sessionId?` | Orchestrated by the provider. Renames a **session** (not a node) and **locks** the title, so the automatic namer never overwrites it. `sessionId` defaults to the **caller's own** session (the agent's, not the focused tab). Main agent only (same `canHop` gate). Returns the new title. |
 > `read_image` is **not** resolved by `ToolRegistry.execute` — it is intercepted in `Agent.executeToolCall` because a tool message cannot carry an image block, so the image must be delivered as an injected user message. Likewise `spawn_agents` / `spawn_readonly_agents` / `send_agent_message` / `send_readonly_agent_message` / `hop_session` / `list_nodes` / `rename_session` are intercepted and delegated to the provider (`setSpawnHandler` / `setSendMessageHandler` / `setHopHandler` / `setListNodeHandler` / `setRenameSessionHandler`); a read-only depth-1 sub-agent gets only the `*_readonly_*` pair, a depth-2 sub-agent gets none of them, and an intercepted call when the matching `canSpawn*` / `canHop` / `hopEnabled` flag is false returns an explicit error (`hop_session` has its own flag: `spinney.hopSession.enabled` removes it while `list_nodes` / `rename_session` stay). **Every** tool is advertised with its full schema: `Agent.getTools` sends `ToolRegistry.definitions` plus the intercepted tools the agent's flags allow, so the model always sees the complete surface — there is no folded/gradual disclosure and no interface-fetch tool (`list_advanced_tool` was removed). `read_image`'s plumbing is unchanged by this: it is still one intercepted tool in one file (`src/agent/tools/readImage.ts`, `requires: 'vision'`), and the brake, the `rect` argument, the transform call and the upload all happen inside that same interception. What is new lives *beside* the tool, not in it — the frozen transform half in `src/agent/imageTransform.ts`, and the pure codec modules it drives (`pngCodec.ts`, `imageResample.ts`, `jpegDecode.ts`, split as `jpegEntropy.ts` / `jpegReconstruct.ts` behind a frozen seam) — see the note on the intercepted tools' file layout below.
 
-## Timeout, budgets and the `exec` diagnostics
+## Run types and the `exec` diagnostics
 
-Two settings bound a command, and they are not interchangeable —
-`spinney.commandDefaultTimeout` (seconds, default 500) is what a call that states no `timeout`
-gets, and `spinney.commandMaxForegroundDuration` (seconds, default 1800 = 30 minutes) is the hard
-**ceiling** on a foreground hold. What a call may hold the turn for is the **foreground slice**: the
-stated `timeout`, honored as given up to the ceiling — `min(timeout, default)` for
-`background_when_timeout`, which is the promotion point that value names — and zero for
-`start_in_background` and `start_detached` (those two never wait). `timeout` itself is the command's
-**total budget** (foreground + background) with **no ceiling**, so the matrix is the whole model:
+`exec_command` has **one knob**, `run_type`, and it says what the call *is* — never how
+long it may run. There is no per-call timeout, no budget, and **no job has a deadline**:
+a command lives until its process ends or something kills it.
 
-| `timeout` | no behavior / `stop_when_timeout` | `background_when_timeout` | `start_in_background` | `start_detached` |
+| `run_type` | behaviour | registered as | locks its node | notifies |
 | --- | --- | --- | --- | --- |
-| omitted | killed at the **default** | **refused before the spawn** | **refused before the spawn** | a detached job with **no deadline** |
-| ≤ default | killed at the timeout | killed at the timeout, **not** promoted | the whole budget as the job's deadline | the whole budget as the job's deadline |
-| default < `timeout` ≤ ceiling | killed at the **stated** timeout | promoted at the **default**; the hub gets `timeout − default` | the whole budget as the job's deadline | the whole budget as the job's deadline |
-| > ceiling | **refused before the spawn** | promoted at the **default**; the hub gets `timeout − default` | the whole budget as the job's deadline | the whole budget as the job's deadline |
+| `foreground` (**the default**) | runs in this turn and returns its output; a command still running after `spinney.execForegroundSeconds` is **moved to the background** — never killed, never refused | a node job, at the promotion | **yes**, from the promotion on | yes |
+| `background` | a node job from the start, its id back at once | a node job | **yes** | yes |
+| `detached` | **fire-and-forget**: session-wide | a **detached** job | **no** | **no** |
 
-The value is the **job's identity** — what is registered, whether the call locks its node's
-composer, whether it notifies, and whether the job can be joined:
+`spinney.execForegroundSeconds` (seconds, default **30**, minimum 10, maximum
+999999999999; `DEFAULT_EXEC_FOREGROUND_SEC` in `src/tools/execCommand.ts`) is the
+**foreground slice**, read live per call. It is not a cap and not a deadline: it is the
+point at which a running command is handed to the hub, so a build that takes a minute
+needs no argument, no timeout and no second thought — it simply becomes a job with a
+card, an id and a completion notice, and nothing is lost. The shipped default is
+deliberately short for the same reason: the promotion is cheap and it keeps the turn
+interactive.
 
-| value | registered as | locks its node | notifies | joinable |
-| --- | --- | --- | --- | --- |
-| `stop_when_timeout` (**the default**) | nothing (it is the turn) | — | — | — |
-| `background_when_timeout` | a node job | **yes** | yes | yes, if its remaining budget fits in a turn |
-| `start_in_background` | a node job | **yes** | yes | as above |
-| `start_detached` | a **detached**, session-wide job | **no** | **no** | **refused** |
-
-Two cells of the budget matrix carry the reasoning. `timeout ≤ default` with `background_when_timeout`
-is **not** promoted because the budget is spent exactly when the slice ends, so promoting it would be
-"kill it immediately" in disguise; and a promotion hands over the **remainder** (`timeout − default`)
-rather than the budget a second time, because the hub measures the job's deadline from the
-registration it performs at that moment — "1 minute in the foreground and 30 minutes in the
-background" was really 30 minutes when the whole budget travelled twice. The row the split exists
-for is the third one: a `timeout` between the default and the ceiling with no background behavior is
-the number the call asked for, so the turn is held that long — the setting **used** to be a cap, so
-the same call was clamped to the default or refused. The third cell that carries
-reasoning is the omitted-`timeout` one: a **node** job with no deadline is refused, exactly as
-`start_in_background` already was, so the no-deadline lifetime belongs to `start_detached` and to
-nothing else.
-
-The refusal (`timeoutTooLongError`, `src/tools/execCommand.ts`) is thrown **before the spawn** —
-no process, no job, nothing was started — with the registry's `Error: ` prefix:
+The one refusal that is left is the **removed arguments** (`removedArgumentError`), which
+fires before anything is spawned — no process, no job, nothing started:
 
 ```
-Error: timeout 2000 s is longer than the 1800 s a turn may hold (spinney.commandMaxForegroundDuration). A command that may run that long must not hold the turn: pass timeout_behavior "background_when_timeout" (500 s in the foreground, the rest of its 2000 s budget in the background) or "start_in_background" (the whole 2000 s in the background), or pass a timeout of 1800 s or less. Nothing was started.
+Error: timeout_behavior was removed; pass run_type "foreground" | "background" | "detached". There is no per-call timeout any more. Nothing was started.
 ```
 
-The same value set adds the second refusal (`needsTimeoutError(behavior)`, also **before the spawn**),
-which one function produces for both node-job values, naming the one that was asked for:
+(`src/tools/index.ts` adds the `Error: ` prefix; the sentence itself is unchanged — the
+guard pins it byte for byte.) A call that still sends a bare `timeout` gets the same
+sentence, because the two went away together and a silent ignore would read as "my
+timeout is in force".
 
-```
-Error: timeout_behavior "<behavior>" needs a timeout: without one the job has no deadline, so nothing ends it on its own and it locks this node (the composer shows Stop for it) until something kills it. Either pass a timeout — the job's whole budget in seconds, with no ceiling, and the job is killed when it runs out — or pass timeout_behavior "start_detached", which is session-wide and fire-and-forget: it locks no node, never sends a completion notice, and its result is read with check_background_terminal. Nothing was started.
-```
+The three results are the model's contract, verbatim (`promotionMessage`,
+`backgroundStartMessage`, `detachedStartMessage` in `src/tools/execCommand.ts`).
 
-`<behavior>` is `background_when_timeout` or `start_in_background`; the rest of the sentence is the
-same either way. `start_detached` may omit `timeout`, because it locks nothing and notifies nobody —
-it is the only value that may.
-
-When a command *is* promoted, the result is this block — the model's contract, verbatim
-(`promotionMessage` in `src/tools/execCommand.ts`):
+A **promotion** — a foreground call that outlived its slice. The first line is frozen
+(the guard and this document quote it byte for byte); the second names the **slice** it
+outlived, never a budget, because nothing is about to end the command:
 
 ```
 [command moved to background: id 7]
-The command was still running after 500000 ms (8m 20s) in <cwd>, so it was moved to the background with the rest of its 1300000 ms budget; it will be killed when that budget runs out. Nothing was killed by the move and it keeps running.
+The command was still running after 30000 ms (30s) in <cwd>, so it was moved to the background when the 30 s foreground slice (spinney.execForegroundSeconds) ran out. Nothing was killed by the move and it keeps running.
 Command: <command>
 Working directory: <cwd>
-You may continue with other work or end your turn: the completion notice for id 7 will reach you when it finishes. Do not poll it — check_background_terminal(7) is a status read, not a wait. kill_background(7) stops it. Once less than 1800 s of its budget is left, join_background(7) returns the result in this turn instead.
+You may continue with other work or end your turn: the completion notice for id 7 will reach you when it finishes. Do not poll it — check_command(7) is a status read, not a wait; wait_for_command(7) waits for it and returns the moment it ends; kill_command(7) stops it.
 Output so far:
 <output>
 ```
 
-`<id>` is the background terminal's session-local id, `8m 20s` is `formatDuration` of the foreground
-time (i.e. ~the default timeout, 500 s), the quoted `1300000 ms` is the budget the **hub** is handed —
-the remainder, not the call's whole budget — and the `Output so far:` line appears only when the
-command produced something. The closing line is the instruction a model has to read like one: it says
-what to do instead of waiting (continue other work, or end the turn), what will come back (the
-completion notice), that a status read is not a wait, and when a join becomes legal. A promotion
-always names a
-budget: the one shape that would have reached it without one (`background_when_timeout` with
-`timeout` omitted) is refused before the spawn, so `promotionMessage`'s no-budget wording (`… so it
-was moved to the background with no deadline instead of a budget.`) is now unreachable from a legal
-call — the only no-deadline job left is a detached one, whose result block says so itself.
+`<id>` is the job's session-local id, `30 s` is the configured slice, and the `Output so
+far:` block appears only when the command produced something. The closing line is the
+one a model has to read like an instruction: it says what to do instead of waiting
+(continue other work, or end the turn), what will come back by itself (the completion
+notice), that a status read is not a wait, that `wait_for_command` is the wait, and that
+`kill_command` ends it. It is worded that way because a session in the field answered the
+same silence with **46** status reads back to back.
 
-`start_in_background` returns before any foreground time has passed, so its result is:
+`run_type: "background"` returns before any foreground time has passed:
 
 ```
 [command started in background: id 7]
 Command: <command>
 Working directory: <cwd>
-You may continue with other work or end your turn: the completion notice for id 7 will reach you when it finishes. Do not poll it — check_background_terminal(7) is a status read, not a wait; kill_background(7) stops it. Once less than 1800 s of its budget is left, join_background(7) returns the result in this turn instead.
+You may continue with other work or end your turn: the completion notice for id 7 will reach you when it finishes. Do not poll it — check_command(7) is a status read, not a wait; wait_for_command(7) waits for it and returns the moment it ends; kill_command(7) stops it.
 ```
 
-`start_detached` never waits either, and its result is the fire-and-forget block:
+`run_type: "detached"` never notifies, and its block says so:
 
 ```
 [command started detached: id 7]
 Command: <command>
 Working directory: <cwd>
-This job is session-wide and fire-and-forget: it locks no node (the composer stays on Send for it) and no completion notice will be sent, so check_background_terminal(7) is how its result is read. kill_background(7) stops it; join_background(7) is refused, because there is no notice and no bounded wait for it. It has no deadline and runs until it ends or is killed.
+This job is session-wide and fire-and-forget: it locks no node (the composer stays on Send for it) and no completion notice will be sent, so check_command(7) is how its result is read. wait_for_command(7) waits for it up to the seconds you give and returns the moment it ends — no notice follows that wait. kill_command(7) stops it. It has no deadline and runs until it ends or is killed.
 ```
 
-The last sentence names the job's budget instead when the call gave one (`It is killed when its 1500000 ms budget runs out.`). The job keeps the node that started it as its **owner** — its card renders there and it is torn down with that node or session — while the two properties the value table names are the ones that change: it **locks no node** (the composer keeps offering Send), and it **never notifies**.
+Every job keeps the node that started it as its **owner** — its card renders there and it
+is torn down with that node or session — and `detached` changes exactly two things: it
+**locks no node** (the composer keeps offering Send) and it **never notifies**.
 
-Every background ending registers the job **under the node whose turn spawned it**
-(`BackgroundHub.register` with the job's budget, and with its detached flag for `start_detached`),
-not under whoever happens to be looking, so the card renders beside that node's card and — for the
-three values that notify — the completion notice returns to that branch.
+The two settings that remain are read live, so a change applies to the next call:
 
-The tool `description` was rewritten for this model — it is the only copy a sub-agent ever sees —
-and still carries the three substrings a gate asserts:
+- `spinney.execForegroundSeconds` — the foreground slice above (`execForegroundSeconds()`
+  in `src/tools/execCommand.ts`);
+- `spinney.subAgentSyncSeconds` — how long a `spawn_agents` / `send_agent_message` call in
+  `sync` mode may hold the turn (`subAgentSyncSeconds()` in `src/chat/runtime.ts`,
+  `DEFAULT_SUB_AGENT_SYNC_SEC = 300`). A batch still running at that point escapes: the
+  tool returns the ids and the summaries arrive later as one batch notice.
+
+The deleted keys — `spinney.commandDefaultTimeout`, `spinney.commandMaxForegroundDuration`
+and, before them, `spinney.commandTimeout` / `spinney.commandTimeoutMax` — are gone from
+the code, the manifest, the catalogs and this document; `npm run check:exec` asserts that
+the schema and the description name neither.
+
+The tool `description` was rewritten for this model — it is the only copy a sub-agent ever
+sees — and still carries the three substrings a gate asserts:
 `Never put the command in the background yourself`,
-`instead of prefixing the command with "cd <dir> && "` and `or an absolute path`. It now also names
-`spinney.commandDefaultTimeout` / 500 s and `spinney.commandMaxForegroundDuration` / 30 minutes, and
-says a longer timeout has to ask for a background mode, that **both node-scoped values** need a
-`timeout` (`background_when_timeout` and
-`start_in_background` alike — asked without one they are refused before anything starts, because a
-node job with no deadline never ends on its own and locks the node's composer on Stop until it is
-killed), and that `start_detached` is the only value that may omit one, while the deleted
-`spinney.commandTimeout` / `spinney.commandTimeoutMax` are gone from it — `npm run check:timeout`
-asserts both halves.
+`instead of prefixing the command with "cd <dir> && "` and `or an absolute path`. It also
+states the three run types, that `spinney.execForegroundSeconds` is when a foreground
+command moves itself, that there is **no per-call timeout**, that a job lives until it
+ends or is killed, and the two rules a model gets wrong without them: **never sleep to
+wait for a command and never poll one** — `wait_for_command` waits, `check_command` is a
+status read.
 
 **Diagnostics.** One `[perf]` line per event, English, on the diagnostics log (see
-`docs/agents/invariants/streaming-perf.md`). `cmd=` is `redactCommand` from `src/redact.ts`
-(whitespace collapsed, secret-looking values masked, clipped to 120 chars with a `…(+N chars)` tail),
-and `pid=none` means "no pid yet" (a spawn failure, or a shell not created yet):
+`docs/agents/invariants/streaming-perf.md`). `cmd=` is `redactCommand` from
+`src/redact.ts` (whitespace collapsed, secret-looking values masked, clipped to 120 chars
+with a `…(+N chars)` tail), and `pid=none` means "no pid yet" (a spawn failure, or a shell
+not created yet):
 
-- `exec start pid=<pid|none> timeout=<foregroundSec>s budget=<budgetSec>s|none behavior=<stop_when_timeout|background_when_timeout|start_in_background|start_detached> cwd=<cwd> cmd=<redacted>`
-  — the call as it was executed, *after* the default and the slice were resolved: `timeout=` is the
-  foreground slice (how long this call may hold the turn), `budget=` is the call's whole budget, and
-  `budget=none` only when the value was `start_detached` with no `timeout` — the one shape that may
-  have no deadline and still be started (both node-job values refuse an omitted `timeout`).
-- `exec still-running pid=<pid|none> ms=<elapsed> out=<chars> cmd=<redacted>` — a 30 s unref'd
-  heartbeat while a foreground command holds the turn: a shell waiting for input, or a network call
-  with no deadline, used to write *nothing*, so a hung command was invisible in the log.
-- `exec end pid=<pid|none> outcome=<exit|timeout|aborted|start-fail|truncated|promoted> code=<code|none> ms=<elapsed>`
-  — one line per foreground call, whatever ended it; `promoted` means it was handed to the background
-  hub (the command is still running — neither `exit` nor `timeout` is true), and `truncated`
-  outranks `exit`, so a nonzero code is never read without the `OUTPUT_CAP` flood that caused it.
-- `exec kill pid=<pid|none> outcome=<exited|no-exit|no-pid|unknown> ms=<elapsed>` — written once a
-  kill issued by this call has actually landed; `unknown` is a kill that rejected, and saying so is
-  better than claiming one of the three real outcomes.
+- `exec start pid=<pid|none> run_type=<foreground|background|detached> cwd=<cwd> cmd=<redacted>`
+  — the call as it was executed. No timeout field, no budget field: `run_type` is the
+  whole of what the call decided.
+- `exec still-running pid=<pid|none> ms=<elapsed> out=<chars> cmd=<redacted>` — a 30 s
+  unref'd heartbeat while a foreground command holds the turn: a shell waiting for input,
+  or a network call that never returns, used to write *nothing*, so a hung command was
+  invisible in the log.
+- `exec end pid=<pid|none> run_type=foreground outcome=<exit|aborted|start-fail|truncated|promoted> code=<code|none> ms=<elapsed>`
+  — one line per **foreground** call, whatever ended it; `promoted` means it was handed
+  to the hub (the command is still running — neither `exit` nor anything else is true),
+  and `truncated` outranks `exit`, so a nonzero code is never read without the `OUTPUT_CAP`
+  flood that caused it. A `background` / `detached` start has no `exec end` line: it never
+  held the turn, and `bg register` is its record.
+- `exec kill pid=<pid|none> outcome=<exited|no-exit|no-pid|unknown> ms=<elapsed>` — written
+  once a kill issued by this call has actually landed; `unknown` is a kill that rejected,
+  and saying so is better than claiming one of the three real outcomes.
 
-Three more lines describe the *background* half, and they are the budget's trail:
+Two more lines describe the *background* half. There is no expiration line, because
+nothing expires:
 
-- `bg register id=<id> pid=<pid|none> budget=<n>s|none` — a command became a background job, under
-  the budget the hub registered it with (`none` = no deadline, which only an omitted `timeout` with
-  `start_detached` can produce now).
-- `bg expire id=<id> pid=<pid|none> budget=<n>s|none ms=<elapsed>` — the harness killed the job at
-  its own deadline. A clean budget kill is recorded **here** and nowhere else, which is exactly why
-  the line exists: the `bg kill` line below is written only when something went wrong.
-- `bg kill id=<id> pid=<pid|none> reason=<user|stop|timeout|rollover|none> outcome=<exited|no-exit|no-pid|unknown> ms=<elapsed>`
-  — written **only when the confirmation failed**, so the log carries an entry for a kill that could
-  not be confirmed (`reason` says who asked for it: the tool/card/Stop all read as `stop`, and
-  `timeout` is the budget).
+- `bg register id=<id> pid=<pid|none> detached=<true|false>` — a command became a job, and
+  whether that job locks and notifies. There is no `budget=` field any more.
+- `bg kill id=<id> pid=<pid|none> reason=<user|stop|rollover|none> outcome=<exited|no-exit|no-pid|unknown> ms=<elapsed>`
+  — written **only when the confirmation failed**, so the log carries an entry for a kill
+  that could not be confirmed (`reason` says who asked for it: the tool, the card and Stop
+  all read as `stop`; there is no `timeout`).
 
 **What a kill reports.** `CommandHandle.kill()` is **async** and resolves
-`'exited' | 'no-exit' | 'no-pid'` — the old shape returned as soon as the signal had been *sent* (or
-`taskkill` had run, which only says taskkill ran), so Stop, the terminal card and the tool result all
-claimed a clean end while the tree could still be alive. On Windows it runs
-`taskkill /PID … /T /F` via `execFile` and then waits for the child's **`exit`** event — never
-`close`, which also waits for the stdio pipes to drain and therefore never arrives when a leftover
-grandchild holds them — for up to **800 ms**; on POSIX the child leads its own process group, so the
-group is signalled: `SIGTERM` → **300 ms** → `SIGKILL` → **500 ms**. `'no-pid'` is a spawn that never
-produced a pid, `'no-exit'` a deadline that passed without one, and it never rejects. The
-confirmation is fired detached so `BackgroundRegistry.kill` stays synchronous (Stop and the card
-must be instant); `kill_background` / `check_background_terminal` are the callers that await it, and
-they say `… but the process tree did not report an exit …` when it failed. A kill the **budget**
-caused is named as such everywhere (`killReason: 'timeout'`, `isBudgetKill`): `check_background_terminal`
-and the completion notice both read `was killed after 30m 0s — its 30m 0s budget ran out`, because a
-job that was promoted so the turn could end must not read as work the user stopped.
+`'exited' | 'no-exit' | 'no-pid'` — the old shape returned as soon as the signal had been
+*sent* (or `taskkill` had run, which only says taskkill ran), so Stop, the terminal card and
+the tool result all claimed a clean end while the tree could still be alive. On Windows it
+runs `taskkill /PID … /T /F` via `execFile` and then waits for the child's **`exit`**
+event — never `close`, which also waits for the stdio pipes to drain and therefore never
+arrives when a leftover grandchild holds them — for up to **800 ms**; on POSIX the child
+leads its own process group, so the group is signalled: `SIGTERM` → **300 ms** →
+`SIGKILL` → **500 ms**. `'no-pid'` is a spawn that never produced a pid, `'no-exit'` a
+deadline that passed without one, and it never rejects. The confirmation is fired detached
+so `BackgroundRegistry.kill` stays synchronous (Stop and the card must be instant);
+`kill_command` / `check_command` are the callers that await it, and they say
+`… but the process tree did not report an exit …` when it failed.
 
-**Git Bash rewrites arguments — and the fix is in `src/tools/shell.ts`.** The Git Bash environment
-carries `MSYS_NO_PATHCONV: '1'` on Windows, so a **native** tool receives the argument as written:
-`taskkill /PID 67188 /T /F` used to reach taskkill as `invalid argument/option` on
-`C:/Program Files/Git/PID` — MSYS had rewritten `/PID` into a Windows path — and three stuck
-processes were never killed. The `//F` / `//IM` double-slash workaround is **obsolete**.
-`npm run check:shell` pins the argv a native child actually receives (`MSYS_NO_PATHCONV` is
-Windows-only; a POSIX bash has no such conversion, so it must not leak there).
+**Git Bash rewrites arguments — and the fix is in `src/tools/shell.ts`.** The Git Bash
+environment carries `MSYS_NO_PATHCONV: '1'` on Windows, so a **native** tool receives the
+argument as written: `taskkill /PID 67188 /T /F` used to reach taskkill as
+`invalid argument/option` on `C:/Program Files/Git/PID` — MSYS had rewritten `/PID` into a
+Windows path — and three stuck processes were never killed. The `//F` / `//IM`
+double-slash workaround is **obsolete**. `npm run check:shell` pins the argv a native child
+actually receives (`MSYS_NO_PATHCONV` is Windows-only; a POSIX bash has no such
+conversion, so it must not leak there).
 
 ## Timing in tool results
 
@@ -278,7 +258,6 @@ because no host string arrives per tick): under 1000 ms → `420ms`, under 10 s 
 
 - **`exec_command` always leads with its own timing line**, first in the result, one of:
   `[exit 0 in 3.4s · cwd D:\repo]`, `[command exited with code 3 in 3.4s · cwd …]`,
-  `[command timed out after 500000 ms (ran 500.2s) · cwd …]`,
   `[command output exceeded 16777216 bytes; truncated after 3.4s · cwd …]`,
   `[command was interrupted after 3.4s · cwd …]`, or
   `[command failed to start after 0.01s: <message> (shell <shell.exe>) · cwd …]` — the cwd half is
@@ -289,10 +268,10 @@ because no host string arrives per tick): under 1000 ms → `420ms`, under 10 s 
   **on purpose**: an oversized result is spilled by `limitInline`, whose preview keeps only the
   first lines (cut to a small character budget), so a timing line anywhere lower is the first thing
   lost — exactly for the long command whose duration matters most. A **promoted** command is the one
-  exception to "leads with its timing line": its first line is the notice itself, `[command moved to background: id 7]`, and the
-  duration rides inside it (`The command was still running after 500000 ms (8m 20s) in …`), next to
-  the budget the hub was handed; `start_in_background` is unchanged, because it returns before any
-  foreground time has passed.
+  exception to "leads with its timing line": its first line is the notice itself,
+  `[command moved to background: id 7]`, and the duration rides inside it (`The command was still
+  running after 30000 ms (30s) in …`), next to the foreground slice it outlived. The two
+  background run types are unchanged, because they return before any foreground time has passed.
 - **Every other text result gets a generic prefix — but only from 1 second up.** A call that took at
   least 1000 ms starts with `[<tool-name> 3.4s]` (e.g. `[search_files 3.4s]`); a fast call stays
   unmarked, so the common case costs no context. `exec_command` never gets this prefix: its own
@@ -310,8 +289,8 @@ its document.
 
 The registry tools live under `src/tools/` with their execution code — one file per tool
 (`readFile.ts`, `writeFile.ts`, `appendFile.ts`, `replaceInFile.ts`, `listDir.ts`,
-`searchFiles.ts`, `searchTranscripts.ts`, `execCommand.ts`) except the three background tools
-(`check_background_terminal` / `kill_background` / `join_background`), which share
+`searchFiles.ts`, `searchTranscripts.ts`, `execCommand.ts`) except the three command-management tools
+(`check_command` / `wait_for_command` / `kill_command`), which share
 `src/tools/backgroundTools.ts`; `background.ts` holds the process plumbing they and
 `exec_command` use. The two web tools are the same shape with a shared spine:
 `webSearch.ts` / `webFetch.ts` are the tools, `webBackends.ts` is the backend table,
@@ -362,7 +341,7 @@ Required arguments are validated **before** the tool body runs (`ToolRegistry.ex
 against the schema it advertises), so an absent value never surfaces as the
 tool's own complaint about the symptom: `exec_command` called without `command`
 answers `Error: exec_command is missing required argument "command". It sent: ….
-Parameters: command, cwd, timeout, timeout_behavior.` — plus a `Did you mean …?`
+Parameters: command, cwd, run_type.` — plus a `Did you mean …?`
 hint when a sent key is a near-miss of the required one. One name is additionally
 folded in as an alias: `exec_command` accepts `cmd` for `command` (only when
 `command` is absent — a correct call is never touched). Aliases + validation live

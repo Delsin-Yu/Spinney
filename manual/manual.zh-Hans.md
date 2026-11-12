@@ -322,7 +322,7 @@ Spinney 绝不发送卡片没有声明的级别。卡片不提供的级别会回
 | 结果 | 子智能体结束时，Spinney 向父节点投递一条通知。该通知带有这次运行的用时。卡片显示 `Delivered`。 |
 | 报告 | Spinney 在父回合的下一个工具边界投递该通知。父节点空闲时，Spinney 把该通知注入父节点。它绝不会新建节点。 |
 
-一个子智能体批次等待的时间同样不超过 `spinney.commandMaxForegroundDuration`。批次在该上限时仍在运行，`sync` 模式（默认）下的 `spawn_agents` 和 `send_agent_message` 就会返回智能体 id。所有摘要随后作为一条批次通知到达。
+一个子智能体批次等待的时间同样不超过 `spinney.subAgentSyncSeconds`（默认 300 秒）。批次到该时间仍在运行，`sync` 模式（默认）下的 `spawn_agents` 和 `send_agent_message` 就会返回智能体 id。所有摘要随后作为一条批次通知到达。
 
 你不能在子智能体卡片中输入。要延续已结束的子智能体，请让父智能体去做。
 
@@ -332,20 +332,23 @@ Spinney 绝不发送卡片没有声明的级别。卡片不提供的级别会回
 
 ### 8.2 后台终端
 
-后台终端在回合继续的同时保持一条长命令。智能体通过带 `timeout_behavior` 的 `exec_command` 启动一个后台终端。
+后台终端在回合继续的同时保持一条长命令。智能体通过带 `run_type` 的 `exec_command` 启动一个后台终端。
 
-一条命令在前台占用一个回合的时间不超过 `spinney.commandMaxForegroundDuration`（1800 秒，即 30 分钟）。没有传 `timeout` 的命令使用 `spinney.commandDefaultTimeout`（500 秒）。`exec_command` 的 `timeout` 是命令的全部预算：前台时间加后台时间，没有上限。不超过上限的 `timeout` 按写入的值使用。`timeout` 长于该上限时，不会启动任何东西，调用先被拒绝，除非它同时请求一个后台取值。
+一条命令在 `spinney.execForegroundSeconds`（默认 30 秒）之后仍在运行，就会自行转入后台。没有东西丢失，也没有东西被终止。工具的结果给出该任务的 id，智能体可以继续其他工作，或者结束本回合。
 
-`timeout_behavior` 决定该调用是什么身份。它有四个取值：
+`run_type` 决定该调用是什么身份。它有三个取值：
 
 | 取值 | Spinney 启动什么 | 代价是什么 |
 |---|---|---|
-| `stop_when_timeout` | 不启动任何东西。命令达到超时时间时仍在运行，Spinney 就终止它。调用没有传 `timeout` 时，Spinney 在默认超时时间终止命令。该取值是默认值。 | 没有代价。 |
-| `background_when_timeout` | 在该节点上启动一个任务。命令先在前台运行到默认超时时间，随后 Spinney 把它转入后台。预算的剩余部分就是该任务的预算。该调用必须传入 `timeout`。 | 该任务结束前，该节点不能发送消息。任务结束时 Spinney 发送一条完成通知。 |
-| `start_in_background` | 立即在该节点上启动一个任务。全部预算就是该任务的截止时间。该调用必须传入 `timeout`。 | 与上一行相同。 |
-| `start_detached` | 立即启动一个分离任务。该任务不锁定任何节点。`timeout` 可以省略。 | 该节点保持空闲，并且该任务不发送通知，所以智能体只在主动查询时才知道它的结果。该会话中的任何节点都能读取或终止该任务。 |
+| `foreground` | 一开始不启动任何东西。命令在本回合内运行。超过 `spinney.execForegroundSeconds` 后，Spinney 把它转入后台。该取值是默认值。 | 命令及时结束时没有代价。转入后台之后与下一行相同。 |
+| `background` | 立即在该节点上启动一个任务。 | 该任务结束前，该节点不能发送消息。任务结束时 Spinney 发送一条完成通知。 |
+| `detached` | 立即启动一个分离任务。该任务不锁定任何节点。 | 该节点保持空闲。该任务不发送通知，所以智能体只在主动查询时才知道它的结果。该会话中的任何节点都能读取或终止该任务。 |
 
-预算用尽时，Spinney 终止该任务。`background_when_timeout` 和 `start_in_background` 都需要 `timeout`：不传 `timeout` 时，Spinney 不会启动任何东西，调用先被拒绝。没有截止时间的任务会一直占用它的节点，所以那样的任务属于 `start_detached`。拒绝消息会指出调用请求的取值，说明没有启动任何东西，并给出两条出路：传入 `timeout`，或者改用 `start_detached`。只有 `start_detached` 可以没有截止时间，因为它不锁定任何节点。`join_background` 同样不得让一个回合超过该上限：只要该任务的剩余预算还多于该上限，或者根本没有截止时间，join 就会被拒绝，并告知智能体结束本回合，完成通知随后才会到达。Spinney 也会拒绝分离任务的 join：该任务没有截止时间，也不发送通知，所以没有任何可等待的东西。智能体用 `check_background_terminal` 读取分离任务，用 `kill_background` 结束它。`check_background_terminal` 和 `kill_background` 对每个任务都可用。智能体启动任务或把任务转入后台时，Spinney 会告诉它可以继续其他工作，或者结束本回合：任务结束时完成通知会到达。状态查询不会等待，所以智能体不得对正在运行的任务反复查询。
+任何任务都没有截止时间。任务一直运行到命令结束，或者直到 Spinney 或你终止它。没有 `timeout` 参数，也没有 `timeout_behavior` 参数。仍然传入其中一个的调用会得到错误，并且不会启动任何东西。
+
+智能体用 `check_command` 读取任务。答案给出状态和到目前为止的输出。状态查询不会等待，所以智能体不得对正在运行的任务反复查询。智能体用 `wait_for_command` 等待：该工具最多等待它给出的秒数，任务一结束就返回。等待先结束时，智能体可以再次等待。智能体用 `kill_command` 结束任务。能运行命令的子智能体也拥有这三个工具。
+
+智能体启动任务或把任务转入后台时，Spinney 会告诉它可以继续其他工作，或者结束本回合：任务结束时完成通知会到达。
 
 智能体不会自己把进程放到后台，例如用 `&` 或 `Start-Process`。Spinney 无法跟踪这样的进程，你也不能从卡片上终止它。
 
@@ -373,7 +376,7 @@ Spinney 在以下情况下终止正在运行的任务：
 
 重启后，正在运行的任务显示为 `已中断`。卡片绝不会在并非活动时声称自己是活动的。
 
-子智能体可以启动后台终端，但不能管理它。只有你能终止它。
+子智能体可以启动并管理自己的后台终端。只读子智能体完全不能运行命令。
 
 ### 8.3 会话交接
 
@@ -498,8 +501,8 @@ Spinney 再次发送请求期间，卡片会显示一行标记，例如 `⟳ 静
 | `spinney.foldToolCalls` | `true` | 默认折叠工作日志中的工具调用卡片。正在运行的调用保持展开。 |
 | `spinney.foldWork` | `true` | 默认在回合完成时把工作日志折叠成单行标题；你点击过的标题、或你松开过锁定圆点的卡片，会保持你留下的状态。 |
 | `spinney.promptSections` | `{}` | 额外的提示词片段，以菜单中的名称为键。与自带片段同名的名称会替换其文本。 |
-| `spinney.commandDefaultTimeout` | `500` | 调用没有传 `timeout` 时，一条命令运行的时间，单位为秒。500 即 8 分 20 秒。它只是默认值，不是上限：调用传入的 `timeout` 按写入的值使用，最多到 `spinney.commandMaxForegroundDuration`。它也是 `background_when_timeout` 在前台运行、随后 Spinney 把命令转入后台的时间。 |
-| `spinney.commandMaxForegroundDuration` | `1800` | 单条命令在前台占用一个回合的最长时间，单位为秒。1800 即 30 分钟。不超过该值的 `timeout` 按写入的值使用。`timeout` 长于该值时，Spinney 拒绝该调用，除非它请求 `background_when_timeout` 或 `start_in_background`。这两个取值都必须自带 `timeout`，否则 Spinney 会拒绝该调用。`start_detached` 从不占用回合，也可以没有截止时间。`join_background` 也不会等待超过该值。 |
+| `spinney.execForegroundSeconds` | `30` | 命令在本回合内运行多长时间（秒），超过之后 Spinney 把它转入后台。默认 30 秒。最小 10 秒。命令不会被终止：它继续作为后台任务运行，智能体收到它的 id。 |
+| `spinney.subAgentSyncSeconds` | `300` | `sync` 模式下 `spawn_agents` 或 `send_agent_message` 调用可以占用回合的时间（秒）。300 即 5 分钟。最小 30 秒，最大 1800 秒。批次到该时间仍在运行，就返回智能体 id，所有摘要随后作为一条批次通知到达。 |
 | `spinney.maxInlineToolOutput` | `32768` | 工具结果的大小上限，单位为字节。更大的结果会写入文件。回复中显示的预览最多 2048 个字符。`0` 关闭该上限。 |
 | `spinney.searchTimeoutSeconds` | `10` | 一次搜索的时间上限（秒）。适用于 `search_files` 与 `search_transcripts`。最小 1 秒，最大 600 秒。该上限覆盖整次调用。达到上限的搜索只返回一条错误，不返回任何结果。此时请缩小搜索范围：改用更窄的路径、更精确的模式、glob，或减少上下文。 |
 | `spinney.hopSession.enabled` | `true` | 允许智能体用 `hop_session` 把自包含任务交给新会话。已经冻结的会话仍保留该工具，但 Spinney 会拒绝调用。 |

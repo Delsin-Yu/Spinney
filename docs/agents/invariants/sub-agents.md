@@ -25,16 +25,19 @@
   `runtime.ts:3536`). A signal is delivered either at the parent turn's **next tool boundary** (injected into the running
   turn, so the model reacts on its next hop) or, when the parent is idle, as an injected turn on
   that same node — never as a new node.
-- **A sub-agent's tool surface is a subset — and it excludes the background tools.** `subAgentTools`
-  (`src/chat/runtime.ts:3086-3097`) builds from `workerFor(node).tools`, so a sub-agent sees exactly
-  `read_file` / `list_dir` / `search_files` / `search_transcripts` (plus `write_file` /
-  `replace_in_file` / `exec_command` when it is writable) and nothing else. `check_background_terminal` /
-  `kill_background` / `join_background` are **not** in that list: a sub-agent that backgrounds a job
-  (`exec_command` with `timeout_behavior = background_when_timeout` / `start_in_background` / `start_detached`) still gets its
-  session-local id back, but a call to any of the three answers `Error: unknown tool "…"` — a job id it
-  cannot manage. The job registers under the **sub-agent's own** node (see "A sub-agent's tools/handlers
-  are bound to the sub-agent's own node" below) and its completion notice does reach the sub-agent; only
-  the user (the job card's kill button, or Stop on the owning line) can kill it.
+- **A sub-agent's tool surface is a subset — and the command tools travel together.** `subAgentTools`
+  (`src/chat/runtime.ts`) builds from `workerFor(node).tools`, so a **writable** sub-agent sees exactly
+  `read_file` / `list_dir` / `search_files` / `search_transcripts` / `web_search` / `web_fetch` plus
+  `write_file` / `replace_in_file` / `append_file` / `exec_command` **and the three tools that read the id
+  `exec_command` hands back**: `check_command` / `wait_for_command` / `kill_command`. They are one list on
+  purpose — the default `run_type: "foreground"` promotes a command into a background job after
+  `spinney.execForegroundSeconds`, so a sub-agent's `npm run compile` becomes a job whether it asked for one
+  or not, and an id it cannot read, wait for or end would strand the work. A **read-only** sub-agent gets
+  none of the four: the write list is both blocked and hidden there (`withBlocked` / `withHidden`), so the
+  model never sees a tool it cannot use and a hallucinated call is denied with a sentence. Because a
+  sub-agent's handlers are bound to its **own** node, a job it starts registers there (see "A sub-agent's
+  tools/handlers are bound to the sub-agent's own node" below) and its completion notice reaches the
+  sub-agent; the user can also end it from the job card's kill button or Stop on the owning line.
 - `send_agent_message({ id, message, write?, model?, mode })` resumes a **finished** sub-agent (the
   `id` from a prior `spawn_agents`) with a follow-up `message`. `sync` blocks and returns the resumed
   result; `async` returns immediately and delivers the result as a notice. `model` is not a wire-name

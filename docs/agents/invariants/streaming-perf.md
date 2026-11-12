@@ -780,7 +780,7 @@ The lines that make such a report diagnosable, in the order they appear:
 - `[env version=… diag=… vscode=… node=… <platform>-<arch> cpus=… mem=…GB appRoot=… folders=… root=… store=… key=… language=…]`
   — which build, on which VS Code (that decides whether the bundled ripgrep is findable at
   all), on what machine, for which workspace and store root.
-- `[config effective maxSubagents=… maxLevel2=… maxInlineToolOutput=… commandDefaultTimeout=…s commandMaxForegroundDuration=…s saveSessionTranscripts=… transcriptDir=… dataDir=… autoSessionTitles=… replyLanguage=… defaultCard=… providers=… cards=…]`
+- `[config effective maxSubagents=… maxLevel2=… maxInlineToolOutput=… execForegroundSeconds=…s subAgentSyncSeconds=…s saveSessionTranscripts=… transcriptDir=… dataDir=… autoSessionTitles=… replyLanguage=… defaultCard=… providers=… cards=…]`
   — the settings in force, in one line.
 - `[search rg=<path>]` (or `rg=missing (… the fix is NOT in play)`, or a spawn-failure line)
   — **the first thing to check**: whether the child-process search path is actually the one
@@ -789,21 +789,20 @@ The lines that make such a report diagnosable, in the order they appear:
   line that matches it is the runtime's `tool <name> <ms>ms args=… result=…`, so a start without an
   end is a hang rather than a hole (`exec_command` adds its own `exec end …`).
 - `[perf] exec start …` / `still-running …` / `end …` / `kill …` — the `exec_command` lifecycle in
-  one grammar: the call as executed (with the redacted command line — `redactCommand` in
+  one grammar (`run_type=<foreground|background|detached>`, no timeout, no budget): the call as executed (with the redacted command line — `redactCommand` in
   `src/redact.ts`, whitespace collapsed, secrets masked, clipped to 120 chars), a 30 s heartbeat
   while a foreground command holds the turn, what ended the call, and what a kill actually
   achieved. See `docs/agents/tools.md`.
-- `[perf] bg register id=… pid=… budget=<n>s|none` · `bg expire id=… pid=… budget=<n>s|none ms=…` ·
-  `bg kill id=… pid=… reason=<user|stop|timeout|rollover|none> outcome=… ms=…` — the background
-  job's own life, written by `BackgroundRegistry` (`src/tools/background.ts`) rather than by the
-  tool: the **registration** and what the job was handed there, the **expiry** — the registry's own
-  event, written when the job's budget timer fires, i.e. the registry killing the job at its own
-  deadline, so `ms=` is how long it really ran — and the **kill whose confirmation failed**
-  (`outcome` is the non-`'exited'` answer; a confirmed kill is not news and stays quiet).
-  `register` / `expire` answer "which background job ate the time" (what it was, and the deadline
-  that ended it); `kill` answers "and why did it end" — a `reason=timeout` expiry, `stop` from Stop
-  or `kill_background`, `rollover` for the window break, `none` when the kill was never attributed.
-  The job's origin is `exec_command`'s own `exec start … budget=… behavior=…` line above.
+- `[perf] bg register id=… pid=… detached=<true|false>` ·
+  `bg kill id=… pid=… reason=<user|stop|rollover|none> outcome=… ms=…` — the background job's own
+  life, written by `BackgroundRegistry` (`src/tools/background.ts`) rather than by the tool: the
+  **registration** (and whether that job locks its node and notifies) and the **kill whose
+  confirmation failed** (`outcome` is the non-`'exited'` answer; a confirmed kill is not news and
+  stays quiet). There is no `bg expire` line and no `budget=` field any more: a job has **no
+  deadline**, so nothing ends it but its own exit or a kill. `kill` answers "and why did it end" —
+  `stop` from Stop or `kill_command`, `rollover` for the window break, `none` when the kill was
+  never attributed. The job's origin is `exec_command`'s own `exec start … run_type=…` line above,
+  and its ending as a foreground call is `exec end … outcome=promoted`.
 - `[perf] search-files ms=… files=… matches=… capped=… via=rg|walk scope=… wait=…ms` — per
   call; `wait=` is the time the call spent queued behind the work budget, and `capped=wall`
   is the one hard budget (`spinney.searchTimeoutSeconds`) ending the call with the timeout

@@ -15,9 +15,9 @@
 3. **Concurrent work** — sessions stream in parallel (P1); within one session, several
    branches may stream in parallel (P3); a background terminal belongs to the **node** that
    spawned it (P2) and never locks another branch/session. A job started with
-   `start_detached` keeps its owning node and its card there, but it locks no node's composer
-   and never notifies; its id resolves **per session**, so any node there can check it, be
-   refused its join, or kill it.
+   `run_type: "detached"` keeps its owning node and its card there, but it locks no node's
+   composer and never notifies; its id resolves **per session**, so any node there can check
+   it, wait for it, or kill it.
 
 ## 1. Confirmed semantics (user decisions — do not re-litigate)
 
@@ -151,7 +151,7 @@ nodeWorkers: Map<nodeId, { agent: Agent; tools: ToolRegistry }>
 
 | message | shape | notes |
 | --- | --- | --- |
-| `state` | `{ sessionId, busy, status, runningNodes: string[], lockedNodes: string[], readOnly }` | `busy` = `isRunning()` (a live run, or an image upload in flight); `runningNodes` = nodes with a live run. Composer shows Stop iff `runningNodes.includes(viewFocusId)` **or** `lockedNodes.includes(viewFocusId)`, and Send otherwise. `lockedNodes` = nodes that still own unfinished work — a running background job / async sub-agent batch, or a notice about to be injected into them. It applies **no run filter**, so a streaming node that also owns a running job is listed in *both* `runningNodes` and `lockedNodes`: Stop there is the union kill (`POST /stop {nodeId}` — turn + jobs + sub-agents, with the notices written back into the node instead of opening a turn). Only the owner is listed — its existing descendants stay usable. A `start_detached` job locks no node, so it is never listed here. `readOnly` = another window owns this workspace's session files: the composer disables Send (Stop hidden) and titles it with the host's sentence, `send()` re-checks the flag, and the host refuses every turn and every session mutation. |
+| `state` | `{ sessionId, busy, status, runningNodes: string[], lockedNodes: string[], readOnly }` | `busy` = `isRunning()` (a live run, or an image upload in flight); `runningNodes` = nodes with a live run. Composer shows Stop iff `runningNodes.includes(viewFocusId)` **or** `lockedNodes.includes(viewFocusId)`, and Send otherwise. `lockedNodes` = nodes that still own unfinished work — a running background job / async sub-agent batch, or a notice about to be injected into them. It applies **no run filter**, so a streaming node that also owns a running job is listed in *both* `runningNodes` and `lockedNodes`: Stop there is the union kill (`POST /stop {nodeId}` — turn + jobs + sub-agents, with the notices written back into the node instead of opening a turn). Only the owner is listed — its existing descendants stay usable. A detached job (`run_type: "detached"`) locks no node, so it is never listed here. `readOnly` = another window owns this workspace's session files: the composer disables Send (Stop hidden) and titles it with the host's sentence, `send()` re-checks the flag, and the host refuses every turn and every session mutation. |
 | `tree` | `{ activeId, viewId, rootId, rootIds, nodes[] }` | `activeId` = stream target; `viewId` = view focus; `rootIds` = every forest root (the webview lays the trees out side by side), `rootId` kept as the first one. Each node carries `kind` (`'turn' \| 'agent' \| 'bg'`), `delivered` (sidecars only), the context state (`context` / `contextPct` / `contextFull`), `contextBaseId` (dashed edge + `CTX` badge), `epochId` (the envelope this node starts, when it starts one) and, for a `kind:'bg'` card, its terminal snapshot (`bgTaskId` / `bgCommand` / `bgExitCode` / `bgKilled` / `bgElapsedMs` / `bgOutputTail`), plus `bgDetached` for a **detached** job (a live-task read, so it is absent on a card restored after a reload — that card must not invent a lock/notice story it can no longer verify), so the card re-renders without asking the in-memory hub. A `kind:'agent'` node carries **`itemCount` and no `items`**: its transcript is fetched with `loadAgentItems` when the card is expanded (a session switch used to ship 2.3 MB of sidecar transcripts, and 10 k DOM elements for 8 cards). |
 | `path` | `{ ids, nodes[] }` | the **view** path. Its `nodes[].items` are complete (a checked-out node — including a sidecar — must render immediately). |
 | `agentItems` | `{ id, items }` | answer to `loadAgentItems`: that sub-agent card's transcript (`clipDisplayItem`-ed). |
@@ -265,7 +265,7 @@ invariant:
 | --- | --- |
 | `concurrency` | two sessions report a live run in the **same** `/state` sample (P1). |
 | `sessions` | two `POST /session/start` sessions are distinct, listed with their titles, and each prompt's marker lands in its own transcript (P1). |
-| `background` | a `start_in_background` job's ownership (`sessions[].backgroundNodes`) survives a `/navigate` that moves the **view** to another node (P2). |
+| `background` | a `run_type: "background"` job's ownership (`sessions[].backgroundNodes`) survives a `/navigate` that moves the **view** to another node (P2). |
 | `signals` | a finished job's notice lands **inside** the owning node: no new node, unchanged node count, `backgroundNodes` still the turn node (P2). |
 | `branch` | two nodes of **one** session stream at once; a second send on a live node is refused; `POST /stop {nodeId}` stops only that node (P3). |
 | `navigation` | `/navigate` + `/continue` on one session leave another session's run undisturbed (P1). |

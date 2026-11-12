@@ -7,7 +7,7 @@ import { AgentTool, ToolDefinition } from '../agent/types';
 import type { BackgroundAccess } from '../chat/backgroundHub';
 import { clipText } from '../text';
 import { appendFileTool } from './appendFile';
-import { makeCheckBackgroundTool, makeJoinBackgroundTool, makeKillBackgroundTool } from './backgroundTools';
+import { makeCheckCommandTool, makeKillCommandTool, makeWaitForCommandTool } from './backgroundTools';
 import { makeExecCommandTool } from './execCommand';
 import { listDirTool } from './listDir';
 import { readFileTool } from './readFile';
@@ -561,9 +561,9 @@ export class ToolRegistry {
       searchFilesTool,
       makeSearchTranscriptsTool(() => this.transcriptRoots?.() ?? []),
       makeExecCommandTool(getAccess),
-      makeCheckBackgroundTool(getAccess),
-      makeKillBackgroundTool(getAccess),
-      makeJoinBackgroundTool(getAccess),
+      makeCheckCommandTool(getAccess),
+      makeWaitForCommandTool(getAccess),
+      makeKillCommandTool(getAccess),
       // The two web tools take this node's card: its `searchProvider` decides whether the
       // provider's paid API leads (and which token the request carries), while the
       // keyless chain behind it needs no key, no setting and no configuration at all.

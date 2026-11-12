@@ -156,29 +156,24 @@
   (`npm run check:cwd`): the working directory and path base, driven through the
   compiled tools with a `vscode` stub and a real shell. See `testing.md`.
 - `tools/shell-argv-acceptance.js` · `tools/exec-kill-acceptance.js` ·
-  `tools/exec-timeout-acceptance.js` · `tools/bg-budget-acceptance.js` — the four
+  `tools/exec-runtime-acceptance.js` — the three
   guards next to it
-  (`npm run check:shell` / `check:kill` / `check:timeout` / `check:budget`, all part of
+  (`npm run check:shell` / `check:kill` / `check:exec`, all part of
   `vscode:prepublish`, all needing `out/`): the argv a **native** child really
   receives under Git Bash (the `MSYS_NO_PATHCONV` fix — `/PID` must arrive verbatim,
   and what `//F` / `//IM` become is printed), the kill contract
   (`'exited' | 'no-exit' | 'no-pid'`, a real exit confirmed before the deadline,
   `BackgroundRegistry.kill` staying synchronous, an unconfirmed kill flagged *and*
-  logged), the **command budget pair** (`spinney.commandDefaultTimeout` for a call that
-  states none, `spinney.commandMaxForegroundDuration` as the ceiling — a `timeout`
-  above the ceiling refused *before the spawn* unless a background `timeout_behavior` asked for
-  one — `background_when_timeout` / `start_in_background` / `start_detached`, the
-  default `stop_when_timeout` being the value that is refused — a stated `timeout` at or
-  below the ceiling honored as given, the promotion at the default carrying only the
-  `timeout − default` that is left and
-  one `hub.register` under the owner of the turn, a node-scoped value
-  (`background_when_timeout` / `start_in_background`) with no `timeout` refused before the
-  spawn, and no ceiling on `timeout`), and the
-  **background budget** (a job killed at its deadline with `killReason:'timeout'`, an
-  unbudgeted job left alone, a `remainingBudgetMs` that counts down, and
-  `join_background`'s two refusals — more budget left than the limit, or no deadline at
-  all (which the guard registers directly; the only value that can produce such a job
-  now is `start_detached`) — plus the allowed case). See `testing.md`.
+  logged), and the **exec runtime** (`run_type` is `foreground` / `background` /
+  `detached`; a foreground command past `spinney.execForegroundSeconds` is **moved to
+  the background** with its id, never killed; a call that still sends `timeout` /
+  `timeout_behavior` answers one frozen sentence before anything is spawned; **no job
+  has a deadline** — the task carries no `timeoutMs` / `deadlineAt`, the module exports
+  no `remainingBudgetMs`, no `bg expire` line exists and a job survives well past the
+  slice; `wait_for_command` finishes early with the notice suppressed and times out as a
+  normal result with the notice restored; the Stop abort path; `check_command` is a
+  status read and `kill_command` ends the tree; the sub-agent tool set and the prompt).
+  See `testing.md`.
 - `tools/migrate-state.mjs` — the one migration this repo carries: an install that
   only ever ran Minimal Agent Harness (`minimal-host.minimal-agent-harness`) moves
   to Spinney (`DE-YU.spinney`) — the memento row key keeps the case the manifest
@@ -258,8 +253,8 @@
   · `tools/check-l10n.js` · `tools/check-context-rollover.js` ·
   `tools/check-modeltree.js` · `tools/check-tree-grid.js` · `tools/check-docs.js` ·
   `tools/exec-cwd-acceptance.js` · `tools/shell-argv-acceptance.js` ·
-  `tools/exec-kill-acceptance.js` · `tools/exec-timeout-acceptance.js` ·
-  `tools/bg-budget-acceptance.js` · `tools/search-files-acceptance.js` ·
+  `tools/exec-kill-acceptance.js` · `tools/exec-runtime-acceptance.js` ·
+  `tools/search-files-acceptance.js` ·
   `tools/websearch-acceptance.js` ·
   `tools/check-png.js` · `tools/check-resample.js` · `tools/check-image.js` ·
   `tools/check-jpeg.js` · `tools/check-neterror.js` · `tools/check-unicode.js` ·
@@ -267,7 +262,7 @@
   the packaging guards
   (`npm run check:models` / `check:webview` / `check:signals` / `check:l10n` /
   `check:rollover` / `check:modeltree` / `check:grid` / `check:docs` / `check:cwd` /
-  `check:shell` / `check:kill` / `check:timeout` / `check:budget` /
+  `check:shell` / `check:kill` / `check:exec` /
   `check:search` / `check:websearch` / `check:png` / `check:resample` / `check:image` /
   `check:jpeg` / `check:neterror` / `check:unicode` / `check:continue`, run
   by `vscode:prepublish`):
@@ -293,19 +288,16 @@
   pattern that would keep a page out of the `.vsix`), and the working directory and path
   base (`resolvePath`'s `/d/x` → `D:\x` on Windows only, a command's first line naming
   the directory it ran in, a broken `cwd` naming the path instead of the shell, and the
-  `/d/...` form reaching the file it means), and the command's other four contracts —
+  `/d/...` form reaching the file it means), and the command's other three contracts —
   the argv a native child receives under Git Bash (the `MSYS_NO_PATHCONV` fix), the
   kill-confirmation rules (`'exited'` / `'no-exit'` / `'no-pid'`, a confirmed exit before
   the deadline, a synchronous `BackgroundRegistry.kill`, an unconfirmed kill flagged and
-  logged), the command budget pair (`spinney.commandDefaultTimeout` /
-  `spinney.commandMaxForegroundDuration`: the refusal of a
-  `timeout` above the ceiling before the spawn without a background `timeout_behavior`, a stated
-  `timeout` at or below it honored as given, the
-  promotion at the default with only the remaining budget, a node-scoped value
-  (`background_when_timeout` / `start_in_background`) with no `timeout` refused before the spawn,
-  no ceiling on `timeout`), and the background budget (a job killed at its own
-  deadline with `killReason:'timeout'`, an unbudgeted job left alone,
-  `remainingBudgetMs`, `join_background`'s refusals). See `testing.md`.
+  logged), and the **exec runtime** (`run_type` = `foreground` / `background` /
+  `detached`, the promotion at `spinney.execForegroundSeconds` with its handle, the
+  removed-argument sentence, no deadline on any job — no `timeoutMs` / `deadlineAt` /
+  `remainingBudgetMs` / `bg expire` — `wait_for_command` finishing early and timing out,
+  the Stop abort path, `check_command` / `kill_command`, the sub-agent tool set). See
+  `testing.md`.
   The four image guards in that list (`check:png` / `check:resample` / `check:image` /
   `check:jpeg`) pin the pre-upload transform's bytes in and bytes out, the PNG codec, the
   resampler and the JPEG decoder — see `testing.md`.
@@ -378,8 +370,8 @@
 - `src/tools/readFile.ts` · `writeFile.ts` · `appendFile.ts` · `replaceInFile.ts` ·
   `listDir.ts` · `searchFiles.ts` · `searchTranscripts.ts` · `execCommand.ts` — the
   registry tools, each with its schema and its implementation in the same file.
-- `src/tools/backgroundTools.ts` — `check_background_terminal` /
-  `kill_background` / `join_background`, grouped because they all read the same
+- `src/tools/backgroundTools.ts` — `check_command` /
+  `wait_for_command` / `kill_command`, grouped because they all read the same
   `BackgroundRegistry`.
 - `src/tools/background.ts` — `BackgroundRegistry` + `BackgroundTask`,
   `CommandHandle`/`spawnShellCommand` (live output capture, process-tree kill),

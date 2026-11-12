@@ -323,7 +323,7 @@ The agent starts a sub-agent with the `spawn_agents` tool. Each sub-agent runs i
 | Result | When the sub-agent finishes, Spinney delivers a notice to the parent. The notice carries the duration of the run. The card shows `Delivered`. |
 | Report | Spinney delivers the notice at the next tool boundary of the parent turn. While the parent is idle, Spinney injects the notice into the parent node. It never makes a new node. |
 
-A sub-agent batch waits at most `spinney.commandMaxForegroundDuration` as well. When the batch still runs at the limit, `spawn_agents` in `sync` mode (the default) and `send_agent_message` return the agent ids. Every summary then arrives later as one batch notice.
+A sub-agent batch waits at most `spinney.subAgentSyncSeconds` (300 seconds by default) as well. When the batch still runs at that time, `spawn_agents` in `sync` mode (the default) and `send_agent_message` return the agent ids. Every summary then arrives later as one batch notice.
 
 You cannot type into a sub-agent card. To continue a finished sub-agent, ask the parent agent to do it.
 
@@ -333,20 +333,23 @@ After a restart, a sub-agent that was running shows as `killed`.
 
 ### 8.2 Background terminals
 
-A background terminal holds a long command while the turn continues. The agent starts one through `exec_command` with `timeout_behavior`.
+A background terminal holds a long command while the turn continues. The agent starts one through `exec_command` with `run_type`.
 
-A command holds a turn for at most `spinney.commandMaxForegroundDuration` (1800 seconds, 30 minutes). A command with no `timeout` uses `spinney.commandDefaultTimeout` (500 seconds). The `timeout` of `exec_command` is the whole budget of the command: its foreground time plus its background time, with no ceiling. A `timeout` up to the maximum is used as written. A `timeout` longer than the maximum is refused before anything starts, unless the call also asks for a background value.
+A command that still runs after `spinney.execForegroundSeconds` (30 seconds by default) moves to the background by itself. Nothing is lost and nothing is killed. The result of the tool gives the id of the job, and the agent can continue its work or end the turn.
 
-`timeout_behavior` gives the call its identity. It has four values:
+`run_type` gives the call its identity. It has three values:
 
 | Value | What Spinney starts | What it costs |
 |---|---|---|
-| `stop_when_timeout` | Nothing. Spinney kills a command that still runs at the timeout. When the call gives no `timeout`, Spinney kills the command at the default timeout. This value is the default. | Nothing. |
-| `background_when_timeout` | A job on that node. The command runs in the foreground for the default timeout, then Spinney moves it to the background. The rest of the budget is the budget of the job. The call must give a `timeout`. | The node cannot send a message until the job ends. Spinney sends a completion notice at the end. |
-| `start_in_background` | A job on that node, at once. The whole budget is the deadline of the job. The call must give a `timeout`. | The same as the row above. |
-| `start_detached` | A detached job, at once. The job locks no node. The `timeout` is optional. | The node stays free, and the job never sends a notice, so the agent learns its result only when it asks. Any node in the session can read the job or kill it. |
+| `foreground` | Nothing at first. The command runs in the turn. After `spinney.execForegroundSeconds`, Spinney moves it to the background. This value is the default. | Nothing, while the command ends in time. After the move, the same as the row below. |
+| `background` | A job on that node, at once. | The node cannot send a message until the job ends. Spinney sends a completion notice at the end. |
+| `detached` | A detached job, at once. The job locks no node. | The node stays free. The job never sends a notice, so the agent learns its result only when it asks. Any node in the session can read the job or kill it. |
 
-Spinney kills a job when its budget runs out. `background_when_timeout` and `start_in_background` need a `timeout`: without one, Spinney refuses the call before anything starts. A job with no deadline keeps its node busy until it ends, so that job belongs to `start_detached`. The refusal names the value that the call asked for, says that nothing was started, and gives both ways out: give a `timeout`, or use `start_detached`. Only `start_detached` can have no deadline, because it locks no node. `join_background` must not hold a turn past the maximum either: while the job has more budget left than the maximum, or no deadline at all, the join is refused and the agent is told to end its turn, so the completion notice reaches it later. Spinney also refuses a join of a detached job: that job has no deadline and sends no notice, so there is nothing to wait for. The agent reads a detached job with `check_background_terminal`, and ends it with `kill_background`. `check_background_terminal` and `kill_background` work for every job. When the agent starts a job or moves it to the background, Spinney tells the agent that it can continue its work or end the turn: the completion notice arrives when the job ends. A status check does not wait, so the agent must not check a running job many times.
+No job has a deadline. A job runs until the command ends, or until Spinney or you kill it. There is no `timeout` argument and no `timeout_behavior` argument. A call that still gives one of them gets an error, and nothing starts.
+
+The agent reads a job with `check_command`. The answer gives the status and the output so far. A status check does not wait, so the agent must not check a running job many times. The agent waits with `wait_for_command`: the tool waits at most the number of seconds it gives, and it returns as soon as the job ends. When the wait ends first, the agent can wait again. The agent ends a job with `kill_command`. A sub-agent that can run a command also has these three tools.
+
+When the agent starts a job or moves it to the background, Spinney tells the agent that it can continue its work or end the turn: the completion notice arrives when the job ends.
 
 The agent does not start a process in the background itself, for example with `&` or `Start-Process`. Spinney cannot track such a process, and you cannot stop it from a card.
 
@@ -374,7 +377,7 @@ Spinney kills a running job in these cases:
 
 After a restart, a job that was running shows as `interrupted`. A card never claims to be live when it is not.
 
-A sub-agent can start a background terminal, but it cannot manage one. Only you can kill it.
+A sub-agent can start and manage a background terminal of its own. A read-only sub-agent cannot run a command at all.
 
 ### 8.3 Session handoff
 
@@ -499,8 +502,8 @@ All keys start with `spinney.`. Open the Settings UI, or edit `settings.json`.
 | `spinney.foldToolCalls` | `true` | Fold the tool-call cards of the work log by default. The running call stays open. |
 | `spinney.foldWork` | `true` | Fold the work log into its one-line header by default when a turn completes; a header that you clicked, or a card whose light you released, stays as you left it. |
 | `spinney.promptSections` | `{}` | Extra prompt snippets, keyed by the name in the menu. A name that matches a shipped snippet replaces its text. |
-| `spinney.commandDefaultTimeout` | `500` | The time a command runs for, in seconds, when the call gives no `timeout`. 500 is 8 minutes 20 seconds. It is a default, not a cap: a `timeout` that the call gives is used as written, up to `spinney.commandMaxForegroundDuration`. It is also the time `background_when_timeout` runs in the foreground before Spinney moves the command to the background. |
-| `spinney.commandMaxForegroundDuration` | `1800` | The longest time a single command may hold the foreground, in seconds. 1800 is 30 minutes. A `timeout` up to this value is used as written. A `timeout` longer than this value is refused, unless the call asks for `background_when_timeout` or `start_in_background`. Both of those values need a `timeout` of their own, or Spinney refuses the call. `start_detached` never holds a turn, and it can have no deadline. `join_background` also does not wait past this value. |
+| `spinney.execForegroundSeconds` | `30` | The time a command runs in the turn, in seconds, before Spinney moves it to the background. 30 seconds is the default. The minimum is 10. The command is not killed: it continues as a background job, and the agent receives its id. |
+| `spinney.subAgentSyncSeconds` | `300` | The time a `spawn_agents` or `send_agent_message` call in `sync` mode can hold the turn, in seconds. 300 is 5 minutes. The minimum is 30 and the maximum is 1800. A batch that still runs at the end of this time returns the agent ids, and every summary arrives later as one batch notice. |
 | `spinney.maxInlineToolOutput` | `32768` | The size limit of a tool result, in bytes. A larger result goes to a file. The answer shows a preview of not more than 2048 characters. `0` turns the limit off. |
 | `spinney.searchTimeoutSeconds` | `10` | The time limit of one search, in seconds. It applies to `search_files` and `search_transcripts`. The minimum is 1 second and the maximum is 600 seconds. The limit covers the whole call. A search that reaches the limit returns an error and no results. Then make the search smaller: use a narrower path, a tighter pattern, a glob, or less context. |
 | `spinney.hopSession.enabled` | `true` | Let the agent send a self-contained task to a new session with `hop_session`. A conversation that is already frozen keeps the tool, and Spinney refuses the call. |
