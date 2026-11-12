@@ -31,8 +31,10 @@ Where the text lives, the template/placeholder mechanics and the two hard rules
   `ChatViewProvider.getConfig()` through `replyLanguageName`
   (`src/agent/languages.ts`); `DEFAULT_REPLY_LANGUAGE = 'English'` in
   `src/agent/prompt.ts` is only the floor when nothing resolves to a language. The
-  line tells the model to keep code, paths, identifiers and command output in their
-  original form; do not add another language requirement (an English-only rule, for
+  line is **one** requirement: the answer, the agent's own reasoning (the thinking
+  block) and the short `exec_command` step title use that language, while code,
+  paths, identifiers and command output stay in their original form. Do not add
+  another language requirement (an English-only rule, for
   instance) on top of it. Changing the setting mid-conversation rewrites
   `messages[0]` and can miss the prompt cache (see
   `docs/agents/invariants/system-prompt.md`).

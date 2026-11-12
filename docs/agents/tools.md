@@ -40,7 +40,9 @@
 
 > **`title` is required on `exec_command` — and on no other tool.** Its schema declares a
 > required `title` (`TOOL_TITLE_DESCRIPTION` in `src/agent/types.ts`): one short human
-> sentence, at most about 60 characters, for the step. It is a **display** argument — no
+> sentence, at most about 60 characters, for the step. The description also says to write
+> it in the language the agent is answering the user in, so the visible step row follows
+> the reply language like the answer and the reasoning block do. It is a **display** argument — no
 > tool body reads it — and the host is what makes it matter: `toolTitleFromArgs`
 > (`src/chat/runtime.ts`) reads it out of the call's arguments and stores it on the turn's
 > `DisplayItem` (`title`), so the card's one-line step row shows the model's sentence instead

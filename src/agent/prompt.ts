@@ -152,10 +152,16 @@ export function identityLines(model: string, effort: ThinkingEffort): string[] {
  * The `## Language` line, filled from `spinney.replyLanguage`. A blank value
  * falls back to {@link DEFAULT_REPLY_LANGUAGE} instead of sending an empty
  * instruction to the model.
+ *
+ * One bullet, one requirement: the language covers **what the user reads** —
+ * the answer, the agent's own reasoning (the thinking block) and the short
+ * `exec_command` step title — and leaves code, file paths, command output and
+ * identifiers in their original form. It is not a second language rule, and it
+ * is never added to the sub-agent template (a sub-agent reports in English).
  */
 export function languageLine(language: string): string {
   const lang = (language || '').trim() || DEFAULT_REPLY_LANGUAGE;
-  return `- Default to ${lang}; keep answering in ${lang} even if the user writes another language, unless the user explicitly asks for one.`;
+  return `- Default to ${lang}; keep answering in ${lang} even if the user writes another language, unless the user explicitly asks for one. Your reasoning (the thinking block) and the short title you write for each exec_command step use ${lang} too; code, file paths, command output and identifiers stay verbatim.`;
 }
 
 /**

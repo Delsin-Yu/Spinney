@@ -247,10 +247,12 @@ export type AgentEvent =
  * one-line step row shows that sentence instead of the one derived from the command
  * — which matters because the arguments are clipped for the UI (~8 KiB) and the
  * label must survive a repaint. Every other tool derives its row from the arguments
- * and declares no `title`.
+ * and declares no `title`. The description also asks for the sentence in the language
+ * the agent is answering the user in, so the visible step row follows
+ * `spinney.replyLanguage` like the answer and the reasoning block do.
  */
 export const TOOL_TITLE_DESCRIPTION =
-  'Required: the sentence the folded step row shows instead of the command — one short human line, at most about 60 characters (for example "Running the test suite").';
+  'Required: the sentence the folded step row shows instead of the command — one short human line, at most about 60 characters (for example "Running the test suite"). Write it in the language you are answering the user in.';
 
 /** A tool that the agent can invoke. */
 export interface AgentTool {

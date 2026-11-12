@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A step group per run, and the text stays in the flow.** A turn is cut into runs by the
+  text the model writes: every contiguous run of tool rows becomes its own `.steps` group
+  with its own `Ran N steps` / `Ran 1 step` header, opened by the first tool row of the run
+  and closed by the next assistant text. The header counts that run's calls, each group
+  folds on its own (open while the turn runs, folded when it ends, a click wins for that
+  group), and the assistant's text — including the turn's final answer — is appended to
+  the log itself, never inside a group, so a reply is no longer interleaved with the
+  reasoning while it streams. A history repaint splits the items with the same rule, and a
+  finished card still builds each group's body only when its header is clicked.
+- **`exec_command` takes a required `title`, and no other tool takes one.** The folded step
+  row shows it instead of the command, so a call reads `Ran Checking the git history`; a
+  call without a `title` is refused by the argument validation before anything starts. The
+  display titles were removed from every other tool schema — they were self-explanatory
+  already — while `hop_session` and `rename_session` keep their own semantic `title`.
+- **The reasoning box has its own follow light.** The open 240 px reasoning scroller
+  carries a small green dot of its own: it follows the newest line, a scroll up releases
+  it, and a scroll back to the end engages it again; clicking the dot toggles it, and the
+  click does not open or close the row.
 - **One entry for every new context.** A new-epoch transition used to have three
   inconsistent entries: the per-card `⧉ Continue in a new window`, a composer `⧉` shown
   only for a harness drift, and a modal raised by a plain send after a model/effort
@@ -116,6 +134,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The green light means "follow", not "the scrollbar is locked".** While it is green you
+  can scroll; the log follows the newest content at the same time. Scrolling up releases
+  the follow (the dot dims), scrolling back to the end re-engages it, and clicking the dim
+  dot locks *and* jumps to the bottom. The rule is directional now — a programmatic pin or
+  a growing turn can never release it — which is what used to go wrong with a lot of
+  streaming content: the old "is it at the bottom" test read a stale offset and unlocked
+  itself. A live turn starts green; a finished card opens dim and stays at its newest
+  content.
+- **The card is 840 px high by default** (`--node-max-h`, was 1200); the drag-resize still
+  raises it.
+- **Three type levels** for visual clearance: the reasoning is the brightest text (13 px,
+  normal), a tool row's verb is `--accent-dim` with a 12 px `--text-dim` label (11 px
+  monospace only when the label is a derived command or pattern), and the expanded detail
+  is one level further down (11 px `--text-dim`). The usage line stays the faintest.
 - **The steps tuck under one fold, and the final answer is plain flow text.** A turn
   with tool calls now puts everything from its first tool call onward into one `.steps`
   group under a `Ran N steps` header (or `Ran 1 step`): the reasoning, the tool lines,
@@ -154,6 +186,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Applying a prompt snippet enables Send, like typing does.** `insertSnippet` wrote the
+  input's value directly and never refreshed the composer, so both composer buttons kept
+  the state of the old content until a key was pressed; `composerClear` had the same
+  omission. One helper now runs `autoGrow()` + `updateComposerButtons()` after any
+  programmatic write.
 - **A hop return waits for the child session to be idle, not just for its turn to
   end.** The return trip fired on the child's *first* finished turn, even when that
   session still owned work: a running node background terminal, a running sub-agent

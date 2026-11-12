@@ -94,7 +94,11 @@
   prompt will carry) fills the
   main template's `{{language}}` line with a language name; the sub-agent template
   keeps `Answer in English`, because a sub-agent reports to the agent that
-  dispatched it and never to the user. A change is a **setup** change, not a
+  dispatched it and never to the user. That one bullet — there is no second language
+  requirement — covers everything the user reads of the agent: the answer, the
+  **reasoning** (the thinking block) and the **short `exec_command` step title** (the
+  schema's `title` description says the same in the tool channel), while code, file
+  paths, command output and identifiers stay verbatim. A change is a **setup** change, not a
   rewrite: `SessionRuntime.applyReplyLanguage` records the new name for the nodes
   frozen from here on and repaints the composer's drift marking
   (`[config] replyLanguage=… (new nodes; frozen chains keep theirs)`); every chain
