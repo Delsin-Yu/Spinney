@@ -34,7 +34,7 @@ Control plane routes (all require `Authorization: Bearer <token>`):
 | `POST /continue` | send a caller-supplied message (`{sessionId?, nodeId?, message}`) that continues from a node — node-scoped, so a run on another branch does not block it |
 | `POST /stop` | `{sessionId?, nodeId?}` — with `nodeId` a **union kill**: that node's live run, every background terminal it owns and every sub-agent it is still running, and nothing continues (the notices are written back into that node's history, so they ride the next request instead of opening a turn); without `nodeId`, cancel every run of the session (else the active session) and leave background jobs alone. Returns `{ok, sessionId, nodeId, stopped}`. Nothing running is `stopped: 0`; an unknown session is 409. Never touches the reload hold |
 | `POST /session/start` | create a session (`{title?, prompt?}`) or jump to one (`{sessionId, nodeId?, prompt?}`) and send `prompt` as its first turn; `returnTo:true` **requires** `originSessionId` (+ optional `returnNodeId`) and hops back with the answer as a new branch of that origin — when the child session calls its own `finish_hop`, never at a turn end |
-| `POST /reload-window` | 202, then `workbench.action.reloadWindow` (refuses while a turn, sub-agent or background job is live) |
+| `POST /reload-window` | 202, then `workbench.action.reloadWindow` (refuses while a turn, sub-agent or background job is live). An optional body `{ continue: { message, sessionId?, nodeId? } }` is **persisted before the reload** and delivered by the next instance once it is idle; the reply then carries `continueQueued: true` and the caller must not post `/continue`. This is what makes a reboot work when the supervisor dies with the reload (a daemon started from inside the window is a child of it) |
 
 **Session jump** (`POST /session/start`): the agent can hand a task to a *fresh*
 conversation instead of growing the current one — e.g.
@@ -162,7 +162,12 @@ though the child keeps its `hopOrigin` and with it the (now inert) `finish_hop` 
 
 `hvsc` commands: `serve` / `start` / `status` / `adopt` / `rm` / `reboot` / `jobs`.
 The reboot flow is `wait-for-finish` → `reload-window` (shared profile) or kill +
-relaunch (`--isolated`) → poll `/health` → `continue`. `hvsc start --no-workspace`
+relaunch (`--isolated`) → poll `/health` → `continue`. The shared-profile reload sends
+its `--continue` **in the reload request** (`POST /reload-window { continue }`): the
+extension persists it and the next instance delivers it, so the daemon may die with the
+reload — which it does whenever it was started from inside the window — without losing
+the message; only when the extension replies without `continueQueued` (an older build)
+does the daemon post `/continue` after the new instance is up. `hvsc start --no-workspace`
 launches a `code` window with no folder open (`workspace: null` is a first-class
 instance identity: matching treats two nulls as a match, so no workspace path is
 required).

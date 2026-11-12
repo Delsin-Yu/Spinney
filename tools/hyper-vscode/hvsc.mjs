@@ -653,6 +653,7 @@ async function serve(argv) {
     }
     const carry = { sessionId: waited.json?.sessionId ?? null, nodeId: waited.json?.nodeId ?? null };
     mark(`idle (session=${carry.sessionId} node=${carry.nodeId})`);
+    let queuedContinue = false;
     if (record.isolated) {
       // Own main process: a hard kill can only affect this instance.
       rmSync(rec0.file, { force: true });
@@ -668,8 +669,16 @@ async function serve(argv) {
       // Shared profile: the extension host's parent is the *user's* main process,
       // so killing it would take every window down. Ask the harness to reload.
       mark(record.adopted ? 'reload-window (adopted window)' : 'reload-window (shared profile)');
-      const reload = await harnessFetch(rec0, '/reload-window', { method: 'POST', body: {}, timeoutMs: 15000 });
+      // The message rides the reload itself: the extension persists it and the next
+      // instance delivers it, so a daemon that dies with the reload (one started from
+      // inside the window is a child of it) cannot lose it.
+      const reloadBody = opts.continueMessage
+        ? { continue: { message: opts.continueMessage, sessionId: carry.sessionId, nodeId: carry.nodeId } }
+        : {};
+      const reload = await harnessFetch(rec0, '/reload-window', { method: 'POST', body: reloadBody, timeoutMs: 15000 });
       if (reload.status !== 202) throw new Error(`/reload-window failed: ${JSON.stringify(reload.json)}`);
+      queuedContinue = reload.json?.continueQueued === true;
+      if (queuedContinue) mark('continue queued by the extension (survives this daemon)');
       record.launchedAt = Date.now();
     }
     const fresh = await waitForHarness(record, record.launchedAt, 180000);
@@ -678,7 +687,9 @@ async function serve(argv) {
     record.alive = true;
     saveInstances();
     mark(`back up on port ${fresh.port} (instance ${fresh.instanceId})`);
-    if (opts.continueMessage) {
+    if (queuedContinue) {
+      mark('continue delivered by the instance itself after the reload');
+    } else if (opts.continueMessage) {
       mark('continue');
       const cont = await harnessFetch(fresh, '/continue', {
         method: 'POST',

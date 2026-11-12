@@ -937,6 +937,9 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       onPostFailed: (sessionId, type) => this.onPostFailed(sessionId, type),
     });
     this.loadSessions();
+    // A supervisor's reload may have carried a message for this instance (the daemon
+    // that asked for the reload can die with it): deliver it once the window is idle.
+    this.schedulePendingContinue();
     // The two context lines come after the sessions are in, so they can name the store
     // root and the workspace key that will hold them: every later line is unreadable
     // without them (a user's report has no developer sitting next to it).
@@ -5273,14 +5276,23 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    * Ask VS Code to reload this window. Replies 202 immediately and reloads a
    * moment later (after the pending persist lands), because the reload kills
    * this process — the caller can only observe it as a *new* instance.
+   *
+   * `opts.continue` is the reload's own message: it is **persisted here, before the
+   * reload**, and delivered by the next instance once it is idle (`schedulePendingContinue`),
+   * so a supervisor that dies with the reload cannot lose it — the daemon a harness
+   * starts from inside the window is exactly such a supervisor. The caller gets
+   * `continueQueued: true` and must not post `/continue` itself.
    */
-  controlReloadWindow(): ControlResult {
+  controlReloadWindow(opts?: {
+    continue?: { message: string; sessionId?: string; nodeId?: string };
+  }): ControlResult {
     if (this.anyRunningTurn()) {
       return { ok: false, error: 'the agent is busy; wait for it to finish first', busy: true };
     }
     if (this.anyRunningSubAgents() || this.anyRunningBackground()) {
       return { ok: false, error: 'sub-agents or background terminals are still running', busy: true };
     }
+    const queued = opts?.continue ? this.writePendingContinue(opts.continue) : false;
     // A reload kills this process: flush the coalesced write first, or the reload
     // itself could lose the state it is reloading for.
     void Promise.all([this.flushPersist(), flushTranscripts()]).finally(() => {
@@ -5288,7 +5300,106 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         void vscode.commands.executeCommand('workbench.action.reloadWindow');
       }, 400);
     });
-    return { ok: true };
+    return queued ? { ok: true, continueQueued: true } : { ok: true };
+  }
+
+  /** The file the *next* instance reads for a reload's own message. */
+  private pendingContinueFile(): string | null {
+    if (!this.globalStorage) return null;
+    return path.join(this.globalStorage.fsPath, 'spinney', 'pending-continue.json');
+  }
+
+  /** Persist a reload's continue; `false` means it must go the old way (post-reload). */
+  private writePendingContinue(carry: { message: string; sessionId?: string; nodeId?: string }): boolean {
+    const file = this.pendingContinueFile();
+    const message = (carry.message ?? '').trim();
+    if (!file || !message) return false;
+    try {
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(
+        file,
+        JSON.stringify({
+          workspaceKey: workspaceKeyFor(vscode.workspace.workspaceFolders?.[0]?.uri.toString()),
+          at: Date.now(),
+          message,
+          sessionId: carry.sessionId ?? null,
+          nodeId: carry.nodeId ?? null,
+        }),
+        'utf8',
+      );
+      return true;
+    } catch (err) {
+      this.outputLog(`[control] could not persist the reload continue: ${err instanceof Error ? err.message : String(err)}`);
+      return false;
+    }
+  }
+
+  /**
+   * Deliver the previous instance's reload continue, once. Read at activation and
+   * removed immediately (a stale or foreign-workspace file is dropped, never replayed),
+   * then retried while the window is held or busy; a session that no longer exists
+   * drops it with a line, which is the only way to tell that apart from "never sent".
+   */
+  private schedulePendingContinue(): void {
+    const file = this.pendingContinueFile();
+    if (!file) return;
+    let carry: { message: string; sessionId?: string; nodeId?: string } | null = null;
+    try {
+      if (!fs.existsSync(file)) return;
+      const raw = JSON.parse(fs.readFileSync(file, 'utf8')) as Record<string, unknown>;
+      const key = workspaceKeyFor(vscode.workspace.workspaceFolders?.[0]?.uri.toString());
+      const at = Number(raw.at ?? 0);
+      const fresh = Date.now() - at < 10 * 60 * 1000;
+      if (raw.workspaceKey === key && typeof raw.message === 'string' && raw.message.trim() && fresh) {
+        carry = {
+          message: String(raw.message),
+          sessionId: typeof raw.sessionId === 'string' ? raw.sessionId : undefined,
+          nodeId: typeof raw.nodeId === 'string' ? raw.nodeId : undefined,
+        };
+      } else {
+        this.outputLog('[control] a reload continue was stale or for another workspace; dropped');
+      }
+    } catch {
+      // A half-written file is not a message.
+    } finally {
+      try {
+        fs.rmSync(file, { force: true });
+      } catch {
+        /* nothing to remove */
+      }
+    }
+    if (carry) this.deliverPendingContinue(carry);
+  }
+
+  /** The retry ladder behind `schedulePendingContinue` (held/busy are transient). */
+  private deliverPendingContinue(
+    carry: { message: string; sessionId?: string; nodeId?: string },
+    attempt = 0,
+  ): void {
+    if (this.disposed) return;
+    if (this.isHeld() || this.anyRunningTurn()) {
+      if (attempt < 120) {
+        const timer = setTimeout(() => this.deliverPendingContinue(carry, attempt + 1), 1000);
+        timer.unref?.();
+      }
+      return;
+    }
+    void this.controlContinueFrom(carry)
+      .then((result) => {
+        if (result.ok) {
+          this.outputLog('[control] continued after the reload');
+          return;
+        }
+        if (result.busy && attempt < 120) {
+          const timer = setTimeout(() => this.deliverPendingContinue(carry, attempt + 1), 1000);
+          timer.unref?.();
+          return;
+        }
+        this.outputLog(`[control] the reload continue was dropped: ${result.error ?? 'unknown error'}`);
+      })
+      .catch((err) => {
+        this.outputLog(`[control] the reload continue failed: ${err instanceof Error ? err.message : String(err)}`);
+      });
   }
 
   // ---- The window-global terminal dock ----

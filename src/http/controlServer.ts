@@ -120,6 +120,9 @@ export interface ControlResult {
   prompted?: boolean;
   /** `POST /session/start`: the start was queued to run when the turn ends. */
   queued?: boolean;
+  /** `POST /reload-window`: the optional continue was stored and will be sent after
+   *  the reload (the caller must not post `/continue` a second time). */
+  continueQueued?: boolean;
   /** `POST /session/start {returnTo}`: the origin session the answer goes back to. */
   originSessionId?: string;
   /** `POST /stop`: how many agents (one per run) were cancelled. */
@@ -172,8 +175,16 @@ export interface ControlHost {
    * Reload this window (`workbench.action.reloadWindow`). The only way to restart
    * an instance that shares the user's profile — the supervisor cannot kill it
    * without killing every other window of the same main process.
+   *
+   * `continue` is the reload's own message: it is **persisted before the reload** and
+   * delivered by the next instance once this window is idle, so a supervisor that
+   * dies with the reload (a daemon started from inside the window does) cannot lose
+   * it. The reply then carries `continueQueued: true`, and the caller must not post
+   * `/continue` again.
    */
-  controlReloadWindow(): ControlResult;
+  controlReloadWindow(opts?: {
+    continue?: { message: string; sessionId?: string; nodeId?: string };
+  }): ControlResult;
 }
 
 const MAX_BODY = 64 * 1024;
@@ -378,7 +389,22 @@ export class ControlServer implements vscode.Disposable {
         return;
       }
       if (route === 'POST /reload-window') {
-        const result = this.host.controlReloadWindow();
+        const body = await this.readBody(req);
+        let carry: { message: string; sessionId?: string; nodeId?: string } | undefined;
+        if (body.continue && typeof body.continue === 'object') {
+          const raw = body.continue as Record<string, unknown>;
+          const message = typeof raw.message === 'string' ? raw.message.trim() : '';
+          if (!message) {
+            send(400, { ok: false, error: 'continue.message is required' });
+            return;
+          }
+          carry = {
+            message,
+            sessionId: typeof raw.sessionId === 'string' ? raw.sessionId : undefined,
+            nodeId: typeof raw.nodeId === 'string' ? raw.nodeId : undefined,
+          };
+        }
+        const result = this.host.controlReloadWindow(carry ? { continue: carry } : undefined);
         send(result.ok ? 202 : 409, result);
         return;
       }
