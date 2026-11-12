@@ -997,16 +997,33 @@ function backgroundPrompt(runId) {
 }
 
 /**
- * A hop child that ends its **first turn while a background job it just started is
- * still running** — the shape that used to return early: the hop return fired on turn
- * end, and the origin resumed while the child still owned the job.
+ * A hop child that ends its **first turn without calling `finish_hop`**, while a
+ * background job it just started is still running — the shape that used to return
+ * early (the hop return fired on turn end, and the origin resumed while the child
+ * still owned the job). The hand-back is a separate, steered turn below.
  */
 function hopBusyChildPrompt(runId) {
   const args = JSON.stringify({ command: sleepCmd(30000), run_type: 'background' });
   return (
     `HARNESS-TEST ${runId} HOP-CHILD: call the exec_command tool exactly once with ${args}, ` +
     'then reply with the single word "ok" and end your turn immediately. ' +
-    'Do not wait for the command, do not join it, do not check it, and do not call any other tool.'
+    'Do not wait for the command, do not join it, do not check it, and do not call any other tool. ' +
+    'In particular do NOT call finish_hop in this turn.'
+  );
+}
+
+/**
+ * The steer that makes the child hand back: a node id the source session does not have
+ * (the tool must answer an error naming it), then the dispatch node (accepted, and the
+ * same landing node), then one more call (the hand-back is spent).
+ */
+function hopFinishPrompt(runId, badNodeId, landingNodeId) {
+  return (
+    `HARNESS-TEST ${runId} HOP-FINISH: call the finish_hop tool three times, in this order, one after another. ` +
+    `1) with ${JSON.stringify({ source_session_node_id: badNodeId })} — read the error it answers. ` +
+    `2) with ${JSON.stringify({ source_session_node_id: landingNodeId })}. ` +
+    '3) once more with no arguments. ' +
+    'Then reply with the single word "HANDED" and end your turn. Do not call any other tool.'
   );
 }
 
@@ -2564,18 +2581,29 @@ function sessionMetas(cx, sessionId) {
 }
 
 /**
- * A hop over the control plane (`POST /session/start {returnTo:true}`):
+ * A hop over the control plane (`POST /session/start {returnTo:true}`), in the shape
+ * the **child-decides** contract has: nothing returns until the hopped-to session
+ * calls `finish_hop`.
  *
  *  - `returnTo` is refused without an explicit `originSessionId`, and with a
  *    `sessionId` (a hop always creates a fresh session);
  *  - the child's id is reported in `/state.hops` as soon as the child session
  *    exists — that id, not a timestamp, is what the return trip matches on;
+ *  - the child's first turn ends **while a background job it started still runs**, and
+ *    then the session goes idle: **no receipt may land** at either moment, and the hop
+ *    must still be armed (`/state.hops`, no `finishRequested`). A turn end is not a
+ *    hand-back — that is what makes a hopped session steerable;
+ *  - the child is then **steered** to call `finish_hop`: a node id that does not exist
+ *    must be refused with an error naming the problem, the dispatch node is accepted,
+ *    and a second call answers "no armed hop";
  *  - a **decoy** session created while the hop is in flight, finishing first, must
  *    not steal the receipt: the receipt names the child and contains no trace of
  *    the decoy (this is the regression that made a hop answer land in the wrong
  *    conversation);
- *  - the receipt lands on the node the hop was dispatched from, in the origin
- *    session, without focusing the origin's tab.
+ *  - only then does the receipt land, on the hop's return node, saying the child
+ *    `called finish_hop and handed back its report` (no `status:` wording), without
+ *    focusing the origin's tab, and the hop leaves `/state.hops` with
+ *    `pendingReceipts` back to 0.
  */
 async function suiteHop(cx) {
   const checks = makeChecks();
@@ -2662,6 +2690,11 @@ async function suiteHop(cx) {
     typeof childHop.originNodeId === 'string' && childHop.originNodeId.length > 0,
     String(childHop.originNodeId),
   );
+  checks.check(
+    'the armed hop carries no finishRequested yet',
+    childHop.finishRequested !== true,
+    JSON.stringify(childHop),
+  );
 
   // A decoy created *while the hop is in flight*, with a short turn so it finishes
   // before the child: the old timestamp rule would have reported its answer back.
@@ -2696,13 +2729,18 @@ async function suiteHop(cx) {
   if (!endedBusy.ok) {
     checks.subskip(
       'the child ended its turn while its background job was still running',
-      'the turn-end / job-running window was not observed; the hop-wait path was not exercised',
+      'the turn-end / job-running window was not observed; the "a turn end is not a hand-back" window was not exercised',
     );
   } else {
     checks.check(
       'the child ended its turn while it still owned a running job',
       true,
       `locked=${JSON.stringify(endedBusy.value.row.lockedNodes)}`,
+    );
+    checks.check(
+      'the child did not call finish_hop in its first turn',
+      !String(endedBusy.value.dump.meta?.prompt ?? '').includes('HOP-FINISH'),
+      'the scripted first turn must not hand back',
     );
     const earlyReceipt = sessionMetas(cx, origin.sessionId).find((d) =>
       String(d.meta?.prompt ?? '').startsWith(HOP_RECEIPT_MARK),
@@ -2713,6 +2751,84 @@ async function suiteHop(cx) {
       earlyReceipt ? `receipt ${earlyReceipt.nodeId} already landed` : 'no receipt yet',
     );
   }
+  const childNodeId = endedBusy.ok ? endedBusy.value.dump.nodeId : null;
+
+  // The child ends its turn **without** finish_hop, then its background job ends and the
+  // session goes idle. Nothing may come back at either moment: a turn end is not a
+  // hand-back, and the hop must still be armed afterwards.
+  const wentIdle = await pollState(
+    cx,
+    (state) => {
+      // The child must really have run: a session that has not finished a turn yet is
+      // not "idle after its work", it simply has not started.
+      const finished = sessionMetas(cx, childId).some((d) => d.meta?.status === 'done');
+      if (!finished) {
+        return undefined;
+      }
+      const row = sessionMap(state).get(childId);
+      const locked = Array.isArray(row?.lockedNodes) ? row.lockedNodes.length : 0;
+      return row && !row.running && locked === 0 ? row : undefined;
+    },
+    180000,
+  );
+  if (!wentIdle.ok) {
+    checks.subskip(
+      'the child session went idle after its background job',
+      `the child never reported idle: ${JSON.stringify(sessionMap(wentIdle.state ?? {}).get(childId) ?? null)}`,
+    );
+  } else {
+    checks.check(
+      'the child session went idle with no hand-back',
+      true,
+      `lockedNodes=${JSON.stringify(wentIdle.value?.lockedNodes ?? null)}`,
+    );
+    const idleReceipt = sessionMetas(cx, origin.sessionId).find((d) =>
+      String(d.meta?.prompt ?? '').startsWith(HOP_RECEIPT_MARK),
+    );
+    checks.check(
+      'no receipt lands when the child goes idle (a turn end is not a hand-back)',
+      !idleReceipt,
+      idleReceipt ? `receipt ${idleReceipt.nodeId} already landed` : 'no receipt yet',
+    );
+    const stillArmed = Array.isArray(wentIdle.state?.hops)
+      ? wentIdle.state.hops.find((h) => h && h.originSessionId === origin.sessionId)
+      : undefined;
+    checks.check(
+      'the hop is still armed after that turn end',
+      Boolean(stillArmed) && stillArmed.finishRequested !== true,
+      JSON.stringify(stillArmed ?? null),
+    );
+  }
+
+  // The steer: the child itself calls finish_hop — once with a node id that does not
+  // exist (the tool must name the problem), once with the dispatch node (the landing
+  // node), once more (the hand-back is spent).
+  const badNodeId = `harness-test-${cx.runId}-nosuchnode`;
+  const steerReason = !childNodeId
+    ? 'the child turn node was never observed'
+    : !wentIdle.ok
+      ? 'the child session never went idle'
+      : '';
+  if (steerReason) {
+    checks.subskip('the child was steered to call finish_hop', steerReason);
+    const bad = checks.failures();
+    return suiteResult(
+      name,
+      bad.length ? 'FAIL' : 'SKIP',
+      bad.length ? `${bad.length} check(s) failed` : steerReason,
+      checks,
+    );
+  }
+  const steer = await cx.client.continueFrom({
+    sessionId: childId,
+    nodeId: childNodeId,
+    message: hopFinishPrompt(cx.runId, badNodeId, childHop.originNodeId),
+  });
+  checks.check(
+    'the child session accepts a steer while the hop is armed',
+    steer.status === 200 && steer.body?.ok !== false,
+    `HTTP ${steer.status}: ${steer.body?.error ?? JSON.stringify(steer.body)}`,
+  );
 
   const receipt = await pollUntil(
     () =>
@@ -2722,17 +2838,52 @@ async function suiteHop(cx) {
     { timeoutMs: 240000, intervalMs: 1000 },
   );
   if (!receipt.ok) {
-    return suiteResult(name, 'FAIL', 'no hop receipt landed in the origin session', checks);
+    return suiteResult(name, 'FAIL', 'no hop receipt landed after the child called finish_hop', checks);
   }
   const meta = receipt.value.meta ?? {};
   const receiptText = String(meta.prompt ?? '');
   checks.check('the receipt landed in the origin session', meta.sessionId === origin.sessionId, `meta.sessionId=${meta.sessionId}`);
   checks.check(
-    'the receipt branches off the dispatch node',
+    'the receipt says the child called finish_hop and handed back its report',
+    /called finish_hop and handed back its report/.test(receiptText),
+    receiptText.slice(0, 160),
+  );
+  checks.check(
+    'the receipt carries no "status:" wording any more',
+    !/status:/.test(receiptText),
+    receiptText.slice(0, 200),
+  );
+  checks.check(
+    'the receipt branches off the hop\'s return node',
     meta.parentId === childHop.originNodeId,
     `parent=${meta.parentId} dispatch=${childHop.originNodeId}`,
   );
   checks.check('the receipt names the child session', receiptText.includes(childId), childId);
+  checks.check(
+    'the receipt carries the search_transcripts pointer',
+    receiptText.includes(`search_transcripts sessionId=${childId}`),
+    receiptText.slice(-120),
+  );
+  // The two refusals the scripted steer asked for are in the child's own dump.
+  const childText = sessionMetas(cx, childId)
+    .map((d) => {
+      try {
+        return transcriptText(parseTranscriptJsonl(fs.readFileSync(d.file, 'utf8')));
+      } catch {
+        return '';
+      }
+    })
+    .join('\n');
+  checks.check(
+    'finish_hop refuses a node id the origin session does not have',
+    childText.includes(`no such node in the source session`) && childText.includes(badNodeId),
+    childText.includes(badNodeId) ? 'the error names the bad node id' : 'no error naming the bad node id',
+  );
+  checks.check(
+    'a second finish_hop answers "no armed hop"',
+    childText.includes('this session has no armed hop (it was already handed back, or none was started)'),
+    'the hand-back is spent',
+  );
   if (!decoy.fail && !decoy.skip) {
     checks.check(
       'the receipt does not name the decoy session',

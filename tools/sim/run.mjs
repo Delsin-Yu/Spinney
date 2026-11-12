@@ -421,6 +421,9 @@ function toolCallOf(events) {
 
 const TOOLS_MAIN = ['read_file', 'search_files', 'spawn_agents', 'send_agent_message', 'hop_session'].map((name) => ({ type: 'function', function: { name } }));
 const TOOLS_SUB = ['read_file', 'search_files', 'spawn_readonly_agents'].map((name) => ({ type: 'function', function: { name } }));
+// A session a `return_when_finished` hop started is a main session **plus** the
+// hand-back tool, so the mock must be able to serve that surface too.
+const TOOLS_HOP = TOOLS_MAIN.concat([{ type: 'function', function: { name: 'finish_hop' } }]);
 
 function conversation(rounds, extra) {
   const messages = [{ role: 'system', content: 'sim' }, { role: 'user', content: extra || '[sim:fanout] run the scenario' }];
@@ -497,6 +500,16 @@ async function selftest(flags) {
   c.add('  … and searches for the token, not the closing answer', afterHistory?.args?.pattern === SEARCH_TOKEN, String(afterHistory?.args?.pattern));
   const sub = toolCallOf(parseSse((await ask(mock, { model: SIM_MODEL, stream: true, messages: conversation(0, '[sim:sub 07] investigate'), tools: TOOLS_SUB })).text));
   c.add('a sub-agent conversation (no hop_session) gets the child plan', sub?.name === 'search_files', String(sub?.name));
+  // A hopped child is a main session that also carries `finish_hop`; its script must win
+  // over the fan-out plan, and it must emit the hand-back call itself.
+  const hop0 = toolCallOf(parseSse((await ask(mock, { model: SIM_MODEL, stream: true, messages: conversation(0), tools: TOOLS_HOP })).text));
+  c.add('a hopped child (finish_hop advertised) gets the hop plan, not the fan-out', hop0?.name === 'search_files', String(hop0?.name));
+  const hop1 = toolCallOf(parseSse((await ask(mock, { model: SIM_MODEL, stream: true, messages: conversation(1), tools: TOOLS_HOP })).text));
+  c.add('  … one read after the scan', hop1?.name === 'read_file', String(hop1?.name));
+  const hop2 = toolCallOf(parseSse((await ask(mock, { model: SIM_MODEL, stream: true, messages: conversation(2), tools: TOOLS_HOP })).text));
+  c.add('  … and the child calls finish_hop itself', hop2?.name === 'finish_hop', String(hop2?.name));
+  const hopClosing = parseSse((await ask(mock, { model: SIM_MODEL, stream: true, messages: conversation(3), tools: TOOLS_HOP })).text);
+  c.add('  … then answers in plain text (the hand-back is the child\'s call, not its turn end)', toolCallOf(hopClosing) === null && hopClosing.some((e) => e.json?.choices?.[0]?.delta?.content));
   const noTools = await ask(mock, { model: SIM_MODEL, stream: false, messages: [{ role: 'user', content: 'name this session' }] });
   const noToolsBody = JSON.parse(noTools.text);
   c.add('a request with no tools is never answered with a tool call', !noToolsBody.choices?.[0]?.message?.tool_calls);

@@ -555,8 +555,16 @@ export class Agent {
   private spawnHandler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null = null;
   /** Provider hook that resumes a finished sub-agent for the `send_agent_message` tool. */
   private sendMessageHandler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null = null;
-  /** Provider hook that hands a task to a fresh session for the `hop_session` tool. */
+  /** Provider hook that hands a task to a fresh session for `hop_session`. */
   private hopHandler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null = null;
+  /**
+   * Provider hook for `finish_hop`: the child of a hop hands its report back
+   * itself. Only a session a `return_when_finished` hop started is offered the
+   * tool, so a call that reaches this handler anyway is refused by the provider.
+   */
+  private finishHopHandler:
+    | ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>)
+    | null = null;
   /** Provider hook that renders the active session's tree for `list_nodes`. */
   private listNodesHandler: (() => Promise<string>) | null = null;
   /** Provider hook that renames a session for the `rename_session` tool. */
@@ -585,6 +593,13 @@ export class Agent {
    * never removes the two read-only session tools.
    */
   private hopEnabled = false;
+  /**
+   * Whether `finish_hop` is exposed: true only in the main agent of a session a
+   * `return_when_finished` hop started. It is set **before** that session's first
+   * turn, because the epoch's frozen tool schemas are what the model keeps seeing
+   * — and it is the child, not its turn end, that decides when the hop returns.
+   */
+  private canFinishHop = false;
   /**
    * The tool schemas of the epoch this agent is sending with, when it has one. Set from
    * the node's frozen envelope at every turn start; `undefined` means "the live set",
@@ -678,6 +693,14 @@ export class Agent {
     this.hopHandler = handler;
   }
 
+  /**
+   * Provider hook for `finish_hop`: a hop's child session hands its report back
+   * itself, and nothing returns to the origin before it does.
+   */
+  setFinishHopHandler(handler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null): void {
+    this.finishHopHandler = handler;
+  }
+
   /** Set a provider hook that renders the active session's tree for `list_nodes`. */
   setListNodeHandler(handler: (() => Promise<string>) | null): void {
     this.listNodesHandler = handler;
@@ -704,6 +727,16 @@ export class Agent {
   /** Allow/deny this agent from hopping to a fresh session (main agent only). */
   setCanHop(v: boolean): void {
     this.canHop = v;
+  }
+
+  /**
+   * Allow/deny `finish_hop` — the hand-back a hopped-to session makes for itself.
+   * Set from the hop that armed this session, before its first turn; every other
+   * agent (a `fire_and_forget` child, a session no hop started, a sub-agent)
+   * keeps it off and never sees the tool.
+   */
+  setCanFinishHop(v: boolean): void {
+    this.canFinishHop = v;
   }
 
   /**
@@ -769,6 +802,7 @@ export class Agent {
       canSpawnReadOnly: this.canSpawnReadOnly,
       canHop: this.canHop,
       hopEnabled: this.canHop && this.hopEnabled,
+      finishHop: this.canFinishHop,
     };
   }
 
@@ -778,7 +812,8 @@ export class Agent {
    * `search_transcripts`) plus the tools the provider orchestrates and the Agent
    * intercepts: `read_image` (vision models only), the `spawn_*` / `send_*` pair
    * matching this agent's capabilities, and — main agent only — `hop_session` /
-   * `list_nodes` / `rename_session`. Every tool is advertised with its full
+   * `list_nodes` / `rename_session` (plus `finish_hop` in the session a hop
+   * started). Every tool is advertised with its full
    * schema; there is no folded "gradual reveal" tier. The intercepted set comes
    * from the same capability flags the system prompt's `## Delegation` guidance
    * assumes, so the two can never disagree.
@@ -1403,6 +1438,15 @@ export class Agent {
           : this.hopHandler
             ? await this.hopHandler(args, signal)
             : 'Error: session hopping is not available in this session.';
+    } else if (call.function.name === 'finish_hop') {
+      // The hopped-to session hands its report back itself. The provider owns the
+      // hop record, the landing node and the receipt, so it answers.
+      const args = parseToolArgs(call.function.arguments);
+      result = !this.canFinishHop
+        ? 'Error: only a session started by a hop may hand back a report (this session was not, or the hop is already closed).'
+        : this.finishHopHandler
+          ? await this.finishHopHandler(args, signal)
+          : 'Error: hand-back is not available in this session.';
     } else if (call.function.name === 'list_nodes') {
       result = !this.canHop
         ? 'Error: only the main agent may list the session tree.'

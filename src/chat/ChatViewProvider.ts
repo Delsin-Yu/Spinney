@@ -44,6 +44,7 @@ import {
   pathMessages,
   sessionEffortPick,
   sessionModelPick,
+  titleFromPrompt,
 } from './tree';
 import {
   TITLE_BATCH_MAX_TOKENS,
@@ -260,7 +261,8 @@ function lastAssistantText(node: TreeNode): string {
  * How a session hop ends for the origin conversation.
  *
  * - `return_when_finished` (the default): the child session's final answer is
- *   delivered back as a user message when its turn finishes.
+ *   delivered back as a user message once the child **calls `finish_hop`** and its
+ *   session is idle. A turn end is not a hand-back.
  * - `fire_and_forget`: the child runs the task and **nothing** comes back; the
  *   origin is never resumed by it, and no trace is written into its tree.
  */
@@ -274,6 +276,28 @@ function parseHopMode(raw: unknown): HopMode | null {
     return 'return_when_finished';
   }
   return typeof raw === 'string' && (HOP_MODES as readonly string[]).includes(raw) ? (raw as HopMode) : null;
+}
+
+/**
+ * The model-facing preamble a hopped-to session's **first** prompt carries. The tool
+ * list already says what `finish_hop` *does*; this says the one thing a schema cannot
+ * — that nothing comes back on its own. Ending a turn, an interrupt and a Stop all
+ * leave the origin waiting, which is what lets the user steer the hopped session; the
+ * call is the hand-back. English on purpose: it is prompt text read by the model, not
+ * a UI string (`docs/agents/invariants/i18n.md`).
+ */
+function hopChildPreamble(originSessionId: string, dispatchNodeId: string, landingNodeId: string): string {
+  const landing =
+    landingNodeId === dispatchNodeId
+      ? `omit it to land on node ${dispatchNodeId}, the node that dispatched this task`
+      : `omit it to land on node ${landingNodeId}, the node your dispatcher chose`;
+  return [
+    `[hop] This session was started by a hop from another conversation — session ${originSessionId}, node ${dispatchNodeId} — and that conversation is waiting for you.`,
+    'Nothing returns to it on its own: ending a turn, being interrupted, being stopped and idling all leave it waiting. That is deliberate — the user can interrupt or steer you at any time, and you keep the work.',
+    'When the work is complete, call the finish_hop tool. Your final reply of that turn is then delivered to the caller as a message to its agent, so put everything it needs in that reply.',
+    `finish_hop's optional \`source_session_node_id\` picks the node of session ${originSessionId} the reply lands on (as a new branch); ${landing}. search_transcripts sessionId=${originSessionId} reads that conversation's nodes and messages, which is how you name one.`,
+    'Call finish_hop once, when the work really is done — after that this session has nothing left to hand back.',
+  ].join('\n');
 }
 
 /**
@@ -297,8 +321,25 @@ interface Hop {
   armedAt: number;
   targetSessionId?: string;
   /**
-   * What the child's last finished turn said, recorded the moment that turn ended.
-   * The receipt is queued only once the child session is **idle**: while it still
+   * Set by the child's `finish_hop`: **the hopped-to session decides when it
+   * returns**. Until this is true `maybeDeliverHopReturn` does nothing at all — a
+   * turn end, an interrupt and a Stop leave the hop armed and the origin waiting,
+   * which is what makes a hopped session steerable. Once it is true the idle-wait
+   * below runs unchanged: record the turn's final answer, wait for the child to be
+   * idle, deliver, retire.
+   */
+  finishRequested?: boolean;
+  /**
+   * The node of the origin session the report lands on, chosen by `finish_hop`'s
+   * optional `source_session_node_id` (else `returnNodeId`, else the node the hop
+   * was dispatched from). Recorded at the call so the receipt needs no second
+   * lookup.
+   */
+  handBackNodeId?: string;
+  /**
+   * What the child's last finished turn said, recorded at the end of a turn that
+   * ran **after** `finishRequested` was set. The receipt is queued only once the
+   * child session is **idle**: while it still
    * owns a running node background job, a running sub-agent batch or a queued
    * completion notice, the hop stays armed and every later turn end refreshes this
    * (see `maybeDeliverHopReturn` / `kickHopWork`). A return that ignored it released
@@ -3417,9 +3458,79 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       );
     }
     return (
-      'Queued. This turn is over: a fresh session will run your task now, and when it finishes ' +
-      `you will be resumed here with its final answer as a user message, as a new branch off ` +
-      (returnNodeId ? `node ${returnNodeId}.` : `the node you dispatched from (${node.id}).`)
+      'Queued. This turn is over: a fresh session will run your task now. ' +
+      'Nothing comes back until that session calls its own finish_hop tool — a turn ending, an interrupt ' +
+      'and a Stop are not a hand-back, and it may be interrupted or steered by the user as often as it ' +
+      'takes. When it calls finish_hop and is idle, you are resumed here with its final reply as a user ' +
+      'message, as a new branch off ' +
+      (returnNodeId ? `node ${returnNodeId}.` : `the node you dispatched from (${node.id}).`) +
+      ' The child chooses that landing node itself (`source_session_node_id`), defaulting to this one.'
+    );
+  }
+
+  /**
+   * The hop that **started this session** — the capability lookup behind
+   * `finish_hop`. It reads the session's own record (`AgentSession.hopOrigin`), not
+   * the in-flight hop: the tool set an epoch froze must not change when the hop is
+   * retired, and a handed-back session keeps answering "no armed hop" instead of
+   * quietly losing the tool. A `fire_and_forget` child and every session no hop
+   * started answer `null`.
+   */
+  hopTargetFor(sessionId: string): { originSessionId: string; originNodeId: string } | null {
+    const origin = this.sessions.find((s) => s.id === sessionId)?.hopOrigin;
+    return origin ? { originSessionId: origin.sessionId, originNodeId: origin.nodeId } : null;
+  }
+
+  /**
+   * `finish_hop` from the hopped-to session: the child decides when it returns.
+   *
+   * The call only **marks** the hop and stores where the report lands; the delivery
+   * is the existing idle-wait path (`maybeDeliverHopReturn` → `deliverHopReturn`),
+   * which now does nothing at all until this flag is set. A second call answers the
+   * same error as a call with no hop at all: the hand-back is spent.
+   */
+  handleFinishHop(rt: SessionRuntime, node: TreeNode, args: Record<string, unknown>): string {
+    const hop = this.hopsByTarget.get(rt.session.id);
+    if (!hop || hop.mode !== 'return_when_finished' || hop.finishRequested) {
+      return 'Error: this session has no armed hop (it was already handed back, or none was started).';
+    }
+    if (this.disposed) {
+      return 'Error: this window is shutting down, so the hop cannot be handed back.';
+    }
+    const wanted = typeof args.source_session_node_id === 'string' ? args.source_session_node_id.trim() : '';
+    let landing = hop.returnNodeId ?? hop.originNodeId;
+    if (wanted) {
+      const origin = this.sessions.find((s) => s.id === hop.originSessionId);
+      if (!origin) {
+        return `Error: the source session ${hop.originSessionId} no longer exists, so there is nothing to hand this report back to.`;
+      }
+      const target = origin.nodes[wanted];
+      if (!target) {
+        return (
+          `Error: no such node in the source session ${hop.originSessionId}: ${wanted} ` +
+          `(search_transcripts sessionId=${hop.originSessionId} lists its nodes).`
+        );
+      }
+      if (isSidecar(target)) {
+        return (
+          `Error: node ${wanted} in the source session ${hop.originSessionId} is a sidecar (a sub-agent or a ` +
+          `background-job card), not a conversation node; pick a turn node ` +
+          `(search_transcripts sessionId=${hop.originSessionId} shows them).`
+        );
+      }
+      landing = wanted;
+    }
+    hop.finishRequested = true;
+    hop.handBackNodeId = landing;
+    this.kickHopWork();
+    this.outputLog(
+      `[hop] child ${rt.session.id} called finish_hop after a turn of ${node.id}; the report returns to ` +
+        `${hop.originSessionId} node ${landing}`,
+    );
+    return (
+      `Handed back. This turn's final reply is delivered to session ${hop.originSessionId} as a new branch off ` +
+      `node ${landing} once this session is idle. Nothing else returns from here, and finish_hop cannot be ` +
+      'called again in this session.'
     );
   }
 
@@ -3439,6 +3550,12 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    * created — deliver its final answer back to the origin session. A turn in any
    * other session is ignored: attribution is by the child's id, so a conversation
    * created while the hop was in flight can no longer steal the receipt.
+   *
+   * **The child decides when it returns.** Until it calls `finish_hop` this does
+   * nothing at all: no recorded answer, no receipt, no retire. That is what makes a
+   * hopped session steerable — a turn ending, an interrupt and a Stop all leave the
+   * hop armed and the origin waiting, instead of pulling the caller back the moment
+   * the child pauses.
    */
   private maybeDeliverHopReturn(rt: SessionRuntime, node: TreeNode | null, status: TurnStatus): void {
     const session = rt.session;
@@ -3451,6 +3568,13 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     }
     if (hop.mode !== 'return_when_finished') {
       this.retireHop(hop, `child ${session.id} finished (status ${status})`);
+      return;
+    }
+    if (!hop.finishRequested) {
+      this.outputLog(
+        `[hop] child ${session.id} finished a turn (status ${status}) without finish_hop; ` +
+          'the hop stays armed and nothing returns',
+      );
       return;
     }
     // Record what this turn said. The child may continue (an injected notice reuses
@@ -3480,10 +3604,9 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   }
 
   /**
-   * Queue a child's answer back to the origin, now that the child session is idle.
-   * The hop is retired here and not at its first turn end: retiring early is what let
-   * a still-running child be reported as finished, and what made every later turn of
-   * that child invisible to the return trip.
+   * Queue a child's answer back to the origin, now that the child session is idle —
+   * the child has called `finish_hop`, so the hop is spent and is retired here. It is
+   * never retired at a turn end: only the hand-back ends a hop.
    */
   private deliverHopReturn(hop: Hop): void {
     const pending = hop.pendingReturn;
@@ -3493,7 +3616,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     const childId = hop.targetSessionId ?? '';
     const child = this.sessions.find((s) => s.id === childId);
     const origin = this.sessions.find((s) => s.id === hop.originSessionId);
-    this.retireHop(hop, `child ${childId || '(unknown)'} is idle (status ${pending.status})`);
+    this.retireHop(hop, `child ${childId || '(unknown)'} called finish_hop and is idle`);
     if (!origin) {
       this.outputLog('[hop] origin session is gone; dropping the result');
       return;
@@ -3505,13 +3628,14 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       attempts: 0,
       queuedAt: Date.now(),
       prompt:
-        `[session hop receipt] The task you dispatched to the new session "${child ? child.title : childId}" (${childId}) has finished (status: ${pending.status}).\n` +
+        `[session hop receipt] The child session "${child ? child.title : childId}" (${childId}) called ` +
+        `finish_hop and handed back its report.\n` +
         `Its final reply:\n\n${clipped || '(the new session produced no text reply)'}\n\n` +
         `(search_transcripts sessionId=${childId} has the full trace if you need it)`,
     };
     this.pendingReceipts.push(receipt);
     this.outputLog(
-      `[hop] receipt queued for ${hop.originSessionId} node ${hop.returnNodeId ?? hop.originNodeId} ` +
+      `[hop] receipt queued for ${hop.originSessionId} node ${this.landingNodeId(hop)} ` +
         `(status ${pending.status}, ${clipped.length} chars)`,
     );
     // Try right away; whatever cannot land now waits for a free node (see kickHopWork).
@@ -3545,7 +3669,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     if (Date.now() - receipt.queuedAt > HOP_RECEIPT_MAX_WAIT_MS) {
       return drop(`the return node stayed unavailable for ${Math.round(HOP_RECEIPT_MAX_WAIT_MS / 60000)} min`);
     }
-    const nodeId = hop.returnNodeId ?? hop.originNodeId;
+    const nodeId = this.landingNodeId(hop);
     if (!nodeId || !origin.nodes[nodeId]) {
       return drop(`the return node ${nodeId || '(none)'} is gone`);
     }
@@ -3646,6 +3770,11 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    * Start one queued hop: create the child session and bind its id **before** its
    * first turn can start, so the return trip can never be attributed to another
    * conversation.
+   *
+   * A `return_when_finished` child's first prompt carries the model-facing preamble
+   * (`hopChildPreamble`) — nothing returns until it calls `finish_hop` — while the
+   * session's title still comes from the caller's own `title` argument (the
+   * provisional seed is the dispatcher's prompt, never the preamble).
    */
   private async startHop(pending: PendingHopStart): Promise<void> {
     const hop = pending.hop;
@@ -3653,17 +3782,29 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       this.retireHop(hop, 'its origin session is gone');
       return;
     }
+    const returns = hop.mode === 'return_when_finished';
+    const prompt = returns
+      ? `${hopChildPreamble(hop.originSessionId, hop.originNodeId, this.landingNodeId(hop))}\n\n---\n\n${pending.prompt}`
+      : pending.prompt;
+    const titleSeed = returns ? sliceText(titleFromPrompt(pending.prompt), 40) : undefined;
     const result = await this.controlStartSession(
-      { title: pending.title, prompt: pending.prompt },
+      { title: pending.title, prompt },
       {
+        titleSeed,
         hopStart: true,
         onSessionCreated: (sessionId) => {
           hop.targetSessionId = sessionId;
           if (hop.mode === 'return_when_finished' && this.hopsByOrigin.get(hop.originSessionId) === hop) {
             this.hopsByTarget.set(sessionId, hop);
+            // The child's own record of the hop: it is what advertises `finish_hop`
+            // to that session's main agent, before (and after) the first turn.
+            const child = this.sessions.find((s) => s.id === sessionId);
+            if (child) {
+              child.hopOrigin = { sessionId: hop.originSessionId, nodeId: this.landingNodeId(hop) };
+            }
             this.outputLog(
-              `[hop] child ${sessionId} will report back to ${hop.originSessionId} node ` +
-                `${hop.returnNodeId ?? hop.originNodeId}`,
+              `[hop] child ${sessionId} reports back to ${hop.originSessionId} node ` +
+                `${this.landingNodeId(hop)} when it calls finish_hop`,
             );
           } else {
             this.outputLog(
@@ -3729,6 +3870,15 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     this.kickHopWork();
     this.outputLog(`[http] session/start hop queued for ${origin.id} (${prompt.slice(0, 60)})`);
     return { ok: true, queued: true, originSessionId: origin.id };
+  }
+
+  /**
+   * The node of the origin session a hop's report lands on: the child's own
+   * `source_session_node_id` when its `finish_hop` named one, else the caller's
+   * `returnNodeId`, else the node the hop was dispatched from.
+   */
+  private landingNodeId(hop: Hop): string {
+    return hop.handBackNodeId ?? hop.returnNodeId ?? hop.originNodeId;
   }
 
   /**
@@ -4824,6 +4974,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         returnNodeId: hop.returnNodeId,
         mode: hop.mode,
         armedAt: hop.armedAt,
+        finishRequested: hop.finishRequested === true ? true : undefined,
       })),
       pendingReceipts: this.pendingReceipts.length,
     };
@@ -4988,6 +5139,13 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       onSessionCreated?: (sessionId: string) => void;
       /** This call **is** a queued hop's start: other sessions running is expected. */
       hopStart?: boolean;
+      /**
+       * A provisional title for the new session, taken from the dispatcher's own
+       * prompt. A hop's child carries a model-facing preamble in its first turn, and
+       * the runtime would otherwise name the session after that preamble instead of
+       * after the task. Provisional, so automatic naming still replaces it.
+       */
+      titleSeed?: string;
     },
   ): Promise<ControlResult> {
     if (this.readOnly) {
@@ -5089,12 +5247,17 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    */
   private async startFreshSession(
     opts: { title?: string; prompt: string },
-    internal?: { onSessionCreated?: (sessionId: string) => void },
+    internal?: { onSessionCreated?: (sessionId: string) => void; titleSeed?: string },
   ): Promise<ControlResult> {
     const session = this.createSessionInMemory();
     // The hop's target id must exist before the turn does: a child's turn can never
     // finish before its own identity is recorded (`Hop.targetSessionId`).
     internal?.onSessionCreated?.(session.id);
+    if (internal?.titleSeed) {
+      // Provisional: a hop child is named after the dispatcher's task, not after the
+      // preamble its first turn carries, and automatic naming may still replace it.
+      this.applySessionTitle(session, internal.titleSeed, 'provisional');
+    }
     if (opts.title?.trim()) {
       // A caller-supplied title is explicit: lock it so automatic naming never
       // overwrites what the dispatcher asked for.

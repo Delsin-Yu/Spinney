@@ -1,4 +1,5 @@
 import { ToolDefinition } from '../types';
+import { finishHopTool } from './finishHop';
 import { hopSessionTool } from './hopSession';
 import { listNodesTool } from './listNodes';
 import { readImageTool } from './readImage';
@@ -17,7 +18,7 @@ import { spawnReadonlyAgentsTool } from './spawnReadonlyAgents';
  * filters this single list by the agent's capabilities, so the tool list the
  * model sees and the capabilities the prompt describes can never drift apart.
  */
-export type ToolRequirement = 'vision' | 'spawn' | 'spawnReadOnly' | 'hop' | 'hopSession';
+export type ToolRequirement = 'vision' | 'spawn' | 'spawnReadOnly' | 'hop' | 'hopSession' | 'finishHop';
 
 export interface InterceptedTool {
   definition: ToolDefinition;
@@ -41,6 +42,12 @@ export interface ToolCapabilities {
    * never takes `list_nodes` / `rename_session` away.
    */
   hopEnabled: boolean;
+  /**
+   * Main agent only, and only in a session a `return_when_finished` hop started:
+   * `finish_hop`, the child's own hand-back. A `fire_and_forget` child, a session
+   * no hop started, and every sub-agent answer `false` here.
+   */
+  finishHop: boolean;
 }
 
 /** Every intercepted tool, in the order it is advertised. */
@@ -51,6 +58,7 @@ export const INTERCEPTED_TOOLS: readonly InterceptedTool[] = [
   spawnReadonlyAgentsTool,
   sendReadonlyAgentMessageTool,
   hopSessionTool,
+  finishHopTool,
   listNodesTool,
   renameSessionTool,
 ];
@@ -67,6 +75,8 @@ function isAvailable(requires: ToolRequirement, caps: ToolCapabilities): boolean
       return caps.canHop;
     case 'hopSession':
       return caps.hopEnabled;
+    case 'finishHop':
+      return caps.finishHop;
   }
 }
 

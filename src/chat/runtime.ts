@@ -796,6 +796,22 @@ export interface RuntimeHost {
    */
   resolveModel(candidate: string): string;
   handleHopSession(rt: SessionRuntime, node: TreeNode, args: Record<string, unknown>): string;
+  /**
+   * The hop that armed **this session as its child**, when it was a
+   * `return_when_finished` hop: `{originSessionId, originNodeId}`. This is what
+   * gives the child's main agent `finish_hop` — the tool it hands its report back
+   * with — so it is `null` for a `fire_and_forget` child and for every session no
+   * hop started. It is read at every turn start, so the child's **first** turn
+   * (whose frozen tool schemas decide the rest of the epoch) already has it.
+   */
+  hopTargetFor(sessionId: string): { originSessionId: string; originNodeId: string } | null;
+  /**
+   * `finish_hop` from the hopped-to session: mark the hop as requested, store the
+   * node the user (or the default) chose, and answer the model. Nothing is
+   * delivered here — the receipt is queued when this turn ends and the child is
+   * idle, exactly as before, only no longer before the call.
+   */
+  handleFinishHop(rt: SessionRuntime, node: TreeNode, args: Record<string, unknown>): string;
   handleRenameSession(args: Record<string, unknown>, callerSessionId?: string): string;
   queueHopReturn(rt: SessionRuntime, node: TreeNode | null, status: TurnStatus): void;
   /**
@@ -1366,6 +1382,9 @@ export class SessionRuntime {
       // are injected into this node's *running* turn at its next tool boundary.
       agent.setSignalHandler(() => this.takeSignalsFor(node));
       agent.setHopHandler((args) => Promise.resolve(this.host.handleHopSession(this, node, args)));
+      // And, when this session is a hop's child, it can hand its own report back:
+      // nothing returns to the caller before it calls `finish_hop`.
+      agent.setFinishHopHandler((args) => Promise.resolve(this.host.handleFinishHop(this, node, args)));
       agent.setListNodeHandler(() => Promise.resolve(this.handleListNodes(node)));
       // And it can rename the session (an explicit rename locks the title, so the
       // automatic namer leaves it alone).
@@ -1377,6 +1396,11 @@ export class SessionRuntime {
     // must reach the next turn without rebuilding the worker, and a chain that froze
     // the schema still refuses the call (the handler checks it too).
     worker.agent.setHopEnabled(this.host.getConfig().hopSessionEnabled);
+    // `finish_hop` is the hopped-to session's own hand-back, and it has to be in the
+    // schemas of that session's **first** turn: an epoch freezes its tools, so a flag
+    // applied any later would leave the child unable to finish. Read here, per turn,
+    // because the hop that armed this session is retired when it hands back.
+    worker.agent.setCanFinishHop(this.host.hopTargetFor(this.sessionId) !== null);
     // The budget accounting `read_image` needs before it may attach anything: which bytes
     // this chain's next request would already carry, and the ceiling its transport has.
     // Installed on **every** call, not only when the worker is built: `workerFor` runs at the
@@ -1593,6 +1617,10 @@ export class SessionRuntime {
       canSpawnReadOnly: false,
       canHop: !sidecar,
       hopEnabled: !sidecar && this.host.getConfig().hopSessionEnabled,
+      // `finish_hop` belongs to the session a hop started, for that session's whole
+      // life (`AgentSession.hopOrigin`): the frozen tool set must match what the live
+      // read produces, or a handed-back child would read as setup drift.
+      finishHop: !sidecar && this.host.hopTargetFor(this.sessionId) !== null,
     };
     return [...registry.definitions, ...interceptedDefinitions(capabilities)];
   }

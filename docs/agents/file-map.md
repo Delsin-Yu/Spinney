@@ -196,7 +196,7 @@
   the identity line in place), the completion-signal injection hook
   (`setSignalHandler`; consulted after each whole tool batch, like the `read_image`
   image block) and the interception of the provider-orchestrated tools
-  (`spawn_*` / `send_*` / `hop_session` / `list_nodes` / `rename_session` /
+  (`spawn_*` / `send_*` / `hop_session` / `finish_hop` / `list_nodes` / `rename_session` /
   `read_image`). The prompt text is **not** here — see `prompt.ts`.
 - `src/agent/prompt.ts` — **the system prompt**: both templates, the
   `{{placeholder}}` renderer (plus the unresolved-placeholder guard) and the two
@@ -330,7 +330,7 @@
   resampler and the JPEG decoder — see `testing.md`.
 - `src/agent/tools/` — one file per intercepted tool (`readImage`, `spawnAgents`,
   `spawnReadonlyAgents`, `sendAgentMessage`, `sendReadonlyAgentMessage`,
-  `hopSession`, `listNodes`, `renameSession`) plus `index.ts`, the barrel that
+  `hopSession`, `finishHop`, `listNodes`, `renameSession`) plus `index.ts`, the barrel that
   filters them.
   Each declares its `requires` capability tag, so the advertised tools and the
   prompt's capability wording cannot drift apart.

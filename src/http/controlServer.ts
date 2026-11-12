@@ -99,6 +99,12 @@ export interface ControlHopInfo {
   /** `return_when_finished` (the default) is the only armed kind; `fire_and_forget` never is. */
   mode: 'return_when_finished' | 'fire_and_forget';
   armedAt: number;
+  /**
+   * True once the child called `finish_hop`: the hand-back is the only thing that
+   * brings a hop back, so an armed hop with this absent is one whose child has not
+   * decided to return yet (a turn end or an interrupt does not set it).
+   */
+  finishRequested?: boolean;
 }
 
 export interface ControlResult {
