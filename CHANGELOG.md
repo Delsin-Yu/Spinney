@@ -191,6 +191,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A reload carries its own continue.** `hvsc reboot --continue` lost its message
+  whenever the supervisor died with the reload — which a daemon started from inside the
+  window always did, because the extension host's teardown kills that process tree: the
+  window came back and nobody told it to continue, so the session had to be woken by
+  hand. `POST /reload-window` now accepts `{ continue: { message, sessionId?, nodeId? } }`,
+  the extension persists it (workspace-keyed, ten-minute freshness) before reloading and
+  answers `continueQueued: true`, and the next instance delivers it through the same
+  continue path once the window is idle and not held; hvsc sends it with the reload and
+  skips its own post-reload `/continue` when the reply says it was queued.
 - **A message that streams text and reasoning alternately is one row and one block.** The
   webview routed each delta by the log's last child, so a reasoning delta that arrived
   after the message's text had started began a second row after the text, and the next
