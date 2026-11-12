@@ -221,6 +221,18 @@
   what triggers a context rollover for either budget (`invariants/context-rollover.md`).
   See `invariants/model-cards.md`. It is the **only** place a model id may
   appear; `tools/check-models.js` enforces that on every package.
+- `src/agent/compaction.ts` — the **handoff summary** of a context rollover, the pure half
+  (`docs/agents/invariants/context-rollover.md` §6a): `extractCompactionSource` (one
+  window, the first user message verbatim, every user message clipped to 500 chars with
+  the count, the last 8 assistant texts, each tool call as `name -> brief -> first line of
+  the result`, the whole source capped at 60,000 chars by a head+tail selection),
+  `detectPriorHandoffSummary`, `buildCompactionPrompt` / `buildCompactionRequest` (one
+  user message, the fixed eleven-section schema, no tools, `max_tokens` 1500, temperature
+  0.2), `COMPACTION_TIMEOUT_MS` (30 s), `missingCompactionSections` (the nine required
+  headings), `classifyCompactionAnswer` (the whole fallback decision) and
+  `compactionDiagLine` (the `[perf] compaction …` line). Deliberately `vscode`-free and
+  dependent on nothing but `../text`, which is what lets `tools/check-compaction.js` drive
+  it from plain node.
 - `src/agent/clients.ts` — `ClientRegistry`, the one place that turns a card into a
   request: one `ApiClient` per provider (created lazily, re-pointed when the
   provider's `baseUrl` is edited), the per-provider API key (cached until
@@ -263,13 +275,14 @@
   `tools/websearch-acceptance.js` ·
   `tools/check-png.js` · `tools/check-resample.js` · `tools/check-image.js` ·
   `tools/check-jpeg.js` · `tools/check-neterror.js` · `tools/check-unicode.js` ·
-  `tools/check-continue.js` —
+  `tools/check-continue.js` · `tools/check-compaction.js` —
   the packaging guards
   (`npm run check:models` / `check:webview` / `check:signals` / `check:l10n` /
   `check:rollover` / `check:modeltree` / `check:grid` / `check:docs` / `check:cwd` /
   `check:shell` / `check:kill` / `check:timeout` / `check:budget` /
   `check:search` / `check:websearch` / `check:png` / `check:resample` / `check:image` /
-  `check:jpeg` / `check:neterror` / `check:unicode` / `check:continue`, run
+  `check:jpeg` / `check:neterror` / `check:unicode` / `check:continue` /
+  `check:compaction`, run
   by `vscode:prepublish`):
   model-config drift (the default is the fallback card, `providers` / `modelCards`
   exist as object schemas, no `enum` on `model`, no model id in the code or the
@@ -277,7 +290,9 @@
   posts" (including the rollover button's label and click), the completion-signal
   persistence contract, the UI catalogs drifting from the code, the
   context-rollover contract (`contextBaseId` / the prefix cut / the error-text
-  parse — pure functions, no DOM), and "does the Model Card Tree page still
+  parse — pure functions, no DOM) and its **handoff summary** (`check:compaction`: the
+  bounded window source, the previous-summary marking, the nine required headings, the
+  fallback decision and the capped summary request), and "does the Model Card Tree page still
   understand the host" (`media/modeltree.js` into a stub DOM: the `ready` handshake,
   a snapshot drawn as a tree, a failed save that keeps the draft, an add-card → save
   round trip), and the Chat Tree's sidecar lattice (`media/tree.js` into node: the depth

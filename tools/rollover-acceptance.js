@@ -68,6 +68,19 @@ ApiClient.prototype.stream = async function* () {
   throw new Error('offline (acceptance run)');
 };
 
+// The handoff summary goes through `ClientRegistry.complete` → `ApiClient.prototype.complete`.
+// The default answer is a failure (the stubbed base URL is unreachable), which is the
+// **fallback** path every rollover has to survive; the summary case below installs a
+// scripted answer to drive the summarized shape too.
+let completeAnswer = async () => {
+  throw new Error('offline (acceptance run)');
+};
+let completeRequests = [];
+ApiClient.prototype.complete = function (request) {
+  completeRequests.push(request);
+  return completeAnswer(request);
+};
+
 // One deterministic provider + model card, so a runtime resolves to a known card
 // instead of the built-in fallback (whose provider would be the real API host).
 const TEST_CARD_ID = 'test-card';
@@ -368,6 +381,15 @@ const tick = (ms = 80) => new Promise((r) => setTimeout(r, ms));
       'the new card shows the user bubble too',
       (roll5 && roll5.displayItems.some((i) => i.kind === 'user' && i.text === 'now do THIS-INSTEAD')) === true,
     );
+    // The summary request cannot reach a provider here, so this rollover exercised the
+    // fallback half: the pointer text, one sentence saying the summary is unavailable, and
+    // no stored summary.
+    ok(
+      'a failed summary falls back to the pointer and says so',
+      harnessText.includes('A handoff summary was asked for but could not be written'),
+      harnessText.split('\n').slice(0, 3).join(' / '),
+    );
+    ok('  ... and no summary text is stored on the node', !!roll5 && roll5.handoffSummary === undefined);
 
     // The empty box is the other half: the harness message alone, no invented user message.
     const s6 = makeSession();
@@ -380,6 +402,80 @@ const tick = (ms = 80) => new Promise((r) => setTimeout(r, ms));
     ok('  ... and records no handoff', !!roll6 && roll6.handoff === undefined);
   }
 
+
+  console.log('-- the summarized handoff: the summary first, then the facts --');
+  {
+    const SUMMARY = [
+      '## Primary Request and Intent',
+      'FINISH-THE-JOB.',
+      '## Key Technical Concepts',
+      'rollover.',
+      '## Files and Code Sections',
+      'src/chat/runtime.ts (re-read before editing).',
+      '## Errors and Fixes',
+      'none.',
+      '## Problem Solving',
+      'the window filled.',
+      '## All User Messages',
+      'do the thing; now FINISH-THE-JOB please.',
+      '## Pending Tasks',
+      'finish it.',
+      '## Current Work',
+      'half an answer.',
+      '## Optional Next Step',
+      '"now FINISH-THE-JOB please"',
+      '## Durable References',
+      'the transcript.',
+      '## Handoff Contract',
+      'you are the same agent continuing the same task.',
+    ].join('\n');
+    completeRequests = [];
+    completeAnswer = async () => ({ text: SUMMARY, usage: { prompt_tokens: 100, completion_tokens: 321, total_tokens: 421 } });
+    const s = makeSession();
+    s.nodes.p0.displayItems.push({ kind: 'notice', text: 'usage', usage: { prompt_tokens: 996147, completion_tokens: 10, total_tokens: 996157 } });
+    const { rt } = makeRuntime(s);
+    const started = await rt.rolloverContext('p0', 'current', { text: 'go on', handoff: 'summary' });
+    ok('rolloverContext() with a summary reports success', started === true);
+    ok('one summary request was sent', completeRequests.length === 1, String(completeRequests.length));
+    const asked = completeRequests[0] || {};
+    ok('  ... with the capped output and a cold temperature', asked.maxTokens === 1500 && asked.temperature === 0.2);
+    ok('  ... no tools, no streaming', asked.tools === undefined && asked.stream === undefined);
+    const prompt = String((asked.messages && asked.messages[0] && asked.messages[0].content) || '');
+    ok('  ... the window is the input', prompt.includes('now FINISH-THE-JOB please') && prompt.includes('do the thing'));
+    ok('  ... the eleven-section schema is the ask', prompt.includes('## Primary Request and Intent') && prompt.includes('## Handoff Contract'));
+    const roll = Object.values(s.nodes).find((n) => n.parentId === 'p0');
+    const run = roll && rt.runs.get(roll.id);
+    const sent = (run && run.agent.getMessages()) || [];
+    const harness = String(sent[1] && sent[1].content);
+    ok('the harness text starts with the summary title', harness.startsWith('[Harness: context window reset — handoff summary]'));
+    ok('  ... and the summary itself follows it', harness.includes(SUMMARY));
+    ok('  ... then the last user request verbatim', harness.includes("The user's last request, verbatim: now FINISH-THE-JOB please"));
+    ok('  ... then the transcript pointer', /\.jsonl/.test(harness));
+    ok('  ... then the killed-work list', harness.includes('Still running from the previous window: none'));
+    ok('  ... and the size line last', /The previous window used \d+ of this model's \d+-token context/.test(harness));
+    ok('  ... with no unavailable-summary sentence', !harness.includes('could not be written'));
+    ok('the summary is stored on the node', !!roll && roll.handoffSummary === SUMMARY);
+    ok('  ... and it is the harness item of the run', (run.items || []).some((i) => i.kind === 'harness' && i.text === harness));
+    ok('the composer text is still its own user message', sent[2] && sent[2].role === 'user' && sent[2].content === 'go on');
+
+    // One validation retry: an answer without a required heading is asked for once more.
+    completeRequests = [];
+    let attempt = 0;
+    completeAnswer = async () => {
+      attempt++;
+      return { text: attempt === 1 ? '## Primary Request and Intent\nonly this' : SUMMARY, usage: { completion_tokens: 5, total_tokens: 5, prompt_tokens: 5 } };
+    };
+    const s2 = makeSession();
+    const { rt: rt2 } = makeRuntime(s2);
+    await rt2.rolloverContext('p0', 'current', { text: '', handoff: 'summary' });
+    ok('an answer without the headings is retried once', completeRequests.length === 2, String(completeRequests.length));
+    ok('  ... and the retry names the missing section', /Pending Tasks|Current Work/.test(String(completeRequests[1].messages[2].content)));
+    const roll2 = Object.values(s2.nodes).find((n) => n.parentId === 'p0');
+    ok('  ... and the second answer is the stored summary', !!roll2 && roll2.handoffSummary === SUMMARY);
+    completeAnswer = async () => {
+      throw new Error('offline (acceptance run)');
+    };
+  }
   console.log('');
   if (problems.length === 0) {
     console.log('PASS rollover-acceptance: the new window sends no ancestor history, and the old line is union-killed and re-dumped');
