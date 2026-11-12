@@ -764,6 +764,12 @@ export interface TranscriptSearchOptions {
   maxResults?: number;
   /** Neighbouring lines per hit (0–10, default 0). */
   context?: number;
+  /**
+   * `Date.now()` when the caller's budget is spent. The scan stops at the first file
+   * boundary past it and reports `timedOut`, so the caller can answer the tool's one
+   * timeout sentence instead of a partial page. Absent = no wall clock.
+   */
+  deadlineAt?: number;
 }
 
 export interface TranscriptSearchResult {
@@ -772,6 +778,8 @@ export interface TranscriptSearchResult {
   files: number;
   scanned: number;
   capped: boolean;
+  /** The budget in `deadlineAt` ran out; the text is a partial page and must be dropped. */
+  timedOut: boolean;
 }
 
 /**
@@ -784,6 +792,10 @@ export interface TranscriptSearchResult {
  * extension host's only JS thread, so a `statSync`/`readFileSync` sweep of a whole
  * transcript root is itself a stall. Only the `await`s changed: the returned text
  * is byte for byte what the synchronous version built.
+ *
+ * `opts.deadlineAt` is the caller's one budget: the scan gives up at the first file
+ * boundary past it and reports `timedOut`, and the caller turns that into the tool's
+ * timeout `Error:` line instead of handing back a partial page.
  */
 export async function searchTranscripts(opts: TranscriptSearchOptions): Promise<TranscriptSearchResult> {
   const re = new RegExp(opts.pattern, opts.caseSensitive ? '' : 'i');
@@ -795,10 +807,15 @@ export async function searchTranscripts(opts: TranscriptSearchOptions): Promise<
   let scanned = 0;
   let skippedLarge = 0;
   let capped = listCapped;
+  let timedOut = false;
 
   for (const ref of files) {
     if (matches >= maxResults) {
       capped = true;
+      break;
+    }
+    if (opts.deadlineAt !== undefined && Date.now() >= opts.deadlineAt) {
+      timedOut = true;
       break;
     }
     let raw: string;
@@ -861,7 +878,7 @@ export async function searchTranscripts(opts: TranscriptSearchOptions): Promise<
     : `(no matches in ${scanned} transcript file(s)${
         opts.sessionId ? ` for session ${opts.sessionId}` : ''
       }${opts.kind ? ` of kind ${opts.kind}` : ''})${note}`;
-  return { text, matches, files: files.length, scanned, capped };
+  return { text, matches, files: files.length, scanned, capped, timedOut };
 }
 
 export interface TranscriptSessionInfo {

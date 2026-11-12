@@ -349,11 +349,16 @@ Two probes catch what a single op cannot express:
 - **`[perf] search-files ms=… files=… matches=… capped=… via=rg|walk scope=…`** — one
   line per `search_files` call, written by the tool itself (`src/tools/searchFiles.ts`)
   next to the generic `tool search_files <ms>` line the runtime emits. `via` says which
-  execution path ran and `scope` how many exclusions were in effect, which is how a
-  stall gets attributed to a specific search shape. A search is **allowed to be slow
-  and still be healthy**: with `rg` the work is in a child process, so the number to
-  watch is `lag blocked`, not this one. See `docs/agents/tools.md` for the tool's
-  contract.
+  execution path ran (the vendored ripgrep, the host's, or the in-process walk) and
+  `scope` how many `search.exclude`/`files.exclude` patterns were in effect — `scope=0`
+  for a root outside the workspace, where those settings deliberately do not apply — which
+  is how a stall gets attributed to a specific search shape. `capped=wall` means the call
+  spent its **one** hard budget (`spinney.searchTimeoutSeconds`, 10 s by default) and
+  answered the timeout `Error:` line instead of a page; `ms=` is that whole call, ripgrep
+  and the fallback walk included, so `ms ≳ 10 000` with `capped=wall` is expected, not a
+  fault. A search is **allowed to be slow and still be healthy**: with `rg` the work is in
+  a child process, so the number to watch is `lag blocked`, not this one. See
+  `docs/agents/tools.md` for the tool's contract.
 - **`[perf] dev tee dropped <n> line(s)`** — the dev-only `SPINNEY_PERF_LOG` file tee
   could not keep up (`ChatViewProvider.openPerfTee`, off unless the variable names a
   path). The tee exists because the output channel has no read-back API, which is what
@@ -800,7 +805,9 @@ The lines that make such a report diagnosable, in the order they appear:
   or `kill_background`, `rollover` for the window break, `none` when the kill was never attributed.
   The job's origin is `exec_command`'s own `exec start … budget=… behavior=…` line above.
 - `[perf] search-files ms=… files=… matches=… capped=… via=rg|walk scope=… wait=…ms` — per
-  call; `wait=` is the time the call spent queued behind the work budget.
+  call; `wait=` is the time the call spent queued behind the work budget, and `capped=wall`
+  is the one hard budget (`spinney.searchTimeoutSeconds`) ending the call with the timeout
+  `Error:` line instead of a page.
 - `[perf] spawn-request count=N mode=… depth=1 node=…` — the shape of the fan-out.
 - `[perf] work-done peak rg:N peak req:M …` — one line per storm, on the falling edge of the
   work counters. **A clean run produces this and no `lag blocked` line at all**, which is

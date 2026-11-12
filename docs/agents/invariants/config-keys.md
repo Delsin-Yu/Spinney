@@ -2,7 +2,7 @@
 The settings are contributed in **groups**: `contributes.configuration` is an array of
 `{ title, properties }` sections — Model & API (`model`, `providers`, `modelCards`) · Chat & Display
 (`replyLanguage`, `foldThinking`, `foldToolCalls`, `foldWork`, `promptSections`) · Tools & Execution
-(`commandDefaultTimeout`, `commandMaxForegroundDuration`, `maxInlineToolOutput`, `hopSession.enabled`) · Sub-agents
+(`commandDefaultTimeout`, `commandMaxForegroundDuration`, `maxInlineToolOutput`, `searchTimeoutSeconds`, `hopSession.enabled`) · Sub-agents
 (`maxConcurrentSubagents`, `maxLevel2Subagents`) · Sessions & Transcripts (`autoSessionTitles`,
 `saveSessionTranscripts`, `saveSubAgentTranscripts`, `subAgentTranscriptDir`) ·
 Control Plane (`httpApi.*`). The
@@ -101,6 +101,19 @@ tool result spills to `<agentRoot>/.spinney/tool-output/` and the pointer's prev
 is cut to **2048 characters**, not to a number of lines, because one minified line
 can be megabytes; `read_file` has a separate fixed 256 KiB ceiling, and `Agent`
 caps any single tool result at 512 KiB as a backstop),
+`searchTimeoutSeconds` (seconds, default `10`, minimum `1`, maximum `600` — the **one
+hard budget of a whole search call**, shared by `search_files` and `search_transcripts`.
+`searchTimeoutSeconds` in `src/tools/index.ts` is the reader: it is called at the start
+of every call, so a change applies to the next search and never to one already running,
+and an absent/non-numeric value falls back to 10 while the value is clamped to [1, 600]
+there as well as in the manifest, because a hand-edited `settings.json` is not validated
+by VS Code. The budget covers the slot queued behind the rg work budget, the ripgrep
+child **and** the in-process fallback walk — they share it, which is the point: the two
+used to have a hard-wired 20 s ceiling each, so one call could spend 40 s. A call that
+runs out answers `Error: <tool> timed out after N s (spinney.searchTimeoutSeconds) while
+searching <root>. …` with **no hits and no count**, so a partial page can never read as
+"this is all there is" — which is also what gives the tool description's "prefer many
+small cheap searches" something to enforce),
 `hopSession.enabled` (default `true` — may the main agent hand a task to a fresh
 session with `hop_session`? Read **live at every turn start** and enforced in the
 handler as well, because a chain that already froze its tool set keeps advertising the
@@ -156,7 +169,7 @@ no handling.
 | `foldToolCalls`, `foldThinking`, `foldWork` | immediately, incl. cards already on screen | pushed: `postConfig()` → the webview re-applies the default to existing cards (`foldWork` re-runs the card's automatic work-log fold after the push, which is how a finished card folds or unfolds without a repaint) |
 | `promptSections` | immediately, incl. a chat tab already open | pushed: `postConfig()` → the webview rebuilds the snippet menu from `snippets` (it keeps no copy of the list, and the shipped rows are merged in again on every push, so a renamed or emptied row shows up at once) |
 | `httpApi.enabled`, `httpApi.port` | immediately | pushed: `ControlServer.restart()` (rebind the listener; disabling just leaves `start()` a no-op) |
-| `commandDefaultTimeout`, `commandMaxForegroundDuration`, `maxInlineToolOutput`, `maxLevel2Subagents`, `saveSessionTranscripts`, `saveSubAgentTranscripts`, `subAgentTranscriptDir`, `autoSessionTitles`, `hopSession.enabled` | immediately | pulled at the point of use (they already were — no listener needed; both command numbers are read **per call** — an `exec_command` invocation, a join, a spawn — and never cached, so a change applies to the next call and never to a call already waiting. `hopSession.enabled` is read at every turn start (`workerFor` → `Agent.setHopEnabled`) and again in `handleHopSession`) |
+| `commandDefaultTimeout`, `commandMaxForegroundDuration`, `maxInlineToolOutput`, `searchTimeoutSeconds`, `maxLevel2Subagents`, `saveSessionTranscripts`, `saveSubAgentTranscripts`, `subAgentTranscriptDir`, `autoSessionTitles`, `hopSession.enabled` | immediately | pulled at the point of use (they already were — no listener needed; both command numbers are read **per call** — an `exec_command` invocation, a join, a spawn — and never cached, so a change applies to the next call and never to a call already waiting. `hopSession.enabled` is read at every turn start (`workerFor` → `Agent.setHopEnabled`) and again in `handleHopSession`) |
 
 - **`model` / `thinkingEffort` arbitration (P4):** the selection belongs to the **node**.
   A turn records the card and level it ran with on the node it creates; a follow-up

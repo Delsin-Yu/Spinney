@@ -251,7 +251,8 @@
   `tools/check-modeltree.js` · `tools/check-tree-grid.js` · `tools/check-docs.js` ·
   `tools/exec-cwd-acceptance.js` · `tools/shell-argv-acceptance.js` ·
   `tools/exec-kill-acceptance.js` · `tools/exec-timeout-acceptance.js` ·
-  `tools/bg-budget-acceptance.js` · `tools/websearch-acceptance.js` ·
+  `tools/bg-budget-acceptance.js` · `tools/search-files-acceptance.js` ·
+  `tools/websearch-acceptance.js` ·
   `tools/check-png.js` · `tools/check-resample.js` · `tools/check-image.js` ·
   `tools/check-jpeg.js` · `tools/check-neterror.js` · `tools/check-unicode.js` ·
   `tools/check-continue.js` —
@@ -259,7 +260,7 @@
   (`npm run check:models` / `check:webview` / `check:signals` / `check:l10n` /
   `check:rollover` / `check:modeltree` / `check:grid` / `check:docs` / `check:cwd` /
   `check:shell` / `check:kill` / `check:timeout` / `check:budget` /
-  `check:websearch` / `check:png` / `check:resample` / `check:image` /
+  `check:search` / `check:websearch` / `check:png` / `check:resample` / `check:image` /
   `check:jpeg` / `check:neterror` / `check:unicode` / `check:continue`, run
   by `vscode:prepublish`):
   model-config drift (the default is the fallback card, `providers` / `modelCards`

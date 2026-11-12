@@ -339,6 +339,14 @@ All four of those need `out/` (`npm run compile` first), for the same reason
 (`check:cwd` is the working directory and path base, `check:shell` the argv the shell
 hands on, `check:kill` the end of a command, `check:timeout` what happens when it does
 not end, `check:budget` what happens once the work has left the turn).
+- `npm run check:search` (`tools/search-files-acceptance.js`) — `search_files` end to end:
+  the vendored-ripgrep probe order, `search.exclude`/`files.exclude` only inside the
+  workspace, the always-pruned `SKIP_DIRS`, the 8 MB per-file cap, the cap note, the
+  `Error:` strings, and the one hard time budget (a walk run with a 1-second
+  `spinney.searchTimeoutSeconds` must answer the timeout sentence with no hits and no
+  count). The long version of what it asserts is its own paragraph above
+  ("`tools/search-files-acceptance.js` is the **fifth** windowless acceptance run"). Needs
+  `out/`.
 - `npm run check:websearch` (`tools/websearch-acceptance.js`) — the keyless
   web-search backends, replayed from the committed response bodies under
   `tools/fixtures/web-backends/`, so a backend that changes its markup or its
@@ -538,20 +546,35 @@ exactly the bug class. The method that does, with no real API key and no tokens:
 `search_files` tool (`src/tools/searchFiles.ts`). That tool used to walk the whole tree
 in-process, on the extension host's only JS thread — 397 calls / 782.7 s in one customer
 log, a hitless search costing as much as a hit-heavy one, and the host blocked for up to
-10.3 s — and now runs in a **ripgrep child process** with the original walk kept as the
-fallback for a machine where no `rg` can be found. Two execution paths that must keep
-**one** contract is exactly the kind of thing that drifts silently, so the script stubs
-`vscode` (a `Module._load` hook) and drives the compiled tool for real: `file:line: text`
-with workspace-relative slash paths, `-` context separators, a single-file `path`, the
-exact `maxResults` cut plus its `…[search stopped early: …]` note, `search.exclude` /
-`files.exclude` pruning (a directory pattern, a directory glob and a file glob), no hit
-inside a font-like binary in either path, `(no matches)` for a hitless search, the fresh
-`search-files … via=rg|walk scope=` perf line, and the three `Error:` strings unchanged.
-Its last section re-runs the whole script in a child process with `env.appRoot` absent
-and `PATH` stripped — the "no ripgrep here" case — and asserts the walk produces the same
-behaviour. `npx tsc -p ./ && node tools/search-files-acceptance.js` (an explicit out dir
-checks the checker itself); it needs `out/`, so it runs after `compile` like
-`check:signals`, but it is **not** in `vscode:prepublish`.
+10.3 s — and now runs in a **ripgrep child process** (the vendored
+`media/vendor/ripgrep/<platform>-<arch>/rg` first, then VS Code's bundled binary, then
+`PATH`) with the original walk kept as the fallback for a machine where no `rg` can run.
+Two execution paths that must keep **one** contract is exactly the kind of thing that
+drifts silently, so the script stubs `vscode` (a `Module._load` hook) and drives the
+compiled tool for real: `file:line: text` with workspace-relative slash paths, `-`
+context separators, a single-file `path`, the exact `maxResults` cut plus its
+`…[search stopped early: …]` note, `search.exclude` / `files.exclude` pruning inside the
+workspace (a directory pattern, a directory glob and a file glob) **and their absence
+outside it** (a second fixture under `os.tmpdir()`, where `skipme/` and `*.min.js` must
+answer while `.git` and `node_modules` still do not), the `SKIP_DIRS` set pruned by both
+paths, no hit inside a font-like binary, the 8 MB per-file cap (2 MB searched, 8 MB + 1
+skipped), `(no matches)` for a hitless search, the fresh `search-files … via=rg|walk
+scope=` perf line, and the three `Error:` strings unchanged.
+
+It then re-runs itself in child processes, one per execution path, and that is the part
+that makes the budget testable: `--no-app-root` (no `env.appRoot`, no `rg` on `PATH`)
+must still answer through the **vendored** binary; `--no-vendor` runs from a **copy of
+`out/`** — so no `media/vendor/` sits above it — with no appRoot and a stripped `PATH`,
+which is the only honest way to force the in-process walk while the vendored binary is
+checked in; `--timeout-probe` is that same walk with a **1-second** budget
+(`searchTimeoutSeconds` stubbed to 1) over a fixture whose second file is a line V8
+cannot finish scanning inside a second (`(a+)+b` against 30 "a"s), and it asserts the
+whole timeout contract: the `Error: search_files timed out after 1 s
+(spinney.searchTimeoutSeconds) while searching …` line, **no hits** — the hit collected
+before the deadline is dropped — **no count**, the sentence naming the setting, and
+`capped=wall` on the perf line. `npx tsc -p ./ && node tools/search-files-acceptance.js`
+(an explicit out dir checks the checker itself); it needs `out/`, so it runs after
+`compile`, and it **is** in `vscode:prepublish` as `npm run check:search`.
 
 `tools/transcript-queue-acceptance.js` is the **sixth** windowless acceptance run, for the
 transcript write queue (`src/chat/transcript.ts`). A dump used to be `mkdirSync` +

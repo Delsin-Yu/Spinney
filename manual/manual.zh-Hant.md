@@ -503,6 +503,7 @@ Spinney 再次傳送要求期間，卡片會顯示一行標記，例如 `⟳ 靜
 | `spinney.commandDefaultTimeout` | `500` | 呼叫沒有傳入 `timeout` 時，一條命令執行的時間，以秒為單位。500 即 8 分 20 秒。它只是預設值，不是上限：呼叫傳入的 `timeout` 按寫入的值使用，最多到 `spinney.commandMaxForegroundDuration`。它也是 `background_when_timeout` 在前景執行、隨後 Spinney 把命令移到背景的時間。 |
 | `spinney.commandMaxForegroundDuration` | `1800` | 單一命令在前景佔用一個回合的最長時間，以秒為單位。1800 即 30 分鐘。不超過該值的 `timeout` 按寫入的值使用。`timeout` 長於該值時，Spinney 拒絕該呼叫，除非它要求 `background_when_timeout` 或 `start_in_background`。這兩個取值都必須自帶 `timeout`，否則 Spinney 會拒絕該呼叫。`start_detached` 從不佔用回合，也可以沒有截止時間。`join_background` 也不會等待超過該值。 |
 | `spinney.maxInlineToolOutput` | `32768` | 工具結果的大小上限，以位元組為單位。更大的結果會寫入檔案。回覆中顯示的預覽最多 2048 個字元。`0` 關閉上限。 |
+| `spinney.searchTimeoutSeconds` | `10` | 一次搜尋的時間上限（秒）。適用於 `search_files` 與 `search_transcripts`。最小 1 秒，最大 600 秒。此上限涵蓋整次呼叫。達到上限的搜尋只傳回一則錯誤，不傳回任何結果。此時請縮小搜尋範圍：改用更窄的路徑、更精確的模式、glob，或減少脈絡。 |
 | `spinney.hopSession.enabled` | `true` | 允許代理用 `hop_session` 把自包含任務交給新工作階段。已經凍結的工作階段仍保留該工具，但 Spinney 會拒絕呼叫。 |
 | `spinney.maxConcurrentSubagents` | `15` | 同時可以執行多少個第 1 層子代理。多出的工作會等待。 |
 | `spinney.maxLevel2Subagents` | `2` | 一個子代理可以啟動多少個子項。 |

@@ -208,6 +208,50 @@ export function searchExcludeGlobs(): string[] {
   return [...patterns];
 }
 
+
+/** Fallback for `spinney.searchTimeoutSeconds` — the whole budget of one search, in seconds. */
+export const SEARCH_TIMEOUT_DEFAULT_SEC = 10;
+
+/** The range `spinney.searchTimeoutSeconds` is clamped to (the manifest's minimum and maximum). */
+export const SEARCH_TIMEOUT_MIN_SEC = 1;
+export const SEARCH_TIMEOUT_MAX_SEC = 600;
+
+/**
+ * The hard wall-clock budget of **one** search call (`search_files` or
+ * `search_transcripts`), in seconds — the whole call, not one attempt: the ripgrep
+ * child, a slot queued behind the work budget, and the fallback walk all share it, so
+ * a search cannot spend twenty seconds on ripgrep and twenty more on the walk.
+ *
+ * Read live, like every other tool budget, so a settings change applies to the next
+ * call instead of needing a window reload. A non-numeric value falls back to 10, and
+ * the value is clamped to [1, 600] here as well as in the manifest, because a
+ * hand-edited `settings.json` is not validated by VS Code.
+ */
+export function searchTimeoutSeconds(): number {
+  const configured = vscode.workspace.getConfiguration('spinney').get<number>('searchTimeoutSeconds');
+  const value =
+    typeof configured === 'number' && Number.isFinite(configured)
+      ? Math.floor(configured)
+      : SEARCH_TIMEOUT_DEFAULT_SEC;
+  return Math.min(Math.max(value, SEARCH_TIMEOUT_MIN_SEC), SEARCH_TIMEOUT_MAX_SEC);
+}
+
+/**
+ * What a search answers when its budget runs out: an `Error:` line and nothing else —
+ * no hits, no count, no partial page that could read as "this is all there is". The
+ * sentence names the setting, what is left to try, and the one thing only the user
+ * can do.
+ */
+export function searchTimeoutError(tool: string, root: string, seconds: number): string {
+  return (
+    `Error: ${tool} timed out after ${seconds} s (spinney.searchTimeoutSeconds) while searching ${root}. ` +
+    'No results are returned. Narrow the path, tighten the pattern, add a glob, or lower context; ' +
+    'if even a simple query times out, ask the user to raise spinney.searchTimeoutSeconds.'
+  );
+}
+
+
+
 function truncate(s: string, n = 200): string {
   return s.length > n ? clipText(s, n) : s;
 }
