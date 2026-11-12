@@ -633,7 +633,9 @@ function selectorStub(selector) {
 // longer exist in the real DOM and `getElementById` must return null for them.
 // Anything left over from it then throws inside the `backgrounds` handler — the
 // "UI silently keeps its previous values" failure mode this checker exists for.
-const REMOVED_IDS = new Set(['bg-panel', 'bg-list', 'bg-count', 'bg-head']);
+// `new-setup-btn` is the same statement for the composer's retired harness-drift hint:
+// the one new-epoch entry is `#new-context-btn`, and a leftover lookup would throw.
+const REMOVED_IDS = new Set(['bg-panel', 'bg-list', 'bg-count', 'bg-head', 'new-setup-btn']);
 
 function elementById(id) {
   if (REMOVED_IDS.has(id)) return null;
@@ -1095,10 +1097,13 @@ if (contextLabel !== 'ctx 50%') {
 // The composer's Send/Stop pair follows the *view focus* node, not the session:
 // you cannot send into a node that is streaming, but a run on another branch must
 // leave this composer fully usable (spec §1 — "sending a new prompt when another
-// branch is active").
+// branch is active"). While Stop owns the row **both** other buttons hide — Send and
+// the new-epoch entry: nothing can be sent or started while the node is doing
+// something.
 {
   const stop = elementById('stop-btn');
   const send = elementById('send-btn');
+  const newContext = elementById('new-context-btn');
   const hidden = (element) => element.classList.contains('hidden');
   // The view focus is only observable through the DOM here (main.js keeps its own
   // `treeActiveId`): the card the webview marked active is the one it docks the
@@ -1109,6 +1114,8 @@ if (contextLabel !== 'ctx 50%') {
   if (viewFocus !== NODE_ID) {
     problems.push(`the composer is docked on ${viewFocus} after a tree carrying viewId=${NODE_ID}`);
   }
+  // Something to send, so the disabled state cannot be blamed on an empty box.
+  elementById('input').value = 'a message while the node works';
   const expectComposer = (label, nodes) => {
     dispatch({ type: 'state', busy: nodes.length > 0, status: '', sessionId: 'smoke-session', runningNodes: nodes });
     const wantStop = nodes.includes(NODE_ID);
@@ -1117,24 +1124,36 @@ if (contextLabel !== 'ctx 50%') {
         `the composer shows ${hidden(stop) ? 'Send' : 'Stop'} ${label} (runningNodes=${JSON.stringify(nodes)})`,
       );
     }
+    // While Stop owns the row, nothing else may be offered: a send is refused there and
+    // so is starting a new epoch.
+    if (wantStop && !hidden(newContext)) {
+      problems.push(
+        `the new-epoch button stays visible ${label} — Stop must hide both other buttons (runningNodes=${JSON.stringify(nodes)})`,
+      );
+    }
   };
   expectComposer('while the focused node is streaming', [NODE_ID]);
   expectComposer('while the live run belongs to another branch', ['another-node']);
   expectComposer('once nothing is running', []);
+  elementById('input').value = '';
 }
 
 // A window that does not own this workspace's sessions is read-only: the host refuses
 // every turn there, so the composer says so instead of letting a send fail. The flag
 // arrives with `state` (one owner window per workspace), and `send()` checks it again so
-// a click never depends on a repaint having happened.
+// a click never depends on a repaint having happened. The new-epoch entry is disabled
+// with the same sentence — a window that may not write may not open a window either.
 {
   const input = elementById('input');
   const send = elementById('send-btn');
+  const newContext = elementById('new-context-btn');
   const stop = elementById('stop-btn');
   const hidden = (element) => element.classList.contains('hidden');
   const state = (readOnly) =>
     dispatch({ type: 'state', busy: false, status: '', sessionId: 'smoke-session', runningNodes: [], lockedNodes: [], readOnly });
 
+  // Content in the box, so "disabled" can only mean the read-only flag.
+  input.value = 'a message';
   state(true);
   if (hidden(send) || !hidden(stop)) {
     problems.push('a read-only window hides Send and shows Stop (it must offer neither a stop nor a silent send)');
@@ -1145,6 +1164,12 @@ if (contextLabel !== 'ctx 50%') {
   if (!/read-only/.test(String(send.title || ''))) {
     problems.push(`the read-only Send button carries no reason: ${JSON.stringify(send.title)}`);
   }
+  if (!newContext.disabled) {
+    problems.push('a read-only window leaves the new-epoch button enabled (it must not start a window either)');
+  }
+  if (!/read-only/.test(String(newContext.title || ''))) {
+    problems.push(`the read-only new-epoch button carries no reason: ${JSON.stringify(newContext.title)}`);
+  }
   // A click must not send anything, even if the flag arrives between a repaint and the click.
   const before = posted.length;
   input.value = 'this must not reach the host';
@@ -1154,9 +1179,9 @@ if (contextLabel !== 'ctx 50%') {
   if (posted.length !== before) {
     problems.push('a read-only window sent a message anyway');
   }
-  input.value = '';
 
   // The flag clears when the state says so: the same window may own the sessions later.
+  input.value = 'a message';
   state(false);
   if (send.disabled) {
     problems.push('the Send button stayed disabled after the read-only flag cleared');
@@ -1164,6 +1189,7 @@ if (contextLabel !== 'ctx 50%') {
   if (hidden(send)) {
     problems.push('Send stayed hidden after the read-only flag cleared');
   }
+  input.value = '';
 }
 
 // A node that is *not* streaming but still owns unfinished work (a running
@@ -1187,6 +1213,9 @@ if (contextLabel !== 'ctx 50%') {
       `a node that still owns unfinished work shows ${hidden(stop) ? 'Send' : 'Stop'} (it must offer Stop — the union kill)`,
     );
   }
+  if (!hidden(elementById('new-context-btn'))) {
+    problems.push('a node that still owns unfinished work keeps the new-epoch button visible (Stop owns the row)');
+  }
   if (!stop.title) {
     problems.push('the Stop button of a node that owns unfinished work carries no tooltip (it kills more than a turn)');
   }
@@ -1208,14 +1237,17 @@ if (contextLabel !== 'ctx 50%') {
 // --- The composer's two identities, the Send gate and `composerClear` (§4.2/§4.4)
 // A setup change never rewrites already-sent bytes: the composer shows *both*
 // identities — what this send uses (the checked-out node's frozen setup) and what a
-// new node would freeze — and drift only decides how Send behaves. Three things are
-// checked here that a plain replay cannot show:
+// new node would freeze — and the disagreement itself is what the composer's **one**
+// new-epoch button is offered for. Four things are checked here that a plain replay
+// cannot show:
 //   (a) an absent `setup` (an old replay shape) hints nothing and never disables Send;
-//   (b) `drift: 'user'` draws the two lines, marks Send with `drift` and leaves it
-//       *enabled* (the host asks with a modal, the button is not the gate), while
-//       `drift: 'harness'` leaves the button alone and shows the extra fork hint;
-//   (c) the composer empties only on `composerClear` — neither the Send button nor
-//       Enter clears it, so a modal answered with No cannot eat the user's text.
+//   (b) `drift: 'user'` draws the two lines and leaves Send alone, while
+//       `drift: 'harness'` shows neither line — both kinds make the new-epoch button
+//       available, which is the only entry point either of them has;
+//   (c) Send is *disabled* where it cannot act (an empty box, a full window, a read-only
+//       window, a sub-agent branch) and Enter goes through the same button;
+//   (d) the composer empties only on `composerClear` — neither the Send button nor
+//       Enter clears it, so a refused send cannot eat the user's text.
 {
   const R = 'setup-root';
   const treeNode = { id: R, parentId: null, children: [], title: R, status: 'done', createdAt: 0, preview: R, usage: null, size: null };
@@ -1226,30 +1258,36 @@ if (contextLabel !== 'ctx 50%') {
   const base = { ...TURN_MESSAGES.find((m) => m.type === 'config'), model: 'card-text', thinkingEffort: 'medium' };
   const input = elementById('input');
   const sendBtn = elementById('send-btn');
-  const controls = elementById('composer-controls');
+  const newContextBtn = elementById('new-context-btn');
   const composer = elementById('composer');
   const ident = () => findByClass(composer, 'composer-ident');
-  const hintBtn = () => findByClass(controls, 'new-setup-btn');
   const lineText = (name) => {
     const box = ident();
     const line = box ? findByClass(box, name) : null;
     return String((line || {}).textContent || '');
   };
   const hidden = (element) => !!element && element.classList.contains('hidden');
+  // Typing is what re-evaluates "has content": the input listener is the same one the
+  // real page fires, so the assertions below exercise the production path.
+  const typeInto = (value) => {
+    input.value = value;
+    if (typeof input._listeners?.input === 'function') input._listeners.input({ target: input });
+  };
 
   const nodeIdent = { cardId: 'card-text', cardLabel: 'smoke-model', effort: 'medium', language: 'English' };
   const liveIdent = { cardId: 'card-vision', cardLabel: 'smoke-vision-model', effort: 'low', language: 'Chinese' };
 
   // (a) No `setup` at all: the shape a host that predates the epochs still sends.
+  typeInto('something to send');
   dispatch({ ...base, setup: undefined });
   if (!hidden(ident()) && ident()) {
     problems.push('a config without `setup` still shows the two identities');
   }
-  if (sendBtn.classList.contains('drift')) {
-    problems.push('a config without `setup` leaves the Send button marked as drifted');
-  }
   if (sendBtn.disabled) {
-    problems.push('a config without `setup` disables Send');
+    problems.push('a config without `setup` disables Send while the box has text');
+  }
+  if (!hidden(newContextBtn)) {
+    problems.push('a config without `setup` shows the new-epoch button (nothing is available there)');
   }
 
   // (b1) The user changed the model / effort: both identities, in two lines.
@@ -1271,19 +1309,24 @@ if (contextLabel !== 'ctx 50%') {
       );
     }
   }
-  if (!sendBtn.classList.contains('drift')) {
-    problems.push('the Send button carries no `drift` class after the user changed the setup');
+  // The `drift` mark on Send is gone: acting on a drift is the new-epoch button's click,
+  // and a Send that says "I will ask" is exactly what this feature replaced.
+  if (sendBtn.classList.contains('drift')) {
+    problems.push('the Send button is marked as drifted (a plain send no longer asks anything)');
   }
   if (sendBtn.disabled) {
-    problems.push('the drifted Send button is disabled — it must stay usable (the host asks with a modal, §4.2)');
+    problems.push('the drifted Send button is disabled — a plain send is a normal send');
   }
-  if (!sendBtn.title) {
-    problems.push('the drifted Send button has no tooltip saying that it will ask first');
+  if (hidden(newContextBtn)) {
+    problems.push('a user drift does not show the composer\'s new-epoch button');
+  }
+  if (newContextBtn.disabled) {
+    problems.push('the new-epoch button is disabled although the box has content and the window is writable');
   }
 
   // The click still posts the same `userMessage` the Enter key does — and the box
   // keeps its text until the host says it took the message.
-  input.value = 'drifted send';
+  typeInto('drifted send');
   posted.length = 0;
   const sendClick = sendBtn._listeners && sendBtn._listeners.click;
   if (typeof sendClick !== 'function') {
@@ -1299,7 +1342,7 @@ if (contextLabel !== 'ctx 50%') {
     }
   }
 
-  input.value = 'typed with enter';
+  typeInto('typed with enter');
   posted.length = 0;
   const enterKey = input._listeners && input._listeners.keydown;
   if (typeof enterKey !== 'function') {
@@ -1315,13 +1358,35 @@ if (contextLabel !== 'ctx 50%') {
     }
   }
 
+  // An **empty** box is a disabled Send, not a silent no-op — and Enter goes through the
+  // same button, so it does nothing at all while Send is disabled.
+  typeInto('');
+  if (!sendBtn.disabled) {
+    problems.push('an empty composer leaves Send enabled (an empty send must be a disabled state)');
+  }
+  if (!newContextBtn.disabled) {
+    problems.push('an empty composer leaves the new-epoch button enabled');
+  }
+  if (!sendBtn.title) {
+    problems.push('the disabled Send button of an empty composer carries no reason');
+  }
+  posted.length = 0;
+  if (typeof enterKey === 'function') {
+    enterKey({ key: 'Enter', shiftKey: false, preventDefault() {} });
+  }
+  if (posted.some((m) => m && m.type === 'userMessage')) {
+    problems.push('Enter posted a `userMessage` while Send was disabled (an empty box must send nothing)');
+  }
+
   // `composerClear` is the one message that empties it.
+  typeInto('kept until the host says so');
   dispatch({ type: 'composerClear' });
   if (String(input.value) !== '') {
     problems.push(`\`composerClear\` left ${JSON.stringify(input.value)} in the input`);
   }
 
-  // (b2) The harness drifted instead: no mark on Send, and the extra fork hint.
+  // (b2) The harness drifted instead: neither identity line, and the same one entry.
+  typeInto('continue this');
   dispatch({ ...base, setup: { node: nodeIdent, live: liveIdent, drift: 'harness', reasons: ['template'] } });
   if (!hidden(ident()) && ident()) {
     problems.push('a harness drift shows the user-drift identity block (only `drift: "user"` may)');
@@ -1330,52 +1395,170 @@ if (contextLabel !== 'ctx 50%') {
     problems.push('a harness drift marks the Send button (the user did not change anything)');
   }
   if (sendBtn.title) {
-    problems.push(`a harness drift leaves the drifted tooltip on Send (${JSON.stringify(sendBtn.title)})`);
+    problems.push(`a Send with room and content carries a tooltip: ${JSON.stringify(sendBtn.title)}`);
   }
-  const hint = hintBtn();
-  if (!hint) {
-    problems.push('a harness drift shows no `#new-setup-btn` hint beside the snippets button');
+  if (hidden(newContextBtn)) {
+    problems.push('a harness drift does not show the composer\'s new-epoch button');
+  }
+  if (!/Continue with new context/.test(String(newContextBtn.textContent || ''))) {
+    problems.push(
+      `the new-epoch button reads ${JSON.stringify(newContextBtn.textContent)} with content in the box, expected "Continue with new context"`,
+    );
+  }
+  if (!newContextBtn.title) {
+    problems.push('the new-epoch button carries no tooltip explaining what its click does');
+  }
+  posted.length = 0;
+  const newContextClick = newContextBtn._listeners && newContextBtn._listeners.click;
+  if (typeof newContextClick !== 'function') {
+    problems.push('the new-epoch button has no click handler');
   } else {
-    if (hidden(hint)) {
-      problems.push('the harness-drift hint button is hidden although the harness drifted');
-    }
-    if (!hint.title) {
-      problems.push('the harness-drift hint button carries no tooltip explaining what its click does');
-    }
-    input.value = 'fork this';
-    posted.length = 0;
-    const hintClick = hint._listeners && hint._listeners.click;
-    if (typeof hintClick !== 'function') {
-      problems.push('the harness-drift hint button has no click handler');
+    newContextClick({ stopPropagation() {} });
+    const sent = posted.find((m) => m && m.type === 'newContextTurn');
+    if (!sent) {
+      problems.push(`the new-epoch button posted ${JSON.stringify(posted)}, expected \`{ type: 'newContextTurn' }\``);
     } else {
-      hintClick({ stopPropagation() {} });
-      const forked = posted.find((m) => m && m.type === 'forkTurn');
-      if (!forked) {
-        problems.push(`the harness-drift hint posted ${JSON.stringify(posted)}, expected \`{ type: 'forkTurn' }\``);
-      } else {
-        if (forked.text !== 'fork this') {
-          problems.push(`the hint button forked with ${JSON.stringify(forked.text)}, expected the composer's text`);
-        }
-        if (!Array.isArray(forked.attachments)) {
-          problems.push('the `forkTurn` message carries no attachments array');
-        }
+      if (sent.text !== 'continue this') {
+        problems.push(`the new-epoch button sent ${JSON.stringify(sent.text)}, expected the composer's text`);
       }
-      if (String(input.value) !== 'fork this') {
-        problems.push('posting `forkTurn` cleared the input (the host clears it with `composerClear`)');
+      if (!Array.isArray(sent.attachments)) {
+        problems.push('the `newContextTurn` message carries no attachments array');
       }
     }
+    if (String(input.value) !== 'continue this') {
+      problems.push('posting `newContextTurn` cleared the input (the host clears it with `composerClear`)');
+    }
+  }
+  // …and the label follows an empty box: the compaction entry.
+  typeInto('');
+  if (!/Compact and Continue/.test(String(newContextBtn.textContent || ''))) {
+    problems.push(
+      `the new-epoch button reads ${JSON.stringify(newContextBtn.textContent)} with an empty box, expected "Compact and Continue"`,
+    );
   }
 
-  // Back to no drift: both affordances go away again (the hint is hidden, so it
-  // cannot fork a tree for no reason).
+  // Back to no drift: the identity block goes away, and the new-epoch button goes with
+  // it — there is no new epoch to offer when the setup is the live one and the window has
+  // room left.
   dispatch(base);
   if (!hidden(ident()) && ident()) {
     problems.push('the identity block stays visible after the setup stopped drifting');
   }
-  if (hintBtn() && !hidden(hintBtn())) {
-    problems.push('the harness-drift hint stays visible after the drift went away');
+  if (!hidden(newContextBtn)) {
+    problems.push('the new-epoch button stays visible after the drift went away (there is nothing to start)');
   }
-  notes.push('composer identities: user drift (two lines, Send still enabled) + harness drift (fork hint)');
+  notes.push('composer identities: user drift (two lines) + harness drift, one new-epoch button, Send disabled when it cannot act');
+}
+
+// --- The composer's new-epoch entry: the three situations it exists for ------------
+// One button replaces the card's `⧉ Continue in a new window`, the harness-drift `⧉` hint
+// and the modal a plain send raised. It is *available* when the host says a new epoch is
+// (setup drift, context near, context full) and never while the focused node is doing
+// something; it is *disabled* — with a reason — when there is nothing to send, in a
+// read-only window, or on a sub-agent branch. The card no longer carries any rollover
+// element at all, which is checked here as the removed ids/classes.
+{
+  const R = 'epoch-root';
+  const AGENT = 'epoch-agent';
+  const node = (id, parentId, children, extra) =>
+    Object.assign(
+      { id, parentId, children, title: id, status: 'done', createdAt: 0, preview: id, usage: null, size: null },
+      extra || {},
+    );
+  const base = { ...TURN_MESSAGES.find((m) => m.type === 'config'), model: 'card-text', thinkingEffort: 'medium' };
+  const input = elementById('input');
+  const sendBtn = elementById('send-btn');
+  const newContextBtn = elementById('new-context-btn');
+  const hidden = (element) => !!element && element.classList.contains('hidden');
+  const typeInto = (value) => {
+    input.value = value;
+    if (typeof input._listeners?.input === 'function') input._listeners.input({ target: input });
+  };
+  const tree = (focus, extra, nodes) => {
+    dispatch({ type: 'reset' });
+    dispatch({
+      type: 'tree',
+      viewId: focus,
+      activeId: null,
+      rootId: R,
+      rootIds: [R],
+      nodes: nodes || [node(R, null, [AGENT], extra), node(AGENT, R, [], { kind: 'agent', status: 'done' })],
+    });
+    dispatch({ type: 'path', ids: [focus], nodes: [{ id: focus, status: 'done', items: [] }] });
+  };
+
+  // 1. No drift, room left: hidden, whatever the box holds.
+  tree(R, { context: 'ok' });
+  typeInto('a message');
+  dispatch({ ...base, setup: { node: null, live: null, drift: false, reasons: [] } });
+  if (!hidden(newContextBtn)) {
+    problems.push('the new-epoch button is visible with no drift and a window that has room left');
+  }
+
+  // 2. The context is `near`: available, enabled (there is content).
+  tree(R, { context: 'near', contextPct: 93 });
+  dispatch({ ...base, setup: { node: null, live: null, drift: false, reasons: [] } });
+  if (hidden(newContextBtn)) {
+    problems.push('a near-full window does not offer the new-epoch button');
+  }
+  if (newContextBtn.disabled) {
+    problems.push('the new-epoch button of a near-full window is disabled although the box has content');
+  }
+  if (!/Continue with new context/.test(String(newContextBtn.textContent || ''))) {
+    problems.push('the new-epoch button of a near-full window does not read "Continue with new context"');
+  }
+
+  // 3. The context is `full`: available, and Send is disabled (the request would be
+  //    refused again — the entry is the way out).
+  tree(R, { context: 'full' });
+  dispatch({ ...base, setup: { node: null, live: null, drift: false, reasons: [] } });
+  if (hidden(newContextBtn)) {
+    problems.push('a full window does not offer the new-epoch button');
+  }
+  if (!sendBtn.disabled) {
+    problems.push('a full context window leaves Send enabled (the same request would be refused again)');
+  }
+  if (!sendBtn.title) {
+    problems.push('the Send of a full window carries no reason');
+  }
+  posted.length = 0;
+  if (typeof sendBtn._listeners?.click === 'function') {
+    sendBtn._listeners.click({ preventDefault() {}, stopPropagation() {} });
+  }
+  if (posted.some((m) => m && m.type === 'userMessage')) {
+    problems.push('a full context window sent a `userMessage` anyway');
+  }
+
+  // 4. A sub-agent card is read-only: the entry is there (the epoch may still be
+  //    available) but disabled, with the branch as its reason.
+  tree(AGENT, { context: 'ok' });
+  typeInto('a message');
+  dispatch({ ...base, setup: { node: null, live: null, drift: false, reasons: [] } });
+  if (!newContextBtn.disabled) {
+    problems.push('a sub-agent branch leaves the new-epoch button enabled');
+  }
+  if (!/sub-agent/i.test(String(newContextBtn.title || ''))) {
+    problems.push(`the disabled new-epoch button of a sub-agent branch carries no reason: ${JSON.stringify(newContextBtn.title)}`);
+  }
+  if (!sendBtn.disabled) {
+    problems.push('a sub-agent branch leaves Send enabled');
+  }
+
+  // 5. The removed affordances: no card carries a rollover element any more, and the
+  //    rollover message type is not posted by the view at all.
+  const cardsIn = () => elementById('tree-canvas').children.slice();
+  for (const card of cardsIn()) {
+    for (const gone of ['node-window', 'node-rollover', 'node-near']) {
+      if (card.classList.contains(gone)) {
+        problems.push(`a card still wears the removed \`${gone}\` class`);
+      }
+    }
+    if (findByClass(card, 'node-window')) {
+      problems.push('a card still carries a second (`.node-window`) continue entry');
+    }
+  }
+  typeInto('');
+  dispatch(base);
 }
 
 // --- The forest: several roots side by side (§3) -------------------------------
@@ -2428,30 +2611,34 @@ if (contextLabel !== 'ctx 50%') {
   }
 }
 
-// --- The ▶ Continue / ↻ Retry / ⧉ rollover button -------------------------------
+// --- The ▶ Continue / ↻ Retry buttons on a card, and the *absence* of a rollover one
 // A turn that ended without an answer — interrupted by the user, or failed on an
 // API error that outlived the client's retries — offers a button that asks the
 // harness to run a turn from that node with a message the harness writes itself,
 // so the user never has to type "continue". It may only appear where continuing
-// makes sense, and it must post the node it belongs to. One failure is special: a
-// provider context-length error (the host ships `context: 'full'`, contract §3/§4) is
-// not retryable, so the button is *replaced* by the rollover variant, which posts
-// `rolloverTurn`. A window that is merely *near* full (>= 90%) is not a refusal,
-// though: there the retry stays and the `⧉` entry stands *beside* it, on its own
-// `.node-window` element, so an entry with no other way in is never hidden behind a
-// repair. The same fixture carries a window-starting node, whose card wears
-// the `CTX` badge and whose own connector — not its descendants' — is dashed.
+// makes sense, and it must post the node it belongs to.
+//
+// A new **context window** is *not* a card entry any more. The three entries that used
+// to disagree — this card's `⧉ Continue in a new window`, the composer's harness-drift
+// `⧉`, and the modal a plain send raised — are one composer button
+// (`#new-context-btn`, `docs/agents/invariants/context-rollover.md`), so this fixture
+// asserts the opposite of what it used to: no card carries a `.node-window` element, no
+// card wears `node-rollover` / `node-near`, and a provider refusal changes nothing about
+// the card's own repair.
+//
+// The same fixture carries a window-starting node, whose card wears the `CTX` badge and
+// whose own connector — not its descendants' — is dashed.
 {
   const R = 'cont-node-root';
   const A = 'cont-node-a';       // interrupted tip → ▶ Continue
   const B = 'cont-node-b';       // failed tip → ↻ Retry
   const C = 'cont-node-c';       // interrupted, but already continued → no button
   const D = 'cont-node-d';       // the continuation of C (done)
-  const F = 'cont-node-f';       // failed on a full context window → ⧉ rollover
+  const F = 'cont-node-f';       // failed on a full context window → still ↻ Retry (composer owns the offer)
   const G = 'cont-node-g';       // interrupted *and* context 'full' → still ▶ Continue
-  const NEAR = 'cont-node-near'; // interrupted at 93% → the ⧉ *suggestion* (node-near)
-  const ERR_NEAR = 'cont-node-error-near'; // *failed* at 92% → ↻ Retry *and* the ⧉ beside it
-  const DONE_NEAR = 'cont-node-done-near'; // *finished* at 91% → the suggestion too
+  const NEAR = 'cont-node-near'; // interrupted at 93% → ▶ Continue, no extra entry
+  const ERR_NEAR = 'cont-node-error-near'; // *failed* at 92% → ↻ Retry, no extra entry
+  const DONE_NEAR = 'cont-node-done-near'; // *finished* at 91% → nothing (the composer carries it)
   const DONE_OK = 'cont-node-done-ok';     // finished with room left → no button at all
   const DONE_FULL = 'cont-node-done-full'; // finished, state 'full' → still nothing (full needs an error)
   const SUB = 'cont-node-sub';   // `kind:'agent'` sidecar, interrupted → no button
@@ -2488,18 +2675,16 @@ if (contextLabel !== 'ctx 50%') {
       // `context` arrives on every node (the host computes it once, §4.3): only a
       // turn that died on the provider's context-length error carries `full`.
       node(F, R, [], 'error', undefined, { context: 'full' }),
-      // The state alone must not roll anything over — `interrupted` keeps ▶ Continue.
+      // The state alone changes nothing on a card — `interrupted` keeps ▶ Continue.
       node(G, R, [], 'interrupted', undefined, { context: 'full' }),
-      // At (or above) 90% the same ⧉ entry is offered as a *suggestion*: the label
-      // is the rollover one, the class and the percentage-carrying tooltip are not.
+      // At (or above) 90% the card adds nothing: the composer's new-epoch entry is the
+      // one place that carries the suggestion.
       node(NEAR, R, [], 'interrupted', undefined, { context: 'near', contextPct: 93 }),
       // A *failed* tip at 92% is not a refusal either — nothing about the request was
-      // rejected — so the repair stays and the `⧉` entry stands beside it instead of
-      // replacing it (`.node-window`).
+      // rejected — so the repair stays alone on the card.
       node(ERR_NEAR, R, [], 'error', undefined, { context: 'near', contextPct: 92 }),
-      // The suggestion does not depend on the status: a *finished* tip above 90% is
-      // exactly the case it is for (the next send would hit the wall), so it shows
-      // there too — while a finished tip with room left stays empty-handed.
+      // A *finished* tip above 90% is exactly the case the composer's entry is for, so
+      // the card stays empty-handed — as does one with room left.
       node(DONE_NEAR, R, [], 'done', undefined, { context: 'near', contextPct: 91 }),
       node(DONE_OK, R, [], 'done', undefined, { context: 'ok' }),
       // `full` is a *failure* mode (the provider refused the request), so it keeps
@@ -2628,309 +2813,95 @@ if (contextLabel !== 'ctx 50%') {
     }
   }
 
-  // --- the rollover variant (contract §4) --------------------------------------
-  // A turn that died because the provider refused an oversized request cannot be
-  // retried: the *same* request is guaranteed to fail again. So the button is
-  // replaced by the rollover one — the user's click is what opens the new window.
-  const ROLLOVER_TOOLTIP =
-    'Ask the harness to continue this turn in a new, empty context window (the current one is full)';
+  // --- the card has no rollover entry at all any more ---------------------------
+  // Every new-epoch transition — a refused window, a near-full one, a setup that moved —
+  // is the composer's single `#new-context-btn` (`docs/agents/invariants/context-rollover.md`),
+  // so no card may carry a second, differently-worded entry for the same act. What a
+  // card still offers is the *repair*: `↻ Retry` on a failure, `▶ Continue` on an
+  // interruption, whatever the context state says.
   dispatch(tree('interrupted'));
   refresh();
-
-  const rollover = buttonOf(F);
-  if (!rollover || rollover.textContent !== '⧉ Continue in a new window') {
-    problems.push(
-      'a node whose turn died on a full context window (error + context "full") shows no `⧉ Continue in a new window` button',
-    );
-  } else {
-    if (!hasClass(rollover, 'node-rollover')) {
-      problems.push('the rollover button does not carry the `node-rollover` class the styling and the guard read');
-    }
-    if (hasClass(rollover, 'node-near')) {
-      problems.push('a *full* window is marked as the `near` suggestion — only the 90% entry carries `node-near`');
-    }
-    if (rollover.dataset.action !== 'rollover') {
-      problems.push(
-        `the rollover button carries data-action=${JSON.stringify(rollover.dataset.action)}, expected 'rollover'`,
-      );
-    }
-    if (rollover.title !== ROLLOVER_TOOLTIP) {
-      problems.push(
-        `the rollover button's tooltip is ${JSON.stringify(rollover.title)}, expected ${JSON.stringify(ROLLOVER_TOOLTIP)}`,
-      );
-    }
-  }
-  // Retry is *replaced*, not offered beside it — and a plain failure is untouched.
-  if (!buttonOf(B) || buttonOf(B).textContent !== '↻ Retry' || buttonOf(B).dataset.action !== 'retry') {
-    problems.push('a node whose turn failed for any other reason no longer shows ↻ Retry (data-action="retry")');
-  }
-
-  const rolloverClick = rollover && rollover._listeners && rollover._listeners.click;
-  if (typeof rolloverClick !== 'function') {
-    problems.push('the rollover button has no click handler');
-  } else {
-    posted.length = 0;
-    rolloverClick({ stopPropagation() {} });
-    const sent = posted.find((message) => message && message.type === 'rolloverTurn');
-    if (!sent || sent.id !== F) {
-      problems.push(
-        `clicking the rollover button posted ${JSON.stringify(posted)}, expected { type: 'rolloverTurn', id: '${F}' }`,
-      );
-    }
-    if (posted.some((message) => message && message.type === 'continueTurn')) {
-      problems.push('the rollover button also posted continueTurn — the retried request is the oversized one');
-    }
-  }
-
-  // --- the `near` suggestion (contract §3) --------------------------------------
-  // A window at (or above) 90% gets the same `⧉` entry, but as a *suggestion*: the
-  // `node-near` class softens it and the tooltip carries the percentage the host
-  // sent as `contextPct`. Nothing is forced — this node can still be continued in
-  // place, it is the user who decides.
-  const NEAR_TOOLTIP = 'Context is 93% full - continue in a new window';
-  const near = buttonOf(NEAR);
-  if (!near || near.textContent !== '⧉ Continue in a new window') {
-    problems.push(
-      'a node whose window is 93% full shows no `⧉ Continue in a new window` suggestion (context: "near")',
-    );
-  } else {
-    if (!hasClass(near, 'node-near')) {
-      problems.push('the near-full suggestion does not carry the `node-near` class');
-    }
-    if (near.dataset.action !== 'rollover') {
-      problems.push(
-        `the near-full suggestion carries data-action=${JSON.stringify(near.dataset.action)}, expected 'rollover'`,
-      );
-    }
-    if (near.title !== NEAR_TOOLTIP) {
-      problems.push(
-        `the near-full suggestion's tooltip is ${JSON.stringify(near.title)}, expected ${JSON.stringify(NEAR_TOOLTIP)} ` +
-          '(the host sends the percentage as `contextPct` and the title carries it)',
-      );
-    }
-    const nearClick = near._listeners && near._listeners.click;
-    if (typeof nearClick !== 'function') {
-      problems.push('the near-full suggestion has no click handler');
-    } else {
-      posted.length = 0;
-      nearClick({ stopPropagation() {} });
-      const sent = posted.find((message) => message && message.type === 'rolloverTurn');
-      if (!sent || sent.id !== NEAR) {
-        problems.push(
-          `clicking the suggestion posted ${JSON.stringify(posted)}, expected { type: 'rolloverTurn', id: '${NEAR}' }`,
-        );
-      }
-    }
-  }
-  // The suggestion is the *only* thing the `near` state adds where nothing failed: a
-  // plain interrupted tip keeps ▶ Continue, and such a tip keeps the single `⧉` entry
-  // (only a *failed* tip at 90%+ puts a retry beside it).
-  if (!buttonOf(A) || buttonOf(A).textContent !== '▶ Continue') {
-    problems.push('a node with an `ok` window no longer shows ▶ Continue while a sibling is `near`');
-  }
-
-  // --- a failure at 90%+: the repair *and* the suggestion (contract §3/§4) -------
-  // `near` is a size, not a refusal: the request was not rejected, so `↻ Retry` is a
-  // real repair and stays — and because the `⧉` entry has no other way in, the retry
-  // must not hide it either. Two elements, one meaning each.
   const altOf = (id) => {
     const card = cards.get(id);
     return card ? findByClass(card, 'node-window') : null;
   };
-  const errNear = buttonOf(ERR_NEAR);
-  if (!errNear || errNear.textContent !== '↻ Retry' || errNear.dataset.action !== 'retry') {
-    problems.push(
-      'a node whose turn failed at 92% shows no ↻ Retry (a near-full window is not a refusal, so the repair stays)',
-    );
-  } else {
-    if (hasClass(errNear, 'node-rollover')) {
-      problems.push('the ↻ Retry of a failed node at 92% carries the rollover class (it is the repair, not the rollover)');
-    }
-    if (hasClass(errNear, 'node-near')) {
-      problems.push('the ↻ Retry of a failed node at 92% is marked as the `near` suggestion itself');
-    }
-  }
-  const besideEntry = altOf(ERR_NEAR);
-  if (!besideEntry || besideEntry.textContent !== '⧉ Continue in a new window') {
-    problems.push('a failed node at 92% shows no second `⧉ Continue in a new window` entry beside ↻ Retry');
-  } else {
-    if (!hasClass(besideEntry, 'node-rollover')) {
-      problems.push('the `⧉` entry beside a repair carries no `node-rollover` class (the styling and the guard read it)');
-    }
-    if (!hasClass(besideEntry, 'node-near')) {
-      problems.push('the `⧉` entry beside a repair carries no `node-near` class (it is the 90% suggestion)');
-    }
-    if (besideEntry.dataset.action !== 'rollover') {
-      problems.push(
-        `the \`⧉\` entry beside a repair carries data-action=${JSON.stringify(besideEntry.dataset.action)}, expected 'rollover'`,
-      );
-    }
-    if (besideEntry.title !== 'Context is 92% full - continue in a new window') {
-      problems.push(
-        `the \`⧉\` entry beside a repair has the tooltip ${JSON.stringify(besideEntry.title)}, expected its own percentage`,
-      );
-    }
-    const besideClick = besideEntry._listeners && besideEntry._listeners.click;
-    if (typeof besideClick !== 'function') {
-      problems.push('the `⧉` entry beside a repair has no click handler');
-    } else {
-      posted.length = 0;
-      besideClick({ stopPropagation() {} });
-      const sent = posted.find((message) => message && message.type === 'rolloverTurn');
-      if (!sent || sent.id !== ERR_NEAR) {
-        problems.push(
-          `clicking the beside entry posted ${JSON.stringify(posted)}, expected { type: 'rolloverTurn', id: '${ERR_NEAR}' }`,
-        );
-      }
-      if (posted.some((message) => message && message.type === 'continueTurn')) {
-        problems.push('the beside entry also posted continueTurn — the two entries must not share an action');
-      }
-    }
-  }
-  // The retry beside it still continues *that* node.
-  const errNearClick = errNear && errNear._listeners && errNear._listeners.click;
-  if (typeof errNearClick !== 'function') {
-    problems.push('the ↻ Retry of a failed node at 92% has no click handler');
-  } else {
-    posted.length = 0;
-    errNearClick({ stopPropagation() {} });
-    const sent = posted.find((message) => message && message.type === 'continueTurn');
-    if (!sent || sent.id !== ERR_NEAR) {
-      problems.push(
-        `clicking ↻ Retry at 92% posted ${JSON.stringify(posted)}, expected { type: 'continueTurn', id: '${ERR_NEAR}' }`,
-      );
-    }
-  }
-  // Only a *failure* at 90%+ carries two entries: a refusal (`full`), a failure with
-  // room left, and a tip that did not fail each keep exactly one.
   for (const [entryId, why] of [
-    [F, 'a `full` window (there the rollover replaces the retry)'],
-    [B, 'a failure with room left'],
-    [NEAR, 'a tip at 93% that did not fail'],
+    [F, 'a failed turn on a full window'],
+    [B, 'a failed turn with room left'],
+    [NEAR, 'an interrupted tip at 93%'],
+    [ERR_NEAR, 'a failed tip at 92%'],
     [DONE_NEAR, 'a finished tip at 91%'],
+    [DONE_OK, 'a finished tip with room left'],
+    [DONE_FULL, 'a finished tip flagged full'],
   ]) {
     if (altOf(entryId)) {
-      problems.push(`a second entry appeared for ${why} — only a *failure* at 90%+ carries two`);
+      problems.push(`a card still carries a second (rollover) entry: ${why}`);
+    }
+    const card = cards.get(entryId);
+    if (card && (hasClass(card, 'node-rollover') || hasClass(card, 'node-near'))) {
+      problems.push(`a card still wears the removed rollover classes: ${why}`);
     }
   }
-
-  // --- the `near` suggestion on a *finished* tip -------------------------------
-  // The entry is a suggestion about the *next* send, so it must not depend on the
-  // status: the common case is a long conversation that just answered (>= 90%), where
-  // the next message would hit the wall. A finished tip with room left stays empty,
-  // and a finished tip whose window is `full` is not an entry either — a provider
-  // refusal is an error, and that gate stays where it is.
-  const doneNear = buttonOf(DONE_NEAR);
-  if (!doneNear || doneNear.textContent !== '⧉ Continue in a new window') {
-    problems.push(
-      'a *finished* node at 91% shows no `⧉ Continue in a new window` suggestion ' +
-        '(the 90% entry must not depend on the status: a done tip is the common case)',
-    );
-  } else {
-    if (!hasClass(doneNear, 'node-near')) {
-      problems.push('the finished node\'s near-full suggestion does not carry the `node-near` class');
-    }
-    if (doneNear.dataset.action !== 'rollover') {
-      problems.push(
-        `the finished node's suggestion carries data-action=${JSON.stringify(doneNear.dataset.action)}, expected 'rollover'`,
-      );
-    }
-    if (doneNear.title !== 'Context is 91% full - continue in a new window') {
-      problems.push(
-        `the finished node's suggestion tooltip is ${JSON.stringify(doneNear.title)}, expected its own percentage`,
-      );
+  if (!buttonOf(F) || buttonOf(F).textContent !== '↻ Retry' || buttonOf(F).dataset.action !== 'retry') {
+    problems.push('a failure on a full context window no longer shows ↻ Retry on its card');
+  }
+  if (!buttonOf(ERR_NEAR) || buttonOf(ERR_NEAR).textContent !== '↻ Retry') {
+    problems.push('a failure at 92% no longer shows ↻ Retry on its card');
+  }
+  for (const [entryId, why] of [
+    [DONE_NEAR, 'a finished tip at 91%'],
+    [DONE_OK, 'a finished tip with room left'],
+    [DONE_FULL, 'a finished tip flagged full'],
+  ]) {
+    if (buttonOf(entryId)) {
+      problems.push(`a card offers a continue entry although nothing failed or was interrupted: ${why}`);
     }
   }
-  if (buttonOf(DONE_OK)) {
-    problems.push('a finished node whose window has room left shows a Continue button (there is nothing to continue)');
+  // A tip that was merely *interrupted* keeps its repair whatever the context state
+  // says — the window offer is the composer's business, in every case.
+  if (!buttonOf(NEAR) || buttonOf(NEAR).textContent !== '▶ Continue') {
+    problems.push('an interrupted tip at 93% no longer shows ▶ Continue on its card');
   }
-  if (buttonOf(DONE_FULL)) {
-    problems.push(
-      'a finished node carrying context "full" shows the ⧉ entry — `full` is a provider *refusal* (an error), ' +
-        'so it keeps its error gate',
-    );
-  }
-  notes.push('context states: full (hard ⧉, replaces retry), near (suggestion; beside ↻ Retry when the tip failed), ok (▶ / ↻, done = none)');
-
-  // The judgement is made by the host and can arrive *after* the tree was drawn
-  // (that is exactly how a turn dies on a context-length error), so a `nodeUpdate`
-  // has to carry the state and re-sync the button on the card it already shows.
-  dispatch({ type: 'nodeUpdate', id: B, status: 'error', title: B, context: 'full' });
-  const switched = buttonOf(B);
-  if (
-    !switched ||
-    switched.textContent !== '⧉ Continue in a new window' ||
-    !hasClass(switched, 'node-rollover') ||
-    hasClass(switched, 'node-near') ||
-    switched.dataset.action !== 'rollover'
-  ) {
-    problems.push('a `nodeUpdate` carrying context: "full" did not switch a ↻ Retry card to the rollover button');
-  } else {
-    if (altOf(B)) {
-      problems.push('a `full` window left the second entry on the card (there the rollover replaces the retry)');
-    }
-    posted.length = 0;
-    if (typeof switched._listeners?.click === 'function') switched._listeners.click({ stopPropagation() {} });
-    const sent = posted.find((message) => message && message.type === 'rolloverTurn');
-    if (!sent || sent.id !== B) {
-      problems.push(
-        `after the state arrived by \`nodeUpdate\`, clicking posted ${JSON.stringify(posted)}, expected { type: 'rolloverTurn', id: '${B}' }`,
-      );
-    }
-  }
-  // A patch that carries a failure at 90%+ adds the *second* entry: the repair stays,
-  // and the suggestion's tooltip has to carry the percentage the patch brought, or the
-  // title would lie.
-  dispatch({ type: 'nodeUpdate', id: B, status: 'error', title: B, context: 'near', contextPct: 95 });
-  const suggested = buttonOf(B);
-  if (
-    !suggested ||
-    suggested.textContent !== '↻ Retry' ||
-    hasClass(suggested, 'node-rollover') ||
-    hasClass(suggested, 'node-near') ||
-    suggested.dataset.action !== 'retry'
-  ) {
-    problems.push(
-      `a \`nodeUpdate\` carrying context: "near" and contextPct: 95 produced ` +
-        `${JSON.stringify(suggested && { text: suggested.textContent, title: suggested.title })}`,
-    );
-  }
-  const suggestedWindow = altOf(B);
-  if (
-    !suggestedWindow ||
-    suggestedWindow.textContent !== '⧉ Continue in a new window' ||
-    !hasClass(suggestedWindow, 'node-near') ||
-    suggestedWindow.dataset.action !== 'rollover' ||
-    suggestedWindow.title !== 'Context is 95% full - continue in a new window'
-  ) {
-    problems.push(
-      'a `nodeUpdate` carrying context: "near" and contextPct: 95 did not add the second ' +
-        `entry with the patch's percentage: ${JSON.stringify(suggestedWindow && { text: suggestedWindow.textContent, title: suggestedWindow.title })}`,
-    );
-  }
-  // And the state is not sticky: a later patch that clears it goes back to Retry.
-  dispatch({ type: 'nodeUpdate', id: B, status: 'error', title: B, context: 'ok' });
-  const back = buttonOf(B);
-  if (
-    !back ||
-    back.textContent !== '↻ Retry' ||
-    hasClass(back, 'node-rollover') ||
-    hasClass(back, 'node-near') ||
-    back.dataset.action !== 'retry'
-  ) {
-    problems.push('a `nodeUpdate` with context: "ok" did not switch the card back to ↻ Retry');
-  }
-  if (altOf(B)) {
-    problems.push('a `nodeUpdate` with context: "ok" left the second entry on the card');
-  }
-
-  // A full window is only a *failure* mode: an interrupted node keeps ▶ Continue
-  // even when the host's state says the window is full (there is no refused request
-  // to roll over — the 90% suggestion is the one that follows the state alone).
+  // `full` is the provider's refusal of *this* request: the card repairs in place, the
+  // composer is the one that carries the window offer.
   const interruptedFlagged = buttonOf(G);
   if (!interruptedFlagged || interruptedFlagged.textContent !== '▶ Continue') {
-    problems.push('an interrupted node carrying context: "full" no longer shows ▶ Continue (only a failed turn rolls over)');
+    problems.push('an interrupted node carrying context: "full" no longer shows ▶ Continue (nothing was refused)');
   }
+  notes.push('the card keeps ▶ / ↻ only; every new-epoch entry is the composer\'s one button');
+
+  // The host's judgement can arrive *after* the tree was drawn (that is exactly how a
+  // turn dies on a context-length error), so a `nodeUpdate` must reach **both** halves:
+  // the card keeps its repair, and the composer's Send is disabled while its new-epoch
+  // entry becomes the way out. `B` is the view focus in this fixture.
+  const epochInput = elementById('input');
+  epochInput.value = 'a message that would be refused';
+  if (typeof epochInput._listeners?.input === 'function') epochInput._listeners.input({ target: epochInput });
+  dispatch({ type: 'nodeUpdate', id: B, status: 'error', title: B, context: 'full' });
+  const switched = buttonOf(B);
+  if (!switched || switched.textContent !== '↻ Retry' || switched.dataset.action !== 'retry') {
+    problems.push('a `nodeUpdate` carrying context: "full" replaced the card\'s ↻ Retry with a rollover entry');
+  }
+  if (!elementById('send-btn').disabled) {
+    problems.push('a `nodeUpdate` carrying context: "full" left the composer\'s Send enabled');
+  }
+  if (elementById('new-context-btn').classList.contains('hidden')) {
+    problems.push('a `nodeUpdate` carrying context: "full" did not offer the composer\'s new-epoch entry');
+  }
+  // And the state is not sticky: a later patch that clears it re-enables Send and takes
+  // the offer away again.
+  dispatch({ type: 'nodeUpdate', id: B, status: 'error', title: B, context: 'ok' });
+  const back = buttonOf(B);
+  if (!back || back.textContent !== '↻ Retry' || back.dataset.action !== 'retry') {
+    problems.push('a `nodeUpdate` with context: "ok" did not keep the card on ↻ Retry');
+  }
+  if (elementById('send-btn').disabled) {
+    problems.push('a `nodeUpdate` with context: "ok" left the composer\'s Send disabled');
+  }
+  if (!elementById('new-context-btn').classList.contains('hidden')) {
+    problems.push('a `nodeUpdate` with context: "ok" left the composer\'s new-epoch entry visible');
+  }
+  epochInput.value = '';
 
   // --- the CTX badge and the dashed edge (contract §5) --------------------------
   // The two marks of a window break: the badge on the node that *starts* a window,
@@ -5626,6 +5597,49 @@ if (contextLabel !== 'ctx 50%') {
         'wheel over the composer still scrolls that zone and over the canvas still zooms',
     );
   }
+}
+// --- the shell document: where the new-epoch button sits, and what is gone -------
+// `media/main.js` cannot assert this: the DOM stub builds an element per id on demand,
+// so the *document* has to be read as text. Two facts matter, both from
+// `src/chat/webviewShell.ts`:
+//
+//   - `#new-context-btn` is inside `#actions` and immediately **before** `#send-btn`,
+//     which is the placement the feature specifies (the composer's row ends
+//     `… new-context, send`, and Stop takes the row when the node is busy);
+//   - the retired ids are gone from the shell as well as from the script: the
+//     harness-drift hint (`#new-setup-btn`) and the card's `.node-window` /
+//     `.node-rollover` / `.node-near` shapes.
+{
+  const shellSource = fs.readFileSync(path.join(root, 'src', 'chat', 'webviewShell.ts'), 'utf8');
+  const actionsAt = shellSource.indexOf('id="actions"');
+  const newContextAt = shellSource.indexOf('id="new-context-btn"');
+  const sendAt = shellSource.indexOf('id="send-btn"');
+  if (actionsAt < 0 || newContextAt < 0 || sendAt < 0) {
+    problems.push('the shell is missing `#actions`, `#new-context-btn` or `#send-btn`');
+  } else if (!(actionsAt < newContextAt && newContextAt < sendAt)) {
+    problems.push(
+      '`#new-context-btn` is not inside `#actions` immediately before `#send-btn` ' +
+        `(actions@${actionsAt}, new-context@${newContextAt}, send@${sendAt})`,
+    );
+  }
+  for (const gone of ['new-setup-btn', 'node-window', 'node-rollover', 'node-near']) {
+    if (shellSource.includes(gone)) {
+      problems.push(`the shell still carries \`${gone}\``);
+    }
+  }
+  const styleSource = fs.readFileSync(path.join(root, 'media', 'style.css'), 'utf8');
+  for (const gone of ['#new-setup-btn', '.node-window', '.node-rollover', '.node-near', '#send-btn.drift']) {
+    if (styleSource.includes(gone)) {
+      problems.push(`media/style.css still styles the removed \`${gone}\``);
+    }
+  }
+  const scriptSource = fs.readFileSync(scriptPath, 'utf8');
+  for (const gone of ['forkTurn', 'rolloverTurn', 'new-setup-btn', 'node-window']) {
+    if (scriptSource.includes(gone)) {
+      problems.push(`media/main.js still mentions the removed \`${gone}\``);
+    }
+  }
+  notes.push('shell: #new-context-btn sits before #send-btn, and the retired ids/classes are gone');
 }
 
 // --- report ------------------------------------------------------------------

@@ -923,7 +923,18 @@ export class Agent {
     return this.abortController.signal;
   }
 
-  sendUserMessage(content: string | ContentPart[]): void {
+  /**
+   * Start a turn with a typed prompt.
+   *
+   * `followUp` is the one caller that sends **two** user messages in one turn: a context
+   * rollover stores the harness' own account of the previous window and, immediately
+   * after it, the text the user actually typed (`SessionRuntime.rolloverContext`). The
+   * two are deliberately not folded into one message — the harness text is a fact about
+   * the old window and the typed text is this turn's request, and a model that reads them
+   * as one paragraph tends to answer the quotation. Both are pushed before the turn's
+   * start index, so the rollback below keeps them together.
+   */
+  sendUserMessage(content: string | ContentPart[], followUp?: string): void {
     if (this.isRunning) {
       return;
     }
@@ -949,6 +960,10 @@ export class Agent {
 
     // Everything appended during this turn; rolled back on failure.
     this.messages.push({ role: 'user', content });
+    const extra = typeof followUp === 'string' ? followUp.trim() : '';
+    if (extra) {
+      this.messages.push({ role: 'user', content: extra });
+    }
     const turnStartIndex = this.messages.length;
 
     void this.runTurn(signal, turnStartIndex);

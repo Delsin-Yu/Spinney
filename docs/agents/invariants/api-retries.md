@@ -120,9 +120,10 @@ acceptable: the model is asked the same question again, in the same words.
     "not now", not "no".
   - **Every other 4xx is a refusal** and surfaces immediately, spending no budget:
     401/403 (key), 404, 422, and the 400s the card has a *different* answer for —
-    the provider's context-window and per-request image-size refusals, which offer
-    `⧉ Continue in a new window` instead (`context-rollover.md`, and the `full`
-    state in §2). Re-issuing a refusal repeats the same rejection.
+    the provider's context-window and per-request image-size refusals, which make the
+    composer offer its one new-epoch entry (`Continue with new context`) instead
+    (`context-rollover.md`, and the `full` state in §2). Re-issuing a refusal repeats
+    the same rejection.
 - **Stop wins, before the decision.** A Stop is re-thrown unchanged by
   `Agent.requestRound` before `shouldReissueTransparently` is even consulted, so an
   interruption keeps its own path (the notice, the checkpoint, the `interrupted`
@@ -152,19 +153,22 @@ acceptable: the model is asked the same question again, in the same words.
   and the ↻ Retry button. The turn's history is narrowed first — see
   `interrupt-rollback.md` for the rollback rule.
 
-## 2. The ▶ Continue / ↻ Retry button, and its ⧉ Continue in a new window variant (transparent continue)
+## 2. The ▶ Continue / ↻ Retry button (transparent continue)
 
 A turn can end without an answer in two ways: the user pressed Stop
 (`node.status = 'interrupted'`, partial output kept as the checkpoint) or the
 call failed (`node.status = 'error'`, the turn rolled back). Either way the user
 used to have to type "continue" themselves. Now the card offers a button — and in
 the ordinary cases it resumes **that node in place**: no new card, no visible node
-split. One meaning per button, and at most two of them. Two further states are
-about the *context*, not about the failure: a provider refusal that no retry can fix
-(the request is too big) offers a rollover instead — whose whole point is a *new*
-card — and a chain that is merely **near** full offers the same entry as a
-suggestion. Only the *refusal* takes the repair's place; a failure at `near` shows
-both (see the show rules below). What a rollover does is `context-rollover.md`.
+split. One meaning per button, and only one of them.
+
+Two further states are about the *context*, not about the failure, and they are
+**not** card entries any more: a provider refusal that no retry can fix (the request
+is too big) and a chain that is merely **near** full both make the *composer's* one
+new-epoch entry available (`Continue with new context`), where the click opens a new
+window after one modal question. The card shows its repair and nothing else — a
+window offer is never a second button beside it, and never replaces it. What a
+rollover does is `context-rollover.md`.
 A mid-answer stall (`request-stall`, §1b) is the case that asked for this: the turn
 ends in `error`, and the card is the way back in.
 
@@ -230,7 +234,7 @@ ends in `error`, and the card is the way back in.
   prompt** after a Stop — see the last bullet.
 - **Who decides the context state**: the host, once, and it ships a tri-state —
   `context: 'ok' | 'near' | 'full'` plus `contextPct` (the rounded percentage, for
-  the `near` variant's title) on the `tree` node payload and in every `nodeUpdate`
+  the readouts) on the `tree` node payload and in every `nodeUpdate`
   patch. `full` is computed from the node's own persisted failure text
   (`node.status === 'error' && windowFullReason(lastFailureText(node)) !==
   undefined` — the token refusal *and* the provider's per-request image-size refusal,
@@ -240,9 +244,10 @@ ends in `error`, and the card is the way back in.
   never parses an error string, and no second copy of the provider's wording exists
   in `main.js`. `nodeStatePatch` still carries the older `contextFull: boolean`
   beside them, but nothing in the webview reads it.
-  The host entry point is `ChatViewProvider.handlePanelMessage` → `rolloverTurn` →
-  `canRollover` → `rolloverWithSetup` → `SessionRuntime.rolloverContext(nodeId,
-  setup)`.
+  The host entry point for a new window is `ChatViewProvider.handlePanelMessage` →
+  `newContextTurn` → `newContextEntry` → `rt.newEpochTrigger()` / `canRollover` →
+  `confirmEpochChange` → `SessionRuntime.rolloverContext(nodeId, 'current',
+  { text, handoff })`.
 - **In place, not a new node**: `continueFrom` uses `beginInjectedTurn(node)` —
   the same mechanism the background / sub-agent completion notices use. The run is
   bound to the existing node (`fresh: false`), its reply is appended to that
@@ -266,28 +271,16 @@ ends in `error`, and the card is the way back in.
   conversational branch — no turn child yet (a node that already has a
   conversational continuation is not offered again), not
   `kind:'agent'`/`'bg'` (sidecars have no conversation of their own in this path),
-  and not currently running. The failure variants additionally need a terminal
-  status: `▶ Continue` for an interruption, `↻ Retry` for any other failure, and
-  `⧉ Continue in a new window` for `context === 'full'` (that variant also adds
-  `node-rollover` and `data-action="rollover"`, and its click posts
-  `{ type: 'rolloverTurn', id }` instead of `{ type: 'continueTurn', id }`). The
-  **`near` entry is the one rule that hangs off the context state instead of a
-  failure**: `context === 'near'` shows the same `⧉` (plus the softening `node-near`
-  class and the percentage in the title) on a `done` tip too — the long
-  conversation that just finished above 90 % is exactly its case. The two are
-  **replaced only by a refusal, never by a size**: `full` means the provider refused
-  *this* request, so `↻ Retry` would re-send the same refused bytes and the `⧉` takes
-  the slot alone; a failure at `near` (a stall, a network error, a 4xx) keeps `↻
-  Retry` **and** shows the `⧉` beside it, on its own `.node-window` element — nothing
-  was rejected, the retry is a real repair, and the `⧉` entry has no other way in, so
-  neither may hide the other. It is synced from both
-  entry points of a status change (`renderTree` and `applyNodeUpdate`) — a turn
-  that ends after the tree was drawn arrives as `nodeUpdate`, so both must call it
-  (and `applyNodeUpdate` must merge `context` / `contextPct` into `treeNodes[id]`
-  *before* it re-syncs, or that entry point would show the wrong variant). Each
-  entry is one reused element (`.node-continue`, `.node-window`) whose text, class
-  list and `dataset.action` are re-synced, and every click handler reads the action
-  at click time.
+  and not currently running. The variant follows the status alone: `▶ Continue` for
+  an interruption, `↻ Retry` for any failure, **including one at or past 90 % and one
+  on a refused window** — the context state never changes the card's button, because
+  the new-window offer is the composer's (`updateNewContextButton`). One reused
+  element (`.node-continue`), whose text, `title` and `dataset.action` are re-synced;
+  the click handler reads the action at click time. It is synced from both entry
+  points of a status change (`renderTree` and `applyNodeUpdate`) — a turn that ends
+  after the tree was drawn arrives as `nodeUpdate`, so both must call it (and
+  `applyNodeUpdate` must merge `context` / `contextPct` into `treeNodes[id]`, because
+  the composer's own two buttons read them).
 - **Honest transcript**: the only resume text that exists is the fact line above,
   and it is a `kind:'harness'` display item, pushed into the node's own items and
   rendered inline by `addHarnessNote` as a badged (`HARNESS`) block — never a
@@ -332,40 +325,65 @@ Nothing is silent about this either. The host computes the two setups —
 `setup: { node, live, drift: false | 'user' | 'harness', reasons: string[] }`:
 
 - `drift: 'user'` — the **user** just moved a dropdown (`model` / `effort` /
-  `language`). `SessionRuntime.hasUserDrift()` is the gate: a plain send asks first
-  (`ChatViewProvider.dispatchUserMessage` → `askSetups('user')`), the modal's default
-  action is `Continue with current setup` (so Enter or Escape never changes a
-  prefix), and `SessionRuntime.discardPendingSetup()` throws the pick away and puts
-  the dropdown back on the frozen values before the send goes out. The composer shows
-  both identities (`Sending with: …` / `New setup: …`) and marks Send while this is
-  true.
+  `language`). The composer shows both identities (`Sending with: …` / `New setup: …`);
+  a plain send keeps the frozen setup **silently**, exactly like the harness case. The
+  dropdown's pick is not discarded and not applied — it simply belongs to the next
+  *new* node, which is what the `New setup:` line says.
 - `drift: 'harness'` — the shipped prompt template, the AGENTS.md instructions
   (systemwide or workspace), the tool
   schema set, the endpoint facts or the vision/setup shape changed under a frozen
   chain (`reasons` names which: `prompt` / `agents.md` / `tools` / `provider` /
-  `images`). A plain send keeps the frozen setup **silently** — that is the point of
-  freezing it — and the composer offers the extra `Continue with the latest setup`
-  entry (`forkTurn`, §4.4 of the plan) for the user who wants to move on.
+  `images`). A plain send keeps the frozen setup **silently** too — that is the point
+  of freezing it.
+
+**The one way to move on is the composer's new-epoch entry**
+(`#new-context-btn`, `Continue with new context`): `drift !== false` — either kind —
+makes it available, its click is the user's own "continue with the latest setup", and
+the host answers with a fork under the live setup (`forkTree`) after one modal question
+that names how many tokens the history will cost the provider's cache
+(`context-rollover.md` §4).
+
+**`Send` is never disabled is no longer true, and the modal is gone.** What replaced
+the rule:
+
+- Send is **disabled** when the box has no content (`!hasContent` — an empty send is now
+  a disabled state, not a silent no-op), when the chain's context is `full`, in a
+  read-only window, and on a sub-agent branch. `Enter` goes through the same button, so
+  a disabled Send means Enter does nothing.
+- A plain send never asks anything and never changes a prefix. A plain send while the
+  context is **full** is refused by the host (`dispatchUserMessage` →
+  `rt.contextStateLive() === 'full'`) with a notice that points at the new-epoch entry,
+  because that request can only be refused again.
+- `SessionRuntime.hasUserDrift()`, `discardPendingSetup()` and
+  `ChatViewProvider.askSetups()` are deleted, with `forkAndSend` and
+  `rolloverWithSetup`; `npm run check:continue` asserts they are gone.
 
 The comparison is made from **content hashes** (`Epoch.templateHash` /
 `agentsMdHash` / `toolsetHash`, plus the live endpoint facts), never from a version
 number, so an extension update that changes none of them is not a drift and changes
-no prefix.
+no prefix. `agentsMdHash` is now taken from the **files on disk at the moment of the
+check** (`liveAgentsMdSources`, `src/chat/agentsMd.ts`), so an edit made while VS Code
+was closed shows up as drift on the next `postConfig` instead of needing a reload.
 
-**Status:** the new keys (the modal's labels/header/details, `Sending with: {0}` /
-`New setup: {0}`, the fork entry and the read-only notice) are in both shipped
-catalogs — `npm run check:l10n` fails packaging when a source literal is missing
-from one — and the five entries this change retired (the three "… the prompt cache
-may be missed." notices and the two image-hiding notices) are gone from them.
+**Status:** the new keys (`Continue with new context`, `Compact and Continue`, the two
+modal titles and their details, the two context buttons, the three "nothing was sent"
+notices, `Sending with: {0}` / `New setup: {0}` and the read-only notice) are in both
+shipped catalogs — `npm run check:l10n` fails packaging when a source literal is missing
+from one — and the five entries that retired earlier (the three "… the prompt cache may
+be missed." notices and the two image-hiding notices) are still gone, together with the
+setup modal's keys.
 
 ## Evidence
 
-- `npm run compile`, `npm run check:webview` (the checker asserts the button's
-  show rules, the labels, that clicking posts `continueTurn` (and `rolloverTurn`
-  for the context-full variant), that the state arriving by `nodeUpdate` switches
-  the variant, and that a harness-authored message is badged).
-- `npm run check:l10n` — `⟳ Silent retry {0}/{1}` is in both shipped catalogs (the
-  guard fails packaging when a source literal is missing from one).
+- `npm run compile`, `npm run check:webview` — the card keeps only `▶ Continue` /
+  `↻ Retry`, clicking posts `continueTurn` and never `rolloverTurn`, a harness-authored
+  message is badged, the composer's new-epoch entry obeys its show/disable rules and
+  posts `newContextTurn`, and no card carries a `.node-window` / `node-rollover` /
+  `node-near` element any more.
+- `npm run check:l10n` — `⟳ Silent retry {0}/{1}` and every string of the one entry are
+  in both shipped catalogs (the guard fails packaging when a source literal is missing
+  from one).
+- `npm run check:continue` — the retired setup modal is gone from `src/`.
 - `npm run check:rollover` — the pure-function guard for the window-starting flag,
   the prefix cut and the provider error-text parse (what it proves is listed in
   `context-rollover.md` §10).

@@ -195,6 +195,17 @@ export interface TreeNode {
    */
   epoch?: Epoch;
   /**
+   * The handoff this node's window was opened with (`rolloverContext`), when the user
+   * asked for a specific one instead of the pointer the harness writes itself.
+   *
+   * `'summary'` — the composer's compaction entry: the previous window is to be handed
+   * over as a written summary (one extra request) rather than by being pointed at.
+   * Recorded now so the follow-up feature can implement it without a schema change;
+   * today it behaves exactly like the default `'just continue'` pointer, and a value it
+   * does not know is simply ignored (no migration, no repair pass).
+   */
+  handoff?: 'summary';
+  /**
    * Image provenance for this node's own `messages`, addressed by position. Persisted
    * beside the messages, never inside a content part (see {@link ImageSource}).
    */
@@ -1040,6 +1051,10 @@ function normalizeTreeSession(raw: AgentSession & { rootId?: string | null }): A
       // `epochForNode` (an envelope whose prompt is not a string is ignored). Nothing
       // here re-renders it — that is the whole point of the field.
       epoch: normalizeEpoch(node.epoch),
+      // The handoff a rollover was asked for (`'summary'` only so far). Optional and
+      // validated by value: an unknown one is dropped, so an older build reading a newer
+      // state simply sees the default pointer handoff.
+      handoff: node.handoff === 'summary' ? 'summary' : undefined,
       imageSources: normalizeImageSources(node.imageSources),
       // The card/level this turn ran with: healed exactly like the other optional
       // strings on a node, so a state stored before them loads unchanged (no version

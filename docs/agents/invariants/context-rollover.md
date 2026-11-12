@@ -120,10 +120,12 @@ error above, `'images'` for the provider's **per-request** image-size refusal �
 `Total image size exceeds the limit: max 200 MB per request, got … MB`, the budget
 `vision-images.md` describes and the token window cannot see. Both are the same kind
 of authoritative statement (the request cannot be sent), so both have to offer the
-same way out, and the `⧉` rollover is exactly it: a new window carries **no
-attachments** (§6). Today such a card is a dead end — the window is `1_048_576`
+same way out, and the composer's rollover entry is exactly it: a new window carries **no
+attachments** (§6). Without it such a card would be a dead end — the window is `1_048_576`
 tokens and a chain that hits the image wall sits at ~30 %, so `contextState()` is
-`ok` and no button is offered while every retry walks into the same wall.
+`ok` while every retry walks into the same wall (this was the state before the
+composer's `Continue with new context` existed: `contextState()` is `full` for both
+kinds, so the entry is offered).
 
 A node is **context-full** when
 
@@ -133,7 +135,8 @@ node.status === 'error' && windowFullReason(lastFailureText(node)) !== undefined
 
 `nodeContextFull()` (runtime.ts) only asks whether the classifier returned
 *anything* — the kind is not its business — so both kinds make a node context-full,
-and both therefore make `contextState(node)` `full` and offer the `⧉` button. The
+and both therefore make `contextState(node)` `full` and offer the composer's
+new-epoch entry (§4). The
 harness note names which refusal it was: `rolloverReason()` (`runtime.ts`) returns
 `'images'` for the byte refusal and `'full'` for the token one, because the two are
 different statements and a model told the wrong one redoes the wrong thing (§6). The
@@ -150,7 +153,7 @@ model is told exactly what the user can read there.
 chain* (`chainPromptTokens`) reaching `NEAR_CONTEXT_RATIO` (0.9) of the window of
 the card the chain sends with (`chainCard`: the chain's epoch card, else the live
 resolution). It is the same three-valued answer the host ships to the webview
-(`'ok' | 'near' | 'full'`, `contextPercent` for the tooltip) — never re-derived in
+(`'ok' | 'near' | 'full'`, `contextPercent` for the readout) — never re-derived in
 the webview:
 
 - `full` — the provider refused the request, by tokens or by image bytes (the
@@ -161,67 +164,76 @@ the webview:
 **`usage.prompt_tokens` is still never a *machine* trigger.** It stays a readout
 (and `model-capabilities.md` records how it lied once already — header read
 `ctx 65%` while the request carried ~1.28 M tokens); the 90 % entry does not start
-anything on its own, it only makes the `⧉` button appear, and the user's click is
-what opens the window (§4, §11).
+anything on its own, it only makes the composer's new-epoch button appear, and the
+user's click is what opens the window (§4, §11).
 
 The host computes the state once and ships it in the `tree` node payload and in
 every `nodeUpdate` patch, so the webview never has to re-derive a model fact from
 error text. `nodeStatePatch` still carries the older `contextFull: boolean`
 alongside, but `media/main.js` reads `context` / `contextPct` only.
 
-## 4. The button, and the two setups it offers
+## 4. The composer's one entry point
 
-One button per card, one class (`node-continue`), one meaning at a time. The
-rollover variants add `node-rollover` (`node-near` too for the suggestion) and
-`data-action="rollover"`.
+There is exactly **one** entry for every new-epoch transition, and it lives in the
+composer: `#new-context-btn`, immediately left of `#send-btn` inside `#actions`
+(`src/chat/webviewShell.ts`). It replaces the three entries that used to disagree —
+this feature's per-card `⧉ Continue in a new window` (`syncContinueButton`'s rollover
+half, the `.node-continue` / `.node-window` pair), the composer's `#new-setup-btn` `⧉`
+shown only for `drift === 'harness'`, and the `askSetups` modal a plain send raised when
+the user changed model / effort / language. All three are gone from `src/` and `media/`;
+`npm run check:continue` and `npm run check:webview` assert it.
 
-| node state | button |
+| | what it is |
 | --- | --- |
-| `error` + context `full` | `⧉ Continue in a new window` → posts `{ type: 'rolloverTurn', id }` |
-| context `near` (≥ 90 %), any terminal status | the same `⧉`, as a **suggestion**: the `node-near` class softens it and the title carries the percentage (`Context is {0}% full - continue in a new window`) |
-| `error` (any other failure) | `↻ Retry` (unchanged) |
-| `interrupted` | `▶ Continue` (unchanged) |
+| label, with content | `Continue with new context` |
+| label, empty box | `Compact and Continue` |
+| shown when | the host says a new epoch is available — setup drift (`config.setup.drift`), or the focused chain's `context` is `near` / `full` |
+| hidden when | the focused node is running or locked: Stop owns the row, and both other buttons hide with it |
+| disabled when | the box has no content, the window is read-only, or the focused node is a sub-agent branch (the tooltip says which) |
+| click | posts `{ type: 'newContextTurn', text, attachments }` — the same content a Send would carry |
 
-Show rules: the existing ones — a tip of its branch (no conversational child), not
-a sidecar, not currently running. The `near` variant is the one addition: because
-it hangs off the context state and not off a failure, it also appears on a `done`
-tip (exactly the long conversation that just finished above 90 %). The host
-re-checks the same rules in `SessionRuntime.canRollover` (the gate the modal and
-the turn start share: `contextState(node) !== 'ok'` plus the tip/sidecar/running
-checks), so a replayed click cannot open a second window from one card. Retry is
-*replaced* rather than offered beside the new button, because the retried request
-is the same oversized one and is guaranteed to fail again.
+**Send** keeps its own rules and loses the drift mark: it is hidden while Stop shows,
+and it is **disabled** when `!hasContent || context === 'full' || readOnly || isAgent`.
+An empty box is now a disabled state instead of a silent no-op, and `Enter` goes through
+the same button, so a disabled Send means Enter does nothing. `#composer-ident` (the
+`Sending with:` / `New setup:` lines) stays exactly as it was — it states the two
+setups; the button is the one way to act on the difference.
 
-`applyNodeUpdate` merges `context` and `contextPct` into `treeNodes[id]` before it
-re-syncs the button — a turn that ends after the tree was drawn arrives as a
-`nodeUpdate`, so both entry points must carry them, and the button is one element
-whose class list and `dataset.action` are re-synced (a card that goes Retry →
-rollover and back must read the action at click time). For the same reason the host
-routes every `nodeUpdate` through one helper (`nodeStatePatch(node)`) instead of
-hand-built payloads drifting apart.
+The host picks the **backend** from the trigger (`SessionRuntime.newEpochTrigger`), never
+from a choice of the webview:
 
-Host entry point: `ChatViewProvider.handlePanelMessage` → `rolloverTurn` →
-`SessionRuntime.canRollover(id)` (a node that turns out not to be near/full at all
-still falls back to the in-place `continueFrom`) → `rolloverWithSetup(rt, id)`.
+1. `context` (`contextState(node) !== 'ok'`) → a **new context window**
+   (`rolloverContext`). Its preconditions are `canRollover(nodeId)`: the node exists, is
+   not a sidecar, is not running, and has no conversational child. A failure is a notice
+   and nothing happens — nothing is started and nothing is killed.
+2. `drift` only (`setupState().drift !== false`, either kind) → a **fork** under the live
+   setup (`forkTree`). The old tree keeps the bytes — and the provider cache entry — it
+   was built with. The composer's text is then sent into the new tree as an ordinary
+   turn; an empty box forks only.
 
-`rolloverWithSetup` asks **which setup** the new window should start with
-(`askSetups('rollover')`: `Continue with current setup` is the default/Enter
-action, `Continue with latest setup` the alternative), gates the kills when the
-node still owns work (§7), and then calls
-`SessionRuntime.rolloverContext(id, choice)`:
+Then one modal, whose text depends on the backend (`confirmEpochChange`):
 
-- `'current'` — the new node **inherits the parent's epoch**: same prompt bytes,
-  same tool schemas, same provider facts. Nothing is re-rendered. (A chain with *no*
-  envelope at all — a pre-epoch branch that `adoptLegacyEpoch` did not adopt, since
-  that pass only covers the checked-out chain — freezes one from the node's own
-  resolved card and level, which is the only case in which `'current'` renders
-  anything.)
-- `'latest'` — the new node **freezes the live setup** (`freshEpoch`), the same
-  configuration a fork would freeze.
+| backend | title | body | buttons |
+| --- | --- | --- | --- |
+| context | `Continue in a new context window?` | `The agent that takes over continues this conversation in a new window. It can either receive a handoff summary (one extra request) or be pointed at the previous branch and read the record itself.` | `Write a handoff summary`, `Just continue` |
+| drift | `Continue with the new workspace or model configuration?` | `The conversation history (about {0} tokens for the current model) will be sent to the provider under the new configuration. This request will miss the provider’s cache.` — `{0}` is `chainPromptTokensLive()` | `Continue` |
 
-Both are free here — a new context has no cached prefix to lose — which is exactly
-why the choice can be offered at this entry point at all. Dismissing the dialog
-changes nothing.
+VS Code adds its own Cancel. Dismissing sends nothing, kills nothing and keeps the input
+box. After the answer the trigger is **re-validated** (`newEpochTrigger()` again): the
+state may have moved while the modal was open (a turn finished, a dropdown moved, the
+window filled), and acting on an answer given for a different state is exactly the bug
+the check prevents — it posts a notice and stops instead.
+
+The rollover's answer maps to `rolloverContext(nodeId, 'current', { text, handoff })`:
+the new window **inherits** the parent's frozen epoch. The question this entry asks is
+about the *window*, not about the setup, so a window that inherits keeps the bytes the
+conversation was already written in; acting on a drift stays available afterwards, and
+that is what the fork backend is for. **`handoff: 'summary'`** is recorded on the node
+(`TreeNode.handoff`) and today behaves exactly like `'just continue'` — see §5a.
+
+The host's `rolloverTurn` and `forkTurn` message cases and `rolloverWithSetup` /
+`askSetups` / `forkAndSend` are deleted with the three old entries.
+
 
 ## 5. What the new node is
 
@@ -249,18 +261,40 @@ value cannot claim a window break the host does not perform.
 
 **Before creating it, the node's leftover work is union-killed** — see §7.
 
-**History:** exactly one stored message, the harness text below, as a `role:'user'`
-message. `buildPath()` prepends the run's **epoch prompt** — the frozen envelope of
-the node this rollover started (inherited or freshly frozen, §4), or a live render
-for a chain without one — so what the model receives is `[epoch.prompt, harness
-text]`. The prompt itself is **not** in the node's `messages`, not put into the
-transcript dump and not rendered in the card: it lives on the node that starts the
-epoch, once per epoch (`docs/agents/invariants/system-prompt.md`).
+**History:** `[epoch.prompt, harness text]` plus — when the composer carried text — the
+user's message as a **second, real `role:'user'` message after the harness one**
+(`sendUserMessage(harness, text)`). That order is the point: the harness text is a fact
+about the previous window, the typed text is this turn's request, and a model handed
+only the harness text would be answering a quotation. `buildPath()` prepends the run's
+**epoch prompt** — the frozen envelope of the node this rollover started (inherited, §4),
+or a live render for a chain without one — so what the model receives is
+`[epoch.prompt, harness, userText]` (or `[epoch.prompt, harness]` for an empty box). The
+prompt itself is **not** in the node's `messages`, not put into the transcript dump and
+not rendered in the card: it lives on the node that starts the epoch, once per epoch
+(`docs/agents/invariants/system-prompt.md`).
 
-**Display:** a single `kind:'harness'` item (rendered as the badged block by the
-existing `harnessNote` path), never a fabricated user bubble — the user did not
-type it. Consequently the card has **no pinned prompt**; that is expected for a
-node whose turn was opened by the harness.
+**Display:** one `kind:'harness'` item (rendered as the badged block by the existing
+`harnessNote` path), never a fabricated user bubble — the user did not type it — followed
+by the ordinary `kind:'user'` item when the composer had text. The card's pinned prompt is
+therefore the user's own message, or nothing at all when the box was empty.
+
+## 5a. The handoff answer, and the pending summary
+
+The context modal offers two answers, and only one of them is implemented:
+
+- `Just continue` (and every entry that does not ask, such as a rollover started from a
+  script) → the pointer shape of §6.
+- `Write a handoff summary` → `handoff: 'summary'`, which `rolloverContext` **records on
+  the new node** (`TreeNode.handoff`, persisted with the node, validated by value at load
+  so an older build reads it as absent) and then treats exactly like `'just continue'`.
+  The code carries the marker:
+  `// TODO(compaction): a 'summary' handoff must spend one extra request to write a
+  summary of the previous window and hand *that* to this node instead of the pointer.`
+
+What the follow-up feature inherits: the user's *intent* is stored, the request plumbing
+(`sendUserMessage`'s two user messages) is in place, and nothing else has to change shape.
+Until then the modal's first button is honest about being a plan: both answers open the
+same window, and neither costs an extra request.
 
 ## 6. The harness text
 
@@ -275,6 +309,8 @@ it: the context window was full), so this turn continues in a new, empty window 
 same session. Nothing above was carried over: do not claim to remember it.
 
 Previous window: node <prevId> of session <sessionId>.
+The previous window used <used> of this model's <window>-token context (<pct>%), which
+is at or past the limit this provider accepts for one request.
 Its full transcript — every message, tool call and result — is on disk:
   <absolute path to <root>/<sessionId>/<prevId>.jsonl>
 Read it when you need a detail: read_file on that path, or search_transcripts with
@@ -297,6 +333,18 @@ transcript first — do not guess.
 
 Rules for building it:
 
+- **The size is stated.** `buildContextRolloverMessage({ usage })` receives
+  `{ used, window, pct }` (`rolloverUsage(node)`: the chain's newest `prompt_tokens`
+  against the window of the card the chain sends with) and adds one factual line right
+  after the `Previous window:` paragraph — `The previous window used <used> of this
+  model's <window>-token context (<pct>%)` — whose tail depends on the reason: `… which
+  is at or past the limit this provider accepts for one request.` (`'full'`), `… which is
+  past the harness's 90% rollover threshold; nothing was refused yet.` (`'near'`), or `…
+  the refusal was about the bytes of that request, not about these tokens.` (`'images'` —
+  an image refusal happens at ~30 % of the token window, so the "at or past the limit"
+  sentence would be false there, and a model told the wrong thing redoes the wrong
+  thing). `usage` is `undefined` when either number is unknown, and the line is then
+  omitted: a fact the harness cannot state is not stated.
 - **The reason is named.** `buildContextRolloverMessage({ reason })` receives one of
   **three** values, read off the same refusal text `nodeContextFull()` reads
   (`rolloverReason()`, runtime.ts): `'full'` when the provider refused the request over
@@ -311,6 +359,10 @@ Rules for building it:
   refuse it (the context window was nearly used up)`. Telling the model "it was
   refused" in the last case would be a lie, and naming the wrong refusal in the first
   two sends it after the wrong fix.
+- **The composer's text is not quoted here.** The pointer text stays about the
+  *previous* window; the new request travels as its own user message (§5), so the
+  "Redo the user's last request here" instruction only ever describes work the model
+  can find in the transcript.
 - **The pointer degrades.** If `spinney.saveSessionTranscripts` is off, or the
   file is missing (`rolloverTranscriptOnDisk(prevId)` →
   `fs.existsSync(path.join(host.transcriptDir(sessionId), prevId + '.jsonl'))`, the path
@@ -370,13 +422,14 @@ Three things the rollover must add on top of `stopNode`:
 
 | Piece | File |
 | --- | --- |
-| `contextBaseId`, `contextBase()`, `epochForNode()`, the `pathMessages()` cut, `normalizeTreeSession` | `src/chat/tree.ts` |
+| `contextBaseId`, `contextBase()`, `epochForNode()`, `pathMessages()` cut, `normalizeTreeSession`, `TreeNode.handoff` | `src/chat/tree.ts` |
 | `parseContextLengthError()`, `windowFullReason()` | `src/agent/models.ts` |
-| `beginTurn({ freshContext, freshEpoch })`, `rolloverContext()`, `canRollover()`, `contextState()` / `contextPercent()`, `freezeEpoch()`, the harness text, `nodeStatePatch()`, the kill + settle + flush + re-dump | `src/chat/runtime.ts` |
-| `rolloverTurn` routing, `askSetups()`, `rolloverWithSetup()`, the kill modal, the transcript meta field | `src/chat/ChatViewProvider.ts` |
-| `SessionTranscriptInput` / meta `contextBaseId` | `src/chat/transcript.ts` |
-| Button variant, `applyNodeUpdate` state merge, dashed edge, `CTX` badge | `media/main.js` |
-| `.edge-context`, `.node-rollover`, `.node-near`, `.node-ctx-badge` | `media/style.css` |
+| `beginTurn({ freshContext, freshEpoch })`, `rolloverContext()`, `canRollover()`, `newEpochTrigger()`, `contextState()` / `contextPercent()` / `contextStateLive()`, `chainPromptTokensLive()`, `freezeEpoch()`, the harness text + `rolloverUsage()`, `nodeStatePatch()`, the kill + settle + flush + re-dump | `src/chat/runtime.ts` |
+| `newContextTurn` routing, `newContextEntry()`, `confirmEpochChange()`, `forkEntry()`, `forkFor()`, the kill modal, the transcript meta field | `src/chat/ChatViewProvider.ts` |
+| `sendUserMessage(content, followUp)` — the harness message and the composer's text as two user messages | `src/agent/agent.ts` |
+| AGENTS.md read-at-use (`liveAgentsMdSources`) | `src/chat/agentsMd.ts` |
+| `#new-context-btn` in `#actions`, the composer's own show/disable rules, `syncContinueButton` (▶ / ↻ only), the `context`/`contextPct` merge in `applyNodeUpdate`, dashed edge, `CTX` badge | `src/chat/webviewShell.ts`, `media/main.js` |
+| `#actions #new-context-btn` (and the removed `#new-setup-btn` / `.node-rollover` / `.node-near` rules), `.edge-context`, `.node-ctx-badge` | `media/style.css` |
 | The strings of §9 | `l10n/bundle.l10n.zh-Hans.json`, `l10n/bundle.l10n.zh-Hant.json` |
 | The pure-function guard | `tools/check-context-rollover.js` (`npm run check:rollover`) |
 
@@ -390,20 +443,37 @@ Translated (both catalogs, the source literals in the code):
 | host | `Work is still running in this window.` |
 | host | `{0} piece(s) of work are still running here (background terminals and sub-agents). Continuing in a new window stops them; what they produced stays in the transcript.` |
 | host | `Continue and stop them` |
-| host | `Continue with current setup` |
-| host | `Continue with latest setup` |
-| host | `Continue with a new setup?` |
-| host | `A new context window starts empty, so the latest setup costs nothing here. Continuing with the current setup keeps this conversation on the setup it was frozen with.` |
+| host | `Continue in a new context window?` |
+| host | `The agent that takes over continues this conversation in a new window. It can either receive a handoff summary (one extra request) or be pointed at the previous branch and read the record itself.` |
+| host | `Write a handoff summary` |
+| host | `Just continue` |
+| host | `Continue with the new workspace or model configuration?` |
+| host | `The conversation history (about {0} tokens for the current model) will be sent to the provider under the new configuration. This request will miss the provider’s cache.` |
+| host | `Continue` |
+| host | `Nothing to do: this conversation is on its own setup, and its context window has room left.` |
+| host | `Nothing was sent: the setup or the context window changed while the question was open. Try again.` |
+| host | `This context window is full, so the request was not sent. Use “Continue with new context” to carry the conversation into a new window.` |
 | host | `Could not continue in a new context here — wait for the running turn to finish and try again.` |
-| webview | `⧉ Continue in a new window` |
-| webview | `Ask the harness to continue this turn in a new, empty context window (the current one is full)` |
-| webview | `Context is {0}% full - continue in a new window` (the `near` variant's title) |
-| webview | `This node starts a new context window; the branch above it is not sent to the model any more` |
+| webview | `Continue with new context` |
+| webview | `Compact and Continue` |
+| webview | `Send this message in a new context window or under the new setup (the harness asks first)` |
+| webview | `Compact this conversation and continue in a new context window (the harness asks first)` |
+| webview | `Type a message or attach an image to continue in a new context` |
+| webview | `Type a message or attach an image to send` |
+| webview | `The context window is full; continue in a new one first` |
+| webview | `A sub-agent branch cannot start a new context window` |
+| webview | `A sub-agent branch is read-only` |
+| webview | `This node starts a new context window; the branch above it is not sent to the model any more` (the `CTX` badge's title) |
 
 **Both catalogs carry these keys** (checked by `npm run check:l10n`, which fails
-packaging when a source literal is missing from a shipped catalog), and the five
-entries the epoch change retired — the three "… the prompt cache may be missed."
-notices and the two image-hiding notices — are deleted with them.
+packaging when a source literal is missing from a shipped catalog), and the entries this
+change retired are gone from them: the per-card rollover label and its two tooltips
+(`⧉ Continue in a new window`, `Ask the harness to continue this turn in a new, empty
+context window (the current one is full)`, `Context is {0}% full - continue in a new
+window`), the harness-drift hint (`Continue with the latest setup (forks this tree and
+sends there)`) and the setup modal (`Continue with current setup`, `Continue with latest
+setup`, `Continue with a new setup?`, its two bodies, and `Send will ask before using the
+old setup (the one this node froze)`).
 
 Deliberately untranslated (the existing rules, see `i18n.md`): the harness resume
 text (model-facing and shown verbatim in its block), the `CTX` badge (compact dock
@@ -419,11 +489,17 @@ token), and the `[config]` / `[perf]` diagnostics.
   is ignored rather than repaired (so the live-render fallback is reached), and
   `parseContextLengthError` reads the real provider text (plus two reworded
   fallbacks and a non-matching error).
-- `npm run check:webview` — the rollover button's label and its `rolloverTurn`
-  click, that a non-overflow failure still shows `↻ Retry`, that the state arriving
-  by `nodeUpdate` switches the button, that the `edge-context` class lands on the
-  child's connector only, and that the `CTX` badge appears on the window-starting
-  card and not on its descendants.
+- `npm run check:webview` — the composer's one new-epoch entry: its labels (with and
+  without content), that it is hidden with no epoch available and while Stop shows, that
+  it is disabled on an empty box, in a read-only window and on a sub-agent branch, that a
+  click posts `newContextTurn` with the box's text and attachments and clears nothing,
+  that no card carries a `.node-window` / `node-rollover` / `node-near` element any more,
+  that `#new-context-btn` sits before `#send-btn` in the shell, that a `nodeUpdate`
+  carrying `context: 'full'` disables Send and offers the entry, that the `edge-context`
+  class lands on the child's connector only, and that the `CTX` badge appears on the
+  window-starting card and not on its descendants.
+- `npm run check:continue` — the retired setup modal (`askSetups` /
+  `discardPendingSetup` / `hasUserDrift`) is gone from `src/`.
 - `node tools/rollover-acceptance.js` (dev only, after `npm run compile`) — drives
   `rolloverContext()` against the real runtime with the `vscode` module stubbed and an
   offline client: the new window's first request is `[epoch.prompt, harness]` and carries
@@ -438,7 +514,7 @@ token), and the `[config]` / `[perf]` diagnostics.
 - **No automatic pre-emption.** Amended when the epoch model landed: there is still
   no threshold that *starts* anything — nothing rolls over on its own, and nothing
   is written pre-emptively — but a **user-initiated entry exists from 90 %**: the
-  same `⧉` button appears as a suggestion on a near-full tip
+  composer's new-epoch button appears on a near-full chain
   (`SessionRuntime.contextState(node) === 'near'`), and the click is what opens the
   window. Nothing may relax it further: a near-full tip has no task to carry, so an
   *automatic* rollover there would either burn a request or fabricate a turn.

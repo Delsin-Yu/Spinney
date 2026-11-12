@@ -94,6 +94,7 @@ export function buildChatShell(webview: vscode.Webview, opts: ChatShellOptions):
         <select id="effort-select" title="${vscode.l10n.t('Thinking effort')}"></select>
         <div id="actions">
           <button id="stop-btn" class="hidden">${vscode.l10n.t('Stop')}</button>
+          <button id="new-context-btn" class="hidden"></button>
           <button id="send-btn">${vscode.l10n.t('Send')}</button>
         </div>
       </div>

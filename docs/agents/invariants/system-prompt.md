@@ -8,10 +8,11 @@
   `Agent.systemPrompt` / `Agent.subAgentSystemPrompt` / `Agent.setAgentsMd` /
   `Agent.setGlobalAgentsMd` are
   thin wrappers kept for their callers. The two `set*AgentsMd` setters are the render
-  **fallback** snapshots, not the only source: `prompt.currentAgentsMdSection()`
-  exposes the *rendered* instruction sections, which is what a caller hashes when it
-  freezes a prompt (`Epoch.agentsMdHash`) without rendering anything
-  (`src/agent/prompt.ts`, `setAgentsMd` / `setGlobalAgentsMd` /
+  **fallback** snapshots, not the source: `prompt.agentsMdSection(sources)` exposes the
+  *rendered* instruction sections of a given pair, and the live pair comes from
+  `src/chat/agentsMd.ts` (`liveAgentsMdSources`, read at use — see the last bullet),
+  which is what a caller renders **and** hashes when it freezes a prompt
+  (`Epoch.agentsMdHash`) (`src/agent/prompt.ts`, `setAgentsMd` / `setGlobalAgentsMd` /
   `agentsMdSection`). Note that the AGENTS.md headings live in that builder rather
   than in the template: the two sections are optional and ordered (global first), and
   a single placeholder whose *whole* value is built in one place is what keeps an
@@ -113,9 +114,9 @@
     tool schemas, the content hashes the drift check compares (`templateHash`,
     `agentsMdHash`, `toolsetHash`) and `frozenAt`. `cardId` is a **card id**, never a
     wire model name. `agentsMdHash` is the hash of the **rendered** instruction
-    sections (`currentAgentsMdSection()`), not of one file, so the one hash covers the
-    systemwide file and the workspace file together — a second source needed no second
-    field and no `Epoch` shape change.
+    sections (`agentsMdSection(liveAgentsMdSources(...))`), not of one file, so the one
+    hash covers the systemwide file and the workspace file together — a second source
+    needed no second field and no `Epoch` shape change.
   - The stored envelope is validated by **shape at read time**: `normalizeEpoch`
     drops one whose `prompt` is not a string, and `epochForNode` ignores it, so a
     truncated or foreign value can never make a request fail and needs no repair
@@ -141,23 +142,38 @@
   would freeze, not the bytes a frozen chain is sending. Showing the frozen bytes
   first, with the live render as a labelled second section, is `plans/session-epoch.md`
   §12 item 2 and is **not** implemented.
-- **Two instruction files, read once per window.** `ChatViewProvider.loadAgentsMd`
-  (activation, and every workspace-folder change) takes both snapshots:
+- **Two instruction files, read at use.** `src/chat/agentsMd.ts` owns the reader
+  (`liveAgentsMdSources`, behind `ChatViewProvider.agentsMdSources()`), and both prompt
+  paths go through it — `freezeEpoch` renders these bytes and hashes them, `setupState`
+  hashes them again to decide whether the harness drifted:
   - `~/.spinney/AGENTS.md` — the **systemwide** file, from
-    `ChatViewProvider.globalAgentsMdPath` (`os.homedir()`, with the extension's global
-    storage as the fallback for a host that reports no home). It applies to every
-    workspace **and to no-repo mode**, which used to get no instructions at all. It
-    renders first, as `## Global AGENTS.md (all workspaces)`.
+    `agentsMd.globalAgentsMdPath` (`os.homedir()`, with the extension's global storage
+    as the fallback for a host that reports no home). It applies to every workspace
+    **and to no-repo mode**, which used to get no instructions at all. It renders
+    first, as `## Global AGENTS.md (all workspaces)`.
   - `<workspaceRoot>/AGENTS.md` — the workspace's own file, the existing
     `## Workspace AGENTS.md (project instructions)` section, rendered second.
-  Both go through `Agent.setGlobalAgentsMd` / `Agent.setAgentsMd`, so both are
-  snapshots: an edit lands in the next window, never in a running one. When both exist,
-  `agentsMdSection` adds exactly one precedence line to the global section — the
+  **"Read at use" is mtime-cached**: one `statSync` per file per use, and a real
+  `readFileSync` only when the file's modification time or size moved. An edit made
+  while VS Code was closed — the common case, since the file is usually edited in
+  another window — or during the session is therefore what the **next** freeze renders
+  and what the **next** drift check notices; it never rewrites a prefix behind the
+  model's back (a frozen epoch is never re-rendered), it only makes the composer's
+  `Continue with new context` entry available so the user can start a new epoch. The
+  once-per-window snapshots (`ChatViewProvider.loadAgentsMd` →
+  `Agent.setGlobalAgentsMd` / `Agent.setAgentsMd`, taken at activation and on every
+  workspace-folder change) are now only a **fallback**: a file that exists but cannot be
+  read falls back to what the window last managed to read, so a transient failure cannot
+  silently drop the instructions. A file that is *gone* is really gone (no stale
+  snapshot lingers), and `resetAgentsMdCache()` runs on a workspace-folder change
+  because the workspace path is part of the cache key.
+  When both exist, `agentsMdSection` adds exactly one precedence line to the global
+  section — the
   workspace file wins a conflict, because it is the narrower instruction. A workspace
   with only its own file renders the same bytes it rendered before this change.
   Sub-agents get **no** AGENTS.md section either way.
   **`Spinney: Open Global AGENTS.md`** (`ChatViewProvider.openGlobalAgentsMd`) is how
   the user reaches the systemwide file: it creates `~/.spinney/` and the file (one
   comment line, since the content is prompt bytes) when they are missing, then opens
-  the real file. It deliberately does not re-read or re-render anything — that would
-  rewrite a frozen epoch's prompt behind the model's back.
+  the real file. It never re-renders anything itself — the reader sees the edit on the
+  next check, and re-rendering a frozen epoch's prompt is what that must never cause.

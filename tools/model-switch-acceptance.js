@@ -147,6 +147,7 @@ const host = new Proxy(
     systemPrompt: () => 'SYSTEM-PROMPT-TEXT',
     resolveModel: (m) => (M.cardById(m) ? m : DS),
     getContextWindow: (id) => M.contextWindowFor(id),
+    agentsMdSources: () => ({ global: null, workspace: null }),
     persistRuntimeConfig: () => undefined,
     persist: () => undefined,
   },
@@ -382,8 +383,9 @@ const nodeCard = (rt, id) => rt.session.nodes[id] && rt.session.nodes[id].model;
     rt.setModel(OTHER);
     // The frozen chain wins over the dropdown: the pick is reported as drift, and the send
     // that follows still runs on the card the chain was built with. Moving a chain to a new
-    // setup is a fork, never a silent re-render (`docs/agents/plans/session-epoch.md` §4.2).
-    ok('a pick on a frozen chain is reported as user drift', rt.hasUserDrift());
+    // setup is the composer's new-epoch entry (a fork), never a silent re-render
+    // (`docs/agents/invariants/api-retries.md`).
+    ok('a pick on a frozen chain is reported as drift', rt.newEpochTrigger() === 'drift');
     await send(rt, 'run on the frozen chain');
     const node = rt.session.nodes[rt.session.activeNodeId];
     ok('the node recorded the chain\'s frozen card, not the pick', node.model === DS, String(node.model));

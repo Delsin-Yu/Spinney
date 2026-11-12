@@ -33,7 +33,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { Agent, ImageAccounting } from '../agent/agent';
-import { DEFAULT_REPLY_LANGUAGE, SYSTEM_PROMPT_TEMPLATE, currentAgentsMdSection } from '../agent/prompt';
+import { DEFAULT_REPLY_LANGUAGE, SYSTEM_PROMPT_TEMPLATE, AgentsMdSources, agentsMdSection, systemPrompt } from '../agent/prompt';
 import { Balance, emptyBalance } from '../agent/balance';
 import { ClientRegistry } from '../agent/clients';
 import { AgentEvent, ChatMessage, ContentPart, ThinkingEffort, ToolDefinition, Usage, detectImageMime } from '../agent/types';
@@ -311,6 +311,13 @@ function buildContextRolloverMessage(input: {
   attachments: number;
   /** The last answer the previous window produced, raw (clipped here). */
   answer: string;
+  /**
+   * How much of the model's context the previous window had used, when both numbers are
+   * known: this is what makes the reset auditable instead of mysterious ("it worked
+   * yesterday"). `undefined` when no request has reported usage yet, or the card declares
+   * no window — a fact the harness cannot state is not stated.
+   */
+  usage?: { used: number; window: number; pct: number };
   /** One entry per background terminal the rollover killed (id, clipped command, final state). */
   killedBackground: Array<{ id: number; command: string; state: string }>;
   /** One entry per sub-agent node it killed: its dump path once its finish handler wrote it. */
@@ -345,6 +352,21 @@ function buildContextRolloverMessage(input: {
   // The display path is not cut (the tree stays connected), so "previous window"
   // names the overflowing node the new one hangs below — not its whole chain.
   paragraphs.push(`Previous window: node ${input.previousNodeId} of session ${input.sessionId}.`);
+  // The size of the window that just ended, in the provider's own terms. Stated as a
+  // fact and never as advice: a model that reads "the window was full" without the
+  // numbers tends to try the same oversized request again from the new window.
+  if (input.usage) {
+    const tail =
+      input.reason === 'near'
+        ? "which is past the harness's 90% rollover threshold; nothing was refused yet."
+        : input.reason === 'images'
+          ? 'the refusal was about the bytes of that request, not about these tokens.'
+          : 'which is at or past the limit this provider accepts for one request.';
+    paragraphs.push(
+      `The previous window used ${input.usage.used} of this model's ${input.usage.window}-token context ` +
+        `(${input.usage.pct}%), ${tail}`,
+    );
+  }
   paragraphs.push(
     input.transcriptExists
       ? 'Its full transcript — every message, tool call and result — is on disk:\n' +
@@ -692,6 +714,19 @@ export interface RuntimeHost {
    * does not own (`docs/agents/plans/session-epoch.md` §5).
    */
   isReadOnly(): boolean;
+  /**
+   * The two AGENTS.md instruction files **as they are on disk right now**
+   * (`src/chat/agentsMd.ts`), falling back per half to the window's snapshot when a
+   * file cannot be read at all.
+   *
+   * Both prompt paths go through it — `freezeEpoch` renders these bytes and hashes
+   * them, `setupState` hashes them again to decide whether the harness drifted — so the
+   * prompt a new epoch freezes and the drift check that guards it can never disagree
+   * about which instructions are in force. Reading at use is what makes an edit made
+   * while VS Code was closed (or during the session) show up as drift on the next
+   * check, instead of silently rewriting a frozen prefix or needing a reload.
+   */
+  agentsMdSources(): AgentsMdSources;
 }
 
 /** Decode the base64 payload of a `data:<mime>;base64,<data>` URL into bytes. */
@@ -1417,9 +1452,16 @@ export class SessionRuntime {
   }
 
   /** The system prompt this session would send on its next request (the node in
-   * view, with any pending pick on it). */
+   * view, with any pending pick on it). Rendered from the instruction files as they are
+   * on disk right now — this is a preview of what a *new* node would freeze. */
   systemPromptText(): string {
-    return Agent.systemPrompt(cardDisplayName(this.card), this.thinkingEffort, this.replyLanguage);
+    return systemPrompt(
+      cardDisplayName(this.card),
+      this.thinkingEffort,
+      this.replyLanguage,
+      undefined,
+      this.host.agentsMdSources(),
+    );
   }
 
   /**
@@ -1429,7 +1471,13 @@ export class SessionRuntime {
    * card of that branch, not the dropdown's current value.
    */
   private systemPromptFor(node: TreeNode | undefined): string {
-    return Agent.systemPrompt(cardDisplayName(this.cardForNode(node)), this.effortForNode(node), this.replyLanguage);
+    return systemPrompt(
+      cardDisplayName(this.cardForNode(node)),
+      this.effortForNode(node),
+      this.replyLanguage,
+      undefined,
+      this.host.agentsMdSources(),
+    );
   }
 
   /**
@@ -1480,9 +1528,14 @@ export class SessionRuntime {
     // would send, or a re-frozen chain would inherit a tool set that belongs to the epoch
     // before it.
     const tools = this.liveToolSchemas(card, isSidecar(node));
+    // The instructions are read **at use** (`agentsMd.ts`, through the host): an edit made
+    // while VS Code was closed, or during this session, is what the next epoch freezes —
+    // and the hash below is taken from the same bytes, so the drift check that guards this
+    // envelope can never disagree with what its prompt says.
+    const agentsMd = this.host.agentsMdSources();
     return {
       id: newId(),
-      prompt: Agent.systemPrompt(cardDisplayName(card), level, this.replyLanguage),
+      prompt: systemPrompt(cardDisplayName(card), level, this.replyLanguage, undefined, agentsMd),
       tools,
       cardId: card.id,
       effort: level,
@@ -1492,7 +1545,7 @@ export class SessionRuntime {
       wireModel: card.oaiModel,
       vision: isVisionCard(card),
       visionTransport: card.vision.transport === 'deepseek' ? 'deepseek' : 'openai',
-      agentsMdHash: contentHash(currentAgentsMdSection()),
+      agentsMdHash: contentHash(agentsMdSection(agentsMd)),
       templateHash: contentHash(SYSTEM_PROMPT_TEMPLATE),
       toolsetHash: contentHash(JSON.stringify(tools)),
       frozenAt: Date.now(),
@@ -1625,7 +1678,7 @@ export class SessionRuntime {
     if (contentHash(SYSTEM_PROMPT_TEMPLATE) !== epoch.templateHash) {
       reasons.push('prompt');
     }
-    if (contentHash(currentAgentsMdSection()) !== epoch.agentsMdHash) {
+    if (contentHash(agentsMdSection(this.host.agentsMdSources())) !== epoch.agentsMdHash) {
       reasons.push('agents.md');
     }
     if (contentHash(JSON.stringify(this.liveToolSchemas(liveCard, view?.kind === 'agent'))) !== epoch.toolsetHash) {
@@ -1905,34 +1958,6 @@ export class SessionRuntime {
     this.host.output.appendLine(`[config] replyLanguage=${next} (new nodes; frozen chains keep theirs)`);
     // The two setups may now disagree: repaint the composer's drift marking.
     this.postConfig();
-  }
-
-  /**
-   * Drop the pending setup and put the session seed back where the checked-out chain's
-   * envelope says it belongs. This is the "Continue with current setup" answer
-   * (`docs/agents/plans/session-epoch.md` §4.2): the pick the user made is *discarded*,
-   * never remembered — the dropdown returns to the frozen values precisely because the
-   * send that follows it must not silently become a different setup.
-   */
-  discardPendingSetup(): void {
-    this.pending = null;
-    const view = this.viewNode();
-    const epoch = epochForNode(this.session, view?.id ?? null);
-    if (!epoch) {
-      this.postConfig();
-      return;
-    }
-    const card = this.cardForCardId(epoch.cardId);
-    this.session.model = epoch.cardId;
-    this.session.effort = epoch.effort;
-    this.session.modelFromSettings = this.host.getConfig().defaultCardId;
-    this.session.effortFromSettings = card.defaultEffort;
-    this.seedCardId = epoch.cardId;
-    this.seedEffort = normalizeEffort(card, epoch.effort);
-    this.persistTurn();
-    this.host.persistRuntimeConfig(this.seedCardId, this.seedEffort);
-    this.postConfig();
-    this.postContext();
   }
 
   /** Push a settings change onto the live sub-agent pool. */
@@ -3238,27 +3263,54 @@ export class SessionRuntime {
   }
 
   /**
-   * True when the checked-out chain's setup and the live one disagree **because the user
-   * just picked a different card / level / language**: the send that follows must ask
-   * before it discards that pick (`docs/agents/plans/session-epoch.md` §4.2). Harness-side
-   * drift is deliberately not part of this — a plain send keeps the frozen setup silently,
-   * which is the whole point of freezing it.
+   * Which **epoch change** the composer's one new-epoch entry would start right now, or
+   * `null` when the checked-out chain is exactly on the setup and size it was built for.
+   *
+   * - `'context'` — the chain's window is `near` or `full` (`contextState`): the only
+   *   answer is a new context window (`rolloverContext`), because a request that the
+   *   provider refused cannot be made to fit by changing a dropdown.
+   * - `'drift'` — the chain's frozen setup and the live one disagree (`setupState`, whose
+   *   `drift` covers **both** the user's dropdown pick and the harness's own change): the
+   *   answer is a fork under the live setup (`forkTree`), so the old tree keeps the bytes
+   *   — and the provider cache entry — it was built with.
+   *
+   * The order is deliberate: a full window wins, since preconditions and cost differ and
+   * a fork of an oversized history would just refuse again on the new card.
    */
-  hasUserDrift(): boolean {
-    return this.setupState().drift === 'user';
+  newEpochTrigger(): 'context' | 'drift' | null {
+    const node = this.viewNode();
+    if (node && this.contextState(node) !== 'ok') {
+      return 'context';
+    }
+    return this.setupState().drift !== false ? 'drift' : null;
   }
 
-  /** True when *anything* differs: what the composer's new-setup entry is offered for. */
-  hasDrift(): boolean {
-    return this.setupState().drift !== false;
+  /**
+   * The prompt tokens of the checked-out chain's newest turn (0 when it has none) — the
+   * number the setup-change modal quotes, because it is what the provider will have to
+   * read again under the new configuration (`docs/agents/invariants/api-retries.md`).
+   */
+  chainPromptTokensLive(): number {
+    const node = this.viewNode();
+    return node ? this.chainPromptTokens(node) : 0;
+  }
+
+  /**
+   * How full the checked-out chain's window is (`'ok' | 'near' | 'full'`) — the host-side
+   * half of the composer's Send gate: a `full` window means the provider has already
+   * refused that request, so a plain send is refused here too instead of being re-sent.
+   */
+  contextStateLive(): 'ok' | 'near' | 'full' {
+    const node = this.viewNode();
+    return node ? this.contextState(node) : 'ok';
   }
 
   /**
    * True when this node offers a context continuation: a conversational node that is not
    * streaming and whose chain is at least **near** full (`contextState`, so the provider's
-   * refusal and the 90% threshold both qualify). It is the same predicate the webview's `⧉`
-   * button reflects, and it is public so `ChatViewProvider` can decide whether the
-   * kill-confirmation is needed *before* anything has changed.
+   * refusal and the 90% threshold both qualify). It is the same predicate the composer's
+   * new-epoch entry uses to pick its backend, and it is public so `ChatViewProvider` can
+   * decide whether the kill-confirmation is needed *before* anything has changed.
    */
   canRollover(nodeId: string): boolean {
     const node = this.session.nodes[nodeId];
@@ -3266,9 +3318,8 @@ export class SessionRuntime {
       return false;
     }
     // A node that already has a conversational child has been rolled over (or the
-    // user went on from it): the button is gone, so a second window must not start
-    // from the same card. This is the host half of the webview's "tip of the branch"
-    // rule — the two must agree, or a replayed click would open a sibling window.
+    // user went on from it): a second window must not start from the same card, or a
+    // replayed click would open a sibling window beside the one it already opened.
     if (node.children.some((id) => !isSidecar(this.session.nodes[id]))) {
       return false;
     }
@@ -3333,8 +3384,28 @@ export class SessionRuntime {
    *
    * When it returns true the new node is checked out and running, and this node keeps
    * its full history on its stopped line.
+   *
+   * `opts.text` is the composer's own text: it is sent as a **real user message** in the
+   * new window, right after the harness message. That is the difference from the first
+   * shape of this method, where the harness text merely *quoted* the previous request and
+   * the user's new one was lost — the user asked for this turn, so the model has to
+   * receive it as the turn's request.
    */
-  async rolloverContext(nodeId: string, setup: 'current' | 'latest' = 'current'): Promise<boolean> {
+  async rolloverContext(
+    nodeId: string,
+    setup: 'current' | 'latest' = 'current',
+    opts?: {
+      /** The composer's text, sent as the new window's own user message (may be empty). */
+      text?: string;
+      /**
+       * How the previous window hands over: `'summary'` is the composer's compaction entry
+       * (a handoff summary written by one extra request), `'continue'`/absent is the
+       * pointer shape this method implements. `'summary'` is **recorded on the node** and
+       * currently behaves exactly like `'continue'` — see the `TODO(compaction)` below.
+       */
+      handoff?: 'summary' | 'continue';
+    },
+  ): Promise<boolean> {
     const node = this.session.nodes[nodeId];
     if (!node || isSidecar(node)) {
       return false;
@@ -3394,6 +3465,7 @@ export class SessionRuntime {
         nodeId: id,
         transcript: this.session.nodes[id]?.agentTranscript,
       })),
+      usage: this.rolloverUsage(node),
     });
     const run = this.beginTurn(vscode.l10n.t('Context window {0}', windowNo), {
       parentId: nodeId,
@@ -3412,12 +3484,44 @@ export class SessionRuntime {
     this.stoppedLines.add(nodeId);
     run.items.push({ kind: 'harness', text: message });
     this.post({ type: 'harnessNote', nodeId: run.node.id, text: message });
+    // The handoff the user asked for is *stored* on the node that starts the window, so the
+    // follow-up feature can implement it without a schema change. `'summary'` currently
+    // behaves exactly like `'just continue'`: the pointer shape below.
+    // TODO(compaction): a `'summary'` handoff must spend one extra request to write a
+    // summary of the previous window and hand *that* to this node instead of the pointer.
+    if (opts?.handoff === 'summary') {
+      run.node.handoff = 'summary';
+    }
+    // The composer's own text: a REAL user message of this window, after the harness
+    // message — one request carrying both, never a quotation of somebody else's turn. The
+    // card shows it as the user bubble it is, and nothing is cleared here (the host does
+    // that with `composerClear` once the turn really started).
+    const text = (opts?.text ?? '').trim();
+    if (text) {
+      run.items.push({ kind: 'user', text });
+      this.post({ type: 'user', text, attachments: [] });
+    }
     this.setBusy(true);
     this.lastStatus = vscode.l10n.t('Thinking…');
     this.post({ type: 'status', text: this.lastStatus });
     this.post({ type: 'nodeUpdate', ...this.nodeStatePatch(run.node) });
-    void run.agent.sendUserMessage(message);
+    void run.agent.sendUserMessage(message, text || undefined);
     return true;
+  }
+
+  /**
+   * How full the window that is being rolled over was: the chain's newest prompt usage
+   * against the window of the card that chain sends with. `undefined` when either number
+   * is unknown — the harness message then says nothing about the size rather than
+   * inventing one.
+   */
+  private rolloverUsage(node: TreeNode): { used: number; window: number; pct: number } | undefined {
+    const used = this.chainPromptTokens(node);
+    const window = this.host.getContextWindow(this.chainCard(node).id);
+    if (used <= 0 || !window || window <= 0) {
+      return undefined;
+    }
+    return { used, window, pct: Math.min(100, Math.round((used / window) * 100)) };
   }
 
   /**

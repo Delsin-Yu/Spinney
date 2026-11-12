@@ -124,6 +124,7 @@ const host = new Proxy(
     systemPrompt: () => 'SYSTEM-PROMPT-TEXT',
     resolveModel: (m) => m,
     getContextWindow: () => 1048576,
+    agentsMdSources: () => ({ global: null, workspace: null }),
   },
   {
     get(target, prop) {
@@ -324,6 +325,59 @@ const tick = (ms = 80) => new Promise((r) => setTimeout(r, ms));
     const marks = messages.slice(marked).filter((m) => m.type === 'notice' && m.nodeId === 'p0' && /Silent retry/.test(String(m.text)));
     ok('  ... and the silent re-issues are shown as a display-only marker', marks.length > 0, marks.map((m) => m.text).join(' | '));
     ok('  ... never as a window reset', !messages.slice(marked).some((m) => String(m.text || '').includes('context window reset')));
+  }
+
+  console.log('-- the composer entry: a real user message, the handoff marker, the size line --');
+  {
+    const s = makeSession();
+    // A recorded prompt usage is what the size line is built from (`chainPromptTokens` →
+    // `nodeUsage`); the plain fixture has none, and the line is then correctly omitted.
+    s.nodes.p0.displayItems.push({ kind: 'notice', text: 'usage', usage: { prompt_tokens: 996147, completion_tokens: 10, total_tokens: 996157 } });
+    const { rt: rt5 } = makeRuntime(s);
+    const started = await rt5.rolloverContext('p0', 'current', {
+      text: 'now do THIS-INSTEAD',
+      handoff: 'summary',
+    });
+    ok('rolloverContext() with the composer text reports success', started === true);
+    const roll5 = Object.values(s.nodes).find((n) => n.parentId === 'p0');
+    ok('one new window node was created', !!roll5);
+    const run5 = roll5 && rt5.runs.get(roll5.id);
+    const sent5 = (run5 && run5.agent.getMessages()) || [];
+    ok('the request is [system, harness, user]', sent5.length === 3, sent5.map((m) => m.role).join(','));
+    ok(
+      '  ... the harness message comes first',
+      String(sent5[1] && sent5[1].content).startsWith('[Harness: context window reset]'),
+    );
+    ok(
+      '  ... and the composer\'s text is a REAL user message after it',
+      sent5[2] && sent5[2].role === 'user' && sent5[2].content === 'now do THIS-INSTEAD',
+      JSON.stringify(sent5[2] && sent5[2].content),
+    );
+    ok('the node records the requested handoff', !!roll5 && roll5.handoff === 'summary', roll5 && String(roll5.handoff));
+    const harnessText = String(sent5[1] && sent5[1].content);
+    ok(
+      'the harness text states how full the previous window was',
+      /The previous window used \d+ of this model's \d+-token context \(\d+%\)/.test(harnessText),
+      harnessText.split('\n').find((line) => line.startsWith('The previous window used')) || '(missing)',
+    );
+    ok(
+      '  ... with the "at or past the limit" tail for a refused window',
+      harnessText.includes('which is at or past the limit this provider accepts for one request.'),
+    );
+    ok(
+      'the new card shows the user bubble too',
+      (roll5 && roll5.displayItems.some((i) => i.kind === 'user' && i.text === 'now do THIS-INSTEAD')) === true,
+    );
+
+    // The empty box is the other half: the harness message alone, no invented user message.
+    const s6 = makeSession();
+    const { rt: rt6 } = makeRuntime(s6);
+    await rt6.rolloverContext('p0', 'current', { text: '   ' });
+    const roll6 = Object.values(s6.nodes).find((n) => n.parentId === 'p0');
+    const run6 = roll6 && rt6.runs.get(roll6.id);
+    const sent6 = (run6 && run6.agent.getMessages()) || [];
+    ok('an empty box sends the harness message alone', sent6.length === 2, sent6.map((m) => m.role).join(','));
+    ok('  ... and records no handoff', !!roll6 && roll6.handoff === undefined);
   }
 
   console.log('');

@@ -242,31 +242,32 @@ export function renderPromptTemplate(template: string, values: Record<string, st
 }
 
 /**
- * The two places AGENTS.md instructions come from, as a snapshot.
+ * One pair of AGENTS.md instruction sources: the **systemwide** file (`~/.spinney/AGENTS.md`,
+ * or its fallback under global storage) and the open workspace folder's own `AGENTS.md`.
  *
- * `global` is the **systemwide** file — one per machine, read from
- * `~/.spinney/AGENTS.md` (or its fallback under global storage, see
- * `ChatViewProvider.globalAgentsMdPath`) and injected into every session in every
- * workspace. `workspace` is the open workspace folder's own `AGENTS.md`. Both are
- * read once per window and never re-read mid-session, so an edit needs a reload;
- * the summary order is fixed — global first, workspace second.
+ * A value of this type is either the window's **fallback snapshot** ({@link AgentsMdSources}
+ * filled by {@link currentAgentsMdSources}) or the pair a caller read **at use**
+ * (`src/chat/agentsMd.ts` → `liveAgentsMdSources`, which is what the shipped freeze path
+ * and the drift check both use, so an edit is seen on the next check instead of needing a
+ * reload). The summary order is fixed — global first, workspace second.
  */
 export interface AgentsMdSources {
-  /** The systemwide file's snapshot (null = no such file). */
+  /** The systemwide file's content (null = no such file). */
   global: string | null;
-  /** The workspace root `AGENTS.md`'s snapshot (null = no such file). */
+  /** The workspace root `AGENTS.md`'s content (null = no such file). */
   workspace: string | null;
 }
 
 /**
  * Snapshots of the AGENTS.md files appended to the system prompt. Set once per
- * window by {@link setAgentsMd} / {@link setGlobalAgentsMd}; later edits to either
- * file do not propagate.
+ * window by {@link setAgentsMd} / {@link setGlobalAgentsMd} — they are now the
+ * **fallback** floor for a file that exists but cannot be read
+ * (`src/chat/agentsMd.ts`), not the source of truth: the render path reads both files
+ * at use, so an edit is seen by the next freeze and the next drift check.
  *
- * They are the **fallback** for a render, not the only source: {@link systemPrompt}'s
- * `agentsMd` argument lets a caller pass its own snapshot without touching these
- * (see there — a window-global snapshot cannot describe every session a window
- * serves).
+ * {@link systemPrompt}'s `agentsMd` argument lets a caller pass its own pair without
+ * touching these (see there — one snapshot cannot describe every workspace a window
+ * serves across a folder change).
  */
 let agentsMdSnapshot: string | null = null;
 let globalAgentsMdSnapshot: string | null = null;
@@ -311,14 +312,14 @@ export function agentsMdSection(sources: AgentsMdSources): string {
 }
 
 /**
- * The AGENTS.md bytes a render right now would carry (`''` when neither file
- * exists), for the module-global snapshots.
+ * The AGENTS.md bytes the window's **fallback snapshot** would carry (`''` when neither
+ * file is known), for the module-global snapshots.
  *
- * A caller that freezes a prompt per epoch needs this — not to render with it, but
- * to hash it: the freeze records `agentsMdHash`, and the drift check compares that
- * hash against this value, so editing **either** file shows up as a change instead
- * of silently rewriting somebody's prefix. Hashing the rendered section rather than
- * the raw file is what makes one hash cover both sources.
+ * The freeze path no longer hashes this: it renders from, and hashes, the live pair
+ * (`liveAgentsMdSources`), so an edit on disk is what the next epoch freezes. This stays
+ * as the one-line answer for a caller that has nothing live to read (a dump script, a
+ * test), and it is the same builder — hashing the rendered section rather than a raw file
+ * is what makes one hash cover both sources.
  */
 export function currentAgentsMdSection(): string {
   return agentsMdSection(currentAgentsMdSources());
