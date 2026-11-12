@@ -8,6 +8,13 @@
   webview message routing. It owns the
   `runtimes: Map<sessionId, SessionRuntime>` and a `PanelManager` (tabs); the editor
   `WebviewPanel` lifecycle is `restorePanel` (serializer) + `postAllState`.
+  It also owns the **window-global terminal dock** (`globalBackgroundJobs` +
+  `scheduleBackgroundsGlobal` / `postBackgroundsGlobal`, coalesced ~200 ms, broadcast as
+  `backgroundsGlobal` to every open tab), its removal list (`bgDismissed`, a view of
+  `TreeNode.bgDockDismissed`), and the three dock actions (`killBackgroundIn` /
+  `dismissBackground` / `clearFinishedBackgrounds`) — each one routed through the owning
+  session's runtime, created on demand, so a job can be killed from a tab that shows
+  another conversation.
 - `src/chat/ChatPanel.ts` — a thin wrapper around a `WebviewPanel` (one chat tab).
   It carries its `sessionId`; `PanelManager` keeps one per session. `ChatPanel.create`
   makes a new panel, `ChatPanel.revive` adopts one VS Code restored from serialization
@@ -67,7 +74,10 @@
   (`ChatViewProvider.getHtml()`): the script set and order (the vendored layout engine,
   markdown-it, `media/tree.js`, `media/main.js`), the CSP nonce, `window.__spinneyL10n`
   and the element ids, per-caller `mediaVersion`. One template, because `media/main.js`
-  fetches its whole surface by element id. Guarded by `npm run check:webview`.
+  fetches its whole surface by element id. It carries the chat's fixed frame only —
+  including the window-global terminal dock's frame (`#term-dock`, `#term-dock-head`,
+  `#term-dock-label`, `#term-dock-list`, `#term-dock-clear`), whose rows are built by
+  `media/main.js` from the `backgroundsGlobal` snapshot. Guarded by `npm run check:webview`.
 - `src/chat/agentsMd.ts` — the two AGENTS.md instruction files, **read at use**
   (`liveAgentsMdSources`, `globalAgentsMdPath`, `workspaceAgentsMdPath`,
   `resetAgentsMdCache`): an mtime cache (one `statSync` per file per use, a
@@ -86,6 +96,8 @@
   branch removal (`branchIds` / `detachBranch`), the `isSidecar` predicate (a
   sub-agent `kind:'agent'` window vs. a background job `kind:'bg'` card — both
   display-only sidecars) and the v1→v2 state migration. Pure data layer, no VS Code UI.
+  A `kind:'bg'` card also carries the dock's removal (`TreeNode.bgDockDismissed`, see
+  `invariants/background-terminals.md`).
 - `src/chat/fileWriteQueue.ts` — the coalescing, off-the-host-thread file writer shared by
   the transcript dumps and the session store: a synchronous answer with an async write,
   a later body for one path replacing the pending one, an optional `atomic` swap
@@ -408,7 +420,8 @@
   `tools/check-unicode.js` drive the rules from plain node.
 - `media/main.js` — webview client (tree rendering, pan/zoom, streaming into the
   active node, composer, streaming meter, live tool drafts, drag-to-resize cards,
-  background job cards + `.bgnotify` notification blocks).
+  background job cards + `.bgnotify` notification blocks, and the window-global
+  terminal dock).
   Every string it displays goes through its own `tr(message, ...args)` (defined at
   the top of the file): the host has no `vscode.l10n` inside a webview, so it
   injects the catalog as `window.__spinneyL10n` and `tr()` looks the English source
@@ -417,6 +430,12 @@
   top): it measures the repaint burst the host tagged with a `traceId`, the markdown
   and layout inside it, its own frame gaps and any slow message handler, and posts
   them back as `perfDiag` — see `invariants/streaming-perf.md`.
+  The window-global **terminal dock** is its own block (`renderTerminalDock` /
+  `paintTermDockRow`): rows are diffed by a per-row signature, so a job that prints
+  repaints its own row only, and the dock is fixed outside `#tree-canvas` so no dock
+  repaint ever runs a layout. A row's body is `buildBgBody` — the **same** builder the
+  owning node's `kind:'bg'` card uses (`renderBgBody`), so the two views of one job
+  cannot disagree.
   Canvas gestures live in one block near the end: LMB/MMB drag pans by offset,
   RMB-hold autoscroll-pans towards the cursor (browser middle-click semantics,
   with an origin marker and the `all-scroll` cursor), ctrl+wheel zooms,
@@ -509,7 +528,9 @@
   Not an npm dependency; never update it in place — see
   `docs/agents/invariants/vendored-deps.md`.
 - `media/style.css` — chat UI styling (incl. tree node cards / toolbar, the
-  `kind:'bg'` job card and the `.bgnotify` / `Delivered` badges). Every
+  `kind:'bg'` job card and the `.bgnotify` / `Delivered` badges, and the fixed
+  `#term-dock` at the top-right: above the cards and the autoscroll origin, below the
+  floating menus). Every
   size inside `#composer` is a fixed px value: the input dock's controls and
   fonts never scale with its host card.
 - `media/vendor/markdown-it/` — **vendored, pinned** Markdown renderer

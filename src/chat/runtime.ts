@@ -523,6 +523,19 @@ interface BackgroundInfo {
   pendingDelivery: boolean;
 }
 
+/**
+ * The output tail every background snapshot carries: the job's output so far, trimmed
+ * and clipped to its newest 800 characters (with a leading ellipsis when it was cut).
+ *
+ * One function, because the `backgrounds` snapshot (a session's jobs) and the
+ * `backgroundsGlobal` snapshot (the window-global dock) describe the same job and must
+ * not disagree about what its tail is.
+ */
+export function backgroundOutputTail(task: BackgroundTask): string {
+  const out = task.handle.getOutput().trim();
+  return out.length > 800 ? '…' + tailText(out, 800) : out;
+}
+
 /** What produced a signal: drives the notification block's badge, nothing else. */
 export type SignalKind = 'background' | 'subagent';
 
@@ -656,6 +669,14 @@ export interface RuntimeHost {
    */
   persistRuntimeConfig(model: string, thinkingEffort: ThinkingEffort): void;
   postTo(sessionId: string, message: unknown): void;
+  /**
+   * A background terminal of **this** session changed (a job registered, printed,
+   * finished, was killed or was settled). The session's own card repaint is already on
+   * its way (`postBackgrounds`); this is the other half — the window-global terminal
+   * dock lists every session's jobs in **every** tab, so one session's change is every
+   * tab's news. The provider coalesces it, exactly like the per-session snapshot.
+   */
+  backgroundsChanged(): void;
   transcriptRoot(): string;
   transcriptDir(sessionId: string): string;
   dumpSessionTranscript(node: TreeNode, session: AgentSession, status: TurnStatus): void;
@@ -5303,8 +5324,6 @@ export class SessionRuntime {
   // ---- Background terminals ----
 
   private toBackgroundInfo(owner: BackgroundOwner, task: BackgroundTask): BackgroundInfo {
-    const out = task.handle.getOutput().trim();
-    const outputTail = out.length > 800 ? '…' + tailText(out, 800) : out;
     return {
       id: task.id,
       nodeId: owner.nodeId,
@@ -5317,7 +5336,7 @@ export class SessionRuntime {
       startedAt: task.startedAt,
       finishedAt: task.finishedAt,
       truncated: task.truncated,
-      outputTail,
+      outputTail: backgroundOutputTail(task),
       pendingDelivery: task.status === 'finished' && !task.delivered,
     };
   }
@@ -5353,6 +5372,9 @@ export class SessionRuntime {
     this.post({ type: 'backgrounds', tasks });
     this.postState();
     perf(() => `backgrounds ${Date.now() - t0}ms tasks=${tasks.length}`);
+    // …and the window-global dock, which lists this session's jobs in every tab of
+    // the window (the provider coalesces its own snapshot, ~200 ms, the same way).
+    this.host.backgroundsChanged();
   }
 
   /** Mark a task's completion notice as delivered so it leaves the pending dock state. */
@@ -5777,6 +5799,10 @@ export class SessionRuntime {
     if (touched) {
       this.persistTurn();
       this.postTree();
+      // `delivered` is also what the window-global dock says (`Delivered`, and "pending
+      // delivery" against the job's own exit code), and no background snapshot otherwise
+      // announces it: the dock is reposted together with the cards.
+      this.host.backgroundsChanged();
     }
   }
 

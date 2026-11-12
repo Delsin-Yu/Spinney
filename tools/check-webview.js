@@ -15,7 +15,10 @@
 //   (b) the UI follows the message — the effort dropdown, the model list, the
 //       image affordances, the context readout, the wallet readout and the
 //       composer's Send/Stop pair are checked explicitly, plus the P2 background
-//       docks (each job has to end up in the card of the node that owns it) and the
+//       docks (each job has to end up in the card of the node that owns it), the
+//       **window-global terminal dock** (`#term-dock`: one row per job of every
+//       session, the same body the card renders, kill / ✕ / clear, only the changed
+//       row repainted, and no layout call from the dock) and the
 //       three zones of a turn card, whose third zone is a *move* of the work log's
 //       tail and never a copy (see the bottom of this file), and
 //   (c) the diagnostics probes still speak — a `probe` / `nudge` the host sends comes
@@ -224,6 +227,31 @@ const TURN_MESSAGES = [
     ],
   },
   { type: 'backgroundNotice', nodeId: NODE_ID, item: { id: 'smoke-bg', name: 'smoke', doneText: 'done', content: 'x' } },
+  // The **window-global** dock: every session's jobs, each tagged with its session. A
+  // tab that does not own the job still shows its row (the detailed checks — rows,
+  // labels, kill / ✕ / clear, and that the per-node cards are untouched — are further
+  // down, in the dock's own block).
+  {
+    type: 'backgroundsGlobal',
+    jobs: [
+      {
+        sessionId: 'smoke-session',
+        sessionTitle: 'Smoke session',
+        id: 7,
+        cardNodeId: null,
+        command: 'smoke',
+        status: 'running',
+        exitCode: null,
+        killed: false,
+        detached: false,
+        startedAt: Date.now() - 1000,
+        finishedAt: null,
+        outputTail: 'x',
+        delivered: false,
+        dismissed: false,
+      },
+    ],
+  },
   { type: 'notice', kind: 'warning', text: 'smoke' },
   // The same type, node-scoped: a notice that names a card and a `noticeId` is one
   // block *updated* as its state advances (the silent-retry marker), not one block per
@@ -1849,6 +1877,331 @@ if (contextLabel !== 'ctx 50%') {
       problems.push('the notification opened a card of its own — it must stay inside the owner node');
     }
   }
+}
+
+// --- The window-global terminal dock (#term-dock) -----------------------------
+// Every background command of the **window** — whatever session, whatever tab — is one
+// fixed list at the top-right of every tab, and a row renders the SAME body the owning
+// node's `kind:'bg'` card renders (`buildBgBody`, one builder, two call sites). The host
+// broadcasts the whole list as `backgroundsGlobal` (coalesced ~200 ms) and is the one
+// that decides what it holds: a dismissed job never arrives, and the client refuses one
+// that does. What this block pins:
+//   (a) the dock exists in the shell and its retired predecessors (`bg-panel` / `-list`
+//       / `-count` / `-head`) are gone from both the shell and this script;
+//   (b) the label counts the running jobs, one row per job, the session title on it;
+//   (c) `kill` only while a job runs, `✕` only when it finished, `Delivered` and `shared`
+//       where the card wears them;
+//   (d) the three actions post the shapes the host routes (`sessionId` travels with the
+//       session-local id; the ✕ names the record; `Clear finished` names nothing);
+//   (e) a repaint touches only the row that changed, and the dock path never calls
+//       `relayout()` / `scheduleLayout()` (it is fixed, outside the canvas);
+//   (f) the row set is keyed by `(sessionId, id)` — the same task id in two sessions is
+//       two jobs — and the `kind:'bg'` cards are still rendered beside their nodes.
+{
+  const shell = fs.readFileSync(path.join(root, 'src', 'chat', 'webviewShell.ts'), 'utf8');
+  const scriptText = fs.readFileSync(scriptPath, 'utf8');
+  const RETIRED = ['bg-panel', 'bg-list', 'bg-count', 'bg-head'];
+
+  // (a) The shell carries the dock, and nothing brings the old panel back.
+  for (const id of ['term-dock', 'term-dock-head', 'term-dock-label', 'term-dock-list', 'term-dock-clear']) {
+    if (!shell.includes(`id="${id}"`)) {
+      problems.push(`src/chat/webviewShell.ts has no #${id} — the terminal dock must exist in every tab's shell`);
+    }
+  }
+  for (const id of RETIRED) {
+    if (shell.includes(`id="${id}"`)) {
+      problems.push(`src/chat/webviewShell.ts carries the retired #${id} again`);
+    }
+    if (scriptText.includes(`getElementById('${id}')`)) {
+      problems.push(`media/main.js looks up the retired #${id} — it no longer exists in the shell`);
+    }
+  }
+
+  // (e) The dock's own section must not re-lay out the tree: a job that prints is a row
+  // that repaints, never a tree that moves.
+  const dockFrom = scriptText.indexOf('// ---- The window-global terminal dock');
+  const dockTo = scriptText.indexOf('// ---- Tree rendering ----');
+  if (dockFrom < 0 || dockTo <= dockFrom) {
+    problems.push('media/main.js has no "window-global terminal dock" section — the dock disappeared');
+  } else if (/relayout\s*\(|scheduleLayout\s*\(/.test(scriptText.slice(dockFrom, dockTo))) {
+    problems.push('the terminal dock calls relayout() / scheduleLayout() — it is fixed and must never move the tree');
+  }
+
+  const dock = elementById('term-dock');
+  const list = elementById('term-dock-list');
+  const head = elementById('term-dock-head');
+  const label = elementById('term-dock-label');
+  const clear = elementById('term-dock-clear');
+  const hidden = (element) => !!element && element.classList.contains('hidden');
+  const rowsOf = () =>
+    (list.children || []).filter((child) => child.classList && child.classList.contains('term-dock-row'));
+  const textOf = (element, selector) => String((findByClass(element, selector) || {}).textContent || '');
+  const jobFixture = (extra) =>
+    Object.assign(
+      {
+        sessionId: 'dock-session-a',
+        sessionTitle: 'Session A',
+        id: 1,
+        cardNodeId: 'dock-card-a',
+        command: 'npm run watch',
+        status: 'running',
+        exitCode: null,
+        killed: false,
+        detached: false,
+        startedAt: Date.now() - 2000,
+        finishedAt: null,
+        outputTail: 'compiling…',
+        delivered: false,
+        dismissed: false,
+      },
+      extra || {},
+    );
+
+  // An empty list hides the dock (an empty frame on every tab is noise, not a feature).
+  dispatch({ type: 'backgroundsGlobal', jobs: [] });
+  if (rowsOf().length !== 0) {
+    problems.push(`an empty \`backgroundsGlobal\` left ${rowsOf().length} dock row(s)`);
+  }
+  if (!hidden(dock)) {
+    problems.push('the terminal dock stays visible with no jobs in it');
+  }
+
+  // (b)/(c) A running job (session A) and a finished, delivered, detached job whose task
+  // id is the **same number** in another session (B): two jobs, two rows.
+  const running = jobFixture({});
+  const finished = jobFixture({
+    sessionId: 'dock-session-b',
+    sessionTitle: 'Session B',
+    id: 1,
+    cardNodeId: 'dock-card-b',
+    command: 'npm test',
+    status: 'finished',
+    exitCode: 0,
+    detached: true,
+    startedAt: Date.now() - 9000,
+    finishedAt: Date.now() - 1000,
+    outputTail: 'ok',
+    delivered: true,
+  });
+  if (dispatch({ type: 'backgroundsGlobal', jobs: [running, finished] })) {
+    problems.push(
+      "a `backgroundsGlobal` message threw — the webview no longer understands the window-global dock",
+    );
+  }
+  if (hidden(dock)) {
+    problems.push('the terminal dock is still hidden although the snapshot carries two jobs');
+  }
+  const labelText = String(label.textContent || '');
+  if (labelText !== 'Terminals · 1 running') {
+    problems.push(`the dock header reads ${JSON.stringify(labelText)}, expected "Terminals · 1 running"`);
+  }
+  const rows = rowsOf();
+  if (rows.length !== 2) {
+    problems.push(
+      `the dock rendered ${rows.length} row(s) for two jobs with the same task id in two sessions — ` +
+        'the identity is `(sessionId, id)`',
+    );
+  } else {
+    const [first, second] = rows;
+    if (textOf(first, 'term-dock-session') !== 'Session A') {
+      problems.push(`dock row 1 names its session ${JSON.stringify(textOf(first, 'term-dock-session'))}, expected "Session A"`);
+    }
+    if (textOf(first, 'bg-card-id') !== '#1' || textOf(first, 'bg-status') !== 'running') {
+      problems.push(
+        `the running dock row shows ${JSON.stringify(textOf(first, 'bg-card-id') + ' ' + textOf(first, 'bg-status'))}, ` +
+          'expected "#1 running"',
+      );
+    }
+    if (textOf(first, 'bg-card-cmd') !== 'npm run watch' || textOf(first, 'bg-output') !== 'compiling…') {
+      problems.push('a running dock row does not render the shared job body (command + output tail)');
+    }
+    if (!findByClass(first, 'bg-kill')) {
+      problems.push('a running dock row has no kill button');
+    }
+    if (findByClass(first, 'term-dock-dismiss')) {
+      problems.push('a running dock row offers the dock removal (✕) — a running job cannot be dismissed');
+    }
+    if (textOf(second, 'term-dock-session') !== 'Session B') {
+      problems.push(`dock row 2 names its session ${JSON.stringify(textOf(second, 'term-dock-session'))}, expected "Session B"`);
+    }
+    if (textOf(second, 'bg-status') !== 'exit 0') {
+      problems.push(`a finished dock row reads ${JSON.stringify(textOf(second, 'bg-status'))}, expected "exit 0"`);
+    }
+    if (!findByClass(second, 'node-delivered-badge')) {
+      problems.push('a delivered job is not badged `Delivered` in the dock');
+    }
+    if (!findByClass(second, 'node-shared-badge')) {
+      problems.push('a detached job is not badged `shared` in the dock');
+    }
+    if (!findByClass(second, 'term-dock-dismiss')) {
+      problems.push('a finished dock row has no ✕ (the way out of the list)');
+    }
+    if (findByClass(second, 'bg-kill')) {
+      problems.push('a finished dock row still offers a kill button');
+    }
+    // The shared body is the same markup the card builds, in its own body wrapper.
+    if (!findByClass(first, 'term-dock-body')) {
+      problems.push('a dock row has no `.term-dock-body` — the shared job body has no home');
+    }
+  }
+  if (hidden(clear)) {
+    problems.push('`Clear finished` is hidden although the dock lists a finished job');
+  }
+
+  // (d) The three actions, in the shapes the host routes. The task id is session-local,
+  // so every `killBackground` from the dock carries its session.
+  const click = (element, payload) => {
+    const handler = element && element._listeners && element._listeners.click;
+    if (typeof handler !== 'function') return;
+    handler(payload || { stopPropagation() {} });
+  };
+  if (rows.length === 2) {
+    posted.length = 0;
+    click(findByClass(rows[0], 'bg-kill'));
+    const kill = posted.find((m) => m && m.type === 'killBackground');
+    if (!kill || kill.sessionId !== 'dock-session-a' || kill.id !== 1) {
+      problems.push(`a dock kill posted ${JSON.stringify(posted)}, expected { type: 'killBackground', sessionId: 'dock-session-a', id: 1 }`);
+    }
+    posted.length = 0;
+    click(findByClass(rows[1], 'term-dock-dismiss'));
+    const dismiss = posted.find((m) => m && m.type === 'dismissBackground');
+    if (!dismiss || dismiss.sessionId !== 'dock-session-b' || dismiss.cardNodeId !== 'dock-card-b') {
+      problems.push(
+        `a dock ✕ posted ${JSON.stringify(posted)}, expected { type: 'dismissBackground', sessionId: 'dock-session-b', cardNodeId: 'dock-card-b' }`,
+      );
+    }
+  }
+  posted.length = 0;
+  click(clear);
+  if (!posted.some((m) => m && m.type === 'clearFinishedBackgrounds')) {
+    problems.push(`\`Clear finished\` posted ${JSON.stringify(posted)}, expected { type: 'clearFinishedBackgrounds' }`);
+  }
+  // The header folds the dock; the count stays on it.
+  if (typeof (head && head._listeners && head._listeners.click) !== 'function') {
+    problems.push('the dock header has no click handler (the dock cannot collapse)');
+  } else {
+    click(head);
+    const collapsed = dock.classList.contains('collapsed');
+    click(head);
+    if (!collapsed) {
+      problems.push('clicking the dock header does not collapse it');
+    } else if (dock.classList.contains('collapsed')) {
+      problems.push('a second click does not expand the dock again');
+    }
+  }
+
+  // (e) A repaint touches only the row whose facts moved.
+  if (rows.length === 2) {
+    const rowBefore = rows[0];
+    const bodyBefore = findByClass(rowBefore, 'bg-kill');
+    const untouchedBefore = rows[1];
+    const untouchedHead = untouchedBefore.children[0];
+    dispatch({ type: 'backgroundsGlobal', jobs: [running, finished] });
+    if (rowsOf()[0] !== rowBefore) {
+      problems.push('an unchanged snapshot rebuilt the dock row element');
+    }
+    if (findByClass(rowsOf()[0], 'bg-kill') !== bodyBefore) {
+      problems.push('an unchanged snapshot rebuilt a dock row body (the signature diff did nothing)');
+    }
+    if (rowsOf()[1] !== untouchedBefore || rowsOf()[1].children[0] !== untouchedHead) {
+      problems.push('a repaint touched a dock row whose own facts did not change');
+    }
+    dispatch({
+      type: 'backgroundsGlobal',
+      jobs: [Object.assign({}, running, { outputTail: 'compiled' }), finished],
+    });
+    if (rowsOf()[0] !== rowBefore) {
+      problems.push('a changed dock row replaced its row element instead of repainting in place');
+    }
+    if (findByClass(rowsOf()[0], 'bg-kill') === bodyBefore) {
+      problems.push('a changed dock row was not repainted (its new output tail never rendered)');
+    }
+    if (textOf(rowsOf()[0], 'bg-output') !== 'compiled') {
+      problems.push('a repainted dock row does not show the job\'s new output tail');
+    }
+  }
+
+  // A row the host still marks dismissed is not rendered (the host filters them out; this
+  // is the second half of the same rule, so neither side can resurrect a removed row).
+  dispatch({
+    type: 'backgroundsGlobal',
+    jobs: [running, finished, jobFixture({ id: 3, cardNodeId: 'dock-card-c', dismissed: true })],
+  });
+  if (rowsOf().length !== 2) {
+    problems.push(`a row flagged \`dismissed\` was rendered — the dock lists ${rowsOf().length} row(s)`);
+  }
+
+  // (f) A session switch repaints the tree, never the dock — and the owning node's
+  // `kind:'bg'` card is still rendered beside its parent (the dock adds a view; it does
+  // not replace the card).
+  const ROOT = 'dock-fixture-root';
+  const JOB = 'dock-fixture-job';
+  dispatch({ type: 'reset' });
+  dispatch({
+    type: 'tree',
+    viewId: ROOT,
+    activeId: null,
+    rootId: ROOT,
+    nodes: [
+      {
+        id: ROOT,
+        parentId: null,
+        children: [JOB],
+        title: 'dock root',
+        status: 'done',
+        createdAt: 0,
+        preview: 'dock root',
+        usage: null,
+        size: null,
+      },
+      {
+        id: JOB,
+        parentId: ROOT,
+        children: [],
+        title: 'sleep 5',
+        status: 'done',
+        createdAt: 0,
+        preview: '',
+        usage: null,
+        size: null,
+        kind: 'bg',
+        bgTaskId: 5,
+        bgCommand: 'sleep 5',
+        bgExitCode: 0,
+        bgElapsedMs: 4000,
+        delivered: true,
+      },
+    ],
+  });
+  dispatch({ type: 'path', ids: [ROOT], nodes: [{ id: ROOT, status: 'done', items: [] }] });
+  if (rowsOf().length !== 2) {
+    problems.push('a `reset` (a session switch) dropped the window-global dock rows — it belongs to the window');
+  }
+  let jobCard = null;
+  for (const child of elementById('tree-canvas').children) {
+    if (child.dataset && child.dataset.id === JOB) jobCard = child;
+  }
+  if (!jobCard) {
+    problems.push(`no card was rendered for the dock fixture's \`kind:'bg'\` node ${JOB}`);
+  } else {
+    if (textOf(jobCard, 'bg-card-id') !== '#5' || textOf(jobCard, 'bg-card-cmd') !== 'sleep 5') {
+      problems.push('a `kind:bg` card no longer renders the shared job body (the dock and the card share one builder)');
+    }
+    if (findByClass(jobCard, 'bg-elapsed') && String(findByClass(jobCard, 'bg-elapsed').textContent) !== '4.0s') {
+      problems.push(
+        `a restored job card reads ${JSON.stringify(String(findByClass(jobCard, 'bg-elapsed').textContent))} in its elapsed chip, expected the persisted "4.0s"`,
+      );
+    }
+    if (!findByClass(jobCard, 'node-delivered-badge')) {
+      problems.push('the dock fixture\'s delivered job card lost its `Delivered` badge');
+    }
+  }
+  // Leave the dock empty for the blocks below (they read the tree, not the window).
+  dispatch({ type: 'backgroundsGlobal', jobs: [] });
+  notes.push(
+    'window-global dock: two sessions × one row each (same task id), kill / ✕ / clear posted with the session, ' +
+      'only the changed row repainted, no layout from the dock, the job cards still rendered',
+  );
 }
 
 // --- Lazy sub-agent transcripts ----------------------------------------------

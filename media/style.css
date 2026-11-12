@@ -828,6 +828,177 @@ button.icon-btn {
   background: var(--error-bg);
 }
 
+/* ---- The window-global terminal dock (#term-dock) -------------------------------
+   Every background command of the window — every session, whatever tab is in front —
+   one row per job, pinned to the top-right of the viewport. It is `fixed` and lives
+   outside #tree-canvas, so a job that prints never moves the tree and a repaint of the
+   dock never runs a layout. It sits ABOVE the cards and the autoscroll origin
+   (z-index 1000) and BELOW the floating node / snippet menus (2000), so a right-click
+   menu is never hidden behind it. A row's body is the shared job body
+   (`buildBgBody` in media/main.js), i.e. the same status row, command and output tail
+   the owning node's `kind:'bg'` card renders. */
+#term-dock {
+  position: fixed;
+  /* Below the tree toolbar (follow / fit, one 26px row plus its padding): the dock is
+     pinned to the top-right corner of the viewport but never covers those two buttons. */
+  top: 44px;
+  right: 10px;
+  z-index: 1500;
+  width: 340px;
+  max-width: calc(100vw - 20px);
+  display: flex;
+  flex-direction: column;
+  max-height: 45vh;
+  background: var(--assistant-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+  font-size: 11px;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#term-dock.hidden {
+  display: none;
+}
+
+#term-dock-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+  padding: 3px 6px;
+  border-bottom: 1px solid var(--border);
+}
+
+#term-dock.collapsed #term-dock-bar {
+  border-bottom: 0;
+}
+
+#term-dock-head {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 2px 2px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  text-align: left;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The collapse caret: one glyph, not a translated label (it is a control, not text). */
+#term-dock-head::before {
+  content: '▾';
+  margin-right: 4px;
+  color: var(--text-dim);
+}
+
+#term-dock.collapsed #term-dock-head::before {
+  content: '▸';
+}
+
+#term-dock-clear {
+  flex: 0 0 auto;
+  padding: 2px 6px;
+  font: inherit;
+  font-size: 10px;
+  color: var(--text-dim);
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+#term-dock-clear:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+#term-dock-clear.hidden {
+  display: none;
+}
+
+#term-dock-list {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  max-height: calc(45vh - 28px);
+}
+
+#term-dock.collapsed #term-dock-list {
+  display: none;
+}
+
+.term-dock-row {
+  padding: 4px 6px;
+  border-top: 1px solid var(--border);
+}
+
+#term-dock-list > .term-dock-row:first-child {
+  border-top: 0;
+}
+
+.term-dock-row.running {
+  border-left: 2px solid var(--warn);
+}
+
+.term-dock-row-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.term-dock-session {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 10px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.term-dock-actions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.term-dock-dismiss {
+  flex: 0 0 auto;
+  padding: 0 4px;
+  font-size: 11px;
+  line-height: 16px;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.term-dock-dismiss:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+.term-dock-body {
+  margin-top: 3px;
+}
+
+.term-dock-body .bg-output {
+  max-height: 108px;
+  margin: 2px 0 0;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
 #tps-meter {
   display: flex;
   align-items: center;

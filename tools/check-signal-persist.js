@@ -51,7 +51,7 @@ const raw = {
           ...turnNode('root', null, 'root turn'),
           children: ['bg-done', 'bg-running', 'agent', 'agent-live', 'next'],
         },
-        'bg-done': { ...bgNode('bg-done', 'root', 'done'), delivered: true },
+        'bg-done': { ...bgNode('bg-done', 'root', 'done'), delivered: true, bgDockDismissed: true },
         'bg-running': bgNode('bg-running', 'root', 'running'),
         agent: {
           ...turnNode('agent', 'root', 'sub-agent'),
@@ -94,6 +94,19 @@ ok(
   n['bg-done'] && `${n['bg-done'].bgCommand} · exit ${n['bg-done'].bgExitCode} · ${n['bg-done'].bgOutputTail}`,
 );
 ok('  … and the .bgnotify block is still in its transcript', (n['bg-done'].displayItems || []).some((i) => i.kind === 'background'));
+// The dock's removal is a field on the **record** (it survives a reload with the
+// session), and it is not the tree's delete: the card is still there, still a `bg`
+// record with its terminal state — only the dense list stopped listing it.
+ok(
+  "  … and the dock's removal (bgDockDismissed) survives the load",
+  n['bg-done'] && n['bg-done'].bgDockDismissed === true,
+  n['bg-done'] && String(n['bg-done'].bgDockDismissed),
+);
+ok(
+  '  … while a job the user never removed carries no flag at all',
+  n['bg-running'] && n['bg-running'].bgDockDismissed === undefined,
+  n['bg-running'] && String(n['bg-running'].bgDockDismissed),
+);
 
 console.log('-- a card that was mid-flight when the host died --');
 ok('a still-running bg card stops claiming to run', n['bg-running'] && n['bg-running'].status !== 'running', n['bg-running'] && n['bg-running'].status);

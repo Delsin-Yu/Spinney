@@ -289,6 +289,16 @@ export interface TreeNode {
   bgElapsedMs?: number;
   /** kind === 'bg': last ~800 chars of output, captured at the terminal state. */
   bgOutputTail?: string;
+  /**
+   * `kind:'bg'` only: the user removed this record from the **window-global terminal
+   * dock** (`#term-dock`). It is a field on the record, not a separate list, so it
+   * survives a reload with the session — and it is **not** the tree's delete: the
+   * card stays where it is (its terminal state, its `Delivered` badge, its place in
+   * the owning node's grid), only the dock stops listing it. Two removal gestures,
+   * two meanings, deliberately not one flag used twice. A **running** job can never
+   * be dismissed, so a live job is always listed.
+   */
+  bgDockDismissed?: true;
 }
 
 /**
@@ -1080,6 +1090,9 @@ function normalizeTreeSession(raw: AgentSession & { rootId?: string | null }): A
     n.bgKilled = typeof node.bgKilled === 'boolean' ? node.bgKilled : undefined;
     n.bgElapsedMs = typeof node.bgElapsedMs === 'number' ? node.bgElapsedMs : undefined;
     n.bgOutputTail = typeof node.bgOutputTail === 'string' ? node.bgOutputTail : undefined;
+    // The dock's removal list, persisted on the record it removes (see
+    // `TreeNode.bgDockDismissed`): `true` or absent, never anything else.
+    n.bgDockDismissed = node.bgDockDismissed === true ? true : undefined;
     session.nodes[id] = n;
   }
   pruneSession(session);

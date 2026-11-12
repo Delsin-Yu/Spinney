@@ -114,6 +114,22 @@ export function buildChatShell(webview: vscode.Webview, opts: ChatShellOptions):
       </span>
     </div>
   </div>
+  <!-- The window-global terminal dock: every background command of the window — running
+       or finished, whatever session — one row per job, at the top-right of EVERY tab.
+       The shell carries only the frame (so the dock exists before the first snapshot
+       arrives); the rows, the "Terminals · {0} running" label and the collapse state are
+       built by media/main.js from the backgroundsGlobal snapshot. A row renders the same
+       body the owning node's kind:bg card renders (buildBgBody), so the two views of one
+       job cannot disagree. -->
+  <div id="term-dock" class="hidden">
+    <div id="term-dock-bar">
+      <button id="term-dock-head" aria-expanded="true" title="${vscode.l10n.t('Collapse or expand the terminal dock')}">
+        <span id="term-dock-label"></span>
+      </button>
+      <button id="term-dock-clear" class="hidden">${vscode.l10n.t('Clear finished')}</button>
+    </div>
+    <div id="term-dock-list"></div>
+  </div>
   <script nonce="${nonce}" src="${markdownItUri}"></script>
   <script nonce="${nonce}" src="${layoutEngineUri}"></script>
   <script nonce="${nonce}" src="${treeUri}"></script>
