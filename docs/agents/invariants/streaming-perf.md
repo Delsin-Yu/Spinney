@@ -479,6 +479,25 @@ accumulated in `winBlurMs`), and coming back is the moment the diagnostic exists
   One line per return (59 of them in the measured 3 h 20 m), and a healthy one is still
   evidence: it says the surface agreed with its window at the moment the user came back.
 
+- `webview-composer-focus state=blur|restore|restored|skip|lost reason=… hasFocus=… active=…
+  relatedTarget=… msSinceBlur=… retries=…` — the **caret** half of the same return, and the
+  one place the platform's own focus is visible. A retained webview document keeps its DOM,
+  but `WebviewEditor.focus()` (which runs ~50 ms after the window comes back, throttled)
+  focuses the webview's **frame**, not the element inside it, so the composer's caret blinks
+  for a few milliseconds and is gone; VS Code closed "restore focus inside a retained
+  webview" as out of scope for extensions, so the webview re-asserts the caret itself
+  (`restoreComposerFocus` in `media/main.js`) and reports every sequence: `blur` is a caret
+  lost while the window was away (`hasFocus=false`, `relatedTarget` is where the focus went),
+  `restore` is a sequence starting (`reason=window|blur|mount|show`), `restored` / `lost` is
+  how it ended after `retries` re-asserts, and `skip` is the policy refusing — the dock hidden
+  or read-only, or a `focusout` that says the user clicked somewhere else in this document
+  (`reason=window/hidden`, `…/readonly`, `focus-elsewhere`, `pointer-elsewhere`). `active=` is
+  the element the document's focus was on (an id, or a tag plus two classes — never its text),
+  `msSinceBlur` is `-1` when the caret was never lost in this document, and `retries=0` next to
+  a `skip` is the proof that no focus call was even attempted. It is written per **sequence**,
+  not per tick: a healthy return with the caret in the dock writes two lines (`restore`,
+  `restored`), and one where the user had already clicked elsewhere writes none at all.
+
 - `webview-stall state=stale ms=… frames=… hiddenMs=… tab=… tabHiddenMs=… canvas=… dom=…
   doc=… zoom=…` — the renderer stopped producing frames for at least 3 s **in a tab that is
   on screen**. `frames=` is the sampler's running total (it stops growing), `hiddenMs=` how
@@ -694,7 +713,10 @@ and `[perf] window active=…` follows the window's own focus. Those two facts a
 **pushed into the tab** — the window's focus rides in the same `viewState` message the tab's
 visibility does (`ChatPanel.viewStateTo`, forwarded by the provider's
 `onDidChangeWindowState`), because the sampler has to stop calling an unfocused window a
-frozen screen, and only the document can take the snapshot of the return. A hidden tab in a
+frozen screen, and only the document can take the snapshot of the return. The same message is
+what re-asserts the **composer's caret**: the platform's own focus lands on the webview's
+frame rather than the element inside the document, so the return is a caret sequence too
+(`webview-composer-focus`, in the line list above). A hidden tab in a
 background window is allowed to be stale; so is a tab in an unfocused one; a tab that is
 `visible`, `active` **and** in a focused window is not, and that is the condition the
 automatic probe tests.
@@ -703,11 +725,13 @@ automatic probe tests.
 or more, the visibility and resize lines are written on change, and a probe only exists
 because the tab is already stale. The sampler runs at one frame per second and stops while
 hidden, and a stall that is still in flight repeats at most once every 10 s, so even a tab
-that froze for an hour adds a bounded handful of lines. The two lines a *user* causes are
+that froze for an hour adds a bounded handful of lines. The lines a *user* causes are
 the return snapshot (`webview-focus`, one per return to a focused window — 59 of them in the
-measured 3 h 20 m) and `webview-resize` (one per half second while a panel is being dragged),
-and both are only written for a change. The per-session volume stays in the low hundreds of
-lines a day, the same order as the op trace it can be read next to.
+measured 3 h 20 m), its caret trace (`webview-composer-focus`, two lines for a return with the
+caret in the composer and none when the user had already clicked elsewhere) and
+`webview-resize` (one per half second while a panel is being dragged),
+and all of them are only written for a change. The per-session volume stays in the low
+hundreds of lines a day, the same order as the op trace it can be read next to.
 
 ### Sending the log to someone else: the diagnostics log
 
