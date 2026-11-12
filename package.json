@@ -2,7 +2,7 @@
   "name": "spinney",
   "displayName": "Spinney",
   "description": "%description%",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "publisher": "DE-YU",
   "license": "MIT",
   "author": {
@@ -528,7 +528,6 @@
     "sim": "node tools/sim/run.mjs",
     "sim:selftest": "node tools/sim/run.mjs --selftest",
     "vscode:prepublish": "npm run compile && npm run sync:l10n && npm run check:models && npm run check:webview && npm run check:modeltree && npm run check:signals && npm run check:l10n && npm run check:rollover && npm run check:compaction && npm run check:grid && npm run check:docs && npm run check:cwd && npm run check:args && npm run check:search && npm run check:shell && npm run check:kill && npm run check:exec && npm run check:websearch && npm run check:image && npm run check:neterror && npm run check:unicode && npm run check:continue"
-
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

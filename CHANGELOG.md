@@ -5,7 +5,139 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.7.0] - 2026-11-13
+
+### Added
+
+- **One entry for every new context.** A new-epoch transition used to have three
+  inconsistent entries: the per-card `⧉ Continue in a new window`, a composer `⧉` shown
+  only for a harness drift, and a modal raised by a plain send after a model/effort
+  change. All three are replaced by one composer button, immediately left of Send:
+  **`Continue with new context`**, or **`Compact and Continue`** when the box is empty.
+  It appears when a new epoch exists (setup drift, a context window near 90%, or a full
+  window), never while the focused node is running or locked (Stop owns the row), and it
+  is disabled only in a read-only window or on a sub-agent branch. A click asks one
+  question and then does one of two things: with a full or near window it opens a new
+  context window (dotted edge, `CTX` badge) carrying your message as a real user turn;
+  with a setup drift it forks the tree and sends there. The question offers **`Write a
+  handoff summary`** (one extra request) or **`Just continue`** (point the new window at
+  the previous branch); on a full window it also names the context length the provider
+  just refused. Send now disables on an empty box and on a full window, and Enter goes
+  through it, so a disabled Send means Enter does nothing; a plain send with a drift keeps
+  the frozen setup silently. The frozen prompt and the tool set are still compared by
+  content hash, but the AGENTS.md half is now read from disk at the moment of the check
+  (`src/chat/agentsMd.ts`, mtime-cached), so a file edited while VS Code was closed shows
+  up as a drift instead of needing a reload. A breaking tool-schema change (like this
+  release's) therefore marks every older chain as drifted, and this button is the way to
+  carry it into a new epoch.
+- **A handoff summary for a rollover.** Choosing `Write a handoff summary` runs one
+  bounded, tool-less, non-streaming request on the outgoing card before the new window
+  exists. The input is never the whole chain: the first user message verbatim, every user
+  message clipped to 500 chars, the last eight assistant texts, and each tool call as
+  `name -> brief -> first line of the result`, capped at 60,000 chars with a head+tail
+  selection. The answer is a fixed eleven-section handoff (primary request, concepts,
+  files with "re-read before editing", errors and fixes, problem solving, all user
+  messages, pending tasks, current work, the quoted next step, durable references, and a
+  handoff contract naming the successor as the same agent). It is validated against nine
+  required headings, retried once, and on any timeout (30 s), error, empty or invalid
+  answer the rollover falls back to the pointer text and says the summary was
+  unavailable. `npm run check:compaction` pins the bounds, the schema and every fallback
+  offline.
+- **A hopped-to session hands back when it decides to.** A session started by a
+  `return_when_finished` hop now sees a `finish_hop(source_session_node_id?)` tool, and
+  **nothing returns to the caller on its own**: a turn end, an interrupt and a Stop all
+  leave the hop armed, so a hopped session can finally be steered. The call marks the
+  hand-back and picks the landing node (validated against the origin session); the report
+  is the child's final reply, delivered once the child is idle (a running node job, a
+  sub-agent batch or a queued notice still holds it). The child's first prompt carries a
+  short preamble naming the caller, the tool and the landing rule, and `fire_and_forget`
+  children never get the tool. `tools/harness-test.mjs`'s hop suite and the simulator now
+  exercise the hand-back.
+- **`exec_command` has run types, and waiting is a tool.** The four `timeout_behavior`
+  values and the two command timeouts are gone. The schema is
+  `exec_command(command, cwd?, run_type?)` with `run_type` `foreground` (default),
+  `background` or `detached`; no job has a deadline any more, so the budget machinery
+  (`timeoutMs`, `deadlineAt`, `expireBudget`, `remainingBudgetMs`) is deleted with it. A
+  foreground command still running after `spinney.execForegroundSeconds` (default 30,
+  10…999999999999) is **always** moved to the background with a handle and instructions
+  instead of being killed or refused. Waiting is now a tool: `wait_for_command(id,
+  seconds?)` (default 30, at most 300) returns the moment the command ends and is a plain
+  "still running" answer when it does not, pointing at `check_command` (a status read) or
+  `kill_command` (then relaunch a quieter command); never `sleep` for a job again. The
+  three management tools are also exposed to writable sub-agents, which could already
+  start a job but not read it, and `npm run check:exec` (104 checks) pins the whole
+  matrix.
+- **A window-global terminal dock.** Every background command of the window, running or
+  finished, whatever session, is one list on every chat tab: `#term-dock`, fixed at the
+  top-right, with a collapsible `Terminals · N running` header and one row per job. A row
+  is the same card body the owning node renders (a shared builder, so the two views cannot
+  disagree) plus the session title, the live output tail, the elapsed chip, the kill
+  button while it runs and a ✕ when it is finished. The host broadcasts
+  `backgroundsGlobal` to every open panel on the same ~200 ms coalescing as the
+  per-session snapshot; a tab that comes up is sent one at once. Removing a job is a
+  field on its record (`bgDockDismissed`), persisted with the session, so a reload keeps
+  the dock clean while the tree card — the other view — stays; the tree's delete still
+  removes the record. `Clear finished` empties the dock for the whole window.
+- **A hard search budget, and a search that is not tied to the workspace.** `search_files`
+  and `search_transcripts` now share one hard wall clock, `spinney.searchTimeoutSeconds`
+  (default 10, 1…600), for the whole call; on timeout the answer is an `Error:` line with
+  no hits at all, telling the model to narrow the path, tighten the pattern, add a glob,
+  lower the context, or ask the user to raise the setting. The ripgrep child and the
+  fallback walk share that one budget instead of spending 20 s each. `search.exclude` /
+  `files.exclude` are applied only when the search root is inside the open workspace, the
+  build directories are passed to ripgrep as globs (they used to be pruned only by the
+  walk), the per-file cap rose from 1 MB to 8 MB, and ripgrep itself is now vendored for
+  five platforms (`media/vendor/ripgrep/<platform>-<arch>/`, with `PROVENANCE.md` and
+  hashes) and tried before VS Code's copy, with PATH last; `win32-arm64` has no upstream
+  ripgrep 14.1.1 build and falls through to VS Code's bundled binary. The tool
+  descriptions now say to prefer many small searches and to keep the shell for what is not
+  a search.
+- **`append_file`, and the verbatim frame is gone.** The `<<<RAW:key>>>` frame form is
+  removed from argument parsing, from the `write_file` / `replace_in_file` schemas and
+  from every doc; arguments are strict JSON. The one malformed shape agents kept
+  producing — the whole value wrapped in markers — is answered with one sentence telling
+  the model to send a plain JSON string, and nothing is written. For large files there is
+  now `append_file(path, content)`: write the first part with `write_file`, then append in
+  bounded chunks, preserving the file's line endings. `npm run check:args` pins both.
+- **One essay per turn.** The chat card is no longer a stack of blocks. Thinking renders
+  as one inline row: expanded as a dimmed italic paragraph while the turn runs, collapsed
+  to a single ellipsised line when it ends, and one click opens the full text with its
+  `[Prompt: … + Completion: …, Cache Hit …, Cache Miss …]` line. A tool call is one line
+  too: a bold, localized verb and a label, a status dot and the elapsed chip while it
+  runs, and a click expands the command, the result and the usage in place. Every tool
+  schema now takes an optional `title` — one short human label the model writes — which
+  the host reads into the display item so a clipped argument string cannot lose it; the
+  derived label is the fallback. The zone-2/zone-3 split, the answer promotion and the
+  work-log fold are deleted: the card has one flow and one scroller, and the final answer
+  is simply the last block.
+- **Alt + wheel pans the tree.** The wheel keeps its gestures (ctrl/cmd zooms, shift pans
+  sideways, a native scroll zone keeps its own wheel); Alt + wheel now pans the whole tree
+  vertically from anywhere, including over a card, a step detail or the composer.
+
+### Changed
+
+- Send is **disabled** on an empty box and on a full context window (a disabled Send also
+  means Enter does nothing); Stop still replaces it while the node runs or owns unfinished
+  work.
+- `check_background_terminal` / `join_background` / `kill_background` are now
+  `check_command` / `wait_for_command` / `kill_command`.
+- `spinney.commandDefaultTimeout` and `spinney.commandMaxForegroundDuration` are replaced
+  by `spinney.execForegroundSeconds` (30) and `spinney.subAgentSyncSeconds` (300, the sync
+  wait of `spawn_agents` / `send_agent_message`).
+- Every command still starts in the harness root and says so on its first line; a
+  foreground command that outlives the setting now says which id it became instead of
+  dying.
+
+### Removed
+
+- `spinney.foldThinking`, `spinney.foldToolCalls` and `spinney.foldWork` (the blocks they
+  folded no longer exist).
+- `spinney.commandDefaultTimeout`, `spinney.commandMaxForegroundDuration`, and the
+  `timeout` / `timeout_behavior` arguments of `exec_command` (a stale call is answered
+  with one sentence naming `run_type` and nothing is started).
+- The verbatim frame syntax and the `frame` argument.
+- The three old new-epoch entries: the card's `⧉`, the composer's harness-drift `⧉`, and
+  the setup modal (`askSetups` / `discardPendingSetup`).
 
 ### Fixed
 
@@ -24,6 +156,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   part of that set by design: it never reports back. `tools/harness-test.mjs`'s hop
   suite now starts its child with a background job and asserts no receipt lands before
   the child goes idle.
+
+- **The composer keeps its caret across a window reactivation.** With the caret in the
+  input, clicking another window and then clicking back into the input used to show the
+  caret for a few milliseconds and lose it. The cause is the platform, not a repaint: on
+  reactivation VS Code focuses the retained webview's **frame** (after a ~50 ms throttle),
+  not the element inside it, and VS Code closed the "restore focus inside the webview"
+  request as out of scope for extensions. The composer now tracks its own focus with
+  `focusin` / `focusout`, restores the caret (and the selection) after the platform's
+  focus on the next frame and again a tick later until it sticks, never steals focus when
+  the click was elsewhere, and logs one `composer-focus` trace per sequence.
 
 - **A single-line tool result can no longer kill a node.** An oversized result is
   spilled to `.spinney/tool-output/` and the answer is a pointer with a preview, but
@@ -876,7 +1018,8 @@ everything the extension contains — the baseline the project had reached at th
   `request-timeout` and `request-stall` lines, so a request that has not produced
   its first byte is now visible *while* it waits.
 
-[Unreleased]: https://github.com/Delsin-Yu/Spinney/compare/v0.5.1...HEAD
+[Unreleased]: https://github.com/Delsin-Yu/Spinney/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/Delsin-Yu/Spinney/releases/tag/v0.7.0
 [0.6.0]: https://github.com/Delsin-Yu/Spinney/releases/tag/v0.6.0
 [0.5.1]: https://github.com/Delsin-Yu/Spinney/releases/tag/v0.5.1
 [0.5.0]: https://github.com/Delsin-Yu/Spinney/releases/tag/v0.5.0
