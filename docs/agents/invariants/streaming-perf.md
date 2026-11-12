@@ -126,8 +126,9 @@ bounded by the folds instead, and `renderNodeItems` skips `paintItemsWindow` for
 stacked on it, and each has one renderer used by both the live path and the history
 repaint. The log carries **three type levels** and nothing louder: the prose and the
 reasoning are normal text (13 px `--text`, upright), a tool row's line is one step down
-(the verb in `--accent-dim`, the label 12 px `--text-dim`), the expanded detail is one more
-(11 px `--text-dim`), and the usage line stays the faintest footnote (10 px `--text-dim`).
+(the bold verb and the label both 12 px `--text-dim` — one grey for the whole title), the
+expanded detail is one more (11 px `--text-dim`), and the usage line stays the faintest
+footnote (10 px `--text-dim`).
 
 - **a thinking row** (`.msg.thinking-row`, `data-kind="thinking"`) — no header, no
   chevron, no label: the row *is* the control. Open (while its turn runs) it is the
@@ -145,11 +146,14 @@ reasoning are normal text (13 px `--text`, upright), a tool row's line is one st
   text are one row and one block, whatever order the provider streams them in**: a
   `thinkingDelta` that arrives after that message's text has started joins its own row
   above the answer, in place and without re-opening it.
-- **a tool row** (`.msg.tool`) — one line: a small status dot, the bold verb, the label and
-  the elapsed chip. The verb is per tool, `tr()`-localized (`TOOL_VERBS`: Read /
+- **a tool row** (`.msg.tool`) — one line: the bold verb, the label and the elapsed chip.
+  There is **no status dot**: the ticking chip is the running cue (the row still wears its
+  `running` / `done` class, for anything that reads the state rather than looks at it), and
+  the verb and the label are both `--text-dim`, so the whole title reads as one grey. The
+  verb is per tool, `tr()`-localized (`TOOL_VERBS`: Read /
   Viewed / Wrote / Edited / Appended / Listed / Searched / Recalled / Ran / Checked /
   Waited / Killed / Fetched / Spawned / Hopped / Finished / Renamed; a name no verb knows
-  keeps its own name) and painted in `--accent-dim`. The label is
+  keeps its own name) and bold. The label is
   **`DisplayItem.title`** — `exec_command`'s required `title` argument, read out of the
   call's arguments on the host (`toolTitleFromArgs`) and stored on the item, so a clipped
   argument string can never lose it — else `toolBrief()`'s path/command/pattern. It is
@@ -161,8 +165,8 @@ reasoning are normal text (13 px `--text`, upright), a tool row's line is one st
   result ~32 KiB, enforced host-side by `clipForUi`), the error text when there is one, and
   the usage line. The whole detail is one level down — 11 px `--text-dim` (monospace for
   the command and the output, because it is code) — and the usage line inside it stays the
-  faintest footnote of all. A running row's dot pulses and its chip ticks (250 ms); a
-  finished row's dot goes plain and its chip freezes at the host's `ms`.
+  faintest footnote of all. A running row's chip ticks (250 ms); a finished row's chip
+  freezes at the host's `ms`.
 
 Both are also the reason a card no longer grows a block per call: a step that took ten
 tools is ten one-line rows, and the reader who wants the output opens the one they care

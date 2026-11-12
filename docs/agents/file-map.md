@@ -470,11 +470,12 @@
   ellipsised line after, no label; the open form is normal prose at 13 px `--text`, capped at
   240 px with its own scrollbar, and carries the usage line
   `[Prompt: {0} + Completion: {1}, Cache Hit: {2}, Cache Miss: {3}]`) and *tool*
-  (`.msg.tool` — one line: a status dot, a bold `tr()`-localized verb from `TOOL_VERBS` in
-  `--accent-dim`, the label from `DisplayItem.title` or `toolBrief()` in 12 px
-  `--text-dim` — monospace and 11 px only for a **derived** command/pattern, i.e. only when
-  there is no `title` — and the elapsed chip; a click expands `.tool-detail` in place — the
-  `> args` line, the result, an error, the usage line, all 11 px `--text-dim`).
+  (`.msg.tool` — one line: a bold `tr()`-localized verb from `TOOL_VERBS` in `--text-dim`
+  and the label from `DisplayItem.title` or `toolBrief()` in 12 px
+  `--text-dim` — one grey for the whole title, monospace and 11 px only for a **derived**
+  command/pattern, i.e. only when there is no `title` — and the elapsed chip, whose tick is
+  the only running cue since the row has no status dot; a click expands `.tool-detail` in
+  place — the `> args` line, the result, an error, the usage line, all 11 px `--text-dim`).
   `renderItemInto` (the history repaint) goes through the **same** `addTool` /
   `makeThinkingRow` / `addAssistant` the live path uses and splits the items with the same
   per-run rule, and `tools/check-webview.js` pins both halves. While a thinking row is
@@ -597,7 +598,7 @@
   The card's reading height is one number in one place — `--node-max-h` (840 px), which a
   drag raises per card through an inline `max-height` and nothing writes an inline height
   — and the log's **three type levels** live here with it: the prose and the reasoning at
-  13 px `--text`, a tool row's verb in `--accent-dim` with its label at 12 px `--text-dim`
+  13 px `--text`, a tool row's bold verb and its label both at 12 px `--text-dim`
   (11 px monospace for a *derived* command/pattern only), the expanded `.tool-detail` at
   11 px `--text-dim`, and the usage line as the faintest footnote.
 - `media/vendor/markdown-it/` — **vendored, pinned** Markdown renderer

@@ -3845,8 +3845,9 @@ if (contextLabel !== 'ctx 50%') {
     }
   }
 
-  // (d) A tool row: the one line (`Verb label`), the dot, the chip, and a detail that
-  // holds the `> args` line and, once the call reports, its result.
+  // (d) A tool row: the one line (`Verb label`), the chip, and a detail that holds the
+  // `> args` line and, once the call reports, its result. There is deliberately no
+  // status dot: the ticking chip is the running cue.
   dispatch({ type: 'toolCallDelta', nodeId: NODE, index: 0, id: 'rows-tool', name: 'read_file', args: '{"path":"a/b.ts"}' });
   dispatch({
     type: 'toolStart',
@@ -3873,10 +3874,10 @@ if (contextLabel !== 'ctx 50%') {
         );
       }
       if (!hasClass(row, 'running')) {
-        problems.push('a tool row whose call is running does not carry the `running` class — the dot reads it');
+        problems.push('a tool row whose call is running does not carry the `running` class — the row state reads it');
       }
-      if (!findByClass(row, 'tool-dot')) {
-        problems.push('a tool row has no status dot');
+      if (findByClass(row, 'tool-dot')) {
+        problems.push('a tool row carries a `.tool-dot` — the row lost its status dot, its chip is the running cue');
       }
       const chip = findByClass(row, 'tool-elapsed');
       if (!chip || !/^1\.[0-9]s$/.test(String(textOf(chip)))) {
@@ -3896,7 +3897,10 @@ if (contextLabel !== 'ctx 50%') {
     dispatch({ type: 'toolEnd', nodeId: NODE, id: 'rows-tool', content: 'the file contents', ms: 640 });
     const done = lastOf('tool');
     if (done && !hasClass(done, 'done')) {
-      problems.push('a tool row whose call ended does not carry the `done` class — the dot reads it');
+      problems.push('a tool row whose call ended does not carry the `done` class — the row state reads it');
+    }
+    if (done && findByClass(done, 'tool-dot')) {
+      problems.push('a finished tool row carries a `.tool-dot` — the row lost its status dot for good');
     }
     const frozen = done ? findByClass(done, 'tool-elapsed') : null;
     if (!frozen || textOf(frozen) !== '640ms') {
