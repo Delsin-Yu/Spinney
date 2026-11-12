@@ -1,4 +1,3 @@
-import { TOOL_TITLE_DESCRIPTION } from '../types';
 import type { InterceptedTool } from './index';
 
 /**
@@ -32,7 +31,6 @@ export const spawnAgentsTool: InterceptedTool = {
               required: ['instruction', 'write'],
             },
           },
-          title: { type: 'string', description: TOOL_TITLE_DESCRIPTION },
           mode: { type: 'string', enum: ['sync', 'async'], description: 'sync (default) blocks for at most the configured spinney.subAgentSyncSeconds limit; if the batch is still running when that limit is reached, the call returns the agent ids and every summary is delivered later as one batch notice — so a long batch costs the turn nothing. async returns immediately and always notifies.' },
         },
         required: ['agents'],

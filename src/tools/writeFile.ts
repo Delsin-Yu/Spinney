@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { AgentTool, TOOL_TITLE_DESCRIPTION } from '../agent/types';
+import { AgentTool } from '../agent/types';
 import { applyEol, detectEol, ensureNotAborted, eolLabelOf, resolvePath, toLf, verbatimFrameError } from './index';
 
 export const writeFileTool: AgentTool = {
@@ -15,7 +15,6 @@ export const writeFileTool: AgentTool = {
         properties: {
           path: { type: 'string', description: 'File path to write.' },
           content: { type: 'string', description: 'Full file content to write, as a plain JSON string.' },
-          title: { type: 'string', description: TOOL_TITLE_DESCRIPTION },
         },
         required: ['path', 'content'],
       },

@@ -1,5 +1,5 @@
 import * as dns from 'dns';
-import { AgentTool, TOOL_TITLE_DESCRIPTION, ToolDefinition } from '../agent/types';
+import { AgentTool, ToolDefinition } from '../agent/types';
 import { describeFetchError } from '../agent/netError';
 import { ensureNotAborted, limitInline } from './index';
 import { awaitApiSlot, searchAccessFor, type CardResolver, type SearchAccess } from './webAccess';
@@ -362,7 +362,6 @@ const definition: ToolDefinition = {
       type: 'object',
       properties: {
         url: { type: 'string', description: 'Absolute http(s) URL to fetch.' },
-        title: { type: 'string', description: TOOL_TITLE_DESCRIPTION },
       },
       required: ['url'],
     },

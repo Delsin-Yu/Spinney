@@ -116,6 +116,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The steps tuck under one fold, and the final answer is plain flow text.** A turn
+  with tool calls now puts everything from its first tool call onward into one `.steps`
+  group under a `Ran N steps` header (or `Ran 1 step`): the reasoning, the tool lines,
+  the prose between them and the harness notes. The group is open while the turn runs
+  and folds when the reply finishes; a click toggles it and always wins over the resting
+  state. The final answer is lifted out of the group when the turn ends and is the
+  flow's last block, with no frame of its own (`.msg.assistant` lost its background and
+  border; the error variant keeps its tint). The reasoning line and the tool detail are
+  normal text — no dim, no italic — and an open reasoning line is capped at 240 px with
+  its own scrollbar, following its newest line unless the reader scrolled it. A cold card
+  with steps builds only the run-up, the header and the answer; the body is built on the
+  click that opens it, so the old scroll window now applies only to a tool-less long
+  turn.
 - Send is **disabled** on an empty box and on a full context window (a disabled Send also
   means Enter does nothing); Stop still replaces it while the node runs or owns unfinished
   work.
@@ -156,7 +169,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   part of that set by design: it never reports back. `tools/harness-test.mjs`'s hop
   suite now starts its child with a background job and asserts no receipt lands before
   the child goes idle.
-
 - **The composer keeps its caret across a window reactivation.** With the caret in the
   input, clicking another window and then clicking back into the input used to show the
   caret for a few milliseconds and lose it. The cause is the platform, not a repaint: on
@@ -166,7 +178,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `focusin` / `focusout`, restores the caret (and the selection) after the platform's
   focus on the next frame and again a tick later until it sticks, never steals focus when
   the click was elsewhere, and logs one `composer-focus` trace per sequence.
-
 - **A single-line tool result can no longer kill a node.** An oversized result is
   spilled to `.spinney/tool-output/` and the answer is a pointer with a preview, but
   that preview used to be "the first 8 **lines**". A minified file is one line: a
@@ -204,6 +215,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now hashes the rendered sections, so the one drift notice that follows this release
   is the template hash moving, not a per-file bookkeeping difference.
 
+
 ## [0.5.1] - 2026-11-04
 
 ### Fixed
@@ -223,6 +235,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   both cases: a fresh profile's tree is exactly the built-in provider plus the built-in
   card, and a save of one user card leaves the vendored card in the catalog.
 
+
 ## [0.5.0] - 2026-11-02
 
 ### Added
@@ -240,6 +253,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   title requests name the window of the session they are about. The Model Cards page has no
   control for the field; a save from it carries a hand-written value through. Every request
   also identifies itself as `spinney/<version>` in its `User-Agent`.
+
 
 ## [0.4.0] - 2026-10-25
 
@@ -316,6 +330,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Deleting a session retires every hop that touches it (origin **or** child). A hop whose child
   was deleted used to stay armed forever, refusing every later hop with "already in progress".
 
+
 ## [0.3.0] - 2026-10-09
 
 ### Added
@@ -363,6 +378,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer produced. **Sessions written by an earlier build** cannot be reconstructed (the text
   is there, the field is not): continue from an earlier node, or use **⧉** if the card offers
   it.
+
 
 ## [0.2.0] - 2026-10-02
 
@@ -523,6 +539,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   now, so the two read as one block, and every `setStatus` string in zh-Hans is fixed by the one
   number.
 
+
 ## [0.1.0] - 2026-09-22
 
 ### Added
@@ -651,6 +668,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tree did not report an exit (command: …).` The state transition stays instantaneous, so Stop and
   the card do not wait for the confirmation.
 
+
 ## [0.0.3] - 2026-09-18
 
 Performance and data-durability release. It comes from a reported slowdown on a machine
@@ -703,6 +721,7 @@ Data` move the folder, and `spinney.dataDir` puts it where you want it.
 - A session write no longer rewrites the whole profile, and no longer serializes every
   conversation to store one change.
 - A rename, a reinstall or another publisher no longer makes the history invisible.
+
 
 ## [0.0.2] - 2026-09-16
 
@@ -1018,7 +1037,6 @@ everything the extension contains — the baseline the project had reached at th
   `request-timeout` and `request-stall` lines, so a request that has not produced
   its first byte is now visible *while* it waits.
 
-[Unreleased]: https://github.com/Delsin-Yu/Spinney/compare/v0.7.0...HEAD
 [0.7.0]: https://github.com/Delsin-Yu/Spinney/releases/tag/v0.7.0
 [0.6.0]: https://github.com/Delsin-Yu/Spinney/releases/tag/v0.6.0
 [0.5.1]: https://github.com/Delsin-Yu/Spinney/releases/tag/v0.5.1

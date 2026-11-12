@@ -1,4 +1,3 @@
-import { TOOL_TITLE_DESCRIPTION } from '../types';
 import type { InterceptedTool } from './index';
 
 /**

@@ -140,13 +140,14 @@ export function clipForUi(text: string, cap = UI_TOOL_CONTENT_CAP): string {
 }
 
 /**
- * The model's own one-line label for a step: the `title` argument every tool
- * schema carries (`TOOL_TITLE_DESCRIPTION` in `agent/types.ts`). It is read out of
+ * The model's own one-line label for a step: `exec_command`'s required `title`
+ * argument (`TOOL_TITLE_DESCRIPTION` in `agent/types.ts`) — the one tool schema
+ * that carries it. It is read out of
  * the call's arguments **here**, on the host, and stored on the `DisplayItem` — so
  * the card's step row keeps it even though the display copy of `args` is clipped to
  * 8 KiB and the row may be rebuilt from a repaint or a reload. Whitespace is
  * collapsed to one line and the label is capped at the length the schema promises,
- * because a model that ignores "at most ~60 characters" must not be able to push a
+ * because a model that ignores "at most about 60 characters" must not be able to push a
  * paragraph into a one-line row. Anything unparsable, absent or blank yields
  * `undefined`, and the webview then falls back to its own `toolBrief()`.
  */

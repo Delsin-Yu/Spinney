@@ -157,8 +157,8 @@ export interface DisplayItem {
   noticeId?: string;
   name?: string;
   /**
-   * `kind:'tool'` only: the model's own one-line label for this step (`title` on
-   * every tool schema). The card's step row shows it instead of the label derived
+   * `kind:'tool'` only: the model's own one-line label for this step (`exec_command`'s
+   * required `title`). The card's step row shows it instead of the label derived
    * from the arguments — and it is stored on the item, not re-derived, because the
    * display copy of `args` is clipped (~8 KiB) and the label must survive that clip
    * and every repaint. `SessionRuntime` fills it from the call's arguments when the

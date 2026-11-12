@@ -38,11 +38,15 @@
  *      interrupted]`, restores the notice, and leaves the command running.
  *   8. `check_command` is a status read (a running job answers the same thing twice,
  *      and says what to do instead of polling); `kill_command` ends the tree.
- *   9. The schemas: `exec_command` takes exactly `command` / `cwd` / `run_type` (no
- *      `timeout`, no `timeout_behavior`), the description keeps the two rules a
- *      sub-agent reads (never background the command yourself; use `cwd` instead of a
- *      `cd <dir> && …` prefix) and the never-sleep/never-poll rule, and the three
- *      management tools are `check_command` / `wait_for_command` / `kill_command`.
+ *   9. The schemas: `exec_command` takes exactly `command` / `cwd` / `run_type` /
+ *      `title` (no `timeout`, no `timeout_behavior`); `command` and `title` are
+ *      required, `title` is the one schema that carries a display title, and a call
+ *      without it answers the registry's missing-argument sentence and starts
+ *      nothing. The description keeps the two rules a sub-agent reads (never
+ *      background the command yourself; use `cwd` instead of a `cd <dir> && …`
+ *      prefix), the never-sleep/never-poll rule, and the one-line title rule, and
+ *      the three management tools are `check_command` / `wait_for_command` /
+ *      `kill_command`.
  *  10. Sub-agent access: `src/chat/runtime.ts`'s `subAgentTools` exposes the three
  *      management tools to writable sub-agents (the depth-2 subset is the same list),
  *      and the prompt still says what they are for.
@@ -221,7 +225,7 @@ const startJob = (ms, detached = false) => {
     `execForegroundSeconds()=${execForegroundSeconds()}`,
   );
   let registeredBefore = registered.length;
-  let r = await timed('case 1', withAccess.execute({ command: 'echo hi' }, undefined));
+  let r = await timed('case 1', withAccess.execute({ command: 'echo hi', title: 'Echo a greeting' }, undefined));
   check('the result is a normal exit line', /^\[exit 0 in /.test(r.text) && r.text.includes('hi'), firstLine(r.text));
   check('nothing was registered', registered.length === registeredBefore, `registered=${registered.length}`);
   check('no promotion, no run_type in the result', !/moved to background/.test(r.text));
@@ -229,7 +233,12 @@ const startJob = (ms, detached = false) => {
   console.log('== case 2: the removed arguments are answered before anything is spawned ==');
   const removed = await timed(
     'case 2',
-    withAccess.execute({ command: slowCommand(5000), timeout: 120, timeout_behavior: 'start_in_background' }),
+    withAccess.execute({
+      command: slowCommand(5000),
+      title: 'A removed-argument call',
+      timeout: 120,
+      timeout_behavior: 'start_in_background',
+    }),
   );
   const REMOVED =
     'timeout_behavior was removed; pass run_type "foreground" | "background" | "detached". ' +
@@ -244,24 +253,44 @@ const startJob = (ms, detached = false) => {
   registry2.setBackgroundAccess({ currentOwner: () => owner, hub: fakeHub });
   const viaRegistry = await registry2.execute(
     'exec_command',
-    JSON.stringify({ command: slowCommand(5000), timeout_behavior: 'stop_when_timeout' }),
+    JSON.stringify({ command: slowCommand(5000), title: 'A removed-argument call', timeout_behavior: 'stop_when_timeout' }),
   );
   check(
     'as the model reads it, the answer is exactly the frozen sentence behind "Error: "',
     viaRegistry === `Error: ${REMOVED}`,
     short(viaRegistry, 'removed'),
   );
-  const viaRegistryTimeout = await registry2.execute('exec_command', JSON.stringify({ command: 'echo x', timeout: 9 }));
+  const viaRegistryTimeout = await registry2.execute(
+    'exec_command',
+    JSON.stringify({ command: 'echo x', title: 'A bare-timeout call', timeout: 9 }),
+  );
   check(
     'a bare `timeout` is refused by the same sentence',
     viaRegistryTimeout === `Error: ${REMOVED}`,
     short(viaRegistryTimeout, 'removed'),
   );
 
+  console.log('== case 2b: `title` is required, and an untitled call starts nothing ==');
+  registeredBefore = registered.length;
+  const untitled = await registry2.execute('exec_command', JSON.stringify({ command: 'echo hi' }));
+  check(
+    'a call without `title` answers the registry’s missing-argument sentence',
+    untitled.startsWith('Error: exec_command is missing required argument "title".') &&
+      untitled.includes('Parameters: command, cwd, run_type, title.'),
+    short(untitled, 'required'),
+  );
+  check('nothing was started', registered.length === registeredBefore, `registered=${registered.length}`);
+  const untitledSlow = await registry2.execute('exec_command', JSON.stringify({ command: slowCommand(5000) }));
+  check(
+    'a long command without `title` is refused too (the check is before the spawn)',
+    /missing required argument "title"/.test(untitledSlow) && registered.length === registeredBefore,
+    short(untitledSlow, 'required'),
+  );
+
   console.log('== case 3: a foreground command past the slice is MOVED to the background ==');
   let t0 = Date.now();
   registeredBefore = registered.length;
-  r = await timed('case 3', withAccess.execute({ command: slowCommand(4000) }, undefined));
+  r = await timed('case 3', withAccess.execute({ command: slowCommand(4000), title: 'A long-running command' }, undefined));
   check('the result leads with the background id', r.text.startsWith(`[command moved to background: id ${nextId - 1}]`), firstLine(r.text));
   check('it was promoted at the 1 s slice, not at the command’s end', r.ms >= 900 && r.ms <= 3000, `${r.ms}ms`);
   check('it was registered exactly once', registered.length === registeredBefore + 1, `registered=${registered.length}`);
@@ -286,7 +315,10 @@ const startJob = (ms, detached = false) => {
   console.log('== case 4: the three run types ==');
   registeredBefore = registered.length;
   t0 = Date.now();
-  const bgRun = await timed('case 4-background', withAccess.execute({ command: slowCommand(4000), run_type: 'background' }, undefined));
+  const bgRun = await timed(
+    'case 4-background',
+    withAccess.execute({ command: slowCommand(4000), title: 'A background command', run_type: 'background' }, undefined),
+  );
   check('"background" leads with the started id', /^\[command started in background: id \d+\]/.test(bgRun.text), firstLine(bgRun.text));
   check('"background" returns before any foreground time has passed', bgRun.ms < 700, `${bgRun.ms}ms`);
   const bgJob = registered[registered.length - 1];
@@ -297,7 +329,10 @@ const startJob = (ms, detached = false) => {
   measured('background start', t0);
 
   registeredBefore = registered.length;
-  const detachedRun = await timed('case 4-detached', withAccess.execute({ command: slowCommand(4000), run_type: 'detached' }, undefined));
+  const detachedRun = await timed(
+    'case 4-detached',
+    withAccess.execute({ command: slowCommand(4000), title: 'A detached command', run_type: 'detached' }, undefined),
+  );
   check('"detached" leads with the started id', /^\[command started detached: id \d+\]/.test(detachedRun.text), firstLine(detachedRun.text));
   check('"detached" returns at once', detachedRun.ms < 700, `${detachedRun.ms}ms`);
   const detachedJob = registered[registered.length - 1];
@@ -308,7 +343,10 @@ const startJob = (ms, detached = false) => {
   check('"detached" names wait_for_command and check_command', /wait_for_command\(\d+\)/.test(detachedRun.text) && /check_command\(\d+\)/.test(detachedRun.text));
   if (detachedJob) await killJob(detachedJob);
 
-  const invalid = await timed('case 4-invalid', withAccess.execute({ command: 'echo x', run_type: 'stop_when_timeout' }, undefined));
+  const invalid = await timed(
+    'case 4-invalid',
+    withAccess.execute({ command: 'echo x', title: 'An invalid run type', run_type: 'stop_when_timeout' }, undefined),
+  );
   check(
     'an old behavior name as run_type is refused, naming the three values',
     invalid.threw && /Invalid run_type/.test(invalid.text) && /"foreground", "background", or "detached"/.test(invalid.text),
@@ -420,10 +458,10 @@ const startJob = (ms, detached = false) => {
   console.log('== case 11: the schemas ==');
   const schema = withAccess.definition.function;
   const props = Object.keys(schema.parameters.properties);
-  // `title` is the model's one-line label for the step, which every tool schema carries
-  // (`TOOL_TITLE_DESCRIPTION` in src/agent/types.ts): a display argument, never a command one.
+  // `title` is required here and is the **only** schema that carries it: the step row
+  // shows it instead of the command (`TOOL_TITLE_DESCRIPTION` in src/agent/types.ts).
   check(
-    'exec_command takes command, cwd, run_type and the display title, and nothing else',
+    'exec_command takes command, cwd, run_type and the required title, and nothing else',
     props.join(',') === 'command,cwd,run_type,title',
     props.join(','),
   );
@@ -433,8 +471,31 @@ const startJob = (ms, detached = false) => {
     (schema.parameters.properties.run_type.enum || []).join(',') === 'foreground,background,detached',
     (schema.parameters.properties.run_type.enum || []).join(','),
   );
-  check('only `command` is required', (schema.parameters.required || []).join(',') === 'command');
+  check(
+    '`command` and `title` are the required arguments',
+    (schema.parameters.required || []).join(',') === 'command,title',
+    (schema.parameters.required || []).join(','),
+  );
+  check(
+    'the title argument says it is required and names the folded step row',
+    /^Required:/.test(schema.parameters.properties.title.description) &&
+      /step row/.test(schema.parameters.properties.title.description),
+    short(schema.parameters.properties.title.description, 'Required'),
+  );
+  const titledRegistryTools = registry2.definitions
+    .filter((d) => 'title' in (d.function.parameters.properties || {}))
+    .map((d) => d.function.name);
+  check(
+    'exec_command is the only registry tool whose schema carries a title',
+    titledRegistryTools.join(',') === 'exec_command',
+    titledRegistryTools.join(',') || '(none)',
+  );
   const desc = schema.description;
+  check(
+    'the description says every call must carry a short human title',
+    /Every call must carry a short human title/.test(desc) && /Running the test suite/.test(desc),
+    short(desc, 'human title'),
+  );
   check('the no-self-background rule survived', /Never put the command in the background yourself/.test(desc));
   check('the cwd rule survived', /instead of prefixing the command with "cd <dir> && "/.test(desc));
   check('the cwd argument still says "or an absolute path"', /or an absolute path/.test(schema.parameters.properties.cwd.description));
@@ -454,9 +515,9 @@ const startJob = (ms, detached = false) => {
   const killSchema = killTool.definition.function;
   check('check_command is a tool taking pid', checkSchema.name === 'check_command' && (checkSchema.parameters.required || []).join(',') === 'pid');
   check(
-    'wait_for_command takes pid, the display title and an optional seconds',
+    'wait_for_command takes pid and an optional seconds',
     waitSchema.name === 'wait_for_command' &&
-      Object.keys(waitSchema.parameters.properties).join(',') === 'pid,title,seconds' &&
+      Object.keys(waitSchema.parameters.properties).join(',') === 'pid,seconds' &&
       (waitSchema.parameters.required || []).join(',') === 'pid',
   );
   check('kill_command is a tool taking pid', killSchema.name === 'kill_command' && (killSchema.parameters.required || []).join(',') === 'pid');

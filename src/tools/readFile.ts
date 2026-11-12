@@ -1,5 +1,5 @@
 import * as fs from 'fs';
-import { AgentTool, TOOL_TITLE_DESCRIPTION } from '../agent/types';
+import { AgentTool } from '../agent/types';
 import { headByBytes, tailByBytes } from '../text';
 import { ensureNotAborted, eolLabelOf, resolvePath, toLf } from './index';
 
@@ -33,7 +33,6 @@ export const readFileTool: AgentTool = {
           path: { type: 'string', description: 'File path.' },
           startLine: { type: 'number', description: 'Inclusive 1-based start line.' },
           endLine: { type: 'number', description: 'Inclusive 1-based end line.' },
-          title: { type: 'string', description: TOOL_TITLE_DESCRIPTION },
         },
         required: ['path'],
       },

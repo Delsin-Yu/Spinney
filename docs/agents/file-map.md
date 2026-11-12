@@ -39,8 +39,9 @@
   per-node `signals` queue, handed to a running turn at its next tool boundary or
   injected into the idle owning node. Reaches the provider through the narrow `RuntimeHost`.
   `treeMessage()` builds the `tree` message **without** posting it.
-  `toolTitleFromArgs()` is the one reader of a tool call's `title` argument (every tool
-  schema carries it, `TOOL_TITLE_DESCRIPTION` in `agent/types.ts`): it collapses the label
+  `toolTitleFromArgs()` is the one reader of a tool call's `title` argument
+  (`exec_command`'s required title, `TOOL_TITLE_DESCRIPTION` in `agent/types.ts` — the one
+  schema that carries it): it collapses the label
   to one line, caps it at 60 characters and stores it on the `DisplayItem` **and** on the
   `toolStart` message, so the card's step row shows the model's label even though the
   display copy of `args` is clipped to 8 KiB — and it survives every repaint.
@@ -405,12 +406,13 @@
   this module (safe: every use is inside `execute()`, i.e. call time).
 - `src/tools/readFile.ts` · `writeFile.ts` · `appendFile.ts` · `replaceInFile.ts` ·
   `listDir.ts` · `searchFiles.ts` · `searchTranscripts.ts` · `execCommand.ts` — the
-  registry tools, each with its schema and its implementation in the same file. Every
-  schema (these, the three background tools and every intercepted tool) also declares the
-  same optional `title` argument — `TOOL_TITLE_DESCRIPTION` in `src/agent/types.ts` — the
-  model's one-line label for the step, which the card's tool row shows instead of a derived
-  one. A tool body ignores it; the host reads it (`toolTitleFromArgs`) and stores it on the
-  `DisplayItem`.
+  registry tools, each with its schema and its implementation in the same file. Exactly
+  one schema declares a `title` argument — `exec_command`'s required one,
+  `TOOL_TITLE_DESCRIPTION` in `src/agent/types.ts`, the model's sentence for the step,
+  which the card's tool row shows instead of a derived one. A tool body ignores it; the
+  host reads it (`toolTitleFromArgs`) and stores it on the `DisplayItem`. Every other
+  tool (these, the three background tools and every intercepted tool) derives its row
+  from the arguments and declares no `title`.
 - `src/tools/backgroundTools.ts` — `check_command` /
   `wait_for_command` / `kill_command`, grouped because they all read the same
   `BackgroundRegistry`.

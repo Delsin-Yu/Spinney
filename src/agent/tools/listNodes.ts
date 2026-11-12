@@ -1,4 +1,3 @@
-import { TOOL_TITLE_DESCRIPTION } from '../types';
 import type { InterceptedTool } from './index';
 
 /**
@@ -17,7 +16,7 @@ export const listNodesTool: InterceptedTool = {
         'List the chat tree of the active session: one line per node with its id, status, parent and title, plus which node is currently checked out. Use it to pick a `returnNodeId` for hop_session, or to understand how the conversation branched.',
       parameters: {
         type: 'object',
-        properties: { title: { type: 'string', description: TOOL_TITLE_DESCRIPTION } },
+        properties: {},
         required: [],
       },
     },

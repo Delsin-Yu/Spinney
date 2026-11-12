@@ -1,5 +1,5 @@
 import * as fs from 'fs';
-import { AgentTool, TOOL_TITLE_DESCRIPTION } from '../agent/types';
+import { AgentTool } from '../agent/types';
 import { applyEol, detectEol, ensureNotAborted, eolLabelOf, resolvePath, toLf, verbatimFrameError } from './index';
 
 export const replaceInFileTool: AgentTool = {
@@ -15,7 +15,6 @@ export const replaceInFileTool: AgentTool = {
           path: { type: 'string', description: 'File path to edit.' },
           oldText: { type: 'string', description: 'Exact text to find, as a plain JSON string.' },
           newText: { type: 'string', description: 'Replacement text, as a plain JSON string.' },
-          title: { type: 'string', description: TOOL_TITLE_DESCRIPTION },
         },
         required: ['path', 'oldText', 'newText'],
       },

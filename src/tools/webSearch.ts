@@ -1,4 +1,4 @@
-import { AgentTool, TOOL_TITLE_DESCRIPTION, ToolDefinition } from '../agent/types';
+import { AgentTool, ToolDefinition } from '../agent/types';
 import { ensureNotAborted, limitInline } from './index';
 import { searchAccessFor, type CardResolver } from './webAccess';
 import { normalizeUrl, runWebSearch, type Attempt } from './webBackends';
@@ -51,7 +51,6 @@ const definition: ToolDefinition = {
           type: 'number',
           description: 'How many results to aim for (1-20, default 8). Fewer is faster; the chain stops once it has enough.',
         },
-        title: { type: 'string', description: TOOL_TITLE_DESCRIPTION },
       },
       required: ['query'],
     },

@@ -1,4 +1,4 @@
-import { AgentTool, TOOL_TITLE_DESCRIPTION } from '../agent/types';
+import { AgentTool } from '../agent/types';
 import type { BackgroundAccess } from '../chat/backgroundHub';
 import { formatDuration } from '../duration';
 import type { BackgroundTask } from './background';
@@ -87,7 +87,6 @@ export function makeCheckCommandTool(getAccess: () => BackgroundAccess | null): 
           type: 'object',
           properties: {
             pid: { type: 'number', description: 'The command id returned by exec_command.' },
-            title: { type: 'string', description: TOOL_TITLE_DESCRIPTION },
           },
           required: ['pid'],
         },
@@ -142,7 +141,6 @@ export function makeWaitForCommandTool(getAccess: () => BackgroundAccess | null)
           type: 'object',
           properties: {
             pid: { type: 'number', description: 'The command id returned by exec_command.' },
-            title: { type: 'string', description: TOOL_TITLE_DESCRIPTION },
             seconds: {
               type: 'number',
               description: 'How long to wait, in seconds (default 30, clamped to 1–300).',
@@ -254,7 +252,6 @@ export function makeKillCommandTool(getAccess: () => BackgroundAccess | null): A
           type: 'object',
           properties: {
             pid: { type: 'number', description: 'The command id returned by exec_command.' },
-            title: { type: 'string', description: TOOL_TITLE_DESCRIPTION },
           },
           required: ['pid'],
         },

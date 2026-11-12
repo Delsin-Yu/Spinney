@@ -2,7 +2,7 @@ import { ChildProcess, spawn } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { AgentTool, TOOL_TITLE_DESCRIPTION } from '../agent/types';
+import { AgentTool } from '../agent/types';
 import { beginWork, countWork, perf } from '../perf';
 import { RequestGate } from '../agent/requestGate';
 import { sliceText } from '../text';
@@ -768,7 +768,6 @@ export const searchFilesTool: AgentTool = {
           caseSensitive: { type: 'boolean', description: 'Default false.' },
           maxResults: { type: 'number', description: 'Default 200 (capped at 300).' },
           context: { type: 'number', description: 'Lines of context around each match (0-10, default 0).' },
-          title: { type: 'string', description: TOOL_TITLE_DESCRIPTION },
         },
         required: ['pattern'],
       },

@@ -113,8 +113,8 @@ repaint:
   the elapsed chip. The verb is per tool and `tr()`-localized (`TOOL_VERBS`: Read /
   Viewed / Wrote / Edited / Appended / Listed / Searched / Recalled / Ran / Checked /
   Waited / Killed / Fetched / Spawned / Hopped / Finished / Renamed; a name no verb knows
-  keeps its own name). The label is **`DisplayItem.title`** — the `title` argument every
-  tool schema carries, read out of the call's arguments on the host
+  keeps its own name). The label is **`DisplayItem.title`** — `exec_command`'s required
+  `title` argument, read out of the call's arguments on the host
   (`toolTitleFromArgs`) and stored on the item, so a clipped argument string can never lose
   it — else `toolBrief()`'s path/command/pattern, set in monospace for a command or a
   pattern. The detail (`.tool-detail`) is folded at rest and a click toggles it: the

@@ -241,15 +241,16 @@ export type AgentEvent =
   | { type: 'error'; message: string };
 
 /**
- * The `title` argument every tool schema carries, in one place so the seventeen
- * schemas cannot word it differently. It is a **display** argument only: the tool
- * body ignores it, and `SessionRuntime` copies it onto the turn's `DisplayItem`
- * (`title`) so the card's one-line step row shows that label instead of the one
- * derived from the arguments — which matters because the arguments are clipped for
- * the UI (~8 KiB) and the label must survive a repaint.
+ * The `title` argument `exec_command` requires — the only tool schema that carries
+ * it. It is a **display** argument only: the tool body ignores it, and
+ * `SessionRuntime` copies it onto the turn's `DisplayItem` (`title`) so the card's
+ * one-line step row shows that sentence instead of the one derived from the command
+ * — which matters because the arguments are clipped for the UI (~8 KiB) and the
+ * label must survive a repaint. Every other tool derives its row from the arguments
+ * and declares no `title`.
  */
 export const TOOL_TITLE_DESCRIPTION =
-  'Optional: one short human label for this step (at most ~60 characters). The UI shows it instead of a derived label.';
+  'Required: the sentence the folded step row shows instead of the command — one short human line, at most about 60 characters (for example "Running the test suite").';
 
 /** A tool that the agent can invoke. */
 export interface AgentTool {

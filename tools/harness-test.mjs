@@ -979,7 +979,7 @@ const sleepCmd = (ms) => `node -e "setTimeout(()=>{},${ms})"`;
 
 /** A prompt that keeps one run busy long enough to observe concurrency. */
 function longRunPrompt(runId, label, ms = 15000) {
-  const args = JSON.stringify({ command: sleepCmd(ms) });
+  const args = JSON.stringify({ command: sleepCmd(ms), title: 'A slow command for the concurrency check' });
   return (
     `HARNESS-TEST ${runId} ${label}: call the exec_command tool exactly once with ${args} ` +
     '(no other arguments), wait for it to finish, then reply with the single word "ok". ' +
@@ -989,7 +989,7 @@ function longRunPrompt(runId, label, ms = 15000) {
 
 /** A prompt that makes the agent start an exec_command in the background. */
 function backgroundPrompt(runId) {
-  const args = JSON.stringify({ command: sleepCmd(25000), run_type: 'background' });
+  const args = JSON.stringify({ command: sleepCmd(25000), title: 'A background command', run_type: 'background' });
   return (
     `HARNESS-TEST ${runId} BG: call the exec_command tool exactly once with ${args}, ` +
     'then reply with the returned background id and nothing else. Do not call any other tool.'
@@ -1003,7 +1003,7 @@ function backgroundPrompt(runId) {
  * still owned the job). The hand-back is a separate, steered turn below.
  */
 function hopBusyChildPrompt(runId) {
-  const args = JSON.stringify({ command: sleepCmd(30000), run_type: 'background' });
+  const args = JSON.stringify({ command: sleepCmd(30000), title: 'A background command for the hop', run_type: 'background' });
   return (
     `HARNESS-TEST ${runId} HOP-CHILD: call the exec_command tool exactly once with ${args}, ` +
     'then reply with the single word "ok" and end your turn immediately. ' +
@@ -1035,8 +1035,8 @@ function hopFinishPrompt(runId, badNodeId, landingNodeId) {
  * finding them in a dump can only mean the host injected them.
  */
 function signalPrompt(runId, { jobMs = 6000, busyMs = 12000 } = {}) {
-  const job = JSON.stringify({ command: sleepCmd(jobMs), run_type: 'background' });
-  const wait = JSON.stringify({ command: sleepCmd(busyMs) });
+  const job = JSON.stringify({ command: sleepCmd(jobMs), title: 'A short background job', run_type: 'background' });
+  const wait = JSON.stringify({ command: sleepCmd(busyMs), title: 'A foreground command that keeps the turn busy' });
   return (
     `HARNESS-TEST ${runId} SIG: a timing check of background terminals. ` +
     `Step 1: call the exec_command tool with ${job} — that starts a short job and returns immediately. ` +
@@ -1051,7 +1051,7 @@ function signalPrompt(runId, { jobMs = 6000, busyMs = 12000 } = {}) {
  * quickly, leaving an *idle* basis node to open the two concurrent branches from.
  */
 function branchStartPrompt(runId, ms = 12000) {
-  const args = JSON.stringify({ command: sleepCmd(ms) });
+  const args = JSON.stringify({ command: sleepCmd(ms), title: 'A short task' });
   return (
     `HARNESS-TEST ${runId} BR1: call the exec_command tool exactly once with ${args} ` +
     '(no other arguments), wait for it to finish, then reply with the single word "DONE". ' +

@@ -99,30 +99,30 @@ const cwdLine = (s) => fold(firstLine(s)).includes('· cwd ') && saysRoot(firstL
   }
 
   console.log('== exec_command: the first line names the directory ==');
-  const plain = await call('exec_command', { command: 'pwd' });
+  const plain = await call('exec_command', { command: 'pwd', title: 'Print the working directory' });
   check('a default run starts in the harness root', saysRoot(plain), plain.trim());
   check('the first line carries the cwd', cwdLine(plain), firstLine(plain));
-  const rel = await call('exec_command', { command: 'pwd', cwd: 'src' });
+  const rel = await call('exec_command', { command: 'pwd', cwd: 'src', title: 'Print the working directory in src' });
   check('cwd "src" runs there', saysRoot(rel, 'src'), rel.trim());
   check('the cwd line reports src', cwdLine(rel) && saysRoot(firstLine(rel), 'src'), firstLine(rel));
   if (WIN) {
-    const msys = await call('exec_command', { command: 'pwd', cwd: MSYS_ROOT });
+    const msys = await call('exec_command', { command: 'pwd', cwd: MSYS_ROOT, title: 'Print the /d working directory' });
     check('cwd in the /d form no longer fails to spawn', saysRoot(msys) && !/ENOENT/.test(msys), msys.trim());
     check('the cwd line reports the drive form', cwdLine(msys), firstLine(msys));
-    const win = await call('exec_command', { command: 'pwd', cwd: WIN_ROOT });
+    const win = await call('exec_command', { command: 'pwd', cwd: WIN_ROOT, title: 'Print the drive-form working directory' });
     check('cwd in the D:\\ form runs there', saysRoot(win) && !/ENOENT/.test(win), win.trim());
   }
 
   console.log('== exec_command: a broken cwd names the path ==');
-  const missing = await call('exec_command', { command: 'echo hi', cwd: 'does-not-exist' });
+  const missing = await call('exec_command', { command: 'echo hi', cwd: 'does-not-exist', title: 'A missing cwd' });
   check('a missing cwd is reported as missing', /does not exist/.test(missing), missing.trim());
   check('the message names the requested path', missing.includes('"does-not-exist"'), missing.trim());
   check('the message names the harness root', saysRoot(missing), missing.trim());
   check('the shell is not blamed', !/ENOENT|bash\.exe/.test(missing), missing.trim());
-  const file = await call('exec_command', { command: 'echo hi', cwd: 'package.json' });
+  const file = await call('exec_command', { command: 'echo hi', cwd: 'package.json', title: 'A file as cwd' });
   check('a file as cwd is reported as not-a-directory', /is not a directory/.test(file), file.trim());
   if (WIN) {
-    const missingMsys = await call('exec_command', { command: 'echo hi', cwd: '/d/no-such-repo' });
+    const missingMsys = await call('exec_command', { command: 'echo hi', cwd: '/d/no-such-repo', title: 'A missing /d cwd' });
     check(
       'a missing /d path is reported against the drive path',
       /does not exist/.test(missingMsys) &&

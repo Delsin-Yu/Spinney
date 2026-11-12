@@ -270,7 +270,7 @@ regression fails *packaging* instead of the user's session:
   `bg kill id=… pid=… outcome=… ms=…` diagnostics line, a confirmed one stays quiet.
   Needs `out/` and is portable — the POSIX and Windows halves exercise the same public
   API. Part of `vscode:prepublish`.
-- `npm run check:exec` (`tools/exec-runtime-acceptance.js`, **104 checks**) — the
+- `npm run check:exec` (`tools/exec-runtime-acceptance.js`, **110 checks**) — the
   **command runtime** contract, which is what replaced the old timeout pair and the
   background-budget guard: there is **no per-call timeout and no deadline**, only
   `run_type`. It stubs `vscode` and the settings **keyed by name**
@@ -283,7 +283,9 @@ regression fails *packaging* instead of the user's session:
   arguments**: `timeout` and `timeout_behavior` are answered, *as the model reads it
   through `ToolRegistry.execute`*, with exactly `Error: timeout_behavior was removed;
   pass run_type "foreground" | "background" | "detached". There is no per-call timeout any
-  more. Nothing was started.` before anything is spawned; (3) the **promotion**: a
+  more. Nothing was started.` before anything is spawned — and a call without the required
+  `title` answers the registry's `missing required argument "title"` sentence and starts
+  nothing; (3) the **promotion**: a
   foreground command still running after the 1 s slice is `[command moved to background:
   id …]`, registered exactly once under the owner of the turn, **not killed** (the
   process is still alive afterwards), and the block names the slice, no budget, the status
@@ -305,9 +307,12 @@ regression fails *packaging* instead of the user's session:
   result whose text says no notice will arrive and keeps the job silent, and
   `kill_command` ends the tree (the job reads `finished`, `killReason: 'stop'`, the notice
   suppressed, a second kill answers "not running", and a later wait returns at once); (9)
-  the schemas: `exec_command` takes exactly `command` / `cwd` / `run_type` (no `timeout`,
-  no `timeout_behavior`), the description keeps the two rules a sub-agent reads (never
-  background the command yourself, use `cwd` instead of a `cd <dir> && …` prefix) and the
+  the schemas: `exec_command` takes exactly `command` / `cwd` / `run_type` / `title` (no
+  `timeout`, no `timeout_behavior`), `command` and `title` are required, `title` is the one
+  registry schema that carries a title (its description says it is required and names the
+  folded step row), the description states the one-line-title rule and keeps the two
+  rules a sub-agent reads (never background the command yourself, use `cwd` instead of a
+  `cd <dir> && …` prefix) and the
   shell-is-not-a-search clause, states that there is no per-call timeout and that a model
   must never sleep/poll, names all three management tools and
   `spinney.execForegroundSeconds`, names no deleted setting and no old value name; and
