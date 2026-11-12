@@ -6404,6 +6404,21 @@
     inputEl.style.height = Math.min(inputEl.scrollHeight, INPUT_MAX_H) + 'px';
   }
 
+  /**
+   * Everything the composer owes after its **value** changed. Typing gets this from the
+   * `input` listener, but a write the script makes itself — a prompt snippet landing in
+   * the box, the host's `composerClear` emptying it — fires no `input` event at all.
+   * Both composer buttons read "has content" (`updateComposerButtons`), so without this
+   * one shared refresh a snippet leaves Send disabled (and the new-epoch label stale)
+   * until the user types a character; `composerClear` leaves Send enabled on an empty
+   * box. One helper, one path: the `input` listener, `insertSnippet` and `composerClear`
+   * call the same thing.
+   */
+  function afterComposerWrite() {
+    autoGrow();
+    updateComposerButtons();
+  }
+
   // ---- Composer prompt snippets ----
   // A snippet is **the user's own turn**: the menu places its text in the input box,
   // and the user may edit it before sending. Nothing is sent by the menu itself, so
@@ -6439,7 +6454,9 @@
     if (inputEl.setSelectionRange) {
       inputEl.setSelectionRange(caret, caret);
     }
-    autoGrow();
+    // A programmatic write fires no `input` event, so the composer refreshes here: the
+    // snippet is *content*, and Send must be able to take it at once.
+    afterComposerWrite();
     if (inputEl.focus) {
       inputEl.focus();
     }
@@ -6647,7 +6664,9 @@
         inputEl.value = '';
         pendingAttachments = [];
         renderPendingAttachments();
-        autoGrow();
+        // The same refresh the `input` event does: an emptied box must disable Send
+        // again, not keep the previous value's verdict.
+        afterComposerWrite();
         break;
       case 'harnessNote':
         // An in-place continue (`SessionRuntime.continueFrom`): the block belongs in
@@ -7170,9 +7189,9 @@
   });
 
   inputEl.addEventListener('input', () => {
-    autoGrow();
-    // Typing changes "has content", which both composer buttons read.
-    updateComposerButtons();
+    // Typing changes "has content", which both composer buttons read — the same
+    // refresh a programmatic write (a snippet, `composerClear`) makes for itself.
+    afterComposerWrite();
   });
 
   // The caret's own intent, tracked where it happens (see the composer focus block):
