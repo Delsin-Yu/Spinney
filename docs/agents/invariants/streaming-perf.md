@@ -31,26 +31,43 @@
   asserts both halves ("the two rows of a turn").
 - Transcript scrolling is **per-card and event-driven**, and a card has exactly one
   scroller: `.node-work`, which holds the whole turn (see §"One card, one flow"). It has
-  a `createScrollController` with a green lock dot
-  (`attachLock(container, host, locked, card)`) and it is also the only container that
-  windows a long transcript. The controller starts locked only for a **live** turn
-  (`status === 'running'`); a finished node starts unlocked and is positioned at its
+  a `createScrollController` with a green follow dot
+  (`attachLock(container, host, locked)`) and it is also the only container that
+  windows a long transcript. The controller starts following only for a **live** turn
+  (`status === 'running'`); a finished node starts released and is positioned at its
   newest content once on first render, so history is scrollable immediately — that one
   move is carried by `_needsBottomScroll`, which the item-render paths
-  (`expandedCard` / `renderPath` / `applyFetchedItems`) consume. **A repaint never moves
-  a scroller**: only the follow light (locked → pinned to the bottom) and the
-  once-per-card "opens at its newest content" may move it (§"A repaint never moves a
-  scroller", below).
-  Locked = pinned to bottom with `scroll-locked` hiding and disabling the
-  scrollbar; clicking the dot toggles it and hands scrolling back to the user. It is never re-engaged from scroll position (that heuristic
-  was unreliable). Instead it follows the turn lifecycle: `setBusy(true)`
-  re-locks the active card, `done` / `interrupted` / `error` release it, and
-  sub-agent cards lock on `agentStart` / release on `agentDone`
-  (`setCardScrollLock`). `scrollToBottom()` is a no-op while the light is off.
+  (`expandedCard` / `renderPath` / `applyFetchedItems`) consume through
+  `pinToBottom()`. **A repaint never moves a scroller**: only the follow light
+  (following → pinned to the bottom) and the once-per-card "opens at its newest content"
+  may move it (§"A repaint never moves a scroller", below).
+  **The green light means follow, not a lock on the scrollbar.** The reader may scroll
+  while it is on, and the rule is the *direction* of their move: a `scroll` that lands at
+  the bottom (`top + clientHeight >= scrollHeight - 2`) engages follow, and a `scroll`
+  above the bottom whose offset moved **up** since the last one releases it — the dot
+  dims and the log keeps the reader's offset. Nothing else may release it: a
+  `scrollToBottom` / `pinToBottom` pin and plain content growth only move the offset
+  *towards* the bottom, which is exactly the bug the direction rule fixes. The old
+  heuristic asked "is it still at the bottom?" on every pass, and a heavy stream answered
+  "no" — so a card unlocked itself under its own output. The pin also **stands down** while
+  the box sits above the offset the controller last wrote: that is the reader's move whose
+  `scroll` has not been dispatched yet, so the one ordering that could fight a drag (a
+  delta first, its event second) still leaves the light out and the offset where the reader
+  put it. Clicking the dot toggles it, and
+  engaging follow scrolls to the newest content immediately. The light also follows the
+  turn lifecycle: `setBusy(true)` engages the active card, `done` / `interrupted` /
+  `error` release it, and sub-agent cards engage on `agentStart` / release on `agentDone`
+  (`setCardScrollLock`). `scrollToBottom()` is a no-op while the light is off. The class
+  `scroll-locked` is the light's state and nothing more — it must never hide the bar or
+  block manual scrolling (no `overflow` rule).
   The dot sits in the strip the container reserves below its scrollbar
   (`margin-bottom: 20px`), on `.node-work-wrap` — the log's box, which is not itself a
-  scroller. The tree viewport itself is a pannable canvas (pan/zoom/fit), not a scroll
-  container.
+  scroller. **The reasoning box has its own light**: the open thinking row is a 240 px
+  scroller of its own, so it carries a small dot in its bottom-right corner
+  (`attachRowLock`, `.thinking-row > .scroll-lock-dot`), in the row only while the row is
+  open, under the same direction rule; its click releases or re-engages that box and
+  `stopPropagation`s, because the row's own click opens and closes the row. The tree
+  viewport itself is a pannable canvas (pan/zoom/fit), not a scroll container.
 - `[perf]` lines (request JSON size, assistant-round, tool timings, persist, stream
   flush) go to the **Spinney** output channel. Open View → Output → "Spinney". Every
   one that reaches the diagnostics file also ends with a ` | at=<ISO8601>` stamp, and
@@ -105,10 +122,13 @@ repaint:
   paragraph in the same type as the prose (no dim, no italic), capped at **240 px** with
   its own scrollbar so a long reasoning cannot push the turn below the fold, and its tail
   is the turn's usage line
-  (`[Prompt: {0} + Completion: {1}, Cache Hit: {2}, Cache Miss: {3}]`); the stream keeps
-  the box at its newest line unless the reader scrolled it. Closed it is one line of the
-  same text, ellipsised in CSS. `setThinkingOpen` owns the two states; `_open` mirrors the
-  class.
+  (`[Prompt: {0} + Completion: {1}, Cache Hit: {2}, Cache Miss: {3}]`). The box follows its
+  own stream — it carries its **own green dot** while it is open, and the same direction
+  rule as the log (`appendThinking` calls the row's `scrollToBottom()`; a reader who
+  scrolled the box up released it, and the next delta does not take it back). Closed it is
+  one line of the same text, ellipsised in CSS, with no scroller and no light.
+  `setThinkingOpen` owns the two states and puts the dot in the row on open / takes it out
+  on close; `_open` mirrors the class.
 - **a tool row** (`.msg.tool`) — one line: a small status dot, the bold verb, the label and
   the elapsed chip. The verb is per tool and `tr()`-localized (`TOOL_VERBS`: Read /
   Viewed / Wrote / Edited / Appended / Listed / Searched / Recalled / Ran / Checked /
@@ -150,9 +170,12 @@ was scrolled to — \`rememberScroll\` / \`scrollMemory\` / \`restoreScroll\` on
 by a \`scroll\` listener attached when \`createNodeCard\` builds the card — and it is put back
 at that offset after every step that can destroy it: \`renderNodeItems\`' full re-render (a
 \`tree\` / \`path\` repaint) and the window repaint (\`paintItemsWindow\`). It is never restored
-while the card is locked (the follow light owns the bottom) nor while \`_needsBottomScroll\`
-is still pending, so only two things may move a scroller at all: the follow light while it
-is on, and the once-per-card "opens at its newest content".
+while the card is following (the follow light owns the bottom) nor while
+\`_needsBottomScroll\` is still pending, so only two things may move a scroller at all: the
+follow light while it is on, and the once-per-card "opens at its newest content". A restore
+is the memory's write and not the reader's: it hands the offset back to the controller
+(\`syncOffset\`), so a repaint can neither release the light nor re-engage it, not even when
+the remembered offset is the bottom.
 
 A routed append is not a rebuild: it appends one row into the log that is already there, so
 there is nothing to restore — which is exactly what the measured split could not say. The
@@ -163,10 +186,11 @@ append path measures the log any more.
 
 **The window repaint corrects in both directions.** \`extendItemsWindow\` adjusts the scroll
 position by the height difference whichever way the window grew; it used to correct the
-upward direction only. \`tools/check-webview.js\` pins the whole thing: an unlocked card's log
-keeps its offset across a routed append and a \`tree\` / \`path\` repaint, a locked card still
-pins its log to the bottom, and scrolling a windowed log does not lose the answer as the
-last block.
+upward direction only. \`tools/check-webview.js\` pins the whole thing: a released card's log
+keeps its offset across a routed append and a \`tree\` / \`path\` repaint, a following card
+still pins its log to the bottom, scrolling a windowed log does not lose the answer as the
+last block, and the direction rule of the light (up releases, the bottom re-engages) is
+replayed against the stub's own scroll offsets.
 
 ### Diagnosing a stutter (the `[perf] op#` traces)
 A stutter — above all when **switching sessions** — is one user-visible operation

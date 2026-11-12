@@ -58,10 +58,13 @@
   (the hex values are fallbacks only) so the panel follows light/dark/HC themes —
   keep any new colour theme-driven rather than hardcoded. A turn card is **one
   essay**: `.node-ask` (the pinned prompt) and then `.node-work` — the card's only
-  scroller, with the green lock dot — holding every row of the turn in order, the final
-  answer as its last markdown block. The two rows are `makeThinkingRow` (open while its
+  scroller, with the green follow dot (`createScrollController` / `attachLock`: green
+  means following the newest content, an upward scroll releases it, the bottom re-engages
+  it) — holding every row of the turn in order, the final answer as its last markdown
+  block. The two rows are `makeThinkingRow` (open while its
   turn runs, one ellipsised line after — `setThinkingOpen` / `setActiveRow` /
-  `clearActiveRow`) and the tool row (`addTool` + `toolRowHead`: a bold `tr()`-localized
+  `clearActiveRow`; its open 240 px box carries its own dot) and the tool row (`addTool`
+  + `toolRowHead`: a bold `tr()`-localized
   verb, the label from `DisplayItem.title` or `toolBrief()`, a status dot and the elapsed
   chip, with `setToolOpen` folding the detail). Nothing is promoted, measured or folded
   per card any more — see `docs/agents/invariants/streaming-perf.md`.

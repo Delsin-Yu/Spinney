@@ -4495,7 +4495,7 @@ if (contextLabel !== 'ctx 50%') {
 // were half-way through. Only the person reading the card can see that happen, and this
 // is the only place it can be seen without one.
 //
-// The one exception is pinned with it: a LOCKED card (a node in `runningNodes`: the
+// The one exception is pinned with it: a FOLLOWING card (a node in `runningNodes`: the
 // follow light on, `.scroll-locked` on the container) is never handed an older offset —
 // its log stays pinned to its newest content, and the offset its memory holds loses.
 //
@@ -4575,14 +4575,15 @@ if (contextLabel !== 'ctx 50%') {
       }
     };
     /**
-     * The reader takes the log to 300 and tells the memory, which is the state every
-     * message below starts from. Re-armed before each step on purpose: a step that loses
-     * the offset is then the step that lost it, and never merely the one that inherited a
-     * position an earlier step had already thrown away.
+     * The reader takes the log to 300 and tells every `scroll` listener, which is the state
+     * every message below starts from — a real scroll reaches both the follow light and the
+     * memory. Re-armed before each step on purpose: a step that loses the offset is then the
+     * step that lost it, and never merely the one that inherited a position an earlier step
+     * had already thrown away.
      */
     const arm = () => {
       work.scrollTop = WORK_TOP;
-      if (scrollHandler(work)) scrollHandler(work)();
+      for (const handler of handlersOf(work, 'scroll')) handler({ type: 'scroll' });
     };
 
     // (b) The routed appends an unlocked card sees: a `delta`, a tool call and a
@@ -4629,33 +4630,42 @@ if (contextLabel !== 'ctx 50%') {
     dispatch(pathMsg);
     expectOffset('a `path` re-render');
 
-    // (d) A LOCKED card still owns its log. A `state` naming this node in `runningNodes`
-    // (the `setBusy` path) engages the follow light; the append after that has to pin the
-    // log to its newest content, and the 300 the memory holds must lose. `clientHeight`
-    // is 0 for this step so "the bottom" is exactly the full `scrollHeight`: the clamped
-    // write the follow path makes and a plain `scrollTop = scrollHeight` are then the same
-    // number.
+    // (d) A FOLLOWING card still owns its log. A `state` naming this node in
+    // `runningNodes` (the `setBusy` path) engages the follow light; from then on an append
+    // pins the log to its newest content and the 300 the memory holds must lose — the
+    // reader who left that offset handed the light back when they scrolled up, which is the
+    // direction rule checked in the follow block below. `clientHeight` is 0 for this step so
+    // "the bottom" is exactly the full `scrollHeight`: the clamped write the follow path
+    // makes and a `scrollTop = scrollHeight` are then the same number.
     dispatch({ type: 'state', busy: true, status: '', sessionId: 'mem-session', runningNodes: [ID] });
     const dot = findByClass(card, 'scroll-lock-dot');
     if (!work.classList.contains('scroll-locked') || !dot || !dot.classList.contains('locked')) {
       problems.push(
-        "a `state` naming this node in `runningNodes` did not engage the card's follow light — the locked-log " +
+        "a `state` naming this node in `runningNodes` did not engage the card's follow light — the pinned-log " +
           'check below cannot see the pin at all',
       );
     }
     work.clientHeight = 0;
-    // The reader's older offset is the memory's 300 (armed above): the pin has to win.
-    arm();
+    // The reader's older offset is still the memory's 300: an append has to win over it.
     dispatch({ type: 'delta', nodeId: ID, text: 'more' });
     if (work.scrollTop !== work.scrollHeight) {
       problems.push(
-        `a locked card's work log sits at ${work.scrollTop} after an append, expected ${work.scrollHeight} — the ` +
+        `a following card's work log sits at ${work.scrollTop} after an append, expected ${work.scrollHeight} — the ` +
           'follow light pins the log to its newest content, and the offset the memory holds must not win',
+      );
+    }
+    // A repaint while the light is on must not restore the memory's older offset either.
+    work.scrollTop = work.scrollHeight;
+    dispatch(pathMsg);
+    if (work.scrollTop !== work.scrollHeight) {
+      problems.push(
+        `a \`path\` re-render moved a following card's log to ${work.scrollTop}, expected its newest content ` +
+          `${work.scrollHeight} — a repaint restores the memory only while the light is off`,
       );
     }
   }
 
-  notes.push('scroll memory: the one scroller holds through append / repaint / re-render, a locked log still pins');
+  notes.push('scroll memory: the one scroller holds through append / repaint / re-render, a following log still pins');
 }
 
 // --- The release light belongs to the card, and only to the card --------------
@@ -4709,6 +4719,9 @@ if (contextLabel !== 'ctx 50%') {
 
   const items = [
     { kind: 'user', text: 'the ask' },
+    // A closed thinking row: one ellipsised line and — unlike its *open* form, which is a
+    // 240px scroller with a light of its own (pinned in the follow block below) — no light.
+    { kind: 'assistant', thinking: 'weighing the options', text: '' },
     { kind: 'tool', name: 'read_file', args: '{"path":"a"}', id: 'lock-tool', content: 'ok', status: 'done' },
     { kind: 'assistant', text: 'the answer' },
   ];
@@ -4792,17 +4805,293 @@ if (contextLabel !== 'ctx 50%') {
     if (dotsIn(wrapA) !== 1) {
       problems.push('the green .scroll-lock-dot is not in .node-work-wrap (the log is the only scroller)');
     }
-    // A row never carries a light of its own: a thinking row used to.
+    // A *closed* row carries no light: a closed thinking row is one line with no scroller
+    // of its own, and a tool row never scrolls inside itself. (An **open** thinking row is
+    // the one exception — a 240px scroller, pinned in the follow block below.)
     const rowsWithDot = [];
     for (const row of (findByClass(cardA, 'node-work') || { children: [] }).children) {
       if (dotsIn(row) > 0) rowsWithDot.push((row.dataset || {}).kind);
     }
     if (rowsWithDot.length > 0) {
-      problems.push(`the log's rows carry their own .scroll-lock-dot (${JSON.stringify(rowsWithDot)}) — the card has one`);
+      problems.push(
+        `the log's closed rows carry their own .scroll-lock-dot (${JSON.stringify(rowsWithDot)}) — only an open ` +
+          'thinking row has one',
+      );
     }
   }
 
   notes.push('follow light: one per card, engaged for a live turn, released by a click, never a claim on anything else');
+}
+
+// --- Follow, not a scrollbar lock: the light goes out on an upward scroll ------
+// The green dot says **"follow the newest content"**. It is not a lock on the scroller:
+// the reader may scroll while it is on, and the direction of their move is what changes
+// the light — not the click alone, and never the content itself.
+//
+// The cases below pin the rule, each stated as the thing that would be broken without it:
+//   (a) an upward scroll inside a following log releases it, the dot dims, and the log
+//       keeps the reader's offset while the stream keeps appending (it is no longer pinned);
+//   (b) scrolling back to the bottom engages it again — the dot is green exactly while the
+//       newest content is on screen;
+//   (c) a click on a dim dot engages follow **and** puts the log at its newest content —
+//       the green light is a promise about where the reader is, not only about where the
+//       next token goes;
+//   (d) a programmatic append and content growth never release it — a pin only ever moves
+//       the offset towards the bottom, so it cannot be read as a reader's gesture. This is
+//       the old bug in one place: the old rule asked "is it still at the bottom?" and a
+//       heavy stream answered "no", so the card unlocked itself under its own output;
+//   (e) the reasoning box has its own light: the open form is a 240 px scroller, so it
+//       follows (and can be released, and be re-engaged by its own dot) on its own — and
+//       the light exists only while the row is open;
+//   (f) the pin stands down for a reader's move whose `scroll` has not been dispatched yet,
+//       so the one ordering that could fight a drag (delta first, event second) still ends
+//       with the light out and the offset where the reader put it.
+{
+  const N = 'follow-node';
+  const T = 'follow-thinking';
+  const node = (id, parentId, children, extra) =>
+    Object.assign(
+      { id, parentId, children, title: id, status: 'done', createdAt: 0, preview: id, usage: null, size: null },
+      extra || {},
+    );
+  const cardOf = (id) => {
+    for (const child of elementById('tree-canvas').children) {
+      if (child.dataset && child.dataset.id === id) return child;
+    }
+    return null;
+  };
+  /** A `scroll` as the engine delivers it: every listener the element registered. */
+  const scrolled = (element) => {
+    for (const handler of handlersOf(element, 'scroll')) handler({ type: 'scroll' });
+  };
+  const clickOf = (element, what) => {
+    const handler = element && element._listeners && element._listeners.click;
+    if (typeof handler !== 'function') {
+      problems.push(`${what} has no click listener`);
+      return false;
+    }
+    handler({ stopPropagation() {} });
+    return true;
+  };
+  const items = [
+    { kind: 'user', text: 'the ask' },
+    { kind: 'tool', name: 'read_file', args: '{"path":"a"}', id: 'follow-tool', content: 'ok', status: 'done' },
+    { kind: 'assistant', text: 'the answer' },
+  ];
+
+  dispatch({ type: 'reset' });
+  dispatch({
+    type: 'tree',
+    viewId: N,
+    activeId: N,
+    rootId: N,
+    rootIds: [N],
+    nodes: [node(N, null, [], { status: 'running' })],
+  });
+  dispatch({ type: 'path', ids: [N], nodes: [{ id: N, status: 'running', items }] });
+  const card = cardOf(N);
+  const work = card ? findByClass(card, 'node-work') : null;
+  const dot = card ? findByClass(card, 'scroll-lock-dot') : null;
+  if (!card || !work || !dot) {
+    problems.push('the follow fixture rendered no live card with a log and a light');
+  } else {
+    // Geometry a laid-out log would have: 1000 px of content in a 400 px box, so "the
+    // bottom" is 600 and every offset below is a real comparison.
+    work.scrollHeight = 1000;
+    work.clientHeight = 400;
+    const following = () => dot.classList.contains('locked') && work.classList.contains('scroll-locked');
+    // The reader reaches the newest content: the light is already on, and that stays true.
+    work.scrollTop = 600;
+    scrolled(work);
+    if (!following()) {
+      problems.push('a live card at its newest content does not read as following — the green light is the state this block is about');
+    }
+
+    // (a) Up: follow is released, and the released log keeps the reader's offset.
+    work.scrollTop = 300;
+    scrolled(work);
+    if (dot.classList.contains('locked')) {
+      problems.push(
+        'scrolling up inside a following log left the light engaged — the green light means follow, and an upward move is ' +
+          'the reader taking the scroll back',
+      );
+    }
+    if (work.classList.contains('scroll-locked')) {
+      problems.push('the released log still wears `scroll-locked` — the class follows the light, and the light went out');
+    }
+    dispatch({ type: 'delta', nodeId: N, text: ' more' });
+    if (work.scrollTop !== 300) {
+      problems.push(
+        `a released log was moved to ${work.scrollTop} by a routed append, expected the reader's 300 — the light is off, so ` +
+          'nothing may pin it',
+      );
+    }
+
+    // (c) A dim dot's click engages follow *and* pins the log to its newest content.
+    clickOf(dot, 'the card light');
+    if (!following()) {
+      problems.push('clicking a dim dot did not engage follow — the light cannot be turned back on');
+    }
+    if (work.scrollTop !== 600) {
+      problems.push(
+        `clicking a dim dot left the log at ${work.scrollTop}, expected 600 (its newest content) — engaging follow puts the ` +
+          'reader at the newest content immediately',
+      );
+    }
+
+    // (a2) Up again, then (b) back to the bottom: the light comes back on.
+    work.scrollTop = 300;
+    scrolled(work);
+    if (dot.classList.contains('locked')) {
+      problems.push('a second upward scroll did not release the light — the direction rule is not a one-shot');
+    }
+    work.scrollTop = 600;
+    scrolled(work);
+    if (!dot.classList.contains('locked')) {
+      problems.push(
+        'scrolling back to the bottom did not re-engage follow — the dot is green exactly while the newest content is on screen',
+      );
+    }
+
+    // (d) Content growth and a programmatic append never release it.
+    work.scrollHeight = 1600;
+    dispatch({ type: 'delta', nodeId: N, text: ' and more' });
+    if (work.scrollTop !== 1200) {
+      problems.push(
+        `a following log sits at ${work.scrollTop} after an append into a taller log, expected 1200 (its newest content)`,
+      );
+    }
+    // The engine reports the pin as a `scroll` of its own; that echo is not a gesture.
+    scrolled(work);
+    if (!dot.classList.contains('locked')) {
+      problems.push(
+        'a programmatic pin released the follow light — a pin only moves the offset towards the bottom, so it must never ' +
+          'read as an upward scroll (that is the heavy-stream bug the direction rule fixes)',
+      );
+    }
+    work.scrollHeight = 1800;
+    dispatch({ type: 'delta', nodeId: N, text: ' still more' });
+    if (work.scrollTop !== 1400 || !dot.classList.contains('locked')) {
+      problems.push(
+        `after another growth and append a following log sits at ${work.scrollTop} (light ` +
+          `${dot.classList.contains('locked') ? 'engaged' : 'released'}), expected 1400 and engaged`,
+      );
+    }
+
+    // (f) A pin never reverts a move whose `scroll` has not been dispatched yet. This is the
+    // one ordering the direction rule has to survive: the reader drags up, a delta lands
+    // first (the pin runs before the event), and the pin has to stand down — otherwise it
+    // pulls the reader back to the bottom and the event arrives reporting the bottom, so the
+    // light never goes out and the drag is a no-op.
+    work.scrollTop = 1300;
+    dispatch({ type: 'delta', nodeId: N, text: ' raced the drag' });
+    if (work.scrollTop !== 1300) {
+      problems.push(
+        `a pin reverted a reader's un-dispatched scroll: the log sits at ${work.scrollTop}, expected the reader's 1300 — ` +
+          'the pin must stand down while the box is above the offset the controller last wrote',
+      );
+    }
+    scrolled(work);
+    if (dot.classList.contains('locked')) {
+      problems.push(
+        'the delayed `scroll` of a reader drag did not release the light — the pin stood down, so the event has to be ' +
+          'able to release it',
+      );
+    }
+  }
+
+  // (e) The reasoning box has a light of its own — and only while it is open.
+  dispatch({ type: 'reset' });
+  dispatch({
+    type: 'tree',
+    viewId: T,
+    activeId: T,
+    rootId: T,
+    rootIds: [T],
+    nodes: [node(T, null, [], { status: 'running' })],
+  });
+  dispatch({ type: 'path', ids: [T], nodes: [{ id: T, status: 'running', items: [{ kind: 'user', text: 'the ask' }] }] });
+  dispatch({ type: 'thinkingDelta', nodeId: T, text: 'reasoning so far' });
+
+  const tcard = cardOf(T);
+  const tlog = tcard ? findByClass(tcard, 'node-work') : null;
+  let row = null;
+  for (const child of (tlog && tlog.children) || []) {
+    if (child.dataset && child.dataset.kind === 'thinking') row = child;
+  }
+  if (!row || !hasClass(row, 'open')) {
+    problems.push('a live thinking delta did not open a reasoning row — the reasoning light below has no box to belong to');
+  } else {
+    const box = row._textEl;
+    const rdot = findByClass(row, 'scroll-lock-dot');
+    if (!rdot) {
+      problems.push(
+        'the open reasoning row carries no .scroll-lock-dot — its 240px box is a scroller of its own, so it has a light of ' +
+          'its own',
+      );
+    } else {
+      if (!rdot.classList.contains('locked')) {
+        problems.push('the reasoning light starts released — opening the row follows the reasoning');
+      }
+      if (!hasClass(row, 'thinking-row')) {
+        problems.push('the reasoning light is not in the reasoning row');
+      }
+      // The box follows its own stream, then a reader's upward scroll releases it — and the
+      // stream does not take the box back.
+      box.scrollHeight = 300;
+      box.clientHeight = 186;
+      dispatch({ type: 'thinkingDelta', nodeId: T, text: ' and more' });
+      if (box.scrollTop !== 114) {
+        problems.push(
+          `the open reasoning box sits at ${box.scrollTop} after a delta, expected 114 (its newest line) — the box follows ` +
+            'its own stream',
+        );
+      }
+      box.scrollTop = 40;
+      scrolled(box);
+      if (rdot.classList.contains('locked')) {
+        problems.push('scrolling up inside the reasoning box left its light engaged — the box follows only while the reader lets it');
+      }
+      dispatch({ type: 'thinkingDelta', nodeId: T, text: ' more still' });
+      if (box.scrollTop !== 40) {
+        problems.push(
+          `a released reasoning box was moved to ${box.scrollTop} by the next delta, expected the reader's 40 — the stream ` +
+            'does not take a box back',
+        );
+      }
+      // Its own dot engages it again and scrolls it to the newest line — without opening or
+      // closing the row (the row's click owns that).
+      clickOf(rdot, 'the reasoning light');
+      if (!rdot.classList.contains('locked') || box.scrollTop !== 114) {
+        problems.push(
+          `clicking the reasoning light left it ${rdot.classList.contains('locked') ? 'engaged' : 'released'} at ` +
+            `${box.scrollTop}, expected engaged at 114`,
+        );
+      }
+      if (!hasClass(row, 'open')) {
+        problems.push(
+          'a click on the reasoning light toggled the row — the dot handler has to stopPropagation, or releasing the box ' +
+            'folds the reasoning too',
+        );
+      }
+      // The light belongs to the open form: closing the row takes it out of the DOM.
+      clickOf(row, 'the reasoning row');
+      if (hasClass(row, 'open')) {
+        problems.push('a click on the reasoning row did not close it — the case below has nothing to check');
+      }
+      if (findByClass(row, 'scroll-lock-dot')) {
+        problems.push(
+          'a closed reasoning row still carries a .scroll-lock-dot — a one-line row has no scroller, and the closed form ' +
+            'carries no light',
+        );
+      }
+    }
+  }
+
+  notes.push(
+    'follow light: an upward scroll releases it, the bottom re-engages it, a dim click engages and pins, an append never ' +
+      'releases it; the reasoning box has its own light while it is open',
+  );
 }
 
 // --- Touch navigation: a finger pans the tree, two fingers pinch it -----------
