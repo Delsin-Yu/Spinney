@@ -555,14 +555,18 @@ const startJob = (ms, detached = false) => {
     /get<number>\('subAgentSyncSeconds'\)/.test(runtimeSrc) && !/commandMaxForegroundDuration/.test(runtimeSrc),
   );
   const promptSrc = fs.readFileSync(path.join(ROOT, 'src', 'agent', 'prompt.ts'), 'utf8');
-  check(
-    'the prompt tells the model never to sleep for a command',
-    /Never sleep to wait for a command/.test(promptSrc),
-    short(promptSrc.slice(promptSrc.indexOf('Never sleep'), promptSrc.indexOf('Never sleep') + 120), 'Never sleep'),
-  );
-  check('the prompt names wait_for_command and check_command', /wait_for_command/.test(promptSrc) && /check_command/.test(promptSrc));
+  // The mechanism (run_type semantics, the three management tools, the foreground
+  // setting) is stated **once**, in the exec_command schema, and case 11 asserts it
+  // there. The prompt keeps only the rule the schema cannot carry as a prohibition:
+  // never hand the work to a process the harness does not own. These two checks hold
+  // the split — the rule present, the mechanism not repeated.
   check('the prompt keeps the never-background-it-yourself rule', /never hand the work to a process the harness does not own/.test(promptSrc));
-  check('the prompt names spinney.execForegroundSeconds', /spinney\.execForegroundSeconds/.test(promptSrc));
+  check(
+    'the prompt does not repeat the exec_command mechanism the schema owns',
+    !/wait_for_command|check_command/.test(promptSrc) &&
+      !/spinney\.execForegroundSeconds/.test(promptSrc) &&
+      !/Never sleep to wait for a command/.test(promptSrc),
+  );
   check(
     'the prompt names none of the removed arguments or settings',
     !/timeout_behavior/.test(promptSrc) && !/commandMaxForegroundDuration|commandDefaultTimeout/.test(promptSrc),

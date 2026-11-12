@@ -138,6 +138,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The system prompt says each thing once.** The main template dropped from 6491 to 4429
+  characters with no rule lost: the `exec_command` mechanism it used to restate (`run_type`
+  semantics, `wait_for_command` / `check_command` / `kill_command`, the foreground setting)
+  now lives only in that tool's schema, which the model reads on every request anyway. What
+  the prompt keeps is the rule a schema cannot carry as a prohibition: never hand work to a
+  process the harness does not own. The exec acceptance check holds the split in both
+  directions — the rule present, the mechanism not repeated.
 - **The green light means "follow", not "the scrollbar is locked".** While it is green you
   can scroll; the log follows the newest content at the same time. Scrolling up releases
   the follow (the dot dims), scrolling back to the end re-engages it, and clicking the dim
