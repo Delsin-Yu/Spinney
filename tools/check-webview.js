@@ -3966,6 +3966,300 @@ if (contextLabel !== 'ctx 50%') {
   notes.push('rows: a thinking line opens live and collapses to one line, a tool line is one bold verb + label + chip');
 }
 
+// --- The steps groups: one per run of tool rows, and the text stays in the flow ---
+// A turn's process is grouped per **contiguous run of tool rows**, not under one fold:
+// a tool row opens a `.steps` group (`data-kind="steps"`) when none is open, the next
+// assistant **text** closes it — the prose is appended to `.node-work`, never into a
+// group's body — and the following tool row opens a second group. The consequences are
+// what this block pins, because every one of them fails silently in a window:
+//
+//  - a finished card can hold **several** `Ran N steps` groups, each with its own count,
+//    and the text between two of them stands in the log at the top level;
+//  - each group folds **on its own** (its own header, its own body, its own count), and
+//    the live path builds a group's rows as they arrive while a finished card's repaint
+//    leaves each body empty until that group's own header is clicked (`paintStepsBody`);
+//  - nothing is ever moved: the final answer is the flow's last block, top level, and no
+//    assistant row lives inside a `.steps-body` (the `moveAnswerOut` branch is gone);
+//  - the history repaint splits the same items the same way, so a reload cannot
+//    renumber, refold or reorder the runs the user just watched.
+{
+  const NODE = 'runs-node';
+  const node = (id, status) => ({
+    id,
+    parentId: null,
+    children: [],
+    title: id,
+    status,
+    createdAt: 0,
+    preview: id,
+    usage: null,
+    size: null,
+  });
+  const cardOf = () =>
+    Array.from(elementById('tree-canvas').children).find((child) => child.dataset && child.dataset.id === NODE);
+  const logOf = () => {
+    const card = cardOf();
+    return card ? findByClass(card, 'node-work') : null;
+  };
+  /** The log's top-level blocks: the flow, groups included, nothing one fold deeper. */
+  const blocksOf = () => {
+    const log = logOf();
+    return log ? Array.prototype.slice.call(log.children) : [];
+  };
+  const kindsOf = () => blocksOf().map((child) => (child.dataset || {}).kind || '?');
+  const groupsOf = () => blocksOf().filter((child) => hasClass(child, 'steps'));
+  const headOf = (group) => (group ? findByClass(group, 'steps-head') : null);
+  const bodyOf = (group) => (group ? findByClass(group, 'steps-body') : null);
+  const labelOf = (group) => {
+    const head = headOf(group);
+    const label = head ? findByClass(head, 'steps-label') : null;
+    return label ? String(label.textContent || '') : null;
+  };
+  const clickHead = (group) => {
+    const head = headOf(group);
+    const handler = head && head._listeners && head._listeners.click;
+    if (typeof handler !== 'function') {
+      problems.push('a steps header has no click handler — a group can no longer be folded by hand');
+      return false;
+    }
+    handler({ stopPropagation() {} });
+    return true;
+  };
+  const toolIdsIn = (group) => {
+    const body = bodyOf(group);
+    return Array.prototype.slice
+      .call((body && body.children) || [])
+      .filter((row) => (row.dataset || {}).kind === 'tool')
+      .map((row) => (row.dataset || {}).id);
+  };
+  /** Every assistant row anywhere under the log, with the container it sits in. */
+  const assistantRows = (element, into) => {
+    for (const child of (element && element.children) || []) {
+      if ((child.dataset || {}).kind === 'assistant') into.push(child);
+      assistantRows(child, into);
+    }
+    return into;
+  };
+  /** One run's model: a tool call opened and finished on the live stream. */
+  const runTool = (id, name, args) => {
+    dispatch({ type: 'toolCallDelta', nodeId: NODE, index: 0, id, name, args });
+    dispatch({ type: 'toolStart', nodeId: NODE, index: 0, id, name, args, startedAt: Date.now() - 500 });
+    dispatch({ type: 'toolEnd', nodeId: NODE, id, content: 'ok', ms: 500 });
+  };
+
+  // (a) A live turn: thinking, a run of one step, the text, a second run of two steps,
+  // the final answer. The text between the two runs must be a **top-level** block.
+  const mountEmpty = (status) => {
+    dispatch({ type: 'reset' });
+    dispatch({ type: 'tree', viewId: NODE, activeId: NODE, rootId: NODE, nodes: [node(NODE, status)] });
+  };
+  const mount = (status) => {
+    mountEmpty(status);
+    dispatch({ type: 'path', ids: [NODE], nodes: [{ id: NODE, status, items: [{ kind: 'user', text: 'the ask' }] }] });
+  };
+  mount('running');
+  dispatch({ type: 'state', busy: true, status: '', sessionId: 'runs-session', runningNodes: [NODE] });
+  dispatch({ type: 'thinkingDelta', nodeId: NODE, text: 'first thought' });
+  runTool('run-a1', 'read_file', '{"path":"a.ts"}');
+  dispatch({ type: 'delta', nodeId: NODE, text: 'the middle text' });
+  dispatch({ type: 'thinkingDelta', nodeId: NODE, text: 'second thought' });
+  runTool('run-b1', 'exec_command', '{"command":"npm test"}');
+  runTool('run-b2', 'exec_command', '{"command":"npm run lint"}');
+  dispatch({ type: 'delta', nodeId: NODE, text: 'the final answer' });
+  dispatch({ type: 'done', nodeId: NODE });
+
+  const liveKinds = kindsOf();
+  if (liveKinds.join(',') !== 'thinking,steps,assistant,thinking,steps,assistant') {
+    problems.push(
+      `a live turn of two runs renders ${JSON.stringify(liveKinds)} in its log, expected ` +
+        '"thinking,steps,assistant,thinking,steps,assistant" (one group per run of tool rows, and the text between them in the flow)',
+    );
+  }
+  {
+    const groups = groupsOf();
+    if (groups.length !== 2) {
+      problems.push(`a live turn of two runs built ${groups.length} steps group(s), expected 2 (one per run)`);
+    } else {
+      if (labelOf(groups[0]) !== 'Ran 1 step') {
+        problems.push(`the first run's header reads ${JSON.stringify(labelOf(groups[0]))}, expected "Ran 1 step"`);
+      }
+      if (labelOf(groups[1]) !== 'Ran 2 steps') {
+        problems.push(`the second run's header reads ${JSON.stringify(labelOf(groups[1]))}, expected "Ran 2 steps"`);
+      }
+      // The live path builds each run's rows as they arrive, in that group's own body.
+      if (toolIdsIn(groups[0]).join(',') !== 'run-a1') {
+        problems.push(`the first run's body holds ${JSON.stringify(toolIdsIn(groups[0]))}, expected its own ["run-a1"]`);
+      }
+      if (toolIdsIn(groups[1]).join(',') !== 'run-b1,run-b2') {
+        problems.push(`the second run's body holds ${JSON.stringify(toolIdsIn(groups[1]))}, expected ["run-b1","run-b2"]`);
+      }
+      // The turn is over: every group tucks itself behind its own header.
+      for (const [i, group] of groups.entries()) {
+        if (!group.classList.contains('steps-folded')) {
+          problems.push(`group ${i + 1} of a finished turn is still open — each group tucks itself when the turn ends`);
+        }
+      }
+      // A click is per group: the first one opens without touching the second.
+      if (groups.length === 2 && clickHead(groups[0])) {
+        if (groups[0].classList.contains('steps-folded')) {
+          problems.push('clicking a steps header does not open that group');
+        }
+        if (!groups[1].classList.contains('steps-folded')) {
+          problems.push('opening one steps group folded another one with it — each group has its own fold state');
+        }
+      }
+    }
+    // The middle text stands in the flow, at the top level, between the two groups.
+    const blocks = blocksOf();
+    const textAt = blocks.findIndex((child) => (child.dataset || {}).kind === 'assistant');
+    if (textAt < 0 || !groups.length || blocks.indexOf(groups[0]) > textAt) {
+      problems.push('the text between two runs is not a top-level block of the log after the first group');
+    }
+    // Nothing moved: the answer is the last block of the flow, and no assistant row is
+    // inside any group's body.
+    const last = blocks[blocks.length - 1];
+    if (!last || (last.dataset || {}).kind !== 'assistant') {
+      problems.push(
+        `a turn of two runs ends with ${JSON.stringify(((last && last.dataset) || {}).kind)}, expected the final answer as the ` +
+          'flow\'s last block',
+      );
+    }
+    for (const group of groups) {
+      const inside = assistantRows(bodyOf(group), []);
+      if (inside.length) {
+        problems.push(
+          `a steps body holds ${inside.length} assistant row(s) — the text always stays in the flow, so an answer is never ` +
+            'moved out of a group and never written into one',
+        );
+      }
+    }
+  }
+
+  // (b) The same turn replayed as history: the split is the live split, the folds are
+  // closed, and each group's body stays **lazy** until its own header is clicked.
+  const historyItems = [
+    { kind: 'user', text: 'the ask' },
+    { kind: 'assistant', thinking: 'first thought', text: '' },
+    { kind: 'tool', id: 'run-a1', name: 'read_file', args: '{"path":"a.ts"}', status: 'done', content: 'ok', ms: 500 },
+    { kind: 'assistant', text: 'the middle text' },
+    { kind: 'assistant', thinking: 'second thought', text: '' },
+    { kind: 'tool', id: 'run-b1', name: 'exec_command', args: '{"command":"npm test"}', status: 'done', content: 'ok', ms: 500 },
+    { kind: 'tool', id: 'run-b2', name: 'exec_command', args: '{"command":"npm run lint"}', status: 'done', content: 'ok', ms: 500 },
+    { kind: 'assistant', text: 'the final answer' },
+  ];
+  mountEmpty('done');
+  dispatch({ type: 'path', ids: [NODE], nodes: [{ id: NODE, status: 'done', items: historyItems }] });
+  {
+    const repaintKinds = kindsOf();
+    if (repaintKinds.join(',') !== liveKinds.join(',')) {
+      problems.push(
+        `a repainted turn of two runs renders ${JSON.stringify(repaintKinds)}, but the live turn rendered ` +
+          `${JSON.stringify(liveKinds)} — the history repaint has to split the items exactly like the live stream`,
+      );
+    }
+    const groups = groupsOf();
+    if (groups.length !== 2) {
+      problems.push(`a repainted turn of two runs built ${groups.length} steps group(s), expected 2`);
+    } else {
+      if (labelOf(groups[0]) !== 'Ran 1 step' || labelOf(groups[1]) !== 'Ran 2 steps') {
+        problems.push(
+          `the repainted groups read ${JSON.stringify([labelOf(groups[0]), labelOf(groups[1])])}, expected ` +
+            '["Ran 1 step","Ran 2 steps"]',
+        );
+      }
+      // A folded group built no rows: its items are still `_lazy`, and the count on its
+      // header is the one it carries until the click.
+      for (const [i, group] of groups.entries()) {
+        const body = bodyOf(group);
+        if (!group.classList.contains('steps-folded')) {
+          problems.push(`repainted group ${i + 1} is open — a finished card folds every group`);
+        }
+        if (body && body.children.length) {
+          problems.push(
+            `repainted group ${i + 1} built ${body.children.length} row(s) before it was opened — each group's body is built ` +
+              'by its own click',
+          );
+        }
+      }
+      // The first group's click builds **its** rows and leaves the second one alone.
+      if (clickHead(groups[0])) {
+        if (groups[0].classList.contains('steps-folded')) {
+          problems.push('clicking a repainted group\'s header does not open it');
+        }
+        if (toolIdsIn(groups[0]).join(',') !== 'run-a1') {
+          problems.push(`opening the first repainted group built ${JSON.stringify(toolIdsIn(groups[0]))}, expected ["run-a1"]`);
+        }
+        const second = bodyOf(groups[1]);
+        if (!groups[1].classList.contains('steps-folded') || (second && second.children.length)) {
+          problems.push('opening one repainted group also opened the other — each group owns its fold and its lazy body');
+        }
+      }
+      // The second group's click builds its own two rows, and the first stays as it was.
+      if (clickHead(groups[1])) {
+        if (toolIdsIn(groups[1]).join(',') !== 'run-b1,run-b2') {
+          problems.push(`opening the second repainted group built ${JSON.stringify(toolIdsIn(groups[1]))}, expected ["run-b1","run-b2"]`);
+        }
+        if (groups[0].classList.contains('steps-folded')) {
+          problems.push('opening the second group closed the first one — the two folds are independent');
+        }
+      }
+    }
+    // The answer is still the flow's last block after the repaint, and the text between
+    // the runs is still a top-level block of the log.
+    const blocks = blocksOf();
+    const last = blocks[blocks.length - 1];
+    if (!last || (last.dataset || {}).kind !== 'assistant' || hasClass(last, 'steps')) {
+      problems.push(
+        `after the repaint the log ends with ${JSON.stringify(((last && last.dataset) || {}).kind)}, expected the final answer ` +
+          'as the flow\'s last block (no move, no promotion)',
+      );
+    }
+    const assistants = assistantRows(logOf(), []);
+    if (assistants.length !== 2) {
+      problems.push(`a repainted turn of two runs renders ${assistants.length} assistant row(s), expected 2 (its own text blocks)`);
+    }
+    for (const row of assistants) {
+      let parent = row.parentElement;
+      let inStepsBody = false;
+      while (parent) {
+        if (hasClass(parent, 'steps-body')) inStepsBody = true;
+        parent = parent.parentElement;
+      }
+      if (inStepsBody) problems.push('a repainted assistant row lives inside a steps body — the text always stays in the flow');
+    }
+  }
+
+  // (c) A `title` reads as normal text: the monospace label is only for the derived
+  // command or pattern, i.e. when the model named no step of its own.
+  {
+    const titled = { kind: 'tool', id: 'mono-titled', name: 'exec_command', args: '{"command":"npm test"}', title: 'run the tests', status: 'done', ms: 10 };
+    const plain = { kind: 'tool', id: 'mono-plain', name: 'exec_command', args: '{"command":"npm test"}', status: 'done', ms: 10 };
+    mountEmpty('done');
+    dispatch({ type: 'path', ids: [NODE], nodes: [{ id: NODE, status: 'done', items: [{ kind: 'user', text: 'x' }, titled, plain] }] });
+    const groups = groupsOf();
+    if (!groups.length || clickHead(groups[0])) {
+      const body = groups.length ? bodyOf(groups[0]) : null;
+      const rows = Array.prototype.slice.call((body && body.children) || []).filter((r) => (r.dataset || {}).kind === 'tool');
+      const classesOf = (row) => {
+        const label = row ? findByClass(row, 'tool-label') : null;
+        return label ? String(label.className || '') : null;
+      };
+      if (rows.length !== 2) {
+        problems.push(`the title/mono fixture built ${rows.length} tool row(s), expected 2`);
+      } else {
+        if (/mono/.test(String(classesOf(rows[0])))) {
+          problems.push('a tool row carrying a `title` is set in monospace — a title reads as normal text');
+        }
+        if (!/mono/.test(String(classesOf(rows[1])))) {
+          problems.push('an `exec_command` row with no `title` is not set in monospace — a derived command is code');
+        }
+      }
+    }
+  }
+
+  notes.push('steps groups: one per run, the text between them in the flow, each group folded and lazy on its own');
+}
+
 // --- A turn is one flow: no zones, one scroller --------------------------------
 // The card that used to be read in three zones is one linear flow now, and this block
 // pins the structural half of that (the row renderers themselves are in the block
@@ -5576,10 +5870,17 @@ if (contextLabel !== 'ctx 50%') {
     }
   }
   const scriptSource = fs.readFileSync(scriptPath, 'utf8');
-  for (const gone of ['forkTurn', 'rolloverTurn', 'new-setup-btn', 'node-window']) {
+  for (const gone of ['forkTurn', 'rolloverTurn', 'new-setup-btn', 'node-window', 'moveAnswerOut']) {
     if (scriptSource.includes(gone)) {
       problems.push(`media/main.js still mentions the removed \`${gone}\``);
     }
+  }
+  // The card's reading height is one number in one place: the sheet's cap. The drag
+  // raises it per card (`max-height`), and nothing writes an inline height — so this is
+  // the number every card that was never dragged gets, and it is pinned here because a
+  // stylesheet change is invisible to every other guard.
+  if (!/--node-max-h:\s*840px;/.test(styleSource)) {
+    problems.push('media/style.css does not set `--node-max-h: 840px` — the card\'s reading height is the sheet\'s, in one place');
   }
   notes.push('shell: #new-context-btn sits before #send-btn, and the retired ids/classes are gone');
 }

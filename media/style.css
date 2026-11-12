@@ -7,7 +7,7 @@
   /* The card's own cap, in one place. `media/main.js` never writes a layout height onto
      a card, so this (or the size the user dragged) is the only limit: a long turn
      scrolls inside `.node-work` instead of growing the card. */
-  --node-max-h:   1200px;
+  --node-max-h:   840px;
   --bg:           var(--vscode-sideBar-background, #1e1e1e);
   --bg2:          var(--vscode-sideBarSectionHeader-background, #252526);
   --bg3:          var(--vscode-input-background, #2d2d30);
@@ -539,13 +539,16 @@ button.icon-btn {
 
 .answer del { color: var(--text-dim); }
 
-/* ---- The two rows of the log ------------------------------------------------
-   A turn is one flow of rows inside `.node-work` (the card's only scroller), so a
-   thinking row and a tool row are *lines in the essay*, not boxes stacked on it: no
-   border, no background, no header. What distinguishes them is what they say and how
-   loud they are — the reasoning is dim italic text, the step is a bold verb. */
+/* ---- The three type levels of the log ---------------------------------------
+   A turn is one flow of rows inside `.node-work` (the card's only scroller), so what
+   distinguishes them is what they say and how loud they are, in exactly three levels:
+   the prose and the reasoning read as normal text (`--text`, 13px), a tool row's line
+   is one step down (the verb in `--accent-dim`, the label 12px `--text-dim`), and the
+   expanded detail is one more (11px `--text-dim`). The usage line is the faintest, a
+   10px footnote under whichever row hosts it. Nothing is dimmed or italic to say
+   "process": the levels are size and colour, not a second voice. */
 
-/* A thinking row: dimmed italic prose while its turn is live, one ellipsised line once
+/* A thinking row: the whole paragraph while its turn is live, one ellipsised line once
    the turn is over. The row is the control — there is no label and no chevron, so a
    click anywhere on it opens the whole reasoning plus the turn's usage line. */
 .thinking-row {
@@ -639,13 +642,16 @@ button.icon-btn {
   background: var(--success);
 }
 
-/* ---- The steps group --------------------------------------------------------
-   The turn's process lives in one group: the reasoning, the tool lines, the prose
-   between them and the harness notes, under a `Ran N steps` header. The group is open
-   while the turn runs and tucks itself behind the header when the reply finishes; the
-   final answer is lifted out of it and reads as the last block of the flow, in no
-   frame of its own. Nothing here is dimmed or italic: a step is text like any other,
-   and the only marks are the verb, the label and the status dot. */
+/* ---- The steps groups: one per run of tool rows -----------------------------
+   A turn's process is grouped per **run**: a tool row opens a `Ran N steps` group
+   (`Ran 1 step` for a single call), the reasoning that arrives while a run is open
+   rides that group's body, and the next assistant **text** closes it — the prose stays
+   in the flow, never inside a group's body, so the turn's final answer is simply the
+   flow's last block and nothing is ever lifted out of a group. There can be several
+   groups in one turn, and each one has its own fold state: open while its turn runs,
+   folded when the turn ends, and a click on its own header always wins for that group.
+   Nothing here is dimmed or italic: a step is text like any other, at the levels the
+   block above spells out. */
 .steps {
   display: block;
   margin: 0;
@@ -702,27 +708,28 @@ button.icon-btn {
 .tool-verb {
   flex: 0 0 auto;
   font-weight: 700;
-  color: var(--accent);
+  color: var(--accent-dim);
 }
 
 /* The label is the step itself: a path or a title in the UI's own type, a command or a
-   pattern in monospace (main.js adds `.mono` per tool). It is the one part of the row
-   that is allowed to be cut off — a long command ends in an ellipsis, the verb and the
-   chip never do. */
+   pattern in monospace (main.js adds `.mono` per tool — and only when the model gave the
+   step no `title` of its own, so a title always reads as normal text). It is the one part
+   of the row that is allowed to be cut off — a long command ends in an ellipsis, the verb
+   and the chip never do. */
 .tool-label {
   flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: var(--text);
+  color: var(--text-dim);
   font-size: 12px;
 }
 
 .tool-label.mono {
   font-family: "Consolas", "Courier New", monospace;
   font-size: 11px;
-  color: var(--text);
+  color: var(--text-dim);
 }
 
 /* The expanded detail, in place under the row: the `> args` line, the result, an error
@@ -736,7 +743,8 @@ button.icon-btn {
   border-radius: 0 6px 6px 0;
   max-height: 260px;
   overflow: auto;
-  color: var(--text);
+  font-size: 11px;
+  color: var(--text-dim);
   scrollbar-gutter: stable;
 }
 
@@ -748,7 +756,7 @@ button.icon-btn {
 .tool-args-line {
   font-family: "Consolas", "Courier New", monospace;
   font-size: 11px;
-  color: var(--text);
+  color: var(--text-dim);
   white-space: pre-wrap;
   word-break: break-word;
   margin-bottom: 4px;
@@ -760,7 +768,7 @@ button.icon-btn {
   margin: 0;
   font-family: "Consolas", "Courier New", monospace;
   font-size: 11px;
-  color: var(--text);
+  color: var(--text-dim);
   white-space: pre-wrap;
   word-break: break-word;
   user-select: text;
@@ -1369,7 +1377,7 @@ button.icon-btn {
   width: 320px;
   /* A long turn never grows the card: the whole essay scrolls inside `.node-work`
      (the card's one scroller) and the head, the pinned ask and the composer stay put.
-     1200px is a reading height, and the drag-resize can raise it — never a second
+     840px is a reading height, and the drag-resize can raise it — never a second
      opinion about it (the layout writes no inline size at all). */
   max-height: var(--node-max-h);
   background: var(--assistant-bg);

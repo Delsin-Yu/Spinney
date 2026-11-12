@@ -21,14 +21,17 @@
   that an unchanged snapshot rebuilds no row.
 - **A turn is one essay, and its rows follow the turn.** The log is a linear flow, so
   the only row with a *live* state is the thinking row: it is open while its turn runs
-  (the dimmed italic paragraph) and collapses to one ellipsised line the moment the
+  (the upright 13 px paragraph) and collapses to one ellipsised line the moment the
   answer's text takes over or the turn ends (`done` / `interrupted` / `error` →
   `endRun` → `settleRowsFinished`). A click hands *that* row to the user for good
   (`_userTouched`) and the rule then leaves it exactly where they put it. A tool row
   is folded at rest whatever it is doing — its one line already says what the step was —
-  and a click opens its detail. `setThinkingOpen` / `setToolOpen` / `setActiveRow` /
-  `clearActiveRow` / `closeActiveRows` in `media/main.js`; `tools/check-webview.js`
-  asserts both halves ("the two rows of a turn").
+  and a click opens its detail. The **steps groups** follow the same hand-over rule per
+  group: each is open while its run is live, folded when the turn ends, and a click on its
+  own header always wins for that one group. `setThinkingOpen` / `setToolOpen` /
+  `setActiveRow` / `clearActiveRow` / `closeActiveRows` / `setStepsFold` in `media/main.js`;
+  `tools/check-webview.js` asserts both halves ("the two rows of a turn") and the per-run
+  groups ("steps groups: one per run").
 - Transcript scrolling is **per-card and event-driven**, and a card has exactly one
   scroller: `.node-work`, which holds the whole turn (see §"One card, one flow"). It has
   a `createScrollController` with a green lock dot
@@ -66,17 +69,20 @@ containers and no more:
   card exists, and it stays out of the scroller so scrolling a long turn never hides the
   question.
 - **`.node-work`** — the card's **only scroller**, holding every row of the turn in the
-  order it happened. The rows before the first tool call are in the log itself; everything
-  from that call onward lives in the **steps group** (`.steps`, `data-kind="steps"`) —
-  a `Ran N steps` header (`Ran 1 step` when it is one) over a `.steps-body` holding the
-  tool rows, the reasoning, the notices, the background and sub-agent notices and the
-  `HARNESS` blocks. The group is **open while the turn runs** and **tucks itself behind
-  the header when the reply finishes**; a click on the header toggles it, and a click
-  always wins over the resting state. The model's **final answer is lifted out of the
-  group** when the turn ends and renders as the flow's last markdown block, in no frame of
-  its own (`.msg.assistant` has no background or border; the error variant keeps its tint).
-  A turn with no tool calls has no group at all: its reasoning line and its answer are the
-  flow.
+  order it happened. There are no zones and no window above a fold: the rows are the flow.
+  The process is grouped **per run of tool rows**: a tool row opens a steps group
+  (`.steps`, `data-kind="steps"`) when none is open, an assistant **text** row closes it,
+  and the next tool row opens another — so a turn can hold several `Ran N steps` groups
+  (`Ran 1 step` when it is one), each with its own `.steps-body`, its own count and its
+  own fold state (open while its turn runs, folded when the turn ends, and a click on that
+  header toggles it and always wins **for that group**). A thinking row, a notice, a
+  background/sub-agent notice and a `HARNESS` block join the open group's body when there
+  is one and stand in the log itself when there is not. **The text always stays in the
+  flow**: an assistant text row is appended to `.node-work` itself, never into a group's
+  body, so the model's **final answer is simply the flow's last text block** — there is
+  nothing to lift out, and no second place an answer could live (`.msg.assistant` has no
+  background or border; the error variant keeps its tint). A turn with no tool calls has
+  no group at all: its reasoning line and its answer are the flow.
 
 That is the whole structure. It replaced a three-zone card (`ask` / `work` / `answer`)
 whose third zone was a *move* of the log's trailing answer run, and the machinery that
@@ -85,20 +91,26 @@ went with it is deliberately **gone**, not disabled: `promoteAnswer` / `demoteAn
 (the measured share), `autoWorkFold` / `setWorkFold` / `updateWorkHead` and the classes
 `has-answer` / `work-folded` / `answer-split`, the containers `.node-answer-wrap` /
 `.node-answer` and the log's fold header `.node-work-head`, plus the per-card memories
-`_answerAnchor` / `_answerOpened` / `_workTouched`. History is why: the split had to be
-*measured* on every append (the answer's natural height is not something a stylesheet can
-read), and every measured pass was a chance to move a reader. One flow needs no
-measurement at all — the card's own cap bounds the log, and a long turn scrolls in it.
+`_answerAnchor` / `_answerOpened` / `_workTouched`. The single steps group's own
+`moveAnswerOut` went the same way with it: a text row is never inside a group, so the
+answer needs no move at all. History is why: the split had to be *measured* on every append
+(the answer's natural height is not something a stylesheet can read), and every measured
+pass was a chance to move a reader. One flow needs no measurement at all — the card's own
+cap (`--node-max-h`, 840 px) bounds the log, and a long turn scrolls in it.
 
-**A cold card builds only what it shows.** A finished card with steps paints its run-up,
-the header and the answer; the body is empty until the click that opens the group
-(`paintStepsBody` builds it once, from `group._lazy`). That is also why the old
-scroll *window* now applies only to a tool-less long turn: a card with steps is bounded by
-the fold instead, and `renderNodeItems` skips `paintItemsWindow` for it.
+**A cold card builds only what it shows, group by group.** A finished card with steps
+paints the flow, **each** group's header and the answer; every group's body is empty until
+the click that opens *that* group (`paintStepsBody` builds it once, from the group's own
+`_lazy` list, and the header's count travels with the group until then). That is also why
+the old scroll *window* now applies only to a tool-less long turn: a card with steps is
+bounded by the folds instead, and `renderNodeItems` skips `paintItemsWindow` for it.
 
 **The two rows.** A tool call and a piece of reasoning are *lines in the essay*, not boxes
 stacked on it, and each has one renderer used by both the live path and the history
-repaint:
+repaint. The log carries **three type levels** and nothing louder: the prose and the
+reasoning are normal text (13 px `--text`, upright), a tool row's line is one step down
+(the verb in `--accent-dim`, the label 12 px `--text-dim`), the expanded detail is one more
+(11 px `--text-dim`), and the usage line stays the faintest footnote (10 px `--text-dim`).
 
 - **a thinking row** (`.msg.thinking-row`, `data-kind="thinking"`) — no header, no
   chevron, no label: the row *is* the control. Open (while its turn runs) it is the
@@ -108,36 +120,43 @@ repaint:
   (`[Prompt: {0} + Completion: {1}, Cache Hit: {2}, Cache Miss: {3}]`); the stream keeps
   the box at its newest line unless the reader scrolled it. Closed it is one line of the
   same text, ellipsised in CSS. `setThinkingOpen` owns the two states; `_open` mirrors the
-  class.
+  class. It joins the open steps group's body when there is one, and stands in the log
+  itself when there is not.
 - **a tool row** (`.msg.tool`) — one line: a small status dot, the bold verb, the label and
-  the elapsed chip. The verb is per tool and `tr()`-localized (`TOOL_VERBS`: Read /
+  the elapsed chip. The verb is per tool, `tr()`-localized (`TOOL_VERBS`: Read /
   Viewed / Wrote / Edited / Appended / Listed / Searched / Recalled / Ran / Checked /
   Waited / Killed / Fetched / Spawned / Hopped / Finished / Renamed; a name no verb knows
-  keeps its own name). The label is **`DisplayItem.title`** — the `title` argument every
-  tool schema carries, read out of the call's arguments on the host
-  (`toolTitleFromArgs`) and stored on the item, so a clipped argument string can never lose
-  it — else `toolBrief()`'s path/command/pattern, set in monospace for a command or a
-  pattern. The detail (`.tool-detail`) is folded at rest and a click toggles it: the
-  `> command / args` line, a `pre` block with the full result (the existing UI caps still
-  apply: args ~8 KiB, result ~32 KiB, enforced host-side by `clipForUi`), the error text
-  when there is one, and the usage line. The data is in normal text colour (monospace for
-  the command and the output, because it is code); the usage line stays the one dimmed
-  footnote. A running row's dot pulses and its chip ticks (250 ms); a finished row's dot
-  goes plain and its chip freezes at the host's `ms`.
+  keeps its own name) and painted in `--accent-dim`. The label is
+  **`DisplayItem.title`** — the `title` argument every tool schema carries, read out of the
+  call's arguments on the host (`toolTitleFromArgs`) and stored on the item, so a clipped
+  argument string can never lose it — else `toolBrief()`'s path/command/pattern. It is
+  12 px `--text-dim` and set in **monospace (11 px) only for a derived command or pattern**:
+  `const mono = !title && MONO_LABEL_TOOLS.has(name)` in `addTool` / `addLiveTool` /
+  `appendLiveTool` / `finalizeLiveTool`, so a `title` always reads as normal text. The
+  detail (`.tool-detail`) is folded at rest and a click toggles it: the `> command / args`
+  line, a `pre` block with the full result (the existing UI caps still apply: args ~8 KiB,
+  result ~32 KiB, enforced host-side by `clipForUi`), the error text when there is one, and
+  the usage line. The whole detail is one level down — 11 px `--text-dim` (monospace for
+  the command and the output, because it is code) — and the usage line inside it stays the
+  faintest footnote of all. A running row's dot pulses and its chip ticks (250 ms); a
+  finished row's dot goes plain and its chip freezes at the host's `ms`.
 
 Both are also the reason a card no longer grows a block per call: a step that took ten
 tools is ten one-line rows, and the reader who wants the output opens the one they care
 about.
 
-**`renderItemInto` is the same rendering as the live path.** The history repaint builds a
-tool row with the one \`addTool\` (which takes the whole row state —
+**`renderItemInto` is the same rendering as the live path, split the same way.** The
+history repaint builds a tool row with the one \`addTool\` (which takes the whole row state —
 \`{ name, args, id, title, usage, status, start, ms, content }\`), a thinking row with the
 one \`makeThinkingRow\`, and an answer with the one \`addAssistant\`; a live call goes through
 \`addLiveTool\` → \`finalizeLiveTool\` and mutates the same element shape instead of building a
-second one. \`tools/check-webview.js\` pins that equivalence by replaying the same items
-through \`path\` and comparing the verb, the label, the classes, the chip and the folded
-detail against what the live messages produced — a repaint that reformatted a turn would be
-a silent regression nobody could see without a window.
+second one. The **split** is one rule for both: a tool row opens a group when none is open,
+a text row closes it (and is appended to the log itself), a thinking row rides the open
+group. \`tools/check-webview.js\` pins that equivalence by replaying the same items through
+\`path\` and comparing the verb, the label, the classes, the chip and the folded detail
+against what the live messages produced **and** the top-level kind sequence, the per-group
+headers and each group's own lazy body against the live runs — a repaint that reformatted or
+renumbered a turn would be a silent regression nobody could see without a window.
 
 **The previews still work.** \`.node-excerpt\` (a collapsed card, and a monitor's footer) and
 \`.node-summary\` (a sub-agent's one-line result) are untouched by all of this: they describe
