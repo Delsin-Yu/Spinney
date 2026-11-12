@@ -1,4 +1,5 @@
 import type { InterceptedTool } from './index';
+import { TOOL_TITLE_DESCRIPTION } from '../types';
 
 /**
  * The **hopped-to** session decides when it returns.
@@ -31,6 +32,7 @@ export const finishHopTool: InterceptedTool = {
             description:
               'Optional node id of the **source** session the report lands on, as a new branch. Omit it to land where the task was dispatched from. search_transcripts with the source session id lists that conversation\'s nodes.',
           },
+          title: { type: 'string', description: TOOL_TITLE_DESCRIPTION },
         },
         required: [],
       },
