@@ -300,7 +300,6 @@
   "Continue with new context": "在新上下文中继续",
   "Compact and Continue": "压缩并继续",
   "A sub-agent branch cannot start a new context window": "子代理分支无法开启新的上下文窗口",
-  "Type a message or attach an image to continue in a new context": "请输入消息或附加图片以在新的上下文中继续",
   "Send this message in a new context window or under the new setup (the harness asks first)": "在新的上下文窗口或新设置下发送此消息（harness 会先询问）",
   "Compact this conversation and continue in a new context window (the harness asks first)": "压缩此对话并在新的上下文窗口中继续（harness 会先询问）",
   "Type a message or attach an image to send": "请输入消息或附加图片以发送",

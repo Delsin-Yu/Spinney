@@ -4436,7 +4436,7 @@ export class SessionRuntime {
     // them, a read-only sub-agent had no network tool at all — the research tools
     // are the shell, which a read-only sub-agent correctly does not get).
     const read = ['read_file', 'list_dir', 'search_files', 'search_transcripts', 'web_search', 'web_fetch'];
-    const writeTools = ['write_file', 'replace_in_file', 'exec_command'];
+    const writeTools = ['write_file', 'replace_in_file', 'append_file', 'exec_command'];
     if (write) {
       return base.subset([...read, ...writeTools]);
     }

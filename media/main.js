@@ -5817,7 +5817,6 @@
   function newContextBlockedReason() {
     if (readOnly) return READ_ONLY_TITLE;
     if (focusIsAgent()) return tr('A sub-agent branch cannot start a new context window');
-    if (!hasComposerContent()) return tr('Type a message or attach an image to continue in a new context');
     return '';
   }
 
@@ -5831,10 +5830,11 @@
    * The label follows the box: with something to send the click carries that text into
    * the new epoch, with an empty box it is the compaction entry. It is shown only while
    * the host says a new epoch is available, and never while the focused node is doing
-   * something (Stop owns the row then, and both other buttons hide). It is disabled —
-   * with a tooltip that says why — when there is nothing to send, in a read-only window,
-   * or on a sub-agent branch; the host re-checks all of it and answers with a notice
-   * when a stale click arrives.
+   * something (Stop owns the row then, and both other buttons hide). It stays enabled
+   * with an empty box — the compaction entry is exactly the click for a window that is
+   * full and a box that is empty — and is disabled, with a tooltip that says why, only in
+   * a read-only window or on a sub-agent branch; the host re-checks all of it and answers
+   * with a notice when a stale click arrives.
    */
   function updateNewContextButton() {
     const hasContent = hasComposerContent();

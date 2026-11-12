@@ -1364,8 +1364,13 @@ if (contextLabel !== 'ctx 50%') {
   if (!sendBtn.disabled) {
     problems.push('an empty composer leaves Send enabled (an empty send must be a disabled state)');
   }
-  if (!newContextBtn.disabled) {
-    problems.push('an empty composer leaves the new-epoch button enabled');
+  if (newContextBtn.disabled) {
+    problems.push('an empty composer disables the new-epoch button (it must stay available as the compaction entry)');
+  }
+  if (!/Compact and Continue/.test(String(newContextBtn.textContent || ''))) {
+    problems.push(
+      `an empty composer leaves the new-epoch button reading ${JSON.stringify(newContextBtn.textContent)}, expected "Compact and Continue"`,
+    );
   }
   if (!sendBtn.title) {
     problems.push('the disabled Send button of an empty composer carries no reason');
@@ -1528,6 +1533,19 @@ if (contextLabel !== 'ctx 50%') {
   if (posted.some((m) => m && m.type === 'userMessage')) {
     problems.push('a full context window sent a `userMessage` anyway');
   }
+
+  // 3b. …and with nothing to send the entry is *still* available: the compaction entry
+  //     is exactly the click a full window with an empty box needs (Send stays disabled).
+  typeInto('');
+  if (newContextBtn.disabled) {
+    problems.push('a full context window disables the new-epoch button when the box is empty (there is nothing else left to do)');
+  }
+  if (!/Compact and Continue/.test(String(newContextBtn.textContent || ''))) {
+    problems.push(
+      `the new-epoch button of a full window with an empty box reads ${JSON.stringify(newContextBtn.textContent)}, expected "Compact and Continue"`,
+    );
+  }
+  typeInto('a message');
 
   // 4. A sub-agent card is read-only: the entry is there (the epoch may still be
   //    available) but disabled, with the branch as its reason.

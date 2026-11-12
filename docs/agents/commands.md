@@ -34,9 +34,9 @@ powershell -File build-deploy.ps1 -NoInstall # compile + package only           
 
 `npm run package` and `build-deploy.ps1` are the two side-by-side closing paths.
 `npm run package` is the POSIX entry point: it packages the `.vsix`, runs the
-`vscode:prepublish` gate (compile + `sync:l10n` + the **nineteen** guards — `check:models`,
+`vscode:prepublish` gate (compile + `sync:l10n` + the **twenty** guards — `check:models`,
 `check:webview`, `check:modeltree`, `check:signals`, `check:l10n`, `check:rollover`,
-`check:grid`, `check:docs`, `check:cwd`, `check:args`, `check:shell`, `check:kill`, `check:timeout`,
+`check:grid`, `check:docs`, `check:cwd`, `check:args`, `check:search`, `check:shell`, `check:kill`, `check:timeout`,
 `check:budget`, `check:websearch`, `check:image`, `check:neterror`, `check:unicode`,
 `check:continue`) on the way, and takes the generated l10n
 aliases off disk again once it is done.

@@ -300,7 +300,6 @@
   "Continue with new context": "在新內容視窗中繼續",
   "Compact and Continue": "壓縮並繼續",
   "A sub-agent branch cannot start a new context window": "子代理分支無法開啟新的內容視窗",
-  "Type a message or attach an image to continue in a new context": "請輸入訊息或附加圖片以在新的內容視窗中繼續",
   "Send this message in a new context window or under the new setup (the harness asks first)": "在新的內容視窗或新設定下傳送此訊息（harness 會先詢問）",
   "Compact this conversation and continue in a new context window (the harness asks first)": "壓縮此對話並在新的內容視窗中繼續（harness 會先詢問）",
   "Type a message or attach an image to send": "請輸入訊息或附加圖片以傳送",
