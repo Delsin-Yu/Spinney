@@ -6,6 +6,7 @@ import type { ModelCard } from '../agent/models';
 import { AgentTool, ToolDefinition } from '../agent/types';
 import type { BackgroundAccess } from '../chat/backgroundHub';
 import { clipText } from '../text';
+import { appendFileTool } from './appendFile';
 import { makeCheckBackgroundTool, makeJoinBackgroundTool, makeKillBackgroundTool } from './backgroundTools';
 import { makeExecCommandTool } from './execCommand';
 import { listDirTool } from './listDir';
@@ -207,8 +208,6 @@ export function searchExcludeGlobs(): string[] {
   return [...patterns];
 }
 
-const RAW_TOKEN_RE = /<<<RAW:([A-Za-z0-9_]+)>>>|<<<END_RAW:([A-Za-z0-9_]+)>>>/g;
-
 function truncate(s: string, n = 200): string {
   return s.length > n ? clipText(s, n) : s;
 }
@@ -311,13 +310,17 @@ export function limitInline(text: string, tool: string): string {
 }
 
 /**
- * Parse tool-call arguments. Accepts either:
- *  - strict JSON (the classic OpenAI-compatible contract), or
- *  - the "verbatim frame" form used to avoid escaping large/multi-line content:
- *      { "path": "a.ts" }\n<<<RAW:content>>>\n…\n<<<END_RAW:content>>>\n
- *    A short JSON header holds the small fields; each labeled RAW payload is
- *    captured verbatim (one framing newline after the open tag is skipped; a
- *    trailing newline before END_RAW is preserved), then merged into the args.
+ * Parse tool-call arguments: **strict JSON only**, the classic
+ * OpenAI-compatible contract. A non-object (an array, a bare string, `null`) is
+ * as malformed as text that does not parse at all, so both take the one error
+ * path below — the model rewrites the call as JSON instead of having a second
+ * syntax to learn.
+ *
+ * The old "verbatim frame" form (a JSON header line followed by
+ * `<<<RAW:key>>>…<<<END_RAW:key>>>` blocks carrying unescaped text) is gone: the
+ * model wrote the markers *inside* a JSON string ~2% of the time, which is valid
+ * JSON, so the markers landed in the file silently. See {@link verbatimFrameError}
+ * for the one non-parsing check that is left.
  */
 function parseArgs(argsJson: string): Record<string, unknown> {
   if (argsJson && argsJson.trim()) {
@@ -327,83 +330,43 @@ function parseArgs(argsJson: string): Record<string, unknown> {
         return parsed as Record<string, unknown>;
       }
     } catch {
-      // Not strict JSON; try the frame form below.
+      // Fall through to the one error path: arguments are JSON or they are not.
     }
   }
-
-  const result: Record<string, unknown> = {};
-  RAW_TOKEN_RE.lastIndex = 0;
-  const first = RAW_TOKEN_RE.exec(argsJson);
-  if (!first) {
-    throw new Error(`Could not parse tool arguments as JSON: ${truncate(argsJson)}`);
-  }
-
-  const header = argsJson.slice(0, first.index).trim();
-  if (header) {
-    try {
-      const headerObj = JSON.parse(header) as Record<string, unknown>;
-      if (headerObj && typeof headerObj === 'object' && !Array.isArray(headerObj)) {
-        for (const [key, value] of Object.entries(headerObj)) {
-          result[key] = value;
-        }
-      }
-    } catch {
-      throw new Error(`Tool-arguments JSON header is not valid JSON: ${truncate(header)}`);
-    }
-  }
-
-  const stack: Array<{ label: string; start: number }> = [];
-  RAW_TOKEN_RE.lastIndex = first.index;
-  let match: RegExpExecArray | null;
-  while ((match = RAW_TOKEN_RE.exec(argsJson))) {
-    if (match[1]) {
-      let start = RAW_TOKEN_RE.lastIndex;
-      if (argsJson[start] === '\r' && argsJson[start + 1] === '\n') start += 2;
-      else if (argsJson[start] === '\n') start += 1;
-      stack.push({ label: match[1], start });
-    } else if (match[2]) {
-      const open = stack.pop();
-      if (!open || open.label !== match[2]) {
-        throw new Error(`Mismatched RAW/END_RAW markers in tool arguments (END_RAW:${match[2]}).`);
-      }
-      result[open.label] = argsJson.slice(open.start, match.index);
-    }
-  }
-  if (stack.length > 0) {
-    throw new Error(`Unclosed RAW marker(s): ${stack.map((s) => s.label).join(', ')}.`);
-  }
-  return result;
+  throw new Error(`Could not parse tool arguments as JSON: ${truncate(argsJson)}`);
 }
 
 /**
- * Catch the one malformed shape the frame contract keeps producing: a payload
- * whose RAW markers sit *inside* the JSON string, e.g.
- * `{ "path": "a.ts", "content": "<<<RAW:content>>>…<<<END_RAW:content>>>" }`.
- * That is **valid JSON**, so {@link parseArgs} returns it untouched and the
- * markers would be written into the file verbatim — silently, because the tool
- * result still reads "Wrote …". Two independent sweeps of this machine's
- * transcripts found 28 such calls out of 962 `frame: true` calls (~2%), which
- * polluted at least six files across three workspaces (one of them a `.mjs` that
- * then died with `SyntaxError: Unexpected token '<<'`).
+ * The one trace of the removed frame syntax: a payload that is *entirely* wrapped
+ * in `<<<RAW:key>>>…<<<END_RAW:key>>>`. The frame form was removed from the
+ * harness, so this is a **non-parsing sentinel**, not a second syntax — it reads
+ * the value the model sent and answers one sentence instead of writing.
+ *
+ * It exists because the failure it catches is silent and expensive: the shape is
+ * *valid JSON*, so without this check the markers themselves are written into the
+ * file and the tool result still reads `Wrote …` (two sweeps of this machine's
+ * transcripts found 28 such calls out of 962 `frame: true` calls, ≥6 files
+ * polluted across 3 workspaces, one `.mjs` then dying with
+ * `SyntaxError: Unexpected token '<<'`).
  *
  * The check is deliberately anchored on **both** boundaries: markers in the
  * middle of a payload are legitimate file text (a fixture, or a document about
- * this very syntax), and only a payload that is *entirely* wrapped in
- * `<<<RAW:key>>>…<<<END_RAW:key>>>` can be nothing but the frame form gone wrong.
- * Rejecting beats silently stripping the markers: a rewrite would be unrecoverable
- * (there is no way to tell a mistake from an intended payload at that point) and
- * would mask the mistake instead of teaching the correct shape.
+ * this very history), and only a value that *is* the frame can be nothing but the
+ * removed form. Rejecting beats silently stripping the markers: a rewrite would
+ * be unrecoverable (there is no way to tell a mistake from an intended payload at
+ * that point) and would mask the mistake instead of teaching the plain shape.
+ *
+ * Returns the complete model-facing answer (already `Error:`-prefixed) so the
+ * caller returns it as-is; `undefined` means "this value is file text, go ahead".
  */
-export function embeddedFrameError(tool: string, key: string, value: string): string | undefined {
+export function verbatimFrameError(key: string, value: string): string | undefined {
   const wrapped = new RegExp(`^\\s*<<<RAW:${key}>>>[\\s\\S]*<<<END_RAW:${key}>>>\\s*$`).test(value);
   if (!wrapped) {
     return undefined;
   }
   return (
-    `${tool}: "${key}" is wrapped in RAW markers *inside* the JSON string, so the markers ` +
-    `themselves would be written into the file. The frame form puts them outside the JSON — a ` +
-    `short header line holding the small fields, then the payload on its own lines:\n` +
-    `{ "path": "…" }\n<<<RAW:${key}>>>\n…verbatim text…\n<<<END_RAW:${key}>>>`
+    'Error: the verbatim frame form was removed from this harness; send the value as a plain ' +
+    'JSON string instead. Nothing was written.'
   );
 }
 
@@ -548,6 +511,7 @@ export class ToolRegistry {
     for (const tool of [
       readFileTool,
       writeFileTool,
+      appendFileTool,
       replaceInFileTool,
       listDirTool,
       searchFilesTool,

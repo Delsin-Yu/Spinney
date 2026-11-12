@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { AgentTool } from '../agent/types';
-import { applyEol, detectEol, embeddedFrameError, ensureNotAborted, eolLabelOf, resolvePath, toLf } from './index';
+import { applyEol, detectEol, ensureNotAborted, eolLabelOf, resolvePath, toLf, verbatimFrameError } from './index';
 
 export const writeFileTool: AgentTool = {
   definition: {
@@ -9,13 +9,12 @@ export const writeFileTool: AgentTool = {
     function: {
       name: 'write_file',
       description:
-        'Write content to a file, creating parent directories as needed. Fully overwrites the file. Path may be absolute or relative to the harness root (the workspace folder, or the harness scratch folder when no folder is open). When overwriting an existing file, its line-ending style (CRLF/LF) is preserved. Content is either a normal JSON string (short content; newlines, quotes and backslashes must be escaped) or a verbatim frame, whose RAW markers must stand OUTSIDE the JSON, on their own lines: a header line { "path": "a.ts" }, then <<<RAW:content>>>, the file text verbatim, then <<<END_RAW:content>>>. The header holds the small fields; the payload between the markers is captured verbatim (one framing newline after the open marker is skipped, a trailing newline before END_RAW is kept). A frame wrapped *inside* a JSON string value — { "content": "<<<RAW:content>>>..." } — is not a frame: it is valid JSON, so the markers would land in the file, and the call is rejected with an error.',
+        'Write content to a file, creating parent directories as needed. Fully overwrites the file. Path may be absolute or relative to the harness root (the workspace folder, or the harness scratch folder when no folder is open). "content" is a plain JSON string: newlines, quotes and backslashes are escaped normally (\\n for a newline, \\" for a quote, \\\\ for a backslash), and the decoded string is written exactly as it decodes. When overwriting an existing file, its line-ending style (CRLF/LF) is preserved. For a large file, write the first part with this tool and append the rest in bounded chunks with append_file instead of sending one huge string.',
       parameters: {
         type: 'object',
         properties: {
           path: { type: 'string', description: 'File path to write.' },
-          content: { type: 'string', description: 'Full file content to write.' },
-          frame: { type: 'boolean', description: 'Optional. Declares that the payload is a verbatim frame. Framing is decided by the argument text itself (markers outside the JSON), not by this flag.' },
+          content: { type: 'string', description: 'Full file content to write, as a plain JSON string.' },
         },
         required: ['path', 'content'],
       },
@@ -25,9 +24,9 @@ export const writeFileTool: AgentTool = {
     ensureNotAborted(signal);
     const filePath = resolvePath(String(args.path ?? ''));
     const content = String(args.content ?? '');
-    const frameError = embeddedFrameError('write_file', 'content', content);
+    const frameError = verbatimFrameError('content', content);
     if (frameError) {
-      throw new Error(frameError);
+      return frameError;
     }
     await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
     // Preserve the line-ending style of an existing file so rewriting a CRLF

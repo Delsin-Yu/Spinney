@@ -15,10 +15,15 @@ Where the text lives, the template/placeholder mechanics and the two hard rules
   is the only channel the model reads it from. The verbatim-frame shape is the
   worked example: the prompt once restated it, that restatement was dropped with
   the tool list, and the description that remained ("set frame:true, put a short
-  JSON header…") was vague enough that agents wrapped the RAW markers inside the
-  JSON string ~2% of the time and wrote them into files. The description now spells
-  out the correct and the wrong shape, and `embeddedFrameError` rejects the wrong
-  one. When you remove a guide from the prompt, check the description left behind
+  JSON header…") was vague enough that agents wrapped the markers inside the JSON
+  string ~2% of the time and wrote them into files. The lesson is the one that
+  took the feature out: a syntax the description has to *teach* is a syntax a model
+  can get half right, so the form is **gone** — arguments are strict JSON only,
+  content is an escaped string, and a large file is `write_file` plus `append_file`
+  chunks. What is left of that history is one non-parsing sentinel
+  (`verbatimFrameError`) that refuses a value still wrapped in the old markers, and
+  it needs no explanation to be acted on: send the value as a plain JSON string.
+  When you remove a guide from the prompt, check the description left behind
   can stand alone.
 - **The reply language is a setting, not a hard-coded default.** The template's
   `## Language` line is filled from `spinney.replyLanguage`, which defaults to

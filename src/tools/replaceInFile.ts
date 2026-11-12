@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import { AgentTool } from '../agent/types';
-import { applyEol, detectEol, embeddedFrameError, ensureNotAborted, eolLabelOf, resolvePath, toLf } from './index';
+import { applyEol, detectEol, ensureNotAborted, eolLabelOf, resolvePath, toLf, verbatimFrameError } from './index';
 
 export const replaceInFileTool: AgentTool = {
   definition: {
@@ -8,14 +8,13 @@ export const replaceInFileTool: AgentTool = {
     function: {
       name: 'replace_in_file',
       description:
-        'Replace an exact substring in a file with new text. The oldText must appear exactly once, otherwise an error is returned. Use for surgical edits. Matching is done in normalized LF, so CRLF vs LF never breaks a match; the file is written back with its original line endings. Old and new text are either normal JSON strings or verbatim frames, whose RAW markers must stand OUTSIDE the JSON, on their own lines: a header line { "path": "a.ts" }, then <<<RAW:oldText>>>...<<<END_RAW:oldText>>> and <<<RAW:newText>>>...<<<END_RAW:newText>>>. A frame wrapped *inside* a JSON string value is not a frame: it is valid JSON, so the markers would land in the file, and the call is rejected with an error.',
+        'Replace an exact substring in a file with new text. The oldText must appear exactly once, otherwise an error is returned. Use for surgical edits. Matching is done in normalized LF, so CRLF vs LF never breaks a match; the file is written back with its original line endings. "oldText" and "newText" are plain JSON strings: newlines, quotes and backslashes are escaped normally (\\n for a newline, \\" for a quote, \\\\ for a backslash), and the decoded strings are matched and inserted exactly as they decode. The replacement is inserted verbatim (no String.replace dollar patterns).',
       parameters: {
         type: 'object',
         properties: {
           path: { type: 'string', description: 'File path to edit.' },
-          oldText: { type: 'string', description: 'Exact text to find.' },
-          newText: { type: 'string', description: 'Replacement text.' },
-          frame: { type: 'boolean', description: 'Optional. Declares that the payload is a verbatim frame. Framing is decided by the argument text itself (markers outside the JSON), not by this flag.' },
+          oldText: { type: 'string', description: 'Exact text to find, as a plain JSON string.' },
+          newText: { type: 'string', description: 'Replacement text, as a plain JSON string.' },
         },
         required: ['path', 'oldText', 'newText'],
       },
@@ -26,11 +25,9 @@ export const replaceInFileTool: AgentTool = {
     const filePath = resolvePath(String(args.path ?? ''));
     const oldText = String(args.oldText ?? '');
     const newText = String(args.newText ?? '');
-    const frameError =
-      embeddedFrameError('replace_in_file', 'oldText', oldText) ??
-      embeddedFrameError('replace_in_file', 'newText', newText);
+    const frameError = verbatimFrameError('oldText', oldText) ?? verbatimFrameError('newText', newText);
     if (frameError) {
-      throw new Error(frameError);
+      return frameError;
     }
     if (!oldText) {
       throw new Error('replace_in_file requires a non-empty "oldText".');

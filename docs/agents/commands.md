@@ -16,6 +16,7 @@ npm run check:rollover                       # guard: the context-rollover contr
 npm run check:grid                           # guard: the Chat Tree sidecar lattice (media/tree.js)
 npm run check:docs                           # guard: the shipped user manual (manual/**) vs the manifest
 npm run check:cwd                            # guard: the working-directory / path-base contract (compiled tools)
+npm run check:args                           # guard: the tool-argument contract (strict JSON, the frame sentinel, append_file)
 npm run check:shell                          # guard: the argv a native child really receives under Git Bash
 npm run check:kill                           # guard: the kill-confirmation contract (exited / no-exit / no-pid)
 npm run check:timeout                        # guard: the foreground limit and the background promotion
@@ -33,9 +34,9 @@ powershell -File build-deploy.ps1 -NoInstall # compile + package only           
 
 `npm run package` and `build-deploy.ps1` are the two side-by-side closing paths.
 `npm run package` is the POSIX entry point: it packages the `.vsix`, runs the
-`vscode:prepublish` gate (compile + `sync:l10n` + the **eighteen** guards — `check:models`,
+`vscode:prepublish` gate (compile + `sync:l10n` + the **nineteen** guards — `check:models`,
 `check:webview`, `check:modeltree`, `check:signals`, `check:l10n`, `check:rollover`,
-`check:grid`, `check:docs`, `check:cwd`, `check:shell`, `check:kill`, `check:timeout`,
+`check:grid`, `check:docs`, `check:cwd`, `check:args`, `check:shell`, `check:kill`, `check:timeout`,
 `check:budget`, `check:websearch`, `check:image`, `check:neterror`, `check:unicode`,
 `check:continue`) on the way, and takes the generated l10n
 aliases off disk again once it is done.

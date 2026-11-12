@@ -361,12 +361,14 @@
   `AgentEvent`, `AgentTool`).
 - `src/tools/index.ts` — `ToolRegistry` + the helpers every tool shares (path
   resolution, line-ending helpers, `globToRegex`, `SKIP_DIRS`, `limitInline`,
-  argument parsing for strict JSON **or** the verbatim frame). The tools
+  argument parsing that is **strict JSON only**, plus the one non-parsing
+  sentinel that answers a value still wrapped in the removed verbatim frame,
+  `verbatimFrameError`). The tools
   themselves live one per file next to it; they import those helpers back from
   this module (safe: every use is inside `execute()`, i.e. call time).
-- `src/tools/readFile.ts` · `writeFile.ts` · `replaceInFile.ts` · `listDir.ts` ·
-  `searchFiles.ts` · `searchTranscripts.ts` · `execCommand.ts` — the registry
-  tools, each with its schema and its implementation in the same file.
+- `src/tools/readFile.ts` · `writeFile.ts` · `appendFile.ts` · `replaceInFile.ts` ·
+  `listDir.ts` · `searchFiles.ts` · `searchTranscripts.ts` · `execCommand.ts` — the
+  registry tools, each with its schema and its implementation in the same file.
 - `src/tools/backgroundTools.ts` — `check_background_terminal` /
   `kill_background` / `join_background`, grouped because they all read the same
   `BackgroundRegistry`.

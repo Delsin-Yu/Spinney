@@ -29,8 +29,9 @@
 | Tool | Args | Behavior |
 | --- | --- | --- |
 | `read_file` | `path`, `startLine?`, `endLine?` | Returns `File: <path> (N lines, <EOL>)` header + LF-normalized content (line-numbered if a range is given). Always LF content, but reports on-disk EOL. `N` follows the `wc -l` convention (a trailing newline does **not** add a line); `read_file(path, 1, 1)` is the cheap way to get just the count. A requested range over **256 KiB** comes back as an explicit `[TRUNCATED: …]` head/tail excerpt, never silently: the header gives the range's byte size, what was kept and omitted, and either "read a smaller line range" or — when one line is wider than the head, which a line range cannot fix — "use `search_files` to find a short slice"; it also says the text must not be used as `replace_in_file` `oldText`. |
-| `write_file` | `path`, `content`, `frame?` | Overwrites; creates parent dirs. Preserves the existing file's line-ending style (converts content to it). New files written as supplied. |
-| `replace_in_file` | `path`, `oldText`, `newText`, `frame?` | Exact-substring replace. `oldText` must occur **exactly once** (else error). Matches/writes in normalized LF; preserves on-disk EOL. The replacement is inserted **verbatim** (function-form replace), so `String.replace` dollar-patterns in `newText` stay literal. |
+| `write_file` | `path`, `content` | Overwrites; creates parent dirs. Preserves the existing file's line-ending style (converts content to it). New files written as supplied. `content` is a plain JSON string (newlines escaped as `\n`); a value that is the removed verbatim frame answers the sentinel below and writes nothing. |
+| `append_file` | `path`, `content` | Appends `content` to the end of a file, creating the file and its parents when it is absent. An existing file keeps its line-ending style (the content is converted to it, the pair `write_file` uses); a new file is written exactly as supplied. Answers `Appended to <path> (N lines added, M lines total).` — the way to build a **large** file: `write_file` the first part, then append in bounded chunks. The bytes are added exactly as given, so start the content with a newline when the file does not already end with one; `N` / `M` count lines the way `write_file`'s `(N lines, EOL)` does. `content` is a plain JSON string, and the removed verbatim frame hits the same sentinel as in `write_file`. |
+| `replace_in_file` | `path`, `oldText`, `newText` | Exact-substring replace. `oldText` must occur **exactly once** (else error). Matches/writes in normalized LF; preserves on-disk EOL. The replacement is inserted **verbatim** (function-form replace), so `String.replace` dollar-patterns in `newText` stay literal. `oldText` / `newText` are plain JSON strings; either one being the removed verbatim frame answers the sentinel below. |
 | `list_dir` | `path`, `glob?`, `recursive?` | Sorted entries; directories suffixed with `/`. `glob` filters against the path relative to the listed dir (`*.ts` = top level, `**/*.ts` = any depth); `recursive` walks subdirs (heavy dirs skipped) and prints relative paths. Capped at 2000 entries with an explicit note. |
 | `search_transcripts` | `query?`, `sessionId?`, `kind?`, `caseSensitive?`, `maxResults?`, `context?` | Regex search over the harness's own transcript dumps — the **only** way to recall a previous session (history otherwise lives in the Memento, which no tool can grep). Files are `<root>/<sessionId>/<nodeId>.jsonl` (usually **outside** the workspace, in global storage, so `search_files` cannot reach them). Each hit is `file:line: text` with the **absolute** path, so `read_file` with those line numbers pages the full record; `context` (0–10) uses `-` separators. `query` omitted ⇒ index of sessions (id, files, size, last write, kind mix, titles), or of one session's files with `sessionId`. `kind` = `session` (main-agent turns) / `subagent`. Default 50 hits / hard cap 300; files >8 MB skipped; capped runs say so. |
 | `search_files` | `pattern`, `path?`, `glob?`, `caseSensitive?`, `maxResults?`, `context?` | Regex search returning `file:line: text` (paths **workspace-relative**, or **absolute** when no folder is open — a default search of the empty scratch root is not a way to find your files). `path` may be a **file or a directory**. `maxResults` default 200 / hard cap 300; `context` (0–10) adds surrounding lines with `-` separators (`src/a.ts-11- text`). Hit lines are trimmed + clipped to 160 chars. **The search runs in a ripgrep child process** (VS Code's bundled `rg`, found under `env.appRoot` — the universal `ripgrep-universal/bin/<platform>-<arch>/` layout, the older single-binary one, then `rg` on `PATH`), so a whole-tree scan never occupies the extension host's JS thread; when no `rg` can be found or it refuses the pattern (it has no lookaround/backreferences) the same search falls back to the original in-process walk, and the tool says which one ran (`via=rg|walk` on the `[perf] search-files` line). The child is killed as soon as the match cap is reached (that is what makes "does this exist?" cheap) and at a 20 s deadline. **`search.exclude`, `files.exclude` and `.gitignore` are honored** — a path the user excluded is never reported, and a result that was narrowed says so with `…[scope: search.exclude/files.exclude/.gitignore honored]`, so *excluded* is never mistaken for *absent*. **Binary files are skipped** in both paths (a font or a generated table yields no mojibake hit). Files >1 MB are skipped, and `out/`, `dist/`, `node_modules/.git` and the agent's own `.spinney/` scratch stay out of a repo-wide walk. A capped/short-circuited search appends an explicit `…[search stopped early: …]` note (match cap / deadline / file ceiling / oversized files) — never silently truncated. |
@@ -306,8 +307,8 @@ index maps each area (sub-agents, background terminals, transcripts, vision) to
 its document.
 
 The registry tools live under `src/tools/` with their execution code — one file per tool
-(`readFile.ts`, `writeFile.ts`, `replaceInFile.ts`, `listDir.ts`, `searchFiles.ts`,
-`searchTranscripts.ts`, `execCommand.ts`) except the three background tools
+(`readFile.ts`, `writeFile.ts`, `appendFile.ts`, `replaceInFile.ts`, `listDir.ts`,
+`searchFiles.ts`, `searchTranscripts.ts`, `execCommand.ts`) except the three background tools
 (`check_background_terminal` / `kill_background` / `join_background`), which share
 `src/tools/backgroundTools.ts`; `background.ts` holds the process plumbing they and
 `exec_command` use. The two web tools are the same shape with a shared spine:
@@ -326,45 +327,32 @@ new user-visible string** arrives with any of it — the refusal, the zoom hint 
 note are model-facing English, the `MAX_IMAGE_BYTES` precedent, so no l10n catalog
 changes.
 
-Argument parsing is tolerant: strict JSON **or** the verbatim-frame form. The
-frame form lets a tool carry large/multi-line content without JSON escaping:
+Arguments are **strict JSON only** — the classic OpenAI-compatible contract, one
+shape and no second syntax (`parseArgs` in `src/tools/index.ts`). The **verbatim
+frame form is gone**: it let a call carry unescaped multi-line content as a short
+JSON header line followed by labeled marker blocks, and it was removed rather than
+fixed, because the shape it kept producing was *valid JSON anyway* — the markers
+wrapped inside the string value. That was silent: the markers landed in the file
+while the tool result still read `Wrote … (N lines)`. Measured on this machine's
+transcripts, 28 such calls out of 962 that used the form (~2%), ≥6 files polluted
+across 3 workspaces, one `.mjs` then dying with `SyntaxError: Unexpected token
+'<<'`. With the form removed there is no syntax to mistake: every value is an
+escaped JSON string, and a file too large for one call is built with `write_file`
+first and `append_file` in bounded chunks after it.
 
-```
-{ "path": "src/a.ts" }
-<<<RAW:content>>>
-...verbatim file text...
-<<<END_RAW:content>>>
-```
+What is left is one **non-parsing sentinel**, not a parser: a value that *is* the
+old frame — entirely wrapped in the open and close markers of the same key — makes
+`write_file` / `append_file` / `replace_in_file` answer
+`Error: the verbatim frame form was removed from this harness; send the value as a
+plain JSON string instead. Nothing was written.` (`verbatimFrameError` in
+`src/tools/index.ts`). The check is anchored on **both** boundaries: markers in the
+middle of a payload are legitimate file text (a fixture, or a document about this
+history), and only a value that *is* the frame can be nothing but the removed form.
+It refuses rather than silently stripping — a rewrite would be unrecoverable (there
+is no way to tell the two apart at that point) and would mask the mistake instead
+of teaching the plain shape.
 
-The JSON header holds small fields; each `<<<RAW:label>>>` block is captured
-verbatim and merged into `args`. Use it for `write_file`/`replace_in_file`
-content. See `parseArgs` in `src/tools/index.ts`.
-
-**The markers must stand outside the JSON** — and that is the whole contract:
-`parseArgs` is **JSON-first** (a successful `JSON.parse` wins, the frame branch
-then never runs), and nothing in the code reads the `frame` flag (it only
-*declares* intent). So the one shape agents keep producing —
-
-```
-write_file({"path": "a.ts", "frame": true, "content": "<<<RAW:content>>>\n...\n<<<END_RAW:content>>>"})
-```
-
-— is valid JSON, the markers frame nothing, and they land in the file verbatim.
-Measured on this machine's transcripts: 28 such calls out of 962 `frame: true`
-calls (~2%), ≥6 files polluted across 3 workspaces, one `.mjs` then dying with
-`SyntaxError: Unexpected token '<<'`. Failures were **silent** — the tool result
-still read `Wrote … (N lines)`.
-
-Both tools therefore reject that shape up front via `embeddedFrameError` (in
-`src/tools/index.ts`), with an error that names the cause and shows the correct
-form. The check is anchored on **both** boundaries: markers in the middle of a
-payload are legitimate file text (a fixture, or this very document), and only a
-payload *entirely* wrapped in `<<<RAW:key>>>…<<<END_RAW:key>>>` is the mistake.
-It errors rather than silently stripping — a rewrite would be unrecoverable
-(there is no way to tell the two apart at that point) and would mask the mistake
-instead of teaching the shape.
-
-The wording that carried the contract lives in the tool `description`s (the prompt
+The wording that carries the contract lives in the tool `description`s (the prompt
 carries no tool list, so a description is the only plugin-side place a model can
 learn the shape); see `docs/agents/invariants/agent-authoring.md`.
 
