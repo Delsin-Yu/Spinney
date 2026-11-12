@@ -1,3 +1,4 @@
+import { TOOL_TITLE_DESCRIPTION } from '../types';
 import type { InterceptedTool } from './index';
 
 /**
@@ -24,7 +25,7 @@ export const hopSessionTool: InterceptedTool = {
             type: 'string',
             description: 'The full, self-contained task for the new session (it cannot see this conversation).',
           },
-          title: { type: 'string', description: 'Optional short title for the new session.' },
+          title: { type: 'string', description: 'Optional short title for the new session; it is also the one-line label the UI shows for this step.' },
           mode: {
             type: 'string',
             enum: ['return_when_finished', 'fire_and_forget'],

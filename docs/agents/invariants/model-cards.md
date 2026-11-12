@@ -348,7 +348,7 @@ in opposite orders and deadlock.
 | `session.model`, `spinney.runtimeConfig.model` | Card ids — the **seed** for a session with no node history, and the default for sessions created later. An explicit dropdown pick still writes them (`persistRuntimeConfig`). |
 | The dropdown pick | A **pending** choice for the next send on the node in view: it is consumed by that turn (which records it on the new node) and **forgotten on a checkout**, so the dropdown follows the node you click. Picking the card the node already uses is a **no-op** — no "Model changed" notice, no persist. |
 | `spawn_agents`' `model` argument | A card id, a card name, or a wire model name — `resolveCard` accepts all three, case-insensitively for the two spellings. |
-| The `config` message (`SessionRuntime.postConfig`) | `{ model: <card id>, cards: [{ id, name, providerId, providerName, vision, efforts, defaultEffort }], efforts, thinkingEffort, foldToolCalls, foldThinking, snippets }` — a card's `vision` is the boolean `vision.enabled`, and `snippets` is the composer's prompt-snippet list (`cfg.promptSnippets`), so the webview keeps no copy of either. |
+| The `config` message (`SessionRuntime.postConfig`) | `{ model: <card id>, cards: [{ id, name, providerId, providerName, vision, efforts, defaultEffort }], efforts, thinkingEffort, snippets }` — a card's `vision` is the boolean `vision.enabled`, and `snippets` is the composer's prompt-snippet list (`cfg.promptSnippets`), so the webview keeps no copy of either. |
 | Control plane `sessions[]` | `model` (card id) and `modelName` (the display form). |
 | Transcript meta | The card's display name (`cardDisplayName`). |
 

@@ -365,24 +365,6 @@
             "description": "%spinney.replyLanguage.description%",
             "scope": "window"
           },
-          "spinney.foldThinking": {
-            "type": "boolean",
-            "default": true,
-            "description": "%spinney.foldThinking.description%",
-            "scope": "window"
-          },
-          "spinney.foldToolCalls": {
-            "type": "boolean",
-            "default": true,
-            "description": "%spinney.foldToolCalls.description%",
-            "scope": "window"
-          },
-          "spinney.foldWork": {
-            "type": "boolean",
-            "default": true,
-            "description": "%spinney.foldWork.description%",
-            "scope": "window"
-          },
           "spinney.promptSections": {
             "type": "object",
             "default": {},

@@ -1,3 +1,4 @@
+import { TOOL_TITLE_DESCRIPTION } from '../types';
 import type { InterceptedTool } from './index';
 
 /**
@@ -30,6 +31,7 @@ export const spawnReadonlyAgentsTool: InterceptedTool = {
               required: ['instruction'],
             },
           },
+          title: { type: 'string', description: TOOL_TITLE_DESCRIPTION },
           mode: { type: 'string', enum: ['sync', 'async'], description: 'sync (default) or async.' },
         },
         required: ['agents'],

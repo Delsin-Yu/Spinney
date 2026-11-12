@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as vscode from 'vscode';
-import { AgentTool } from '../agent/types';
+import { AgentTool, TOOL_TITLE_DESCRIPTION } from '../agent/types';
 import type { BackgroundAccess } from '../chat/backgroundHub';
 import { formatDuration } from '../duration';
 import { perf } from '../perf';
@@ -371,6 +371,7 @@ export function makeExecCommandTool(getAccess: () => BackgroundAccess | null): A
               description:
                 'What the call is, and the only thing that decides it. "foreground" (the default) runs the command in this turn and returns its output; a command still running after spinney.execForegroundSeconds (30 seconds unless changed) is moved to the background and its id comes back in the result. "background" starts a job on this node immediately (its id comes back at once): it locks this node — the composer shows Stop until it ends — and its completion notice reaches you when it finishes. "detached" starts a session-wide, fire-and-forget job: it locks no node, never sends a completion notice, and is read with check_command or wait_for_command. No run_type carries a timeout or a deadline.',
             },
+            title: { type: 'string', description: TOOL_TITLE_DESCRIPTION },
           },
           required: ['command'],
         },

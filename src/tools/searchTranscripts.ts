@@ -1,4 +1,4 @@
-import { AgentTool } from '../agent/types';
+import { AgentTool, TOOL_TITLE_DESCRIPTION } from '../agent/types';
 import { listTranscriptSessions, searchTranscripts, TranscriptKind } from '../chat/transcript';
 import { ensureNotAborted, limitInline, searchTimeoutError, searchTimeoutSeconds } from './index';
 
@@ -34,6 +34,7 @@ export function makeSearchTranscriptsTool(getRoots: () => string[]): AgentTool {
             caseSensitive: { type: 'boolean', description: 'Default false.' },
             maxResults: { type: 'number', description: 'Default 50 (capped at 300).' },
             context: { type: 'number', description: 'Lines of context around each hit (0-10, default 0).' },
+            title: { type: 'string', description: TOOL_TITLE_DESCRIPTION },
           },
           required: [],
         },

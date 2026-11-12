@@ -420,7 +420,13 @@ const startJob = (ms, detached = false) => {
   console.log('== case 11: the schemas ==');
   const schema = withAccess.definition.function;
   const props = Object.keys(schema.parameters.properties);
-  check('exec_command takes command, cwd and run_type, and nothing else', props.join(',') === 'command,cwd,run_type', props.join(','));
+  // `title` is the model's one-line label for the step, which every tool schema carries
+  // (`TOOL_TITLE_DESCRIPTION` in src/agent/types.ts): a display argument, never a command one.
+  check(
+    'exec_command takes command, cwd, run_type and the display title, and nothing else',
+    props.join(',') === 'command,cwd,run_type,title',
+    props.join(','),
+  );
   check('`timeout` is gone from the schema', !props.includes('timeout') && !props.includes('timeout_behavior'));
   check(
     'run_type is the three values, in order',
@@ -448,9 +454,9 @@ const startJob = (ms, detached = false) => {
   const killSchema = killTool.definition.function;
   check('check_command is a tool taking pid', checkSchema.name === 'check_command' && (checkSchema.parameters.required || []).join(',') === 'pid');
   check(
-    'wait_for_command takes pid and an optional seconds',
+    'wait_for_command takes pid, the display title and an optional seconds',
     waitSchema.name === 'wait_for_command' &&
-      Object.keys(waitSchema.parameters.properties).join(',') === 'pid,seconds' &&
+      Object.keys(waitSchema.parameters.properties).join(',') === 'pid,title,seconds' &&
       (waitSchema.parameters.required || []).join(',') === 'pid',
   );
   check('kill_command is a tool taking pid', killSchema.name === 'kill_command' && (killSchema.parameters.required || []).join(',') === 'pid');

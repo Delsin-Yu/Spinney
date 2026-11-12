@@ -84,15 +84,19 @@ A manual pan or zoom switches that button off.
 
 Each card header carries the turn title, a status chip, and a **🗑** button. The button deletes the branch at that turn (section 4).
 
-The body of a card has three parts, from top to bottom.
+The body of a card has two parts, from top to bottom.
 
 The first part holds your message. Spinney always shows this part, and it never folds it. Spinney renders this part as Markdown.
 
-The second part is the work log. It holds the reasoning blocks, the tool cards, the notices, the background-job notices, the `HARNESS` blocks, and the text that the model wrote before a tool call. The work log scrolls. It is the only part that carries a green lock dot. The dot controls auto-scroll. The live turn starts locked. When a turn completes, the work log folds by itself into a one-line header. The header shows a chevron and a label. The label reads `Work log · 3 steps`. The number is the count of the tool cards. With no tool card, the label reads `Work log`. Click the header to unfold the work log again. A header that you clicked once stays as you left it. The automatic fold never overrules your click. The lock dot keeps the same rule. When you release the light of a card, the automatic fold stops folding or unfolding the work log of that card. The work log unfolds by itself again while a turn runs. The work log stays open when the card has no answer to show. Set `spinney.foldWork` to `false` to turn the automatic fold off (section 11). The blocks in the work log keep their own fold behaviour (see `spinney.foldThinking` and `spinney.foldToolCalls` below and in section 11).
+The second part is the work log. It is the only part that scrolls, and it holds every step of the turn in the order that the turn made them: the reasoning lines, the tool lines, the notices, the background-job notices, the `HARNESS` blocks, the text that the model writes on the way, and the final answer. The final answer is the last block of the work log, and it is Markdown. The work log carries the green lock dot. The dot controls auto-scroll. The live turn starts locked. A newer step does not remove the answer, because there is one list of steps.
 
-The third part is the answer. It holds the final message of the model. Spinney shows it at the bottom of the card, renders it as Markdown, and never folds it. The answer carries no lock dot. Spinney shows the answer only when the turn is at rest and the last item of the work log is the message of the model. The answer goes away when a newer item arrives in the work log, for example a background job, a sub-agent that reports in, a `HARNESS` block from **▶ Continue** or **↻ Retry**, the marker line of a silent retry (section 10.1), or a new tool call. That message is in the work log again at that point. The text of an interrupted turn shows as the answer. The text of an errored turn does not show as the answer. The error stays in the work log.
+Two kinds of line carry the work of the turn.
 
-When the card shows an answer and the work log stays open, the answer comes first, and the height of the answer alone makes the card taller. The work log keeps a strip of about 360 pixels, and it scrolls inside that strip. Drag the bottom-right corner of the card to make that strip taller. While a turn runs, there is no answer yet, and the card keeps that same strip height instead of growing with each tool call. The answer sits on its own surface under a divider line.
+A reasoning line holds the thinking of the model, as dim italic text. While the turn runs, the line shows the whole paragraph. When the turn ends, it becomes one line. Click the line to open it. The open line shows the whole text and the token line. Click it again to close it. A line that you clicked stays as you left it.
+
+A tool line holds one tool call: a verb, a label, a dot that shows the state, and a time. A bold verb starts the line, for example `Read`, `Wrote`, `Ran` or `Searched`. The label is the short name that the agent gave to the step. When the agent gave no name, the label is the path, the command, or the pattern. The label of a command or a pattern uses a monospace font. The dot is amber and pulsing while the call runs, and dim when the call ends. The time is the duration of the call, and it stops when the call ends. Click the line to open the call. The first line starts with `> ` and shows the command or the arguments. The result follows in a code block. The error text follows when the call returned an error. The token line comes last. Click the line again to close it.
+
+The card does not grow with each step. It scrolls inside the work log. Drag the bottom-right corner of the card to make the work log taller.
 
 A card can now be up to 1200 pixels high. The limit was 600 pixels before. Dragging the bottom-right corner of a card still resizes it.
 
@@ -112,9 +116,9 @@ The row under the input box shows the state of the session.
 | `bal …` | The wallet of the answering provider. `bal –` means that no number exists, for example on a provider with the `none` balance dialect. Spinney reads the wallet once and never retries. |
 | `tok/s` | The output speed. It is a local estimate, not the count of the provider. |
 
-Each answer and each tool card carries its own token line: `tokens {0} (prompt {1} + completion {2}) · cache hit {3} / miss {4}`.
+Each step carries its own token line: `[Prompt: 1200 + Completion: 340, Cache Hit: 1000, Cache Miss: 200]`. It shows the prompt tokens, the completion tokens, the cache hits and the cache misses of that request.
 
-Tool cards hold the call, the arguments, and the result. Each tool card shows how long the call took, and the number stays after the call ends. A `HARNESS` block holds the exact text that the harness sent to the model. The reasoning blocks, the tool cards, and the `HARNESS` blocks sit in the work log. Click a block header to fold or unfold it. `spinney.foldThinking` and `spinney.foldToolCalls` set the resting state of those blocks (section 11).
+A `HARNESS` block holds the exact text that the harness sent to the model. The `HARNESS` blocks sit in the work log with the other steps.
 
 Codes that stay in English on purpose: `SUB`, `BG`, `CTX`, `HARNESS`, `Delivered`.
 
@@ -516,9 +520,6 @@ All keys start with `spinney.`. Open the Settings UI, or edit `settings.json`.
 | `spinney.providers` | `{}` | The endpoint rows. Edit them on the model-cards page. |
 | `spinney.modelCards` | `{}` | The model rows. Edit them on the model-cards page. |
 | `spinney.replyLanguage` | `auto` | The language of the answers of the agent. `auto` follows the VS Code display language. The new value applies to the next new node; a frozen conversation keeps its own language. |
-| `spinney.foldThinking` | `true` | Fold the reasoning blocks of the work log by default. The live block stays open. |
-| `spinney.foldToolCalls` | `true` | Fold the tool-call cards of the work log by default. The running call stays open. |
-| `spinney.foldWork` | `true` | Fold the work log into its one-line header by default when a turn completes; a header that you clicked, or a card whose light you released, stays as you left it. |
 | `spinney.promptSections` | `{}` | Extra prompt snippets, keyed by the name in the menu. A name that matches a shipped snippet replaces its text. |
 | `spinney.execForegroundSeconds` | `30` | The time a command runs in the turn, in seconds, before Spinney moves it to the background. 30 seconds is the default. The minimum is 10. The command is not killed: it continues as a background job, and the agent receives its id. |
 | `spinney.subAgentSyncSeconds` | `300` | The time a `spawn_agents` or `send_agent_message` call in `sync` mode can hold the turn, in seconds. 300 is 5 minutes. The minimum is 30 and the maximum is 1800. A batch that still runs at the end of this time returns the agent ids, and every summary arrives later as one batch notice. |

@@ -1,3 +1,4 @@
+import { TOOL_TITLE_DESCRIPTION } from '../types';
 import type { InterceptedTool } from './index';
 
 /**
@@ -31,6 +32,7 @@ export const readImageTool: InterceptedTool = {
         type: 'object',
         properties: {
           path: { type: 'string', description: 'Path to the image file.' },
+          title: { type: 'string', description: TOOL_TITLE_DESCRIPTION },
           rect: {
             type: 'object',
             description:
