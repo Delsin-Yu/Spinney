@@ -68,6 +68,7 @@ import {
 import { defaultSessionTitle, l10nDiagnostics } from '../i18n';
 import { buildChatShell } from './webviewShell';
 import { BackgroundHub } from './backgroundHub';
+import { BackgroundTask } from '../tools/background';
 import { ChatPanel } from './ChatPanel';
 import { PanelManager } from './panels';
 import {
@@ -75,6 +76,7 @@ import {
   RuntimeHost,
   SessionRuntime,
   SubAgentJob,
+  backgroundOutputTail,
   clipDisplayItem,
 } from './runtime';
 import { SessionTreeItem } from './SessionsProvider';
@@ -344,6 +346,63 @@ const HOP_RECEIPT_MAX_ATTEMPTS = 1500;
 const HOP_RECEIPT_MAX_WAIT_MS = 30 * 60 * 1000;
 
 /**
+ * How long the window-global terminal dock's snapshot is coalesced away. The
+ * per-session `backgrounds` snapshot uses the same 200 ms window (`SessionRuntime`),
+ * so a chatty process costs both views the same handful of repaints a second.
+ */
+const BACKGROUNDS_GLOBAL_MS = 200;
+
+/**
+ * A job's identity across the window: a task id is **session-local** (the hub mints it
+ * from a per-session counter), so the session has to travel with it. The separator is
+ * `\0`, which no session id contains.
+ */
+function bgDockHandle(sessionId: string, taskId: number): string {
+  return `${sessionId}\u0000${taskId}`;
+}
+
+/**
+ * One job of the window-global terminal dock (`backgroundsGlobal`): every background
+ * command of every session, running or finished, as one flat list.
+ *
+ * It is the same job the owning node's `kind:'bg'` card renders, plus the two things a
+ * dock row alone can say — which **session** it belongs to (its title) and the card node
+ * the dock's ✕ names. The hub is in-memory, so a job whose process is gone is rebuilt
+ * from its persisted record; `detached` (the `shared` badge) is the one fact only the
+ * live task can answer, exactly as on the card.
+ */
+export interface GlobalBackgroundInfo {
+  /** The session the job belongs to (task ids repeat across sessions). */
+  sessionId: string;
+  /** That session's title, so a row says which conversation it came from. */
+  sessionTitle: string;
+  /** The session-local task id (`#<id>` on the row, and what kill names). */
+  id: number;
+  /** The `kind:'bg'` record the dock's ✕ dismisses (`null` when its branch is gone). */
+  cardNodeId: string | null;
+  command: string;
+  status: 'running' | 'finished';
+  exitCode: number | null;
+  killed: boolean;
+  /** The live task's `start_detached` flag (a restored record has no task to ask). */
+  detached: boolean;
+  /** Host epoch ms: the origin the row's elapsed chip ticks from. */
+  startedAt: number;
+  /** Where the chip freezes (null while the job runs). */
+  finishedAt: number | null;
+  /** The job's newest output (≤800 chars), from the live task or its record. */
+  outputTail: string;
+  /** The completion notice reached its reader (the card's `Delivered` badge). */
+  delivered: boolean;
+  /**
+   * The user removed this job from the dock (`bgDockDismissed` on its record). The host
+   * sends only the jobs the dock should list, and `false` travels on every one of those;
+   * a row that still arrives marked `dismissed` is not rendered (see `media/main.js`).
+   */
+  dismissed: boolean;
+}
+
+/**
  * The Spinney output channel with the time stamp attached to every line written through it.
  *
  * The stamp has to live on the **channel** and not only on the call sites, because some writers
@@ -608,6 +667,17 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   /** node key (\u0000-separated) -> the digest the last write put on disk (see persistDigest). */
   private nodeDigests = new Map<string, string>();
   private activeSessionId = '';
+  /**
+   * The window-global terminal dock's removal list, **in memory**: one handle per job
+   * the user removed from the dock, keyed `sessionId\0taskId` (task ids are
+   * session-local, so the pair is a job's identity). The durable form is
+   * `bgDockDismissed` on the `kind:'bg'` record; this set is a view of it, rebuilt from
+   * the sessions at load (`rebuildBgDismissed`) and kept in step with every dismissal,
+   * so a snapshot never has to walk every session's tree twice.
+   */
+  private readonly bgDismissed = new Set<string>();
+  /** The coalescing timer of the window-global `backgroundsGlobal` snapshot (~200 ms). */
+  private bgGlobalTimer: ReturnType<typeof setTimeout> | null = null;
   /** The one in-flight automatic-title request (a session switch does not cancel it). */
   private titleJob: { sessionId: string; controller: AbortController } | null = null;
   /** Sessions waiting for an automatic-title pass, drained one at a time. */
@@ -1509,6 +1579,9 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     // pre-forest `rootId` into `rootIds` — is exactly once per session, and the loaded
     // tree is always API-valid on activation.
     this.sessions = sessions;
+    // The dock's removal list is a view of `bgDockDismissed` on every `kind:'bg'`
+    // record, so it is rebuilt from exactly the sessions that were just loaded.
+    this.rebuildBgDismissed();
     // The pre-tree (v1) safety copy belongs on disk, not in the memento: it is
     // ~20 M chars of the blob that nothing ever reads again, and VS Code
     // re-serializes the whole memento on every write.
@@ -1654,6 +1727,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
           return;
         }
         this.sessions = sessions;
+        this.rebuildBgDismissed();
         if (!this.sessions.some((s) => s.id === this.activeSessionId)) {
           this.activeSessionId = this.sessions[0].id;
           this.persistActiveSession();
@@ -1814,11 +1888,14 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       return false;
     }
     this.sessions = sessions;
+    // The sessions in front of the user changed wholesale: so did what the dock lists.
+    this.rebuildBgDismissed();
     if (!this.sessions.some((s) => s.id === this.activeSessionId)) {
       this.activeSessionId = this.sessions[0].id;
       this.persistActiveSession();
     }
     this.notifyStateChanged();
+    this.scheduleBackgroundsGlobal();
     return true;
   }
 
@@ -4464,6 +4541,8 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     this.pendingHopStarts = this.pendingHopStarts.filter((p) => p.hop.originSessionId !== id);
     this.pendingReceipts = this.pendingReceipts.filter((r) => r.hop.originSessionId !== id);
     this.sessions.splice(idx, 1);
+    // Its `kind:'bg'` records are gone with it, so its dock handles are too.
+    this.forgetBgDismissed(id);
     if (!deferFinish) {
       this.finishDeletions();
     }
@@ -4485,6 +4564,8 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     this.persistNow();
     this.persistActiveSession();
     this.notifyStateChanged();
+    // Deleting sessions removes `kind:'bg'` records, so the dock's list changed too.
+    this.scheduleBackgroundsGlobal();
   }
 
   /** Clear one session's conversation (the panel that invoked `clear`). */
@@ -4535,6 +4616,10 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     }
     // The cleared conversation's transcript dumps are stale now.
     removeTranscriptDir(this.transcriptDir(session.id));
+    // The tree (and with it every `kind:'bg'` record) is gone: the dock's removal list
+    // for this session goes with it, and every tab's dock repaints.
+    this.forgetBgDismissed(session.id);
+    this.scheduleBackgroundsGlobal();
     // Written now: the dumps are already gone from disk, so a stale memento would
     // resurrect a conversation whose transcripts no longer exist.
     this.persistNow();
@@ -4680,6 +4765,8 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     this.persistNow();
     // The sidebar row shows the node count + "time ago", both of which moved.
     this.notifyStateChanged();
+    // A deleted branch takes its `kind:'bg'` records (and their dock rows) with it.
+    this.scheduleBackgroundsGlobal();
     this.outputLog(
       `[branch] deleted ${ids.length} node(s) at ${nodeId} in ${session.id}; ${dropped} transcript dump(s) removed`,
     );
@@ -5044,6 +5131,228 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     return { ok: true };
   }
 
+  // ---- The window-global terminal dock ----
+  //
+  // Every background command of the window — running or finished, whatever session
+  // and whatever tab — is one list, broadcast as `backgroundsGlobal` to **every**
+  // open chat panel. It is not a second kind of state: each row is the same job the
+  // owning node's `kind:'bg'` card renders (the webview builds both from one shared
+  // body builder), so the dock can never say something the card does not.
+  //
+  // Two sources, de-duplicated by `(sessionId, id)`: the live hub tasks of every
+  // session, and the persisted `kind:'bg'` record nodes of every session (delivered
+  // ones included — that is what survives a reload, because the hub is in-memory).
+  // The removal list is `bgDockDismissed` on the record itself.
+
+  /**
+   * Rebuild the in-memory removal list from the sessions just loaded, adopted or
+   * imported. `bgDockDismissed` on each `kind:'bg'` record is the durable form, so a
+   * reload needs no second store and no migration.
+   */
+  private rebuildBgDismissed(): void {
+    this.bgDismissed.clear();
+    for (const session of this.sessions) {
+      for (const node of Object.values(session.nodes)) {
+        if (node.kind === 'bg' && node.bgDockDismissed === true && node.bgTaskId != null) {
+          this.bgDismissed.add(bgDockHandle(session.id, node.bgTaskId));
+        }
+      }
+    }
+  }
+
+  /** Forget a session's dock handles (its records are gone with it). */
+  private forgetBgDismissed(sessionId: string): void {
+    const prefix = `${sessionId}\u0000`;
+    for (const key of [...this.bgDismissed]) {
+      if (key.startsWith(prefix)) {
+        this.bgDismissed.delete(key);
+      }
+    }
+  }
+
+  /**
+   * Every job the dock lists, in the order it shows them: running first, then
+   * finished, newest first inside each group.
+   *
+   * A job the user dismissed is left out (a running job can never be dismissed, so
+   * nothing live disappears). A job whose card is gone — a branch deleted while the
+   * process still runs — keeps its row (`cardNodeId: null`): the process is real, and
+   * the dock is the only place that could still show or kill it.
+   */
+  private globalBackgroundJobs(): GlobalBackgroundInfo[] {
+    const jobs: GlobalBackgroundInfo[] = [];
+    for (const session of this.sessions) {
+      const live = new Map<number, BackgroundTask>();
+      for (const hit of this.backgroundHub.listForSession(session.id)) {
+        live.set(hit.task.id, hit.task);
+      }
+      const seen = new Set<number>();
+      const push = (taskId: number, node: TreeNode | undefined): void => {
+        if (seen.has(taskId)) {
+          return;
+        }
+        seen.add(taskId);
+        if (this.bgDismissed.has(bgDockHandle(session.id, taskId))) {
+          return;
+        }
+        const task = live.get(taskId);
+        const running = task ? task.status === 'running' : false;
+        // The record is the only clock a restored card has: the job's start is the
+        // card's own `createdAt`, and its frozen duration gives the end.
+        const startedAt = task ? task.startedAt : node?.createdAt ?? 0;
+        const frozen = typeof node?.bgElapsedMs === 'number' ? startedAt + node.bgElapsedMs : null;
+        jobs.push({
+          sessionId: session.id,
+          sessionTitle: session.title,
+          id: taskId,
+          cardNodeId: node?.id ?? null,
+          command: node?.bgCommand ?? task?.command ?? node?.title ?? '',
+          status: running ? 'running' : 'finished',
+          exitCode: task ? task.exitCode : node?.bgExitCode ?? null,
+          killed: task ? task.killed === true : node?.bgKilled === true,
+          // A restored record has no task left to ask, so it never claims `shared`
+          // (same rule as the card's `bgDetached`).
+          detached: task ? task.detached === true : false,
+          startedAt,
+          finishedAt: task ? task.finishedAt : frozen,
+          outputTail: task ? backgroundOutputTail(task) : node?.bgOutputTail ?? '',
+          delivered: task ? task.delivered === true : node?.delivered === true,
+          dismissed: false,
+        });
+      };
+      // The records first: each carries its card node (the dock's ✕ names it)…
+      for (const node of Object.values(session.nodes)) {
+        if (node.kind === 'bg' && node.bgTaskId != null) {
+          push(node.bgTaskId, node);
+        }
+      }
+      // …then any live task with no card left, which would otherwise be invisible.
+      for (const taskId of live.keys()) {
+        push(taskId, undefined);
+      }
+    }
+    jobs.sort(
+      (a, b) =>
+        (a.status === 'running' ? 0 : 1) - (b.status === 'running' ? 0 : 1) ||
+        b.startedAt - a.startedAt ||
+        a.sessionId.localeCompare(b.sessionId) ||
+        a.id - b.id,
+    );
+    return jobs;
+  }
+
+  /**
+   * Coalesce the window-global snapshot (~200 ms), exactly like the per-session one:
+   * a chatty process fires the hub's `onUpdated` many times a second, and the dock of
+   * every tab must not pay for each of them.
+   */
+  scheduleBackgroundsGlobal(): void {
+    if (this.disposed || this.bgGlobalTimer != null) {
+      return;
+    }
+    this.bgGlobalTimer = setTimeout(() => {
+      this.bgGlobalTimer = null;
+      this.postBackgroundsGlobal();
+    }, BACKGROUNDS_GLOBAL_MS);
+  }
+
+  /** Deliver the window-global snapshot to every open chat tab (a session id is not asked). */
+  postBackgroundsGlobal(): void {
+    if (this.disposed) {
+      return;
+    }
+    const jobs = this.globalBackgroundJobs();
+    for (const id of this.panels.ids()) {
+      this.panels.get(id)?.post({ type: 'backgroundsGlobal', jobs });
+    }
+  }
+
+  /** RuntimeHost: a background terminal of one session changed (see its doc). */
+  backgroundsChanged(): void {
+    this.scheduleBackgroundsGlobal();
+  }
+
+  /**
+   * The dock's **kill** (`killBackground {sessionId, id}`): the id is session-local, so
+   * the session travels with it and a job can be killed from any tab — including one
+   * belonging to a session whose own tab is not open. That session's runtime is created
+   * on demand, which is what creates the job's card and delivers the kill's notice; the
+   * window-global snapshot is then reposted for the tab that asked.
+   */
+  private killBackgroundIn(sessionId: string, id: number): void {
+    const session = this.sessions.find((s) => s.id === sessionId);
+    if (!session || !Number.isFinite(id)) {
+      return;
+    }
+    this.runtimeFor(session).onKillBackground(id);
+    this.scheduleBackgroundsGlobal();
+  }
+
+  /**
+   * The dock's **✕**: stop listing one job — a field on its record (`bgDockDismissed`),
+   * persisted with the session, so the removal survives a reload. The card itself is
+   * untouched: the tree's delete removes the record, the dock's ✕ only stops listing it,
+   * and those two gestures stay separate.
+   *
+   * A **running** job is refused: the dock must never be able to hide work in progress
+   * (the button is not rendered for one, and the host re-checks because the click can
+   * race the job's own end).
+   */
+  private dismissBackground(sessionId: string, cardNodeId: string): void {
+    if (this.readOnly) {
+      return;
+    }
+    const session = this.sessions.find((s) => s.id === sessionId);
+    const node = session && cardNodeId ? session.nodes[cardNodeId] : undefined;
+    if (!session || !node || node.kind !== 'bg' || node.bgTaskId == null) {
+      return;
+    }
+    if (this.backgroundHub.lookup(session.id, node.bgTaskId)?.task.status === 'running') {
+      return;
+    }
+    if (node.bgDockDismissed !== true) {
+      node.bgDockDismissed = true;
+      this.bgDismissed.add(bgDockHandle(session.id, node.bgTaskId));
+      // The record is the durable form: written now, so a reload cannot resurrect a
+      // row the user just removed.
+      this.markSessionDirty(session.id);
+      this.persistNow();
+    }
+    this.scheduleBackgroundsGlobal();
+  }
+
+  /**
+   * `Clear finished`: dismiss every finished job of **every** session at once — the dock
+   * is window-global, so its clear is too. Running jobs are left alone, and the cards
+   * stay where they are (see {@link dismissBackground}).
+   */
+  private clearFinishedBackgrounds(): void {
+    if (this.readOnly) {
+      return;
+    }
+    const changed = new Set<string>();
+    for (const session of this.sessions) {
+      for (const node of Object.values(session.nodes)) {
+        if (node.kind !== 'bg' || node.bgTaskId == null || node.bgDockDismissed === true) {
+          continue;
+        }
+        if (this.backgroundHub.lookup(session.id, node.bgTaskId)?.task.status === 'running') {
+          continue;
+        }
+        node.bgDockDismissed = true;
+        this.bgDismissed.add(bgDockHandle(session.id, node.bgTaskId));
+        changed.add(session.id);
+      }
+    }
+    if (changed.size > 0) {
+      for (const id of changed) {
+        this.markSessionDirty(id);
+      }
+      this.persistNow();
+    }
+    this.scheduleBackgroundsGlobal();
+  }
+
   // ---- Webview routing ----
 
   private async dispatchUserMessage(
@@ -5348,6 +5657,10 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         perf(() => `webview-ready session=${session.id} +${tab.ageMs()}ms`);
         tab.markReady();
         rt.postAllState();
+        // The window-global dock is not part of a session's repaint: a tab that has just
+        // come up starts with **every** job of the window, or a reload would show an empty
+        // dock until the next job happens to change.
+        this.postBackgroundsGlobal();
         tab.flushHeld();
         return;
       }
@@ -5435,7 +5748,22 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         return;
       }
       case 'killBackground':
-        rt.onKillBackground(Number(message.id));
+        // Two senders, one action: a job card's ✕ posts a bare `{ id }` (resolved in the
+        // tab's own session), the window-global dock posts `{ sessionId, id }` because it
+        // lists every session — a task id is session-local, so the session has to travel.
+        this.killBackgroundIn(
+          typeof message.sessionId === 'string' && message.sessionId ? message.sessionId : session.id,
+          Number(message.id),
+        );
+        return;
+      case 'dismissBackground':
+        // The dock's ✕: stop listing one job (a field on its `kind:'bg'` record, persisted
+        // with the session). The card, its terminal state and its `Delivered` badge stay.
+        this.dismissBackground(String(message.sessionId ?? session.id), String(message.cardNodeId ?? ''));
+        return;
+      case 'clearFinishedBackgrounds':
+        // The dock's `Clear finished`: every finished job of the window, every session.
+        this.clearFinishedBackgrounds();
         return;
       case 'clear':
         this.clear(session.id);
@@ -5500,6 +5828,11 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     this.pendingReceipts = [];
     this.hopsByOrigin.clear();
     this.hopsByTarget.clear();
+    if (this.bgGlobalTimer != null) {
+      clearTimeout(this.bgGlobalTimer);
+      this.bgGlobalTimer = null;
+    }
+    this.bgDismissed.clear();
     if (this.titleDrainTimer != null) {
       clearTimeout(this.titleDrainTimer);
       this.titleDrainTimer = null;

@@ -285,7 +285,7 @@
   the compiled shell selection the
   way `spawnShellCommand` does (`shell.file` + `buildArgs` + `env`) and pins the argv a native
   child actually receives, because nothing about this failure is visible in the tool's source.
-- **A job's card is a flying `kind:'bg'` node, not a dock.** `SessionRuntime.onBackgroundRegistered`
+- **A job's card is a flying `kind:'bg'` node, not a panel.** `SessionRuntime.onBackgroundRegistered`
   (`runtime.ts:3891`) creates it under the owning turn node once per job: `bgTaskId` = the
   session-local id, `bgCommand` = the command, title = the command clipped to 60 chars
   (`runtime.ts:3902`). It is a **sidecar** exactly like a sub-agent window: `attachNode`
@@ -296,11 +296,14 @@
   view focus. The card lives in the same right-hand column-major grid as the sub-agent windows
   (`media/tree.js` `isSidecarKind` `tree.js:89`, `agentKids` `tree.js:140`).
 - **Webview rendering:** there is no standalone panel and no dock at the bottom of a card any more
-  (`#bg-panel`, `.node-bg`, `.bg-dock-*`, `.bg-item*` are gone). `renderBgBody` fills a `kind:'bg'`
-  card from the tree node's own meta plus the latest snapshot: a status row of `#taskId` + status +
-  the **elapsed chip** (and the same value as the card head's status chip), then the command and the
-  output tail, plus a `kill` button (built by `killBackgroundButton`, which posts
-  `killBackground { id }`) only while the job runs. A **detached** job's card also wears the
+  (`#bg-panel`, `.node-bg`, `.bg-dock-*`, `.bg-item*` are gone) — the one dock the webview has is
+  the **window-global** `#term-dock` (its own bullet below), which is a second view of the same
+  jobs. `renderBgBody` fills a `kind:'bg'`
+  card from the tree node's own meta plus the latest snapshot, **through the shared body builder**
+  (`buildBgBody`: the status row of `#taskId` + status + the **elapsed chip**, then the command and
+  the output tail — the same three parts a dock row renders, so the two views cannot disagree);
+  it also sets the card head's status chip and adds a `kill` button (built by `killBackgroundButton`,
+  which posts `killBackground { id }`) only while the job runs. A **detached** job's card also wears the
   `shared` badge: `treeMessage` sets `bgDetached` from the **live task** (the hub's `lookup`), never
   from the node, so a card restored after a reload — which has no task left to ask — renders as the
   plain record it is, and the badge says why that job's composer stayed on Send.
@@ -323,6 +326,48 @@
   and patches the card of each tree node with a `bgTaskId` (`renderBackgrounds`,
   `media/main.js:1183-1202`); the host coalesces
   the snapshot (~200 ms, `runtime.ts:3832-3841`) so a chatty process cannot freeze the webview.
+- **The window-global terminal dock.** Every background command of the window — running or
+  finished, delivered or not, whatever session — is also one list, on **every** chat tab:
+  `#term-dock` is a `fixed` element at the top-right of the body (`z-index` 1500: above the cards
+  and the autoscroll origin at 1000, below the node / snippet menus at 2000), with a collapsible
+  header `Terminals · {0} running` and one row per job. It is a **view** of the same jobs, never a
+  second state: a row's body is `buildBgBody` — the builder the `kind:'bg'` card uses — plus the
+  session title, the `kill` button while the job runs, the `shared` / `Delivered` badges, the
+  local elapsed chip and the **✕** when the job is finished. The host broadcasts it as
+  `backgroundsGlobal` (`ChatViewProvider.globalBackgroundJobs` / `postBackgroundsGlobal`),
+  coalesced ~200 ms exactly like the per-session snapshot, to **every** open panel; a tab that
+  comes up (`ready`) is sent one at once, so a reload never shows an empty dock until the next job
+  happens to change. `jobs[]` is de-duplicated by `(sessionId, id)` — a task id is session-local,
+  so the pair is a job's identity and the same number in two sessions is two jobs — and built from
+  the live hub tasks of every session **plus** the persisted `kind:'bg'` record nodes of every
+  session (delivered ones included: the hub is in-memory, the record is what survives a reload).
+  Each entry carries `sessionId`, `sessionTitle`, `id`, `cardNodeId`, `command`, `status`,
+  `exitCode`, `killed`, `detached`, `startedAt`, `finishedAt`, `outputTail`, `delivered` and
+  `dismissed`. `detached` is the **live** task's flag (a restored record has no task to ask,
+  exactly like the card's `bgDetached`), and `startedAt` / `finishedAt` are the host clocks the
+  row's chip ticks from and freezes at. Order: running first, then finished, newest first inside
+  each group; a job whose card is gone (its branch was deleted while the process still runs) keeps
+  its row with `cardNodeId: null`, because the process is real and the dock is the only place left
+  that could kill it. The rows are diffed by a per-row signature, so a job that prints repaints
+  **its own row** and nothing else, and the dock lives outside `#tree-canvas`: no dock repaint ever
+  runs `relayout()`. Three actions, each resolved in the session that **owns** the job:
+  `killBackground {sessionId, id}` (the id travels with its session, so any tab can kill any
+  session's job; the owning runtime is created on demand — which is what paints the job's card and
+  delivers the kill's notice), `dismissBackground {sessionId, cardNodeId}` and
+  `clearFinishedBackgrounds` (every finished job of the window, every session).
+- **Removing a job from the dock is a field on the record, not a deletion.**
+  `TreeNode.bgDockDismissed` (`kind:'bg'` only, `true` or absent) is persisted with the session, so
+  a reload keeps the removal without a second store; the provider keeps the in-memory view as a
+  set of `(sessionId, taskId)` handles, rebuilt from the sessions at load (`rebuildBgDismissed`,
+  and forgotten with a session or a cleared conversation). Every dismissal writes the record
+  through `persistNow()` and reposts the snapshot. **Two removal gestures stay separate:** the
+  tree's delete (a card's own delete button / `deleteBranch`) removes the record and its branch,
+  while the dock's ✕ only stops listing it — the card keeps its terminal state, its `Delivered`
+  badge and its place in the owning node's grid. A **running** job can never be dismissed (the ✕
+  is not rendered for one and the host refuses it), so the dock can never hide work in progress;
+  `Clear finished` skips a running job for the same reason, and the webview refuses a row that
+  still arrives with `dismissed: true` — the host filters dismissed jobs out, so the two halves of
+  that rule are independent.
 - **Completion → injected into the owning node.** `onBackgroundFinished` (`runtime.ts:3921`) first
   snapshots the terminal state onto the card (`snapshotBackgroundCard`, `runtime.ts:3938`:
   `bgExitCode`, `bgKilled`, `bgElapsedMs`, `bgOutputTail` (≤800 chars), `bgCommand`, node status

@@ -2934,6 +2934,58 @@
   }
 
   /**
+   * One job as the **body** every job view renders, from either source: the owning
+   * node's meta + the session snapshot (a `kind:'bg'` card) or one `backgroundsGlobal`
+   * row (the dock). Both shapes name the same facts, so this normalisation is what lets
+   * the two views share one builder instead of growing a second copy of the status row,
+   * the command and the output tail.
+   *
+   * `startedAt` is live-only and `elapsedMs` frozen-only: the chip ticks from the host
+   * clock while the job runs and stops at the host's own number when it ends.
+   */
+  function bgJobOf(meta, task) {
+    const running = !!(task && task.status === 'running');
+    const id = task ? Number(task.id) : meta && meta.bgTaskId != null ? Number(meta.bgTaskId) : null;
+    let elapsedMs = null;
+    if (!running) {
+      if (task && typeof task.finishedAt === 'number') elapsedMs = task.finishedAt - task.startedAt;
+      else if (meta && typeof meta.bgElapsedMs === 'number') elapsedMs = meta.bgElapsedMs;
+    }
+    return {
+      id,
+      running,
+      command: (meta && meta.bgCommand) || (task && task.command) || '',
+      pending: !!(task && task.pendingDelivery),
+      statusText: statusTextFor(task, meta),
+      startedAt: running && task ? task.startedAt : null,
+      elapsedMs,
+      tail: outputTailFor(task, meta),
+    };
+  }
+
+  /**
+   * **The one job body**: the status row (`#<id>`, the status word and the elapsed
+   * chip), the command line and the output tail — the three parts of a background
+   * terminal that the owning node's `kind:'bg'` card and the window-global dock row
+   * both render, so the two can never describe one job differently.
+   *
+   * Returns the elements; the caller decides where they go (the card's work zone, a
+   * dock row's body) and adds whatever only it can say (the card's head button, the
+   * dock's session title).
+   */
+  function buildBgBody(job) {
+    const row = el('div', 'bg-card-status');
+    row.appendChild(el('span', 'bg-card-id', '#' + (job.id != null ? job.id : '')));
+    row.appendChild(el('span', 'bg-status' + (job.pending ? ' pending' : ''), job.statusText));
+    syncElapsed(row, 'bg-elapsed', job.startedAt, job.elapsedMs);
+    const parts = [row, el('div', 'bg-card-cmd', job.command)];
+    if (job.tail) {
+      parts.push(el('pre', 'bg-output', job.tail));
+    }
+    return parts;
+  }
+
+  /**
    * (Re)build one job card's body from the tree node + the latest snapshot. The
    * card's head is created once by `createNodeCard`; the body is small enough to
    * rebuild on every snapshot (the host coalesces them to ~5/s at most).
@@ -2958,41 +3010,18 @@
     const workWrap = card.querySelector('.node-work-wrap');
     if (workWrap) workWrap.classList.remove('hidden');
     itemsEl.innerHTML = '';
-    const running = !!(task && task.status === 'running');
+    const job = bgJobOf(meta, task);
+    const running = job.running;
     card.classList.toggle('bg-running', running);
     card.classList.toggle('bg-done', !running);
 
     const statusEl = card.querySelector('.node-status');
-    if (statusEl) statusEl.textContent = statusTextFor(task, meta);
+    if (statusEl) statusEl.textContent = job.statusText;
 
-    const row = el('div', 'bg-card-status');
-    row.appendChild(el('span', 'bg-card-id', '#' + (meta && meta.bgTaskId != null ? meta.bgTaskId : '')));
-    const status = el('span', 'bg-status' + (task && task.pendingDelivery ? ' pending' : ''), statusTextFor(task, meta));
-    row.appendChild(status);
-    // The chip is shown whenever a duration is known — a running job ticks, and a
-    // finished one freezes: at its own `finishedAt` while the snapshot still carries
-    // it (a finished-but-undelivered job), else at the duration persisted on the
-    // node, which is all a record card restored after a restart has left.
-    syncElapsed(
-      row,
-      'bg-elapsed',
-      running && task ? task.startedAt : null,
-      running
-        ? null
-        : task && typeof task.finishedAt === 'number'
-          ? task.finishedAt - task.startedAt
-          : typeof meta.bgElapsedMs === 'number'
-            ? meta.bgElapsedMs
-            : null,
-    );
-    itemsEl.appendChild(row);
-
-    const cmd = el('div', 'bg-card-cmd', (meta && meta.bgCommand) || (task && task.command) || '');
-    itemsEl.appendChild(cmd);
-
-    const tail = outputTailFor(task, meta);
-    if (tail) {
-      itemsEl.appendChild(el('pre', 'bg-output', tail));
+    // The body itself — status row, command, output tail — is the **shared** job body
+    // (`buildBgBody`), the same one the window-global dock renders on every tab.
+    for (const part of buildBgBody(job)) {
+      itemsEl.appendChild(part);
     }
 
     // Only a live job can be killed.
@@ -3031,6 +3060,221 @@
     // The card's height feeds the layout, so re-place the tree when a job changed
     // (debounced: the host coalesces snapshots).
     if (touched) scheduleLayout();
+  }
+
+  // ---- The window-global terminal dock -----------------------------------------
+  // Every background command of the **window** — every session, whatever tab is in
+  // front — is one fixed list at the top-right of every chat tab (`#term-dock`). It is
+  // not a second notion of a job: a row renders the **same** body the owning node's
+  // `kind:'bg'` card renders (`buildBgBody`), plus the session it came from, and the
+  // host is the one that decides what the list holds (a removed job never arrives).
+  // Nothing in this path re-lays out the tree: the dock is fixed and outside the canvas,
+  // so a job that prints cannot move it.
+  const termDockEl = document.getElementById('term-dock');
+  const termDockHeadEl = document.getElementById('term-dock-head');
+  const termDockLabelEl = document.getElementById('term-dock-label');
+  const termDockClearEl = document.getElementById('term-dock-clear');
+  const termDockListEl = document.getElementById('term-dock-list');
+  /** Collapsed? A local preference: the dock's height is the reader's, not the host's. */
+  let termDockCollapsed = false;
+  /** rowKey -> { el, sig }: a row is rebuilt only when its own facts changed. */
+  const termDockRows = new Map();
+
+  /** A job's identity in the window: task ids are session-local, so the pair is the key. */
+  function termDockKey(job) {
+    return String(job.sessionId || '') + '\u0000' + String(job.id);
+  }
+
+  /** Everything one row renders, as one comparable string (an unchanged row is not touched). */
+  function termDockSignature(job) {
+    return JSON.stringify([
+      job.sessionTitle,
+      job.command,
+      job.status,
+      job.exitCode,
+      job.killed === true,
+      job.detached === true,
+      job.startedAt,
+      job.finishedAt,
+      job.outputTail,
+      job.delivered === true,
+      job.cardNodeId,
+    ]);
+  }
+
+  /**
+   * A `backgroundsGlobal` row as the shared body's job view. The row is the host's
+   * **composed** record of a job, so its status word comes from the same
+   * `statusTextFor` the card uses (fed a task-shaped object): `running`, `pending
+   * delivery`, `killed` and `exit {0}` mean the same thing in both places, because it
+   * is the same function that says them.
+   */
+  function bgJobOfDockRow(job) {
+    const running = job.status === 'running';
+    const finishedAt = typeof job.finishedAt === 'number' ? job.finishedAt : null;
+    const task = {
+      status: running ? 'running' : 'finished',
+      // A finished job whose notice has not reached its reader yet: on the card this is
+      // the live task's `pendingDelivery`, and the host ships the same fact as `delivered`.
+      pendingDelivery: !running && job.delivered !== true,
+      killed: job.killed === true,
+      exitCode: job.exitCode != null ? job.exitCode : null,
+    };
+    return {
+      id: job.id,
+      running,
+      command: job.command || '',
+      pending: task.pendingDelivery,
+      statusText: statusTextFor(task, null),
+      startedAt: running ? job.startedAt : null,
+      elapsedMs: running ? null : finishedAt != null ? finishedAt - job.startedAt : null,
+      tail: job.outputTail || '',
+    };
+  }
+
+  /** One dock row: where it came from, its badges, its action, and the shared job body. */
+  function paintTermDockRow(entry, job) {
+    const row = entry.el;
+    row.innerHTML = '';
+    row.className = 'term-dock-row' + (job.status === 'running' ? ' running' : '');
+    const head = el('div', 'term-dock-row-head');
+    head.appendChild(el('span', 'term-dock-session', job.sessionTitle || ''));
+    if (job.detached === true) {
+      // The same untranslated `shared` token the card wears, with the same sentence.
+      const shared = el('span', 'node-shared-badge', 'shared');
+      shared.title =
+        'This job does not block the composer and will not notify the agent; read its result with check_background_terminal.';
+      head.appendChild(shared);
+    }
+    if (job.delivered === true) {
+      head.appendChild(el('span', 'node-delivered-badge', tr('Delivered')));
+    }
+    const actions = el('div', 'term-dock-actions');
+    if (job.status === 'running') {
+      const kill = el('button', 'bg-kill', tr('kill'));
+      kill.title = tr('Kill background terminal {0}', job.id);
+      kill.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        // Task ids are session-local, so the session travels with the id: the dock can
+        // kill a job of a session that is not the one this tab shows.
+        vscode.postMessage({ type: 'killBackground', sessionId: job.sessionId, id: job.id });
+      });
+      actions.appendChild(kill);
+    } else if (job.cardNodeId) {
+      const dismiss = el('button', 'term-dock-dismiss', '✕');
+      dismiss.title = tr('Stop listing this terminal (the record stays)');
+      dismiss.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        vscode.postMessage({
+          type: 'dismissBackground',
+          sessionId: job.sessionId,
+          cardNodeId: job.cardNodeId,
+        });
+      });
+      actions.appendChild(dismiss);
+    }
+    head.appendChild(actions);
+    row.appendChild(head);
+    const body = el('div', 'term-dock-body');
+    for (const part of buildBgBody(bgJobOfDockRow(job))) {
+      body.appendChild(part);
+    }
+    row.appendChild(body);
+  }
+
+  /**
+   * `backgroundsGlobal`: the whole window's jobs, on every tab.
+   *
+   * A row whose signature did not move is left alone (a job that prints rebuilds only
+   * its own row), a row that left the list is dropped, and the header says how many jobs
+   * run. Order is the host's (running first, newest first), so the client only moves the
+   * rows that are out of place. The dock hides itself when it holds nothing: an empty
+   * frame at the top of every tab would be noise, not a feature.
+   */
+  function renderTerminalDock(jobs) {
+    if (!termDockEl || !termDockListEl) return null;
+    const rows = [];
+    const seen = new Set();
+    for (const job of jobs || []) {
+      if (!job || job.id == null) continue;
+      // A dismissed job belongs to no dock. The host already leaves them out; the check
+      // here is what makes a host that sends one unable to resurrect a removed row.
+      if (job.dismissed === true) continue;
+      const key = termDockKey(job);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      rows.push(job);
+    }
+    for (const [key, entry] of [...termDockRows]) {
+      if (!seen.has(key)) {
+        entry.el.remove();
+        termDockRows.delete(key);
+      }
+    }
+    for (const job of rows) {
+      const key = termDockKey(job);
+      const sig = termDockSignature(job);
+      let entry = termDockRows.get(key);
+      if (!entry) {
+        entry = { el: el('div', 'term-dock-row'), sig: '' };
+        termDockRows.set(key, entry);
+        termDockListEl.appendChild(entry.el);
+      }
+      if (entry.sig !== sig) {
+        entry.sig = sig;
+        paintTermDockRow(entry, job);
+      }
+    }
+    // Put the rows in the host's order, touching only what is out of place.
+    const wanted = [];
+    for (const job of rows) {
+      const entry = termDockRows.get(termDockKey(job));
+      if (entry) wanted.push(entry.el);
+    }
+    for (let i = 0; i < wanted.length; i++) {
+      const current = termDockListEl.children[i];
+      if (current !== wanted[i]) {
+        termDockListEl.insertBefore(wanted[i], current || null);
+      }
+    }
+    const running = rows.filter((job) => job.status === 'running').length;
+    if (termDockLabelEl) {
+      const text = tr('Terminals · {0} running', running);
+      if (termDockLabelEl.textContent !== text) termDockLabelEl.textContent = text;
+    }
+    termDockEl.classList.toggle('hidden', rows.length === 0);
+    if (termDockClearEl) {
+      termDockClearEl.classList.toggle('hidden', rows.length - running === 0);
+    }
+    return { rows: rows.length, running };
+  }
+
+  /** Collapse or expand the dock body (a local preference; the header keeps the count). */
+  function setTermDockCollapsed(collapsed) {
+    termDockCollapsed = collapsed === true;
+    if (!termDockEl) return;
+    termDockEl.classList.toggle('collapsed', termDockCollapsed);
+    if (termDockHeadEl) {
+      termDockHeadEl.setAttribute('aria-expanded', termDockCollapsed ? 'false' : 'true');
+    }
+  }
+
+  /**
+   * The dock's two controls: the header folds it (a long list must not cover the tree),
+   * and `Clear finished` removes every finished job of the window from it — the cards
+   * themselves stay, and a running job is never removed.
+   */
+  function wireTerminalDock() {
+    if (termDockHeadEl) {
+      termDockHeadEl.addEventListener('click', () => setTermDockCollapsed(!termDockCollapsed));
+    }
+    if (termDockClearEl) {
+      termDockClearEl.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        vscode.postMessage({ type: 'clearFinishedBackgrounds' });
+      });
+    }
+    setTermDockCollapsed(false);
   }
 
   // ---- Tree rendering ----
@@ -6621,6 +6865,12 @@
       case 'backgrounds':
         renderBackgrounds(msg.tasks, false);
         break;
+      case 'backgroundsGlobal':
+        // The window-global terminal dock: every session's jobs, on **this** tab too.
+        // Independent of `reset` (a session switch moves no job) and of the tree: the
+        // dock is fixed, and a job that prints repaints its own row.
+        renderTerminalDock(msg.jobs);
+        break;
       case 'context':
         setContext(msg.used, msg.total);
         break;
@@ -7215,6 +7465,7 @@
   // Initial handshake.
   vscode.postMessage({ type: 'ready' });
   renderTree({ nodes: [], rootId: null, activeId: null });
+  wireTerminalDock();
   setStatus(tr('Ready'));
   updateImageVisibility();
   updateFollowButton();

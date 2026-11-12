@@ -51,12 +51,16 @@
   (`persist-skipped read-only=true`). There is no second write path (no Memento
   fallback). The webview paints it too: `state.readOnly` disables Send (Stop hidden)
   with the host's sentence as its title, and `send()` re-checks the flag.
-- **Background terminals**: no standalone panel and no dock. A job renders as a `kind:'bg'`
+- **Background terminals**: no standalone panel. A job renders as a `kind:'bg'`
   sidecar card beside the node that spawned it (the same right-hand grid as the sub-agent
   windows), and its completion notice is injected **into that node's own transcript** (a
-  `.bgnotify` block) — no new node, no view focus move. Deleting a branch / clearing / deleting
+  `.bgnotify` block) — no new node, no view focus move. The window also has one
+  **window-global terminal dock** (`#term-dock`, in every chat tab): every job of every
+  session, in the same card body, with kill / ✕ / `Clear finished` — the ✕ removes the job
+  from that list only (a field on the record), never the card. Deleting a branch / clearing / deleting
   a session that owns *running* jobs asks for a modal confirmation and then kills them. Task
-  ids are **session-local** (a task id is only resolvable inside its own session).
+  ids are **session-local** (a task id is only resolvable inside its own session), which is
+  why the dock's actions carry the session with the id.
 - **Control plane**: no back-compat obligation — pick the cleanest shape (`hvsc` + this repo's
   own tooling are updated together).
 
@@ -164,6 +168,7 @@ nodeWorkers: Map<nodeId, { agent: Agent; tools: ToolRegistry }>
 | `done` / `interrupted` / `error` | `{ nodeId, ... }` | idem: clears that node's live tool cards / tps meter. |
 | `backgrounds` | `{ tasks: Array<Task & { nodeId, cardNodeId, pendingDelivery }> }` | replaces `background`: flat list, each task tagged with its owning node **and** with the `kind:'bg'` card that mirrors it (`cardNodeId`, null when the branch is gone). The webview never reads `cardNodeId`: it keeps the snapshot keyed by `task.id` and re-renders **every** `kind:'bg'` card from that card's own `bgTaskId`; `#bg-panel` and the in-card dock are gone. |
 | `backgroundNotice` | `{ nodeId, item }` | appended inside that node's card as a `.msg.bgnotify` block (`item.kind: 'background' \| 'subagent'` picks the `BG` / `SUB` badge). Injected at a tool boundary of a running turn, so the webview finalizes the streaming answer before it adds the block. |
+| `backgroundsGlobal` | `{ jobs: Array<{ sessionId, sessionTitle, id, cardNodeId, command, status, exitCode, killed, detached, startedAt, finishedAt, outputTail, delivered, dismissed }> }` | the **window-global** terminal dock: every background job of **every** session (running or finished, delivered included), broadcast to **every** open panel, de-duplicated by `(sessionId, id)` and coalesced ~200 ms exactly like `backgrounds`. `id` is the session-local task id; `cardNodeId` is the `kind:'bg'` record the dock's ✕ dismisses (`null` when that branch is gone); `detached` is the live task's flag (absent ⇒ `false` on a restored record); `dismissed` is a job the user removed (the host sends only the listed jobs, and a row arriving with `dismissed: true` is still not rendered). The webview diffs rows by signature and never relays the tree for it. A tab's `ready` is followed by one immediately, so a reload never opens an empty dock. |
 | `balance` | `{ providerId, providerName, balance }` | the wallet readout, and the **provider identity travels with the number**. Posted on every refresh — including an *empty* readout (a `none` dialect, or a failed fetch) — so a tab that checks out a node on another provider can never keep showing the previous provider's number. See `invariants/model-cards.md`. |
 | `status`, `notice`, `config`, `context`, `sessionStats`, `user`, `imagePicked`, `harnessNote`, `agentStart`, `agentDone`, `reset`, `composerClear` | unchanged shape, one addition | `config` now also carries `setup: { node, live, drift, reasons }` — the two setups the composer's identity line and its drift marking are rendered from (the host computes it, the webview renders it; `api-retries.md` §2b). `reset` is per-tab (each tab is its own webview); the three sidecar messages carry their node id (`harnessNote` `{ nodeId, text }`, `agentStart` / `agentDone` `{ id, ... }`) so they land in that card. `composerClear` is the host telling the composer its text was really taken (a send that opened a modal and was answered with "No" must not eat it). |
 
@@ -174,7 +179,9 @@ nodeWorkers: Map<nodeId, { agent: Agent; tools: ToolRegistry }>
 | `userMessage` | `{ text, attachments }` | targets the **view focus** node of *this tab's* session. |
 | `checkout` | `{ id }` | view focus change; allowed while anything runs. |
 | `stop` | `{ nodeId? }` | stop that node's run (omit ⇒ every run of this session). |
-| `killBackground` | `{ id }` | resolved in this session (session-local ids). |
+| `killBackground` | `{ sessionId?, id }` | the session-local task id, resolved in the session named (the **dock** posts one from any tab, so the session travels with the id), else in the tab's own session (a job card's ✕). |
+| `dismissBackground` | `{ sessionId, cardNodeId }` | the dock's ✕: set `bgDockDismissed` on that `kind:'bg'` record (persisted, so the removal survives a reload) and stop listing it. The card is untouched; a **running** job is refused. |
+| `clearFinishedBackgrounds` | `{}` | `Clear finished`: dismiss every finished job of the window (every session) at once. Running jobs are left alone, and no card is removed. |
 | `loadAgentItems` | `{ id }` | that sub-agent card was expanded and wants its transcript (`tree` sent only `itemCount`); the host answers with `agentItems`. |
 | `continueTurn`, `newContextTurn`, `deleteBranch`, `setNodeSize`, `killAgent`, `copyNodeId`, `pickImage`, `setModel`, `setThinkingEffort`, `openModelTree`, `openExternal`, `layoutDiagnostic`, `ready` | `rolloverTurn` / `forkTurn` retired | the ▶ button posts `continueTurn` (in-place retry) for `{ id }`; the composer's **one** new-epoch entry posts `newContextTurn` `{ text, attachments }` — the host picks the backend from `SessionRuntime.newEpochTrigger()` (a new context window when the chain is near/full, a fork under the live setup when only the setup drifted), asks one modal question and re-validates the trigger (`ChatViewProvider.newContextEntry`). `clear` is **not** posted by `media/main.js` any more; the host still handles it. |
 

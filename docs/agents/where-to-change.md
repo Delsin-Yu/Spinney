@@ -100,6 +100,11 @@
   `src/chat/runtime.ts` (the `kind:'bg'` card, notice injection, `postBackgrounds`), the tools in
   `src/tools/background.ts` / `backgroundTools.ts` / `execCommand.ts`, and each job's flying card
   (`renderBgBody`) in `media/main.js` — the in-card dock and `#bg-panel` are both gone.
+  **The window-global terminal dock** is the `// ---- The window-global terminal dock ----`
+  section of `src/chat/ChatViewProvider.ts` (`globalBackgroundJobs` / `scheduleBackgroundsGlobal`
+  / the three actions), `TreeNode.bgDockDismissed` in `src/chat/tree.ts` for its removal list, and
+  `renderTerminalDock` + the shared job body (`buildBgBody`) in `media/main.js` / `#term-dock` in
+  `src/chat/webviewShell.ts` and `media/style.css`; the guard is `tools/check-webview.js`.
 - **Model / effort (per node, seeded per session)** → the live selection is a
   property of the **node**: `TreeNode.model` / `TreeNode.effort` in `src/chat/tree.ts`,
   resolved by ancestry (the nearest ancestor's card, else the session **seed**) — see

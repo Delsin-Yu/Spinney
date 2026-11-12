@@ -8,6 +8,17 @@
   to freeze the sidebar after a long session.
 - Tool cards shown in the UI (and persisted `displayItems`) cap args (~8 KiB) and
   result (~32 KiB). Agent `messages` still carry the full tool payload for the model.
+- **The window-global terminal dock repaints one row, never the tree.** `backgroundsGlobal` is
+  coalesced ~200 ms in the host (`ChatViewProvider.scheduleBackgroundsGlobal`), exactly like the
+  per-session `backgrounds`, and the webview diffs it row by row (`renderTerminalDock` in
+  `media/main.js`): a row whose own signature (command, status, both clocks, output tail, badges,
+  session title) did not move is left completely alone, a changed row is rebuilt in place, and a
+  row that left the list is removed. The dock is a `fixed` element **outside `#tree-canvas`**, so
+  nothing on that path re-lays out the tree — a job that prints a line a second cannot make a
+  40-card session lay out again, which is what a dock inside the canvas would cost. Its elapsed
+  chips go through the same 250 ms local ticker the cards use (the host ships clocks, never a
+  counter), and `tools/check-webview.js` pins that the dock's section contains no layout call and
+  that an unchanged snapshot rebuilds no row.
 - **The live block is the only expanded one.** `foldThinking` / `foldToolCalls` are
   the *at rest* default: the thinking block receiving deltas, and a tool call between
   its first delta and its end, are expanded whatever the default says, and fold back

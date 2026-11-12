@@ -392,6 +392,24 @@ The agent can give a self-contained task to a new session. The tool is `hop_sess
 | Settings | `spinney.hopSession.enabled` turns the tool on and off. The default is on. `list_nodes` and `rename_session` stay available when it is off. |
 | Reload | The hop list lives in memory. A window reload drops a hop that is in flight. The new session keeps its history. |
 
+### 8.4 The terminal dock
+
+The terminal dock shows every background terminal of the window. It is at the top right of each chat tab. You can see and control a job from any tab, whatever session owns it.
+
+The header shows the count of running jobs, for example `Terminals · 1 running`. Click the header to fold or unfold the list. With no job, the dock is not shown. Each row shows the session title, the job number, the status, the elapsed time, the command, and the last output lines. A row shows the same facts as the card of that job.
+
+| Row or button | Action |
+|---|---|
+| A running job | The **kill** button ends the process tree of the job. |
+| A finished job | The **✕** button removes the row from the dock. |
+| **Clear finished** | Removes all finished jobs from the dock. |
+
+The **✕** button and **Clear finished** do not delete the job card. The card stays beside its node, with its status and its `Delivered` badge. To delete the card, use the delete button of the card, or delete the branch.
+
+Spinney saves the removal in the session. A removed row stays away after a reload.
+
+You cannot remove a running job from the dock. Terminate it first, and then remove it.
+
 ## 9. Images
 
 Attach an image with the **Attach image** button, or paste one into the input box. Pending attachments show as small pictures with an **×** button.
