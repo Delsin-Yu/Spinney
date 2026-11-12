@@ -3788,9 +3788,30 @@ if (contextLabel !== 'ctx 50%') {
   expectThinkingOpen(lastOf('thinking'), false, 'a thinking row whose message started answering');
 
   // (b) The turn ending collapses it — no click, no setting: a finished thought is one
-  // line of the essay, not a paragraph.
+  // line of the essay, not a paragraph. And the reasoning of a message whose text has
+  // already taken the turn over joins **that message's own row**: one message is one
+  // thinking row and one text block, whatever order the provider streamed them in, so
+  // the late delta appends in place and does not re-open what the answer took over.
   dispatch({ type: 'thinkingDelta', nodeId: NODE, text: ' a second thought' });
-  expectThinkingOpen(lastOf('thinking'), true, 'the second thinking row of the live turn');
+  {
+    const thinking = rowsOf().filter((row) => (row.dataset || {}).kind === 'thinking');
+    if (thinking.length !== 1) {
+      problems.push(
+        `a message whose reasoning resumed after its text rendered ${thinking.length} thinking row(s), expected its one — ` +
+          'one message is one row',
+      );
+    }
+    const row = lastOf('thinking');
+    const text = row ? findByClass(row, 'thinking-text') : null;
+    const read = text ? textOf(text) : null;
+    if (read !== 'reasoning about it a second thought') {
+      problems.push(
+        `the reasoning of a message whose text came first reads ${JSON.stringify(read)}, expected the late delta to join the ` +
+          'message\'s own row ("reasoning about it a second thought")',
+      );
+    }
+    expectThinkingOpen(row, false, 'a thinking row the answer already took over (a late reasoning delta does not re-open it)');
+  }
   dispatch({ type: 'interrupted', nodeId: NODE });
   expectThinkingOpen(lastOf('thinking'), false, 'a thinking row the turn just ended under');
   // A click re-opens it (the open form is the usage line's home), and a second closes it.
@@ -4017,6 +4038,161 @@ if (contextLabel !== 'ctx 50%') {
   notes.push('rows: a thinking line opens live and collapses to one line, a tool line is one bold verb + label + chip');
 }
 
+// --- One message, one row and one block: the stream's order cannot split it --------
+// A provider may interleave the reasoning and the text of **one** message, so a
+// `thinkingDelta` can arrive after that message's text has started. The webview used to
+// decide where a delta belongs from the log's last child alone, and that is what made one
+// message render as text / thinking / text: the late reasoning opened a *second* row after
+// the answer, the next `delta` found that row last and opened a *second* text block after
+// it. The host was never the problem — one item carries both `thinking` and `text` — so
+// the invariant has to hold in the webview: **one message is at most one thinking row and
+// one text block, and the text block is the message's last row**. The reasoning of a
+// message whose text is already on screen joins that message's own row in place and does
+// not re-open it (the answer owns the focus); a bubble that has no row yet gets one, and
+// it goes *above* the bubble — the order the renderer builds.
+//
+// The sequence below is the interleaved stream that produced the report (`A`, `why`, `B`,
+// ` more`, `C`), replayed on one running card, and then its `done`.
+{
+  const NODE = 'interleave-node';
+  const cardEl = () =>
+    Array.from(elementById('tree-canvas').children).find((child) => child.dataset && child.dataset.id === NODE);
+  const logEl = () => {
+    const card = cardEl();
+    return card ? findByClass(card, 'node-work') : null;
+  };
+  /**
+   * Everything an element reads as text: the stub's `textContent` is a plain property, so
+   * a live append (which writes into a `Text` node) and the markdown render (which lands
+   * in `innerHTML`) are both read off the subtree — what a browser would show.
+   */
+  const textOf = (element) => {
+    if (!element) return '';
+    if (element.nodeType === 3) return String(element.data || '');
+    const own = element.textContent ? String(element.textContent) : '';
+    let nested = '';
+    for (const child of element.children || []) {
+      if (child.nodeType === 3) nested += String(child.data || '');
+      else nested += textOf(child);
+    }
+    return own + nested;
+  };
+  /** Every row of one kind anywhere in an element — a row inside a steps body counts. */
+  const rowsOfKind = (kind, root, into) => {
+    const out = into || [];
+    for (const child of (root && root.children) || []) {
+      if (child.dataset && child.dataset.kind === kind) out.push(child);
+      rowsOfKind(kind, child, out);
+    }
+    return out;
+  };
+  /** The text a bubble shows now: its live `Text` node, else its finalized markup. */
+  const answerTextOf = (row) => {
+    const answer = row ? findByClass(row, 'answer') : null;
+    if (!answer) return null;
+    return textOf(answer) || String(answer.innerHTML || '');
+  };
+  /**
+   * The three statements of the invariant, read off the card as it stands: one row, one
+   * answer, the answer last — plus the row's own text and its focus.
+   */
+  const expectOneMessage = (when) => {
+    const card = cardEl();
+    const rows = rowsOfKind('thinking', card, []);
+    const answers = rowsOfKind('assistant', card, []);
+    const log = logEl();
+    const kids = log ? Array.prototype.slice.call(log.children) : [];
+    const last = kids.length ? kids[kids.length - 1] : null;
+    if (rows.length !== 1) {
+      problems.push(`${when}: the card holds ${rows.length} thinking row(s), expected exactly one for its one message`);
+    } else if (!hasClass(rows[0], 'thinking-row')) {
+      problems.push(`${when}: the message's one row is not a .msg.thinking-row — the closed form would not collapse it`);
+    }
+    if (answers.length !== 1) {
+      problems.push(`${when}: the card holds ${answers.length} assistant block(s), expected exactly one for its one message`);
+    } else if (!hasClass(answers[0], 'assistant') || !findByClass(answers[0], 'answer')) {
+      problems.push(`${when}: the message's one text block is not a .msg.assistant carrying its .answer`);
+    } else if (answerTextOf(answers[0]) !== 'ABC') {
+      problems.push(
+        `${when}: the answer reads ${JSON.stringify(answerTextOf(answers[0]))}, expected "ABC" — reasoning that arrives ` +
+          'after the text started must not split the message into a second text block',
+      );
+    }
+    const rowText = rows.length ? textOf(findByClass(rows[0], 'thinking-text')) : null;
+    if (rowText !== 'why more') {
+      problems.push(
+        `${when}: the thinking row reads ${JSON.stringify(rowText)}, expected "why more" — both reasoning deltas belong to ` +
+          'the message\'s one row',
+      );
+    }
+    if (rows.length && (rows[0].classList.contains('open') || rows[0]._open)) {
+      problems.push(
+        `${when}: the thinking row is open — the answer owns the focus, so a reasoning delta that arrives after the text ` +
+          'must not re-open it',
+      );
+    }
+    if (!last || (last.dataset || {}).kind !== 'assistant') {
+      problems.push(
+        `${when}: the log ends with ${JSON.stringify((last && last.dataset || {}).kind)}, expected the message's answer as ` +
+          'its last row',
+      );
+    }
+    // The row and the bubble stand in the renderer's own order: row first, text after.
+    if (rows.length === 1 && answers.length === 1 && rows[0].parentElement === log) {
+      const at = kids.indexOf(rows[0]);
+      const textAt = kids.indexOf(answers[0]);
+      if (at >= 0 && textAt >= 0 && at > textAt) {
+        problems.push(`${when}: the thinking row stands after the text block — a message reads row, then its answer`);
+      }
+    }
+    return { rows: rows.length, answers: answers.length, kids: kids.length };
+  };
+
+  dispatch({ type: 'reset' });
+  dispatch({
+    type: 'tree',
+    viewId: NODE,
+    activeId: NODE,
+    rootId: NODE,
+    nodes: [
+      {
+        id: NODE,
+        parentId: null,
+        children: [],
+        title: 'interleave',
+        status: 'running',
+        createdAt: 0,
+        preview: 'interleave',
+        usage: null,
+        size: null,
+      },
+    ],
+  });
+  dispatch({ type: 'path', ids: [NODE], nodes: [{ id: NODE, status: 'running', items: [{ kind: 'user', text: 'the ask' }] }] });
+  dispatch({ type: 'state', busy: true, status: '', sessionId: 'interleave-session', runningNodes: [NODE] });
+
+  // The interleaved stream itself: the text starts, the reasoning resumes between two of
+  // its deltas, and the text goes on. Read as one message, it is still one row + one block.
+  dispatch({ type: 'delta', nodeId: NODE, text: 'A' });
+  dispatch({ type: 'thinkingDelta', nodeId: NODE, text: 'why' });
+  dispatch({ type: 'delta', nodeId: NODE, text: 'B' });
+  dispatch({ type: 'thinkingDelta', nodeId: NODE, text: ' more' });
+  dispatch({ type: 'delta', nodeId: NODE, text: 'C' });
+  const live = expectOneMessage('an interleaved live message (delta, thinkingDelta, delta, thinkingDelta, delta)');
+
+  // The turn ends: the same row and the same block, finalized — nothing new appears.
+  dispatch({ type: 'done', nodeId: NODE });
+  const ended = expectOneMessage('an interleaved message after `done`');
+  if (ended.rows !== live.rows || ended.answers !== live.answers || ended.kids !== live.kids) {
+    problems.push(
+      `\`done\` changed the card's rows (${live.rows} row(s) / ${live.answers} block(s) / ${live.kids} log child(ren) ` +
+        `before, ${ended.rows} / ${ended.answers} / ${ended.kids} after) — the end of a turn only finalizes what is there`,
+    );
+  }
+
+  notes.push('stream order: one thinking row + one text block per message, the text last, however the deltas alternate');
+}
+
 // --- The steps groups: one per run of tool rows, and the text stays in the flow ---
 // A turn's process is grouped per **contiguous run of tool rows**, not under one fold:
 // a tool row opens a `.steps` group (`data-kind="steps"`) when none is open, the next
@@ -4098,8 +4274,12 @@ if (contextLabel !== 'ctx 50%') {
     dispatch({ type: 'toolEnd', nodeId: NODE, id, content: 'ok', ms: 500 });
   };
 
-  // (a) A live turn: thinking, a run of one step, the text, a second run of two steps,
-  // the final answer. The text between the two runs must be a **top-level** block.
+  // (a) A live turn: thinking, a run of one step, the reasoning and the text of the
+  // message that follows it, a second run of two steps, the final answer. The text
+  // between the two runs must be a **top-level** block, and the second message's
+  // reasoning is the row *above its own text* — one message is one row and one block,
+  // whatever order the provider streamed the two halves in (a `thinkingDelta` after the
+  // text started joins that row in place, it does not open a second one after it).
   const mountEmpty = (status) => {
     dispatch({ type: 'reset' });
     dispatch({ type: 'tree', viewId: NODE, activeId: NODE, rootId: NODE, nodes: [node(NODE, status)] });
@@ -4120,10 +4300,11 @@ if (contextLabel !== 'ctx 50%') {
   dispatch({ type: 'done', nodeId: NODE });
 
   const liveKinds = kindsOf();
-  if (liveKinds.join(',') !== 'thinking,steps,assistant,thinking,steps,assistant') {
+  if (liveKinds.join(',') !== 'thinking,steps,thinking,assistant,steps,assistant') {
     problems.push(
       `a live turn of two runs renders ${JSON.stringify(liveKinds)} in its log, expected ` +
-        '"thinking,steps,assistant,thinking,steps,assistant" (one group per run of tool rows, and the text between them in the flow)',
+        '"thinking,steps,thinking,assistant,steps,assistant" (one group per run of tool rows, the second message\'s one ' +
+        'row above its own text, and the text between the runs in the flow)',
     );
   }
   {
@@ -4192,8 +4373,9 @@ if (contextLabel !== 'ctx 50%') {
     { kind: 'user', text: 'the ask' },
     { kind: 'assistant', thinking: 'first thought', text: '' },
     { kind: 'tool', id: 'run-a1', name: 'read_file', args: '{"path":"a.ts"}', status: 'done', content: 'ok', ms: 500 },
-    { kind: 'assistant', text: 'the middle text' },
-    { kind: 'assistant', thinking: 'second thought', text: '' },
+    // One item carries both halves of a message — the host's own shape, and the reason
+    // the live replay above is one item: the repaint renders its row above its text.
+    { kind: 'assistant', thinking: 'second thought', text: 'the middle text' },
     { kind: 'tool', id: 'run-b1', name: 'exec_command', args: '{"command":"npm test"}', status: 'done', content: 'ok', ms: 500 },
     { kind: 'tool', id: 'run-b2', name: 'exec_command', args: '{"command":"npm run lint"}', status: 'done', content: 'ok', ms: 500 },
     { kind: 'assistant', text: 'the final answer' },

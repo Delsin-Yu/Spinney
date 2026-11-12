@@ -1939,6 +1939,14 @@
    */
   function addAssistant(text, error, thinking) {
     if (!messagesEl) return;
+    // An item that carries its own text closes the run of steps above it, and that
+    // closure comes **before** its reasoning: the item's row belongs above its own bubble
+    // — where the live path puts the row of a message whose text started first
+    // (`appendThinking`) — rather than inside a group its own text ends (which would also
+    // build a row into a group body a finished card keeps empty until the click). An item
+    // that is only its reasoning still rides the open group.
+    const onlyRow = !String(text || '').length && !error && !!thinking;
+    if (!onlyRow) closeStepsGroup();
     // A reasoning row that travelled with this item belongs where the reasoning of its
     // run went: inside the open group if there is one (that is where the live path put
     // it), else in the flow just above the text.
@@ -2059,6 +2067,32 @@
 
   function appendThinking(text) {
     if (!messagesEl) return;
+    // **One message, one row and one block.** A provider may interleave the reasoning
+    // and the text of the same message, so a `thinkingDelta` can arrive *after* the
+    // answer has started. The bubble is then the log's last child, and appending a new
+    // row past it would put the reasoning after the text — and the next `delta`, finding
+    // that row last, would open a second text block after *that*: one message rendered
+    // as text / thinking / text. The host already carries both halves on one item, so
+    // the reasoning of a message whose text dominates belongs to that message's own row:
+    // a row above the bubble, appended to in place and never re-opened (the answer owns
+    // the focus — `appendAssistant` closed the row when the text took over).
+    const bubble = messagesEl.lastElementChild;
+    if (bubble && bubble.dataset && bubble.dataset.kind === 'assistant' && !bubble.classList.contains('error')) {
+      let row = bubble._thinkingRow;
+      if (!row) {
+        // A bubble built *before* any reasoning arrived (the message's text came first):
+        // its row is the one the renderer would have put above it, so it is created
+        // there — never appended past the text, which is where the second row came from.
+        row = makeThinkingRow('');
+        messagesEl.insertBefore(row, bubble);
+        bubble._thinkingRow = row;
+      }
+      textNodeOf(row._textEl).appendData(text);
+      // No `setActiveRow` / `setThinkingOpen(row, true)` here: a delta that joins a row
+      // the answer already took over must not take the reading back to the reasoning.
+      followActive();
+      return row;
+    }
     const row = ensureThinkingRow();
     textNodeOf(row._textEl).appendData(text);
     // The row receiving the deltas is the live one: expanded, and it collapses on its

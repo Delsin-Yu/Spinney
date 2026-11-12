@@ -141,7 +141,10 @@ reasoning are normal text (13 px `--text`, upright), a tool row's line is one st
   one line of the same text, ellipsised in CSS, with no scroller and no light.
   `setThinkingOpen` owns the two states and puts the dot in the row on open / takes it out
   on close; `_open` mirrors the class. It joins the open steps group's body when there is
-  one, and stands in the log itself when there is not.
+  one, and stands in the log itself when there is not. **A message's reasoning and its
+  text are one row and one block, whatever order the provider streams them in**: a
+  `thinkingDelta` that arrives after that message's text has started joins its own row
+  above the answer, in place and without re-opening it.
 - **a tool row** (`.msg.tool`) — one line: a small status dot, the bold verb, the label and
   the elapsed chip. The verb is per tool, `tr()`-localized (`TOOL_VERBS`: Read /
   Viewed / Wrote / Edited / Appended / Listed / Searched / Recalled / Ran / Checked /
