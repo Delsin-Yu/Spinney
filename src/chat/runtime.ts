@@ -1359,11 +1359,12 @@ export class SessionRuntime {
   /**
    * True while this session owns a running **node** job — one that locks its node and sends a
    * completion notice. A `start_detached` (fire-and-forget) job deliberately does not count
-   * here, and that is not cosmetic: the idle gates that call this feed `hop_session`'s refusal,
-   * the session list's `busy` flag, `globallyIdle()` — which the queued session start, the hop
-   * return and the control plane's `POST /wait-for-finish` all wait on — and the reload
-   * refusal. Counting a detached job there would mean a dev server keeps the harness
-   * permanently not-idle, so the supervisor could never reload the window.
+   * here, and that is not cosmetic: the idle gates that call this feed `hop_session`'s
+   * dispatch refusal, the session list's `busy` flag, `globallyIdle()` — which the control
+   * plane's `POST /wait-for-finish` (`scope:'all'`) and the reload refusal wait on — and,
+   * through `runningNodes` / `lockedNodes`, the hop return's child-idle gate. Counting a
+   * detached job there would mean a dev server keeps the harness permanently not-idle, so
+   * the supervisor could never reload the window.
    *
    * The kill paths still count it: `runningBackgroundCount` is what the delete/clear
    * confirmations read (a reload or a branch deletion really does kill the process), and

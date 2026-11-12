@@ -84,12 +84,13 @@ turn can start — and the *return* trip matches on that id alone, never on "a s
 created after the hop was armed", which is how a receipt used to be attributed to the
 wrong conversation when a second session was created while the hop was in flight.
 
-When the child's turn finishes, the provider queues a **user message** back into the
-origin session: `[session hop receipt] The task you dispatched to the new session "…"
-(…) has finished (status: …).` carrying that turn's final assistant text (clipped to
-8 KB, plus the child's `sessionId` for `search_transcripts`). The message branches off
-the **node the hop was dispatched from** (`returnNodeId` overrides it) and is delivered
-by `SessionRuntime.onUserMessage` with an explicit `basisNodeId`, so:
+When the child's **last** turn finishes and the child session is **idle**, the provider
+queues a **user message** back into the origin session: `[session hop receipt] The task
+you dispatched to the new session "…" (…) has finished (status: …).` carrying that
+turn's final assistant text (clipped to 8 KB, plus the child's `sessionId` for
+`search_transcripts`). The message branches off the **node the hop was dispatched
+from** (`returnNodeId` overrides it) and is delivered by `SessionRuntime.onUserMessage`
+with an explicit `basisNodeId`, so:
 
 - it does **not** open or focus the origin's tab, and it does not move that session's
   checkout — an answer arriving while the user reads another branch lands quietly;
@@ -98,6 +99,18 @@ by `SessionRuntime.onUserMessage` with an explicit `basisNodeId`, so:
 - if the return node is busy, owns a background job, or the reload hold is armed, the
   receipt **waits** in `pendingReceipts` and is retried by `kickHopWork` (200 ms) until
   the node frees up, instead of being dropped while the agent was told it succeeded.
+
+A finished *turn* is not a finished *task*, and the return waits for the latter. When
+the child's turn ends while the session still owns work — a running **node** background
+terminal, a running sub-agent batch, or a completion notice already queued for it, so
+exactly the set `runningNodes()` / `lockedNodes()` reports — the hop stays armed: its
+answer is recorded on `hop.pendingReturn`, `kickHopWork` re-checks once a second, and
+every later turn end refreshes the answer. The receipt is queued only when the child is
+idle, and the hop is retired **there**, not at the first turn end. A `start_detached`
+job is not part of that set by design: it never reports back, so a dev server cannot
+hold a hop forever. This wait is not cosmetic: without it the hop returned at the
+child's first turn end while its gate run continued in the background, and the origin
+went on to clear the child's repo lock and run its own commands on the same working tree.
 
 `mode: "fire_and_forget"` is the same hop with no return trip: no receipt, no record
 kept, and nothing written into the origin's tree (the child session appears in the

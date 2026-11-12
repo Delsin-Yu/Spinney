@@ -288,6 +288,15 @@ interface Hop {
   mode: HopMode;
   armedAt: number;
   targetSessionId?: string;
+  /**
+   * What the child's last finished turn said, recorded the moment that turn ended.
+   * The receipt is queued only once the child session is **idle**: while it still
+   * owns a running node background job, a running sub-agent batch or a queued
+   * completion notice, the hop stays armed and every later turn end refreshes this
+   * (see `maybeDeliverHopReturn` / `kickHopWork`). A return that ignored it released
+   * the origin while the child kept working, and both then wrote one working tree.
+   */
+  pendingReturn?: { status: TurnStatus; answer: string; at: number };
 }
 
 /** A hop whose child session does not exist yet (its origin turn has not ended). */
@@ -308,6 +317,13 @@ interface PendingReceipt {
 
 /** How often a waiting hop start / receipt is retried while it cannot land. */
 const HOP_RETRY_MS = 200;
+/**
+ * How often an armed hop re-checks a child that ended a turn but still owns
+ * unfinished work (a running node background job, a running sub-agent batch, or a
+ * queued notice). `HOP_RETRY_MS` is for work that is already queued to land; a
+ * child's background job can run for many minutes, so its wait polls at this rate.
+ */
+const HOP_IDLE_RECHECK_MS = 1000;
 /**
  * How long one receipt may keep failing to start a turn on a node it saw free
  * (200 ms × 1500 = 5 min) before it is dropped with a log line. A node that is
@@ -3339,30 +3355,70 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     if (node && isSidecar(node)) {
       return;
     }
-    this.retireHop(hop, `child ${session.id} finished (status ${status})`);
     if (hop.mode !== 'return_when_finished') {
+      this.retireHop(hop, `child ${session.id} finished (status ${status})`);
       return;
     }
+    // Record what this turn said. The child may continue (an injected notice reuses
+    // the node, so the transcript and this answer grow), and the receipt must carry
+    // the **last** thing it said, not the first turn that happened to end.
+    hop.pendingReturn = {
+      status,
+      answer: node ? lastAssistantText(node) : '',
+      at: Date.now(),
+    };
+    if (this.sessionStillWorking(rt)) {
+      // A turn ending is not the task ending: the child may still own a running
+      // background job, a sub-agent batch, or a notice already queued for it. This is
+      // exactly the bug the wait exists for: a hop came back while the child kept
+      // working, the origin went on to run its own commands on the same repository,
+      // and the two blocked each other's repo lock. `kickHopWork` re-checks and
+      // delivers once the child session is idle, and the next turn end refreshes
+      // `pendingReturn` above with the newer answer.
+      this.outputLog(
+        `[hop] child ${session.id} finished a turn (status ${status}) but still owns unfinished ` +
+          `work; the return waits for it`,
+      );
+      this.kickHopWork(HOP_IDLE_RECHECK_MS);
+      return;
+    }
+    this.deliverHopReturn(hop);
+  }
+
+  /**
+   * Queue a child's answer back to the origin, now that the child session is idle.
+   * The hop is retired here and not at its first turn end: retiring early is what let
+   * a still-running child be reported as finished, and what made every later turn of
+   * that child invisible to the return trip.
+   */
+  private deliverHopReturn(hop: Hop): void {
+    const pending = hop.pendingReturn;
+    if (!pending) {
+      return;
+    }
+    const childId = hop.targetSessionId ?? '';
+    const child = this.sessions.find((s) => s.id === childId);
     const origin = this.sessions.find((s) => s.id === hop.originSessionId);
+    this.retireHop(hop, `child ${childId || '(unknown)'} is idle (status ${pending.status})`);
     if (!origin) {
       this.outputLog('[hop] origin session is gone; dropping the result');
       return;
     }
-    const answer = node ? lastAssistantText(node) : '';
-    const clipped = answer.length > 8000 ? `${sliceText(answer, 8000)}\n…[truncated]` : answer;
+    const clipped =
+      pending.answer.length > 8000 ? `${sliceText(pending.answer, 8000)}\n…[truncated]` : pending.answer;
     const receipt: PendingReceipt = {
       hop,
       attempts: 0,
       queuedAt: Date.now(),
       prompt:
-        `[session hop receipt] The task you dispatched to the new session "${session.title}" (${session.id}) has finished (status: ${status}).\n` +
+        `[session hop receipt] The task you dispatched to the new session "${child ? child.title : childId}" (${childId}) has finished (status: ${pending.status}).\n` +
         `Its final reply:\n\n${clipped || '(the new session produced no text reply)'}\n\n` +
-        `(search_transcripts sessionId=${session.id} has the full trace if you need it)`,
+        `(search_transcripts sessionId=${childId} has the full trace if you need it)`,
     };
     this.pendingReceipts.push(receipt);
     this.outputLog(
       `[hop] receipt queued for ${hop.originSessionId} node ${hop.returnNodeId ?? hop.originNodeId} ` +
-        `(status ${status}, ${clipped.length} chars)`,
+        `(status ${pending.status}, ${clipped.length} chars)`,
     );
     // Try right away; whatever cannot land now waits for a free node (see kickHopWork).
     this.deliverReceipt(receipt);
@@ -3468,8 +3524,26 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       for (const receipt of [...this.pendingReceipts]) {
         this.deliverReceipt(receipt);
       }
+      // A hop whose child ended a turn but still owned work when it did: deliver now
+      // that the child session is idle (a running turn, a running background job, a
+      // sub-agent batch and a queued notice all keep it waiting). The map is copied
+      // first because delivering retires the hop and edits the map mid-iteration.
+      let waitingForChildren = false;
+      for (const hop of [...this.hopsByTarget.values()]) {
+        if (!hop.pendingReturn) {
+          continue;
+        }
+        const child = hop.targetSessionId ? this.runtimes.get(hop.targetSessionId) : undefined;
+        if (child && this.sessionStillWorking(child)) {
+          waitingForChildren = true;
+          continue;
+        }
+        this.deliverHopReturn(hop);
+      }
       if (this.pendingHopStarts.length > 0 || this.pendingReceipts.length > 0) {
         this.kickHopWork(HOP_RETRY_MS);
+      } else if (waitingForChildren) {
+        this.kickHopWork(HOP_IDLE_RECHECK_MS);
       }
     }, delayMs);
   }
@@ -3582,6 +3656,19 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   private originIdle(sessionId: string): boolean {
     const rt = this.runtimes.get(sessionId);
     return !rt || !rt.isRunning();
+  }
+
+  /**
+   * True while a session still owns the work its last finished turn started: a
+   * running **node** background job, a running sub-agent batch, or a completion
+   * notice already queued for a node. `lockedNodes` is exactly that set, and it is
+   * the same predicate the composer reads for its Stop button — the two must agree,
+   * or the hop return and the UI would disagree about "finished". A `start_detached`
+   * job is absent from it by design: it never reports back, so waiting for it would
+   * hold the hop forever.
+   */
+  private sessionStillWorking(rt: SessionRuntime): boolean {
+    return rt.runningNodes().length > 0 || rt.lockedNodes().length > 0;
   }
 
   /** True when no session has a run, a sub-agent or a background terminal live. */

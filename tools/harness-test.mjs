@@ -997,6 +997,24 @@ function backgroundPrompt(runId) {
 }
 
 /**
+ * A hop child that ends its **first turn while a background job it just started is
+ * still running** — the shape that used to return early: the hop return fired on turn
+ * end, and the origin resumed while the child still owned the job.
+ */
+function hopBusyChildPrompt(runId) {
+  const args = JSON.stringify({
+    command: sleepCmd(30000),
+    timeout: 120,
+    timeout_behavior: 'start_in_background',
+  });
+  return (
+    `HARNESS-TEST ${runId} HOP-CHILD: call the exec_command tool exactly once with ${args}, ` +
+    'then reply with the single word "ok" and end your turn immediately. ' +
+    'Do not wait for the command, do not join it, do not check it, and do not call any other tool.'
+  );
+}
+
+/**
  * The `signals` suite's prompt: start a short background job, then keep the *same*
  * turn busy with two foreground rounds, so the job finishes **while its owner still
  * streams** — the mid-turn delivery path. The wording deliberately avoids the host's
@@ -2600,7 +2618,7 @@ async function suiteHop(cx) {
 
   const armed = await cx.client.startSession({
     title: `harness-test ${cx.runId} HOP-CHILD`,
-    prompt: longRunPrompt(cx.runId, 'HOP-CHILD', 25000),
+    prompt: hopBusyChildPrompt(cx.runId),
     returnTo: true,
     originSessionId: origin.sessionId,
   });
@@ -2657,6 +2675,47 @@ async function suiteHop(cx) {
   }
   if (decoy.skip) {
     checks.subskip('the decoy session started', decoy.skip);
+  }
+
+  // The child's first turn must end while its background job is still running: that is
+  // the shape that used to come back early. Watch for the turn's dump together with a
+  // session that still owns work (a running job / a queued notice), and assert no
+  // receipt has landed in the origin at that moment.
+  const endedBusy = await pollUntil(
+    async () => {
+      const dump = sessionMetas(cx, childId).find((d) => d.meta?.status === 'done');
+      if (!dump) {
+        return undefined;
+      }
+      const state = await cx.client.state();
+      const row = sessionMap(state.body).get(childId);
+      const locked = Array.isArray(row?.lockedNodes) ? row.lockedNodes.length : 0;
+      if (!row || row.running || locked === 0) {
+        return undefined;
+      }
+      return { dump, row };
+    },
+    { timeoutMs: 120000, intervalMs: 500 },
+  );
+  if (!endedBusy.ok) {
+    checks.subskip(
+      'the child ended its turn while its background job was still running',
+      'the turn-end / job-running window was not observed; the hop-wait path was not exercised',
+    );
+  } else {
+    checks.check(
+      'the child ended its turn while it still owned a running job',
+      true,
+      `locked=${JSON.stringify(endedBusy.value.row.lockedNodes)}`,
+    );
+    const earlyReceipt = sessionMetas(cx, origin.sessionId).find((d) =>
+      String(d.meta?.prompt ?? '').startsWith(HOP_RECEIPT_MARK),
+    );
+    checks.check(
+      'no receipt lands in the origin while the child still owns the job',
+      !earlyReceipt,
+      earlyReceipt ? `receipt ${earlyReceipt.nodeId} already landed` : 'no receipt yet',
+    );
   }
 
   const receipt = await pollUntil(

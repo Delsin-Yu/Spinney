@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A hop return waits for the child session to be idle, not just for its turn to
+  end.** The return trip fired on the child's *first* finished turn, even when that
+  session still owned work: a running node background terminal, a running sub-agent
+  batch, or a completion notice already queued for it. In the incident, hop 53 ended
+  its turn with the `G0..G6` gate run in the background, the origin got the receipt,
+  judged the child's `.nsw.lock` stale, cleared it, ran the gates itself and committed
+  743c0e82 — while the child was still working, so two sessions wrote one working tree
+  (the child then saw `G3–G6` blocked by the origin's own gate run). The hop now
+  records the finished turn's answer on `Hop.pendingReturn`, stays armed while
+  `runningNodes()` / `lockedNodes()` are non-empty (the same set that keeps the
+  composer on Stop), re-checks once a second, refreshes the answer at every later turn
+  end, and is retired only when the receipt is queued. A `start_detached` job is not
+  part of that set by design: it never reports back. `tools/harness-test.mjs`'s hop
+  suite now starts its child with a background job and asserts no receipt lands before
+  the child goes idle.
+
 - **A single-line tool result can no longer kill a node.** An oversized result is
   spilled to `.spinney/tool-output/` and the answer is a pointer with a preview, but
   that preview used to be "the first 8 **lines**". A minified file is one line: a

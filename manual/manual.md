@@ -378,7 +378,7 @@ The agent can give a self-contained task to a new session. The tool is `hop_sess
 | Fact | Detail |
 |---|---|
 | Start | The hop waits for the current turn to end. Then Spinney creates a new session and sends the task there. The new session cannot see this conversation, so the task must be complete. |
-| Answer | Spinney sends the final reply of the new session back to the node that started the hop, as a new branch. A `returnNodeId` names another node. |
+| Answer | Spinney sends the final reply of the new session back to the node that started the hop, as a new branch. A `returnNodeId` names another node. Spinney sends the answer when the new session has no work left. If the new session still runs a background command, Spinney waits for that command. |
 | Quiet delivery | The answer does not open or focus the tab of this session. It does not move the checked-out node. It does not clear the input box. It does not ask the frozen-setup question. |
 | Busy node | If the node that must receive the answer is busy, Spinney holds the answer and delivers it when the node is free again. |
 | No answer | The `mode` argument selects the behaviour. The default mode is `return_when_finished`. With `mode: "fire_and_forget"` no answer comes back, and Spinney writes nothing into this conversation. |
