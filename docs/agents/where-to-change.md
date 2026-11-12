@@ -65,8 +65,8 @@
   turn runs, one ellipsised line after — `setThinkingOpen` / `setActiveRow` /
   `clearActiveRow`; its open 240 px box carries its own dot) and the tool row (`addTool`
   + `toolRowHead`: a bold `tr()`-localized
-  verb, the label from `DisplayItem.title` or `toolBrief()`, a status dot and the elapsed
-  chip, with `setToolOpen` folding the detail). Nothing is promoted, measured or folded
+  verb and the label from `DisplayItem.title` or `toolBrief()`, both in `--text-dim`, and the
+  elapsed chip — no status dot — with `setToolOpen` folding the detail). Nothing is promoted, measured or folded
   per card any more — see `docs/agents/invariants/streaming-perf.md`.
 - **Add or reword a user-visible string** → write it as the English source inside
   one literal: `vscode.l10n.t('…')` in the host, `tr('…')` in `media/main.js`, or

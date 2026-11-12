@@ -2339,15 +2339,14 @@
   }
 
   /**
-   * The row's one line: the status dot, the bold verb, the label and the elapsed
-   * chip. It is built once per row and rewritten in place (a live call's label grows
-   * with its arguments), which is why it is its own small builder.
+   * The row's one line: the bold verb, the label and the elapsed chip. It is built once
+   * per row and rewritten in place (a live call's label grows with its arguments), which
+   * is why it is its own small builder. There is no status dot: the ticking chip is what
+   * says a call is still running, and the row's `running` / `done` class still carries the
+   * state for anything that reads it.
    */
   function toolRowHead(name, label, mono) {
     const head = el('div', 'tool-row');
-    // The dot is the status, in the smallest form that can say it: filled and pulsing
-    // while the call runs, a plain filled dot once it is done. It is not a control.
-    head.appendChild(el('span', 'tool-dot'));
     head.appendChild(el('b', 'tool-verb', toolVerb(name)));
     if (label) head.appendChild(el('span', 'tool-label' + (mono ? ' mono' : ''), label));
     return head;

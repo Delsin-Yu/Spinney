@@ -543,7 +543,7 @@ button.icon-btn {
    A turn is one flow of rows inside `.node-work` (the card's only scroller), so what
    distinguishes them is what they say and how loud they are, in exactly three levels:
    the prose and the reasoning read as normal text (`--text`, 13px), a tool row's line
-   is one step down (the verb in `--accent-dim`, the label 12px `--text-dim`), and the
+   is one step down (the bold verb and the label both 12px `--text-dim`, one grey), and the
    expanded detail is one more (11px `--text-dim`). The usage line is the faintest, a
    10px footnote under whichever row hosts it. Nothing is dimmed or italic to say
    "process": the levels are size and colour, not a second voice. */
@@ -626,8 +626,10 @@ button.icon-btn {
   display: none;
 }
 
-/* A tool row: one line — the status dot, the bold verb, the label and the elapsed
-   chip — and a folded detail under it. The row is the control. */
+/* A tool row: one line — the bold verb, the label and the elapsed chip — and a folded
+   detail under it. The row is the control. There is no status dot: a call that is still
+   running says so with its ticking chip (and the row's `running` class), and the whole
+   title reads in one grey. */
 .msg.tool {
   align-self: stretch;
   max-width: 100%;
@@ -646,29 +648,6 @@ button.icon-btn {
   user-select: none;
   -webkit-user-select: none;
   min-width: 0;
-}
-
-/* The status dot: small, and the only thing that says whether the step is still
-   running. Filled and pulsing while it runs, a plain dim dot once it ended — the
-   elapsed chip next to it then holds the frozen number. */
-.tool-dot {
-  flex: 0 0 auto;
-  align-self: center;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--text-dim);
-  opacity: 0.6;
-}
-
-.msg.tool.running .tool-dot {
-  background: var(--warn);
-  opacity: 1;
-  animation: pulse 1s ease-in-out infinite;
-}
-
-.msg.tool.done .tool-dot {
-  background: var(--success);
 }
 
 /* ---- The steps groups: one per run of tool rows -----------------------------
@@ -737,7 +716,7 @@ button.icon-btn {
 .tool-verb {
   flex: 0 0 auto;
   font-weight: 700;
-  color: var(--accent-dim);
+  color: var(--text-dim);
 }
 
 /* The label is the step itself: a path or a title in the UI's own type, a command or a
