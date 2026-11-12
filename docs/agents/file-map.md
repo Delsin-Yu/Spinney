@@ -430,6 +430,24 @@
   node the pane is **hidden entirely** (`setComposerVisible(false)`); there is
   no floating/docked fallback. The pane keeps one fixed size: nothing about the
   host card's width (or its resize handle) scales it.
+  **The composer keeps its focus across a window reactivation** — the caret contract.
+  The webview document is *retained* while its tab is in the background, but VS Code's own
+  `WebviewEditor.focus()` runs on reactivation (after a ~50 ms throttle) and focuses the
+  webview's **frame**, not the element inside it: the dock keeps `#input` and loses the DOM
+  focus, which is the stable repro (caret in the composer → another OS window → click the
+  composer again, and the caret shows for a few milliseconds). VS Code closed "restore focus
+  inside a retained webview" as out of scope for extensions, so the rule lives here:
+  `composerHadFocus` is the user's *intent*, tracked by `focusin` / `focusout` — never
+  `document.activeElement` read at mount time, which is already gone (`renderTree` / `reset`
+  remove the old card before `mountComposer` runs); `setComposerVisible(false)` only hides and
+  never blurs; and `restoreComposerFocus` re-asserts the caret on the next frame and then
+  every ~60 ms for up to a second, because the platform's own focus lands *after* ours.
+  `shouldRestoreComposerFocus` is the whole policy — restore only when the user had the caret
+  there, the dock is visible and the input is not `readOnly` / `disabled` — so a click that
+  landed elsewhere, a hidden dock and a read-only composer are never stolen into. Each
+  sequence posts `perfDiag kind:'composer-focus'` (`invariants/streaming-perf.md`), and
+  `tools/check-webview.js` pins both halves: a window return restores the caret *and* its
+  selection, and a hidden / hidden+disabled / visible+disabled dock is refused.
   It also owns the two **model dropdowns**: the card list comes from the `config`
   message (no catalog copy here), the model `<select>` is grouped per provider with
   an `optgroup` per provider name, and the thinking-level `<select>` is built from

@@ -613,6 +613,12 @@
     const now = perfNow();
     winFocused = focused;
     if (!focused) {
+      // A window that goes away with the caret in the dock is the user's intent to come
+      // back to it, and it is recorded here as well as in the input's `focusout`: whether
+      // the platform fires that event before or after the host's message is not something
+      // this side can assume, and a flag lost to the ordering is a caret lost for good.
+      // No `focus()` happens here — this only remembers where the user was.
+      if (composerHasFocus()) composerHadFocus = true;
       perfStopSampler();
       if (winBlurSince == null) winBlurSince = now;
       lastFrameAt = now;
@@ -644,6 +650,13 @@
     requestAnimationFrame(perfMarkFrame);
     requestAnimationFrame(perfMarkFrame);
     perfStartSampler();
+    // The caret, inside the document the return just reactivated. The platform's own
+    // `WebviewEditor.focus()` follows this message by a throttled ~50 ms and focuses the
+    // webview's *frame*, not the element in it — so this re-asserts the caret on the next
+    // frame and again for a second afterwards (see the composer focus block, `restoreComposerFocus`).
+    // It refuses on its own when the user has clicked somewhere else, the dock is hidden or
+    // the input is read-only.
+    restoreComposerFocus('window');
   }
 
   /**
@@ -6765,6 +6778,280 @@
   // `undefined` until the first mount, so the first mountComposer always relocates.
   let composerHost;                     // the card the pane is currently mounted in
 
+  // ---- Composer focus: the caret survives the platform, not just the webview ----
+  // A webview document is **retained** while its tab is in the background, so `#input` is
+  // still there when the window comes back — but VS Code's own `WebviewEditor.focus()` runs
+  // on that reactivation (after a ~50 ms throttle) and focuses the webview's *frame*
+  // element, not the element inside this document. The platform therefore resets the DOM
+  // focus of the retained document: the caret blinks for a few milliseconds and is gone,
+  // which is the stable repro (caret in the composer → another OS window → click the
+  // composer again). VS Code closed "restore focus inside a retained webview" as out of
+  // scope for extensions, so the rule is ours and lives here:
+  //
+  //   * `composerHadFocus` is the user's *intent*, tracked with `focusin` / `focusout` —
+  //     never `document.activeElement` read at mount time, which is already gone by then
+  //     (`renderTree` / `reset` remove the old card *before* `mountComposer` runs, which is
+  //     why the old `composerEl.contains(activeElement)` restore never fired at all);
+  //   * the caret is restored only for a sequence the **platform** started — a window
+  //     return (`viewState.focused`), a window-level `focusout`, a dock move or a re-show —
+  //     and only when `shouldRestoreComposerFocus` agrees: never when the click landed
+  //     elsewhere, when the dock is hidden, or when the input is disabled / read-only;
+  //   * the restore is a ladder, not one call: the next animation frame, then every ~60 ms
+  //     for up to a second, because the platform's focus lands *after* ours;
+  //   * every sequence posts one `perfDiag` line (`kind: 'composer-focus'`), so a caret
+  //     that did not come back is evidence in the Spinney output channel and in the
+  //     diagnostics log instead of an anecdote (`invariants/streaming-perf.md`).
+  /** How often the restore ladder re-asserts the caret. */
+  const COMPOSER_FOCUS_TICK_MS = 60;
+  /**
+   * How long a restore sequence keeps trying. The platform's frame focus is throttled to
+   * ~50 ms, so the second or third tick is the one that sticks; the rest of the second is
+   * the margin for a window that came back while the renderer was still catching up.
+   */
+  const COMPOSER_FOCUS_DEADLINE_MS = 1000;
+  let composerHadFocus = false;         // the user's caret was in `#input`
+  let composerSel = null;               // the last caret, `{ start, end }`, for a restore
+  let composerBlurAt = 0;               // `perfNow()` of the last `focusout` (0 = never)
+  let composerLadder = null;            // the restore sequence in flight, if any
+
+  /**
+   * The restore policy, in one place and deliberately DOM-free: the caret goes back only
+   * when the **user** had it here (`hadFocus`), the dock is on screen and taking input
+   * (`visible`), and the input is not `readOnly` / `disabled`. Anything else would be a
+   * steal — a caret jumping out of the card the user just clicked.
+   */
+  function shouldRestoreComposerFocus(state) {
+    if (!state || typeof state !== 'object') return false;
+    return state.hadFocus === true && state.visible === true && state.readOnly !== true;
+  }
+
+  /** What the policy needs, read from the live DOM (`visible` = docked and not `.hidden`). */
+  function composerFocusState() {
+    let visible = false;
+    try {
+      visible = !!composerEl.parentElement && !composerEl.classList.contains('hidden');
+    } catch (err) {
+      visible = false;
+    }
+    return { hadFocus: composerHadFocus, visible, readOnly: !!(inputEl.disabled || inputEl.readOnly) };
+  }
+
+  /** An element as one log-safe word — its id, or the tag plus two classes. Never its text. */
+  function describeFocusTarget(target) {
+    if (!target) return 'none';
+    if (target === document.body) return 'body';
+    try {
+      if (target.id) return String(target.id);
+      const tag = String(target.tagName || 'node').toLowerCase();
+      const classes = String(target.className || '').split(/\s+/).filter(Boolean).slice(0, 2);
+      return classes.length > 0 ? tag + '.' + classes.join('.') : tag;
+    } catch (err) {
+      return 'node';
+    }
+  }
+
+  /** Is the caret in the dock right now? */
+  function composerHasFocus() {
+    try {
+      if (document.activeElement === inputEl) return true;
+      return !!(composerEl.contains && composerEl.contains(document.activeElement));
+    } catch (err) {
+      return false;
+    }
+  }
+
+  /** The caret, as the input reports it, or `null` where the element has no selection. */
+  function composerSelection() {
+    try {
+      const start = inputEl.selectionStart;
+      const end = inputEl.selectionEnd;
+      if (typeof start !== 'number' || typeof end !== 'number') return null;
+      return { start, end };
+    } catch (err) {
+      return null;
+    }
+  }
+
+  /** One line of the focus trace (`webview-composer-focus` in the diagnostics log). */
+  function postComposerFocusDiag(state, extra) {
+    perfPost(
+      'composer-focus',
+      Object.assign(
+        {
+          state,
+          hasFocus: typeof document.hasFocus === 'function' ? !!document.hasFocus() : true,
+          active: describeFocusTarget(document.activeElement),
+          relatedTarget: 'none',
+          // `-1` is "the caret was never lost in this document": a real 0 would claim a
+          // sequence that began in the same millisecond, which no timer here produces.
+          msSinceBlur: composerBlurAt > 0 ? Math.round(perfNow() - composerBlurAt) : -1,
+          retries: 0,
+        },
+        extra || {},
+      ),
+    );
+  }
+
+  /** Put the caret — and the selection it had — back; `true` when the input has the focus. */
+  function focusComposerInput(sel) {
+    try {
+      inputEl.focus({ preventScroll: true });
+    } catch (err) {
+      try {
+        inputEl.focus();
+      } catch (err2) {
+        /* a detached or disabled input cannot take the focus, and this must not throw */
+      }
+    }
+    if (document.activeElement !== inputEl) return false;
+    const range = sel || composerSel;
+    if (range && typeof inputEl.setSelectionRange === 'function') {
+      try {
+        const length = typeof inputEl.value === 'string' ? inputEl.value.length : range.end;
+        const start = Math.max(0, Math.min(range.start, length));
+        const end = Math.max(start, Math.min(range.end, length));
+        inputEl.setSelectionRange(start, end);
+      } catch (err) {
+        /* the caret position is a nicety; the focus is the point */
+      }
+    }
+    return true;
+  }
+
+  /** Drop the sequence in flight, if any (its `clearTimeout` is all that holds it). */
+  function stopComposerFocusRestore() {
+    const ladder = composerLadder;
+    composerLadder = null;
+    if (ladder && ladder.timer != null) {
+      try {
+        clearTimeout(ladder.timer);
+      } catch (err) {
+        /* ignore */
+      }
+      ladder.timer = null;
+    }
+    return ladder;
+  }
+
+  /**
+   * Re-assert the caret inside the document the platform just focused. Called from the
+   * window return, from a window-level `focusout`, from a dock mount and from a re-show.
+   *
+   * `reason` only names the sequence in the trace (`window`, `blur`, `mount`, `show`).
+   * Returns whether a sequence was started — a refusal is the policy working, not a bug.
+   */
+  function restoreComposerFocus(reason) {
+    const state = composerFocusState();
+    if (!shouldRestoreComposerFocus(state)) {
+      // Nothing to restore: the user left, the dock is hidden, or the input is read-only.
+      // Focusing here would steal the caret from what the user chose.
+      if (state.hadFocus) postComposerFocusDiag('skip', { reason: reason || 'n/a' });
+      return false;
+    }
+    stopComposerFocusRestore();
+    const ladder = {
+      reason: reason || 'n/a',
+      retries: 0,
+      deadline: perfNow() + COMPOSER_FOCUS_DEADLINE_MS,
+      timer: null,
+    };
+    composerLadder = ladder;
+    postComposerFocusDiag('restore', { reason: ladder.reason });
+    const attempt = () => {
+      if (composerLadder !== ladder) return;
+      if (ladder.timer != null) {
+        // Whichever woke this attempt (the frame or the tick), the other one is now wrong.
+        try {
+          clearTimeout(ladder.timer);
+        } catch (err) {
+          /* ignore */
+        }
+        ladder.timer = null;
+      }
+      const live = composerFocusState();
+      if (!shouldRestoreComposerFocus(live)) {
+        // The dock went away (hidden / read-only) mid-sequence: the sequence is over.
+        composerLadder = null;
+        postComposerFocusDiag('skip', {
+          reason: ladder.reason + (live.visible ? '/readonly' : '/hidden'),
+          retries: ladder.retries,
+        });
+        return;
+      }
+      if (!composerHasFocus()) {
+        ladder.retries++;
+        focusComposerInput();
+      }
+      if (perfNow() >= ladder.deadline) {
+        composerLadder = null;
+        postComposerFocusDiag(composerHasFocus() ? 'restored' : 'lost', {
+          reason: ladder.reason,
+          retries: ladder.retries,
+        });
+        return;
+      }
+      ladder.timer = setTimeout(attempt, COMPOSER_FOCUS_TICK_MS);
+    };
+    // The next frame first — that is where the caret goes back the instant the window
+    // returns — then the ticks, which are what catch the platform's own focus a throttle
+    // later. The tick is armed next to the frame because a renderer that is still catching
+    // up may not deliver a frame at all, and this ladder must not die on that: whichever
+    // arrives first clears the other. A `focusin` anywhere else (see `onComposerFocusIn`)
+    // ends it early.
+    try {
+      requestAnimationFrame(attempt);
+    } catch (err) {
+      /* the tick below is the fallback */
+    }
+    ladder.timer = setTimeout(attempt, COMPOSER_FOCUS_TICK_MS);
+    return true;
+  }
+
+  /**
+   * The caret entered `target`. Only `#input` counts as "the user is in the composer": a
+   * press on one of the dock's own controls (the model dropdown) is a different intent, and
+   * so is a press anywhere outside it.
+   */
+  function onComposerFocusIn(event) {
+    const target = event ? event.target : null;
+    if (target === inputEl) {
+      composerHadFocus = true;
+      composerSel = composerSelection();
+      return;
+    }
+    composerHadFocus = false;
+    if (composerLadder) {
+      stopComposerFocusRestore();
+      postComposerFocusDiag('skip', { reason: 'focus-elsewhere' });
+    }
+  }
+
+  /**
+   * The caret left `#input`. Two different events wear the same name:
+   *
+   *   * `document.hasFocus()` is true — the user clicked inside this document, so the caret
+   *     stays where it landed and the intent is over;
+   *   * it is false — the **window** went away, or the platform's frame focus reset this
+   *     document. The user did nothing, so the intent stands and the ladder is armed: if
+   *     the document gets its focus back within a second, the caret goes back.
+   */
+  function onComposerFocusOut(event) {
+    const target = event ? event.target : null;
+    if (target !== inputEl) return;
+    composerSel = composerSelection();
+    composerBlurAt = perfNow();
+    const hasFocus = typeof document.hasFocus === 'function' ? !!document.hasFocus() : true;
+    if (hasFocus) {
+      // The user clicked inside this document: the caret stays where it landed. Nothing
+      // happened that needs a line — a dock a user clicks in and out of all day would
+      // otherwise be the noisiest thing in the log.
+      composerHadFocus = false;
+      return;
+    }
+    postComposerFocusDiag('blur', { relatedTarget: describeFocusTarget(event && event.relatedTarget) });
+    restoreComposerFocus('blur');
+  }
+
   /**
    * Inline the pane at the bottom of `card`, or take it out of the DOM entirely
    * when there is no host card (there is no floating/docked fallback).
@@ -6778,8 +7065,12 @@
       autoGrow();
       return;
     }
-    // Relocating a focused subtree drops focus; put it back on the input.
-    const hadFocus = composerEl.contains(document.activeElement);
+    // Moving a focused subtree drops the DOM focus, so the user's intent is read **before**
+    // the move — and from the flag, not from `document.activeElement`: `renderTree` /
+    // `reset` removed the old card before this is called, so `activeElement` is already
+    // gone and the `contains(activeElement)` check this line replaced could never be true.
+    const hadFocus = composerHadFocus;
+    const sel = hadFocus ? composerSelection() : null;
     composerHost = card;
     if (card) {
       card.appendChild(composerEl);   // last child = the card's bottom
@@ -6787,17 +7078,26 @@
       composerEl.remove();
     }
     autoGrow();
-    if (hadFocus && card) inputEl.focus();
+    if (hadFocus && card) {
+      // The caret goes back where it was, selection included (see `restoreComposerFocus`).
+      if (sel) composerSel = sel;
+      restoreComposerFocus('mount');
+    }
   }
 
   /**
    * Hide/show the whole send pane. A sub-agent branch is read-only, so it must
    * not offer an input at all — the pane is removed from view (not merely
    * disabled) while such a node is checked out.
+   *
+   * Hiding the dock is **not** leaving it, so there is no `blur()` here: the intent lives
+   * in `composerHadFocus`, and the platform blur that followed a hidden dock is one way the
+   * caret used to be lost for good. Showing the dock again is what restores it — and only
+   * when the flag says the user was in it.
    */
   function setComposerVisible(visible) {
     composerEl.classList.toggle('hidden', !visible);
-    if (!visible && composerEl.contains(document.activeElement)) inputEl.blur();
+    if (visible && composerHadFocus) restoreComposerFocus('show');
   }
 
   // ---- Input handlers ----
@@ -6848,6 +7148,30 @@
   });
 
   inputEl.addEventListener('input', autoGrow);
+
+  // The caret's own intent, tracked where it happens (see the composer focus block):
+  // `#composer` as a whole so a press on one of the dock's controls clears it too, and
+  // `#input` because that is the element the platform's frame focus resets.
+  inputEl.addEventListener('focusin', onComposerFocusIn);
+  inputEl.addEventListener('focusout', onComposerFocusOut);
+  composerEl.addEventListener('focusin', onComposerFocusIn);
+  composerEl.addEventListener('focusout', onComposerFocusOut);
+
+  // A press anywhere outside the dock while a restore is in flight is the user choosing a
+  // new caret: the sequence ends at the press, not at a `focusin` a card head (which is not
+  // focusable at all) would never produce. Capture phase, so no handler of its own can
+  // swallow the press first, and it only ever runs while a sequence is armed.
+  document.addEventListener(
+    'mousedown',
+    (event) => {
+      if (!composerLadder) return;
+      const target = event ? event.target : null;
+      if (target && (target === composerEl || (composerEl.contains && composerEl.contains(target)))) return;
+      stopComposerFocusRestore();
+      postComposerFocusDiag('skip', { reason: 'pointer-elsewhere' });
+    },
+    true,
+  );
 
   document.addEventListener('click', (event) => {
     const target = event.target;

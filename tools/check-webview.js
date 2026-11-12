@@ -21,7 +21,11 @@
 //   (c) the diagnostics probes still speak — a `probe` / `nudge` the host sends comes
 //       back as a `perfDiag` report (counters, a frame, and a `kind:'drop'` for a
 //       routed message that found no card), so a tab that stopped painting can never
-//       be mistaken for an idle one (the deferred check at the bottom of this file).
+//       be mistaken for an idle one (the deferred check at the bottom of this file) —
+//       and the composer's caret survives a window reactivation, which is the one
+//       sequence the platform, not this script, controls (`composerHadFocus` and
+//       `restoreComposerFocus` in `media/main.js`: a return restores the caret and its
+//       selection, and a hidden / read-only dock is never stolen into).
 // The session-epoch shapes are checked the same way, each in its own block: the
 // forest (`rootIds` — the roots side by side, every one of them a live checkout
 // target, the composer on the checked-out node's tree), the host's context state
@@ -36,7 +40,14 @@
 //
 // It is deliberately *not* a rendering test: there is no CSS, no layout and no
 // theme, so it cannot tell you the panel looks wrong. It answers one question —
-// "does the webview still understand the provider?" — in under a second.
+// "does the webview still understand the provider?" — in a couple of seconds (the
+// deferred step at the bottom waits out the probes' coalescing windows and the
+// composer's focus ladder).
+//
+// The DOM stub is a DOM, not a list of stubs: it has parents (an append moves a node),
+// `classList` / `className` that agree, focus with `focusin` / `focusout` bubbling and a
+// `document.hasFocus()` the check can turn off, because the composer's focus contract is
+// written on exactly those three facts — see the focus sequence at the bottom of this file.
 //
 // Run by `npm run check:webview`, which `vsce package` executes through
 // `vscode:prepublish` (after `check:models`), so this fails packaging, not the
@@ -70,6 +81,13 @@ const NODE_ID = 'smoke-node';
  * this same string.
  */
 const UNKNOWN_NODE_ID = 'unknown-node-for-drop-test';
+/**
+ * Two fixtures for the composer's focus sequence at the bottom of this file: one plain
+ * turn card (the dock is visible and `#input` takes input) and one sub-agent card (the
+ * dock is hidden and the input is disabled, the case a restore must never touch).
+ */
+const FOCUS_NODE = 'focus-node';
+const FOCUS_AGENT = 'focus-agent-node';
 /**
  * The **one** text the ▶ Continue / ↻ Retry path may still write into a node's own
  * transcript: the pure fact about a tool call a Stop stranded, which is what
@@ -325,6 +343,75 @@ function detachNode(child) {
   child.parentElement = null;
 }
 
+/**
+ * The window's own focus, as `document.hasFocus()` reports it.
+ *
+ * The composer's focus contract reads it to tell two events apart that wear the same
+ * name: `document.hasFocus() === true` means the user clicked somewhere else in this
+ * document (the caret stays where it landed), while `false` means the window — or the
+ * platform's own frame focus — took the caret away (the user did nothing, so the caret
+ * goes back). A sandbox that always answered `true` could not tell the second case from
+ * the first at all, so the check below plays both parts explicitly.
+ */
+let documentFocused = true;
+
+/** The handlers `element` registered for one event type (see `makeElement`). */
+function handlersOf(element, type) {
+  const all = element && element._allListeners && element._allListeners[type];
+  return Array.isArray(all) ? all.slice() : [];
+}
+
+/**
+ * Deliver one focus event the way a browser does: on the element, then on each ancestor
+ * — `focusin` / `focusout` bubble, which is what lets the dock hear about its input.
+ * `target` is where the event started and `relatedTarget` the other side of the move,
+ * the field the focus trace reports. A listener that throws is a problem, not a crash.
+ */
+function dispatchFocusEvent(target, type, relatedTarget) {
+  const event = {
+    type,
+    target,
+    relatedTarget: relatedTarget || null,
+    preventDefault() {},
+    stopPropagation() {},
+  };
+  const seen = new Set();
+  let node = target;
+  while (node && typeof node === 'object' && !seen.has(node)) {
+    seen.add(node);
+    for (const handler of handlersOf(node, type)) {
+      try {
+        handler(event);
+      } catch (err) {
+        problems.push(`a "${type}" listener on ${node.id || 'an element'} threw ${err && err.message}`);
+      }
+    }
+    node = node.parentElement;
+  }
+  return event;
+}
+
+/**
+ * The window going away, the way Chrome does it: `document.hasFocus()` turns false and
+ * the focused element gets its `focusout`, while `document.activeElement` stays where it
+ * was — which is exactly why the caret's *intent* cannot be read from `activeElement`.
+ */
+function loseDocumentFocus() {
+  documentFocused = false;
+  const active = document.activeElement;
+  if (active) dispatchFocusEvent(active, 'focusout', null);
+}
+
+/**
+ * The platform focusing the webview's frame on reactivation (`WebviewEditor.focus()`):
+ * the document has the focus again, but the **element** inside it does not — the inner
+ * DOM focus is reset without an event of its own. This is the stomp the fix exists for.
+ */
+function platformFrameFocus() {
+  documentFocused = true;
+  document.activeElement = null;
+}
+
 function makeElement(id) {
   const element = {
     id,
@@ -441,8 +528,26 @@ function makeElement(id) {
     closest: () => null,
     contains: () => false,
     matches: () => false,
-    focus() {},
-    blur() {},
+    focus() {
+      if (element.disabled) return;
+      const previous = document.activeElement;
+      if (previous === element) return;
+      document.activeElement = element;
+      if (previous) dispatchFocusEvent(previous, 'focusout', element);
+      dispatchFocusEvent(element, 'focusin', previous);
+    },
+    blur() {
+      if (document.activeElement !== element) return;
+      document.activeElement = null;
+      dispatchFocusEvent(element, 'focusout', null);
+    },
+    // A `<textarea>`'s caret, which is what a restore has to put back as well as the
+    // focus itself. `selectionStart` / `selectionEnd` are plain properties here and are
+    // only set by whoever needs them, so nothing that never touched a selection changes.
+    setSelectionRange(start, end) {
+      element.selectionStart = start;
+      element.selectionEnd = typeof end === 'number' ? end : start;
+    },
     select() {},
     scrollIntoView() {},
     attachShadow: () => makeElement(`${id}-shadow`),
@@ -499,6 +604,19 @@ function makeElement(id) {
     },
     configurable: true,
   });
+  // Disabling a focused element blurs it in a browser — and the composer's read-only path
+  // disables `#input`, so a stub that left `activeElement` pointing at a disabled box would
+  // let the focus policy believe the caret is somewhere the user cannot type.
+  let disabled = false;
+  Object.defineProperty(element, 'disabled', {
+    get: () => disabled,
+    set(value) {
+      const was = disabled;
+      disabled = value === true;
+      if (disabled && !was && document.activeElement === element) element.blur();
+    },
+    configurable: true,
+  });
   return element;
 }
 
@@ -525,6 +643,12 @@ function elementById(id) {
   return elements.get(id);
 }
 
+// The HTML shell nests `#input` inside `#composer` (`src/chat/webviewShell.ts`), and the
+// composer's focus contract reads exactly that containment: the dock hears its input's
+// `focusin` / `focusout` because they bubble, and a press inside the dock is not "a press
+// elsewhere". Two unrelated stub elements would model a DOM the webview never sees.
+elementById('composer').appendChild(elementById('input'));
+
 const document = {
   getElementById: elementById,
   createElement: (tag) => makeElement(tag),
@@ -545,6 +669,10 @@ const document = {
   removeEventListener() {},
   querySelector: (selector) => selectorStub(selector),
   querySelectorAll: () => [],
+  // The composer's focus contract asks where the focus is: inside this document (the user
+  // clicked here) or taken away from it (the window left). `loseDocumentFocus` /
+  // `platformFrameFocus` above are how the check below plays those two parts.
+  hasFocus: () => documentFocused,
   body: makeElement('body'),
   documentElement: makeElement('html'),
   activeElement: null,
@@ -5307,7 +5435,7 @@ if (contextLabel !== 'ctx 50%') {
  * this step is the one place the two clocks are reconciled. Half a second per run is
  * nothing next to a report that could not fire at all.
  */
-setTimeout(() => {
+setTimeout(async () => {
   /** `paint`, `probe#1`, `drop` … — what the probes did post, for the messages below. */
   const seen = diagnostics.map(
     (report) => String(report.kind || '?') + (report.id === undefined ? '' : '#' + report.id),
@@ -5315,6 +5443,8 @@ setTimeout(() => {
   /** The reports of one kind, and of one probe id when the shape carries one. */
   const reportOf = (kind, id) =>
     diagnostics.find((report) => report.kind === kind && (id === undefined || report.id === id));
+  /** A task boundary: `requestAnimationFrame` here is a `setTimeout`, and so is the ladder. */
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
   const paint = diagnostics.find((report) => report.kind === 'paint' && report.traceId === 1);
   if (!paint) {
@@ -5468,6 +5598,301 @@ setTimeout(() => {
       const missing = fields.filter((field) => typeof resize[field] !== 'string' || resize[field].length === 0);
       if (missing.length > 0) {
         problems.push(`the resize report's ${missing.join(', ')} is not a non-empty string: ${JSON.stringify(resize)}`);
+      }
+    }
+  }
+
+  // --- the composer keeps its caret across a window reactivation ---------------
+  // The stable repro: the caret in the composer, another OS window clicked, then the
+  // composer input clicked again — the caret shows for a few milliseconds and is gone.
+  // The cause is the platform, not this script: VS Code's own `WebviewEditor.focus()`
+  // runs on reactivation (after a ~50 ms throttle) and focuses the webview's **frame**,
+  // so the retained document keeps `#input` in the DOM and loses the DOM focus. VS Code
+  // closed "restore focus inside a retained webview" as out of scope for extensions, so
+  // the fix is a ladder inside the document (`restoreComposerFocus` in `media/main.js`:
+  // the next frame, then every ~60 ms for up to a second, and only when the *user* had
+  // the caret there). Both halves are replayed here, because "the caret comes back" and
+  // "the caret is never stolen" are one contract: the second without the first is the
+  // bug, the first without the second is a new one.
+  {
+    const composer = document.getElementById('composer');
+    const input = document.getElementById('input');
+    const focusReports = () => diagnostics.filter((report) => report.kind === 'composer-focus');
+    /**
+     * The newest focus report of one state (and reason), searched back to `from` — the
+     * index the current fixture started at, so one fixture's refusal cannot satisfy the
+     * next one's assertion. (No `findLast`: this file deliberately runs on a plain node.)
+     */
+    const focusReport = (state, reason, from) => {
+      for (let at = diagnostics.length - 1; at >= (from || 0); at--) {
+        const report = diagnostics[at];
+        if (report.kind !== 'composer-focus' || report.state !== state) continue;
+        if (reason !== undefined && report.reason !== reason) continue;
+        return report;
+      }
+      return undefined;
+    };
+    /** One side of the sequence: the window goes away, the platform stomps, it comes back. */
+    const windowAwayAndBack = () => {
+      loseDocumentFocus();
+      dispatch({ type: 'viewState', visible: true, active: true, focused: false });
+      dispatch({ type: 'viewState', visible: true, active: true, focused: true });
+    };
+
+    // A plain, checked-out turn card: the dock is visible and its input takes input.
+    dispatch({
+      type: 'state',
+      busy: false,
+      status: '',
+      sessionId: 'smoke-session',
+      runningNodes: [],
+      lockedNodes: [],
+      readOnly: false,
+    });
+    dispatch({
+      type: 'tree',
+      viewId: FOCUS_NODE,
+      activeId: FOCUS_NODE,
+      rootId: FOCUS_NODE,
+      rootIds: [FOCUS_NODE],
+      nodes: [
+        {
+          id: FOCUS_NODE,
+          parentId: null,
+          children: [],
+          title: 'focus',
+          status: 'running',
+          createdAt: 0,
+          preview: 'focus',
+          usage: null,
+          size: null,
+          context: 'ok',
+        },
+      ],
+    });
+    // The window is focused before this block starts (the replay above ends that way), so
+    // the transitions below are the ones that arm anything.
+    if (composer.classList.contains('hidden') || input.disabled) {
+      problems.push(
+        'the focus sequence needs a visible, enabled composer on a plain turn card, and this fixture left it ' +
+          `hidden=${composer.classList.contains('hidden')} disabled=${input.disabled}`,
+      );
+    } else {
+      // The caret mid-sentence: the two selection ends are what a restore has to keep.
+      input.value = 'hello world';
+      input.selectionStart = 2;
+      input.selectionEnd = 5;
+      input.focus();
+      const mark = diagnostics.length;
+      windowAwayAndBack();
+      // The caret is back on the next frame… and then the platform's own throttled frame
+      // focus lands and resets the *inner* focus, which is what the retry exists for.
+      await sleep(30);
+      platformFrameFocus();
+      await sleep(150);
+
+      if (document.activeElement !== input) {
+        problems.push(
+          'a `viewState {focused:true}` after the window took the caret did not restore the composer — `#input` is ' +
+            'not `document.activeElement`, so the caret blinks for a few milliseconds and is gone (the platform ' +
+            'focuses the webview frame, not the element inside it, and one `focus()` call is not enough)',
+        );
+      }
+      if (input.selectionStart !== 2 || input.selectionEnd !== 5) {
+        problems.push(
+          `the restored caret sits at ${input.selectionStart}…${input.selectionEnd}, expected 2…5 — a caret moved ` +
+            'to the end of the box is a different bug, for a user who was mid-sentence',
+        );
+      }
+      const restore = focusReport('restore', 'window', mark);
+      if (!restore) {
+        problems.push(
+          'the window return started no `kind: "composer-focus"` sequence (reason `window`) — a caret that did not ' +
+            `come back has to be evidence in the log; posted ${JSON.stringify(focusReports())}`,
+        );
+      } else {
+        // The trace's own fields: a sequence nobody can read afterwards is not a diagnostic.
+        if (typeof restore.hasFocus !== 'boolean') {
+          problems.push(`the composer-focus report's \`hasFocus\` is not a boolean: ${JSON.stringify(restore)}`);
+        }
+        if (typeof restore.msSinceBlur !== 'number' || typeof restore.retries !== 'number') {
+          problems.push(
+            `the composer-focus report's \`msSinceBlur\` / \`retries\` are not numeric: ${JSON.stringify(restore)}`,
+          );
+        }
+        for (const field of ['state', 'active', 'relatedTarget']) {
+          if (typeof restore[field] !== 'string' || restore[field].length === 0) {
+            problems.push(
+              `the composer-focus report's \`${field}\` is not a non-empty string: ${JSON.stringify(restore)}`,
+            );
+          }
+        }
+      }
+
+      // The click landed elsewhere: the user moved the caret inside this document (the tree,
+      // a card head), which is a `focusout` with `document.hasFocus() === true` — the intent
+      // is over. A window return after that may not pull the caret back into the dock: the
+      // restore only undoes what the **window** took, never what the user chose.
+      const elsewhere = document.getElementById('tree-canvas');
+      input.focus();
+      elsewhere.focus();
+      const clickMark = diagnostics.length;
+      windowAwayAndBack();
+      await sleep(150);
+      if (document.activeElement === input) {
+        problems.push(
+          'a window return after the user had already moved the caret elsewhere in the document focused `#input` — ' +
+            'the restore may only undo what the window took, never what the user chose',
+        );
+      }
+      if (focusReport('skip', 'window', clickMark) || focusReport('restore', 'window', clickMark)) {
+        problems.push(
+          'the window return after the user moved the caret elsewhere still started a `composer-focus` sequence — ' +
+            'that `focusout` (with `document.hasFocus()` true) should have cleared the intent',
+        );
+      }
+
+      // …and the other half: a dock that is hidden, and one whose input is read-only, may
+      // never be focused, whatever the flags say — a restore there would pull the caret out
+      // of the card the user just clicked. Three fixtures, because the policy has two
+      // independent reasons to refuse and each one alone would hide the other two cases:
+      //
+      //   * `hidden` — no node is checked out, so no card hosts the dock
+      //     (`setComposerVisible(false)` + `mountComposer(null)`) while `#input` still takes
+      //     input: an element that is not in the document must not be focused;
+      //   * `hidden+disabled` — a sub-agent branch is checked out: the dock is hidden *and*
+      //     `#input` is `disabled`;
+      //   * `visible+disabled` — this window does not own the workspace's sessions
+      //     (`readOnly`), so the dock is on screen with a disabled input — the case a policy
+      //     that only asked "is it visible?" would focus.
+      //
+      // The window goes away first, because that is the only order in which the user's
+      // intent *survives* into such a tree: they were typing, the window left, and the view
+      // moved on while they were gone.
+      const refusedIn = [
+        [
+          'hidden',
+          'hidden',
+          [
+            {
+              type: 'tree',
+              viewId: null,
+              activeId: null,
+              rootId: FOCUS_NODE,
+              rootIds: [FOCUS_NODE],
+              nodes: [
+                {
+                  id: FOCUS_NODE,
+                  parentId: null,
+                  children: [],
+                  title: 'focus',
+                  status: 'running',
+                  createdAt: 0,
+                  preview: 'focus',
+                  usage: null,
+                  size: null,
+                  context: 'ok',
+                },
+              ],
+            },
+          ],
+        ],
+        [
+          'hidden+disabled',
+          'agent',
+          [
+            {
+              type: 'tree',
+              viewId: FOCUS_AGENT,
+              activeId: FOCUS_AGENT,
+              rootId: FOCUS_AGENT,
+              rootIds: [FOCUS_AGENT],
+              nodes: [
+                {
+                  id: FOCUS_AGENT,
+                  parentId: null,
+                  children: [],
+                  title: 'sub',
+                  kind: 'agent',
+                  status: 'running',
+                  createdAt: 0,
+                  preview: '',
+                  usage: null,
+                  size: null,
+                  context: 'ok',
+                },
+              ],
+            },
+          ],
+        ],
+        [
+          'visible+disabled',
+          'read-only window',
+          [
+            { type: 'state', busy: false, status: '', sessionId: 'smoke-session', runningNodes: [], lockedNodes: [], readOnly: true },
+            {
+              type: 'tree',
+              viewId: FOCUS_NODE,
+              activeId: FOCUS_NODE,
+              rootId: FOCUS_NODE,
+              rootIds: [FOCUS_NODE],
+              nodes: [
+                {
+                  id: FOCUS_NODE,
+                  parentId: null,
+                  children: [],
+                  title: 'focus',
+                  status: 'running',
+                  createdAt: 0,
+                  preview: 'focus',
+                  usage: null,
+                  size: null,
+                  context: 'ok',
+                },
+              ],
+            },
+          ],
+        ],
+      ];
+      for (const [label, expect, messages] of refusedIn) {
+        // The caret back in the dock first: every fixture below needs the user's intent to
+        // still be alive when the window goes away.
+        input.focus();
+        const fixtureMark = diagnostics.length;
+        loseDocumentFocus();
+        platformFrameFocus();
+        for (const message of messages) dispatch(message);
+        const hidden = composer.classList.contains('hidden');
+        const took =
+          label === 'hidden'
+            ? hidden && !input.disabled
+            : label === 'hidden+disabled'
+              ? hidden && input.disabled
+              : !hidden && input.disabled;
+        if (!took) {
+          problems.push(
+            `the ${label} fixture did not take (hidden=${hidden} disabled=${input.disabled}) — the refusal ` +
+              'below would pass for the wrong reason',
+          );
+        }
+        // The window comes back on that tree: the host says so, and the platform stomps the
+        // inner focus exactly as it does on any return. The policy is the only thing that
+        // may keep the caret away from the dock.
+        dispatch({ type: 'viewState', visible: true, active: true, focused: false });
+        dispatch({ type: 'viewState', visible: true, active: true, focused: true });
+        await sleep(150);
+        if (document.activeElement === input) {
+          problems.push(
+            `a window return on the ${label} composer focused \`#input\` anyway — the restore must never steal ` +
+              `the caret into a dock the user cannot see or cannot type in (${expect})`,
+          );
+        }
+        if (!focusReport('skip', 'window', fixtureMark)) {
+          problems.push(
+            `the ${label} composer was refused the caret with no \`kind: "composer-focus"\` trace (state \`skip\`, ` +
+              'reason `window`) — a refusal that says nothing is the silent version of the same bug',
+          );
+        }
       }
     }
   }
