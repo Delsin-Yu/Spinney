@@ -471,7 +471,12 @@
   `> args` line, the result, an error, the usage line, all in normal text colour).
   `renderItemInto` (the history repaint) goes through the **same** `addTool` /
   `makeThinkingRow` / `addAssistant` the live path uses, and `tools/check-webview.js`
-  pins that equivalence.
+  pins that equivalence. While a thinking row is open, its 240 px box carries its own
+  small green **follow** dot (`attachRowLock`), whose click `stopPropagation`s the row's
+  click (which opens and closes the row).
+  The log carries one green dot (`attachLock`): green means **following** the newest
+  content, an upward scroll releases it and the bottom re-engages it — it never hides or
+  blocks the scrollbar, and a programmatic pin or a growing turn can never release it.
   Every string it displays goes through its own `tr(message, ...args)` (defined at
   the top of the file): the host has no `vscode.l10n` inside a webview, so it
   injects the catalog as `window.__spinneyL10n` and `tr()` looks the English source

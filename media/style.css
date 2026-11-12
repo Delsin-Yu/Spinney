@@ -547,8 +547,10 @@ button.icon-btn {
 
 /* A thinking row: dimmed italic prose while its turn is live, one ellipsised line once
    the turn is over. The row is the control — there is no label and no chevron, so a
-   click anywhere on it opens the whole reasoning plus the turn's usage line. */
+   click anywhere on it opens the whole reasoning plus the turn's usage line. The row is
+   also the positioning context of its own follow light (the open form is a scroller). */
 .thinking-row {
+  position: relative;
   align-self: stretch;
   max-width: 100%;
   margin: 0;
@@ -589,8 +591,35 @@ button.icon-btn {
 }
 
 /* The usage line is part of the *open* form only (main.js adds/removes `hidden`), so
-   the closed row stays one line. */
+   the closed row stays one line. Its right end keeps clear of the light below the box. */
 .thinking-row .usage-line.hidden {
+  display: none;
+}
+
+.thinking-row.open > .usage-line {
+  padding-right: 16px;
+}
+
+/* The reasoning box's own light. The open form is a 240 px scroller inside a row that is
+   itself inside the log, so it follows (and is released) on its own: a smaller dot in the
+   row's bottom-right corner, over the box's last line and inside the strip its
+   `scrollbar-gutter` keeps free. `setThinkingOpen` puts the element in the row on open and
+   takes it out on close, so a closed row — one ellipsised line — carries no light at all. */
+.thinking-row > .scroll-lock-dot {
+  right: 12px;
+  bottom: 4px;
+  width: 6px;
+  height: 6px;
+  z-index: 5;
+}
+
+.thinking-row > .scroll-lock-dot::before {
+  inset: -3px;
+}
+
+/* A closed row is one ellipsised line with nothing to follow: `setThinkingOpen` takes the
+   element out of the row on close, and this is the CSS half of the same statement. */
+.thinking-row:not(.open) > .scroll-lock-dot {
   display: none;
 }
 
@@ -1798,10 +1827,11 @@ button.icon-btn {
   color: var(--bg);
 }
 
-/* Manual scroll-lock light: sits in the strip the scroll container reserves
-   below itself (`margin-bottom`), docked in the bottom-right corner of the
-   transcript area. On by default; click it to release the auto-scroll and hand
-   scrolling back to the user. */
+/* Manual follow light: sits in the strip the scroll container reserves below itself
+   (`margin-bottom`), docked in the bottom-right corner of the transcript area. Green
+   means "following the newest content"; dim means the reader owns the offset. A click
+   toggles it, and scrolling is the other way in and out of it (see the direction rule in
+   `createScrollController`) — the light never blocks the scrollbar. */
 .scroll-lock-dot {
   position: absolute;
   right: 10px;
@@ -1843,8 +1873,9 @@ button.icon-btn {
    its own 10px, reaches the card's edge. The offsets therefore have to carry the
    10px again to leave the light exactly where it was: 10px in from the log's right
    edge, in the strip the log's `margin-bottom` reserves below it. Scoped to this
-   host on purpose — nothing else inside a card carries a light any more (a card has
-   exactly one scroller), and the offsets must not move. */
+   host on purpose — it is the log's light, not any other dot in the card (the open
+   reasoning row's own light has its own rule, `.thinking-row > .scroll-lock-dot`) —
+   and the offsets must not move. */
 .node-work-wrap > .scroll-lock-dot {
   right: 20px;
   bottom: 18px;
@@ -1856,18 +1887,10 @@ button.icon-btn {
   display: none;
 }
 
-/* While follow is on the scrollbar is disabled: manual scrolling is blocked and
-   the bar is hidden (the gutter is kept so content doesn't reflow). */
-.scroll-locked {
-  overflow: hidden !important;
-  scrollbar-width: none;
-  -ms-overflow-style: none;
-}
-
-.scroll-locked::-webkit-scrollbar {
-  width: 0 !important;
-  height: 0 !important;
-}
+/* `.scroll-locked` on the log is the light's **state** (green = following), never a
+   scrollbar lock: the reader may scroll a following log, and the first upward move releases
+   the light by itself. There is deliberately no `overflow` rule for it any more — hiding
+   the bar and blocking manual scrolling was the behaviour this light was wrongly given. */
 
 .node-work {
   scrollbar-gutter: stable;

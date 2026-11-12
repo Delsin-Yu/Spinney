@@ -1222,56 +1222,153 @@
     }
   }
 
-  // ---- Manual scroll lock (the green light) ----
-  // The light is the only follow control. While it is on the container is pinned
-  // to its newest content and its scrollbar is disabled (`scroll-locked` hides
-  // the bar and blocks manual scrolling); clicking the light turns follow off and
-  // hands scrolling back to the user. There is deliberately no auto re-engage on
-  // scroll — the state changes only when the light is clicked.
-  // `locked` is the initial state: a live turn starts pinned, a finished node
-  // starts free so its transcript can be scrolled immediately.
-  function createScrollController(container, onChange, locked) {
-    const state = { locked: locked !== false };
+  // ---- The follow light (the green dot) ----
+  // A green dot is the only follow control a scroller has, and what it means is one
+  // thing: **follow the newest content**. It is not a lock on the scrollbar — the reader
+  // may scroll while the light is on, and the light goes out by itself the moment they do.
+  // The rule is the *direction* of the move:
+  //
+  //  - a `scroll` that lands at the bottom (`top + clientHeight >= scrollHeight - 2`)
+  //    engages follow again, so the dot is green exactly while the newest content is on
+  //    screen — including after the reader scrolled back down;
+  //  - a `scroll` above the bottom whose offset moved **up** since the last one releases
+  //    it (the dot dims), and the log then keeps the offset the reader left.
+  //
+  // Nothing else may release it. A programmatic pin (`scrollToBottom` / `pinToBottom`) and
+  // plain content growth both move the offset *towards* the bottom — or leave it where it
+  // is — so neither can be mistaken for a reader's gesture. That is the difference from
+  // the old heuristic ("not at the bottom any more, so the user scrolled"), which unlocked
+  // a card under its own output on every heavy stream. The one ordering that could still
+  // fight a drag is a delta landing between the move and its `scroll`: the follow pin
+  // therefore stands down while the box sits above the offset the controller last wrote,
+  // and the event that arrives next releases the light.
+  //
+  // `locked` is the initial state: a live turn starts following, a finished node starts
+  // released — and is still positioned at its newest content once, by `pinToBottom`.
+  /** The controller's own hook on its container, so a memory restore is not a gesture. */
+  const FOLLOW = '_follow';
 
-    function setLocked(value) {
-      if (state.locked === value) return;
-      state.locked = value;
-      container.classList.toggle('scroll-locked', value);
-      if (onChange) onChange(value);
-      if (value) scrollToBottom();
+  function createScrollController(container, onChange, locked) {
+    // `lastTop` is the offset the controller last knows about: written before a programmatic
+    // pin, and updated from every `scroll` the engine reports.
+    const state = { locked: locked !== false, lastTop: container.scrollTop || 0 };
+
+    /** The offset of the newest content — what a pin writes. */
+    function bottom() {
+      return Math.max(0, (container.scrollHeight || 0) - (container.clientHeight || 0));
+    }
+
+    /** Is the box showing its newest content? The 2px slack absorbs sub-pixel rows. */
+    function atBottom() {
+      const top = container.scrollTop || 0;
+      return top + (container.clientHeight || 0) >= (container.scrollHeight || 0) - 2;
+    }
+
+    /**
+     * Write an offset the controller itself chose. The tracked offset moves with it
+     * *before* the engine can report it back as a `scroll`, so a pin is never read as the
+     * reader's move — that is what keeps a following log following its own stream. The
+     * tracked value is read back off the box, because the engine may clamp or round the
+     * write (a fractional `scrollHeight`), and the echo then has to match exactly.
+     */
+    function writeOffset(top) {
+      if ((container.scrollTop || 0) !== top) container.scrollTop = top;
+      state.lastTop = container.scrollTop || 0;
     }
 
     function scrollToBottom() {
       if (!state.locked) return;
-      const max = Math.max(0, container.scrollHeight - container.clientHeight);
-      if (container.scrollTop !== max) {
-        container.scrollTop = max;
+      // The box sits above where the controller last left it: that is a reader's move whose
+      // `scroll` has not been dispatched yet, so the pin stands down rather than revert it
+      // before the event can release the light. (A generation's growth only ever raises the
+      // offset, so this is never the stream's own doing.)
+      if ((container.scrollTop || 0) < state.lastTop) return;
+      writeOffset(bottom());
+    }
+
+    function setLocked(value) {
+      const changed = state.locked !== value;
+      state.locked = value;
+      if (changed) {
+        container.classList.toggle('scroll-locked', value);
+        if (onChange) onChange(value);
+      }
+      // Engaging follow puts the reader at the newest content immediately: the green light
+      // is a promise about where they are, not only about where the next token goes. It is
+      // a forced pin — the reader asked for it, so nothing stands down for a stale event.
+      if (value) writeOffset(bottom());
+    }
+
+    /**
+     * The engine reporting a scroll. Only two things here are a reader's move: landing at
+     * the bottom (follow again) and going **up** (release). A pin or an append changes the
+     * offset towards the bottom, and an event that reports an offset the controller already
+     * wrote is its own echo — neither touches the light.
+     */
+    function handleScroll() {
+      const top = container.scrollTop || 0;
+      if (top === state.lastTop) return;
+      // A box with nothing to scroll over has no offset worth reading as a gesture: an
+      // emptied container mid-rebuild, or a log the fold just shrank below its box, reports
+      // the engine's clamp to 0 and nothing else — that is not the reader scrolling up.
+      if ((container.scrollHeight || 0) <= (container.clientHeight || 0)) {
+        state.lastTop = top;
+        return;
+      }
+      const movedUp = top < state.lastTop;
+      state.lastTop = top;
+      if (atBottom()) {
+        if (!state.locked) setLocked(true);
+      } else if (movedUp && state.locked) {
+        setLocked(false);
       }
     }
+    container.addEventListener('scroll', handleScroll, { passive: true });
 
     container.classList.toggle('scroll-locked', state.locked);
 
-    return {
+    const api = {
       get locked() { return state.locked; },
       scrollToBottom,
+      /**
+       * Position at the newest content **without** engaging follow: the once-per-card
+       * "opens at its newest content" (`_needsBottomScroll`). It goes through the same
+       * tracked offset as a pin, so the move cannot be read as the reader scrolling down.
+       */
+      pinToBottom() {
+        writeOffset(bottom());
+      },
+      /**
+       * The offset is now `top` and that move is not the reader's (a memory restore after a
+       * repaint): the light neither engages nor releases because of it.
+       */
+      syncOffset(top) {
+        state.lastTop = top || 0;
+      },
       lock() { setLocked(true); },
       unlock() { setLocked(false); },
       toggle() { setLocked(!state.locked); },
     };
+    // `restoreScroll` hands the offset it is about to write back to the controller (see
+    // `syncOffset`): a repaint is not a gesture in either direction.
+    container[FOLLOW] = api;
+    return api;
   }
 
   const LOCK_TITLE_ON = tr('Auto-scroll on — click to release');
   const LOCK_TITLE_OFF = tr('Auto-scroll off — click to follow again');
 
-  // A green lock dot lives on the host of a scrollable container, in the strip
-  // reserved below it (the container keeps a bottom margin so the dot sits just
-  // under the scrollbar). Live turns start locked (following); finished nodes
-  // start unlocked. Click to toggle manual follow.
+  // The green dot lives on the host of a scrollable container, in the strip reserved below
+  // it (the container keeps a bottom margin so the dot sits just under the scrollbar).
+  // Live turns start following (the dot is green); finished nodes start released. A click
+  // toggles it — engaging follow scrolls to the newest content immediately, releasing it
+  // hands the bottom to the reader. A scroll is the other way in and out (see the
+  // direction rule above): it releases nothing but an upward move, and it re-engages only
+  // at the bottom, so a card cannot unlock itself under its own stream.
   //
-  // There is exactly one scroller in a card, so there is exactly one light: the rows
-  // inside the log carry none of their own. Releasing it is the reader's move (the log
-  // then keeps their offset instead of pinning itself), and re-engaging it is a
-  // scrolling gesture and nothing more.
+  // The log is a card's only scroller, so it carries the only light a card has — except
+  // the open form of a thinking row, which is a 240px scroller of its own
+  // (`attachRowLock`, below).
   function attachLock(container, host, locked) {
     const dot = el('div', 'scroll-lock-dot' + (locked === false ? '' : ' locked'));
     const ctrl = createScrollController(container, (isLocked) => {
@@ -1281,9 +1378,9 @@
     dot.title = ctrl.locked ? LOCK_TITLE_ON : LOCK_TITLE_OFF;
     dot.addEventListener('click', (ev) => {
       ev.stopPropagation();
-      // The one gesture that hands the bottom to the reader: `scrollToBottom` stops
-      // writing (it is a no-op while the light is off) and the log's own memory is what
-      // puts them back after a repaint.
+      // Toggling is the reader's own move in both directions: engaging pins the log to the
+      // newest content, releasing leaves `scrollToBottom` a no-op and the log's memory is
+      // what puts them back after a repaint.
       ctrl.toggle();
     });
     host.appendChild(dot);
@@ -1291,13 +1388,36 @@
   }
 
   /**
-   * Lock / unlock a card's one scroller (`.node-work`). The card has exactly one, so
-   * there is nothing else to walk: the thinking rows and the tool rows scroll *with*
-   * it, never inside themselves.
+   * Engage / release a card's one scroller (`.node-work`). The card has exactly one, so
+   * there is nothing else to walk: the tool rows scroll *with* it. The open form of a
+   * thinking row is the one row that scrolls inside itself, and it carries its own light
+   * (`attachRowLock`).
    */
   function setCardScrollLock(card, locked) {
     if (!card) return;
     if (card._itemScroll) (locked ? card._itemScroll.lock() : card._itemScroll.unlock());
+  }
+
+  /**
+   * The light of a container that is not a card's log: the open reasoning box. The dot
+   * belongs to the row (which is its positioning context) and lives in the DOM only while
+   * the row is open — a closed row is one ellipsised line with nothing to follow — so the
+   * caller appends it on open and removes it on close. Its click toggles this box alone and
+   * must not reach the row, whose click opens and closes the whole row.
+   */
+  function attachRowLock(row, container) {
+    const dot = el('div', 'scroll-lock-dot row-lock locked');
+    const ctrl = createScrollController(container, (isLocked) => {
+      dot.classList.toggle('locked', isLocked);
+      dot.title = isLocked ? LOCK_TITLE_ON : LOCK_TITLE_OFF;
+    }, true);
+    dot.title = ctrl.locked ? LOCK_TITLE_ON : LOCK_TITLE_OFF;
+    dot.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      ctrl.toggle();
+    });
+    row._lockDot = dot;
+    return ctrl;
   }
 
   // ---- Remembering where a reader was ------------------------------------------
@@ -1343,10 +1463,16 @@
     return memory && memory.seen ? memory.top : null;
   }
 
-  /** Put a remembered offset back. The engine clamps it to the box it now has. */
+  /**
+   * Put a remembered offset back. The engine clamps it to the box it now has. The write is
+   * the memory's, not the reader's, so the controller is told the offset it now holds — a
+   * repaint must neither release the follow light nor re-engage it, not even when the
+   * remembered offset is the bottom.
+   */
   function restoreScroll(container, top) {
     if (!container || top == null) return;
     if (container.scrollTop !== top) container.scrollTop = top;
+    if (container[FOLLOW]) container[FOLLOW].syncOffset(container.scrollTop || top);
   }
 
   // ---- The two rows of the log: a thinking line and a tool line ----------------
@@ -1380,17 +1506,30 @@
   /**
    * Open or close a thinking row. `open` is the paragraph plus the usage line; the
    * closed form is one line of the same text, ellipsised in CSS.
+   *
+   * The open form is a 240 px scroller of its own, so it also carries its own follow
+   * light — the dot is in the row only while the row is open (a closed row is one line
+   * with nothing to follow), and opening it engages that light and scrolls to the end of
+   * the reasoning. The light is not touched on later deltas: `setActiveRow` calls this on
+   * every delta of a live row, and re-engaging there would take back a reader who scrolled
+   * up inside the box. Only a real open → close → open transition engages it again.
    */
   function setThinkingOpen(row, open) {
     if (!row) return;
+    const wasOpen = !!row._open;
     row._open = !!open;
     row.classList.toggle('open', row._open);
     const usage = row.querySelector('.usage-line');
     if (usage) usage.classList.toggle('hidden', !row._open);
-    // Opening puts the reader back at the end of the reasoning.
-    if (row._open && row._textEl) {
-      row._textEl._userScrolled = false;
-      row._textEl.scrollTop = row._textEl.scrollHeight;
+    if (!row._scroll || !row._lockDot) return;
+    if (row._open && !wasOpen) {
+      // The light belongs to the open form: it goes into the row as the box opens, and
+      // opening puts the reader back at the end of the reasoning, following it.
+      row.appendChild(row._lockDot);
+      row._scroll.lock();
+    } else if (!row._open && row._lockDot.parentElement === row) {
+      // A closed row is one ellipsised line: no scroller, no light.
+      row.removeChild(row._lockDot);
     }
   }
 
@@ -1730,11 +1869,10 @@
     row._textEl = text;
     row._usageEl = usage;
     row._open = false;
-    // While the row is open, the deltas keep the box at its newest line — unless the
-    // reader scrolled up inside it, which is a claim the stream does not take back.
-    text.addEventListener('scroll', () => {
-      text._userScrolled = !(text.scrollTop + text.clientHeight >= text.scrollHeight - 8);
-    });
+    // The open form scrolls inside itself, so it follows (and can be released) on its own:
+    // `attachRowLock` gives the row its own green dot, which `setThinkingOpen` puts in the
+    // row only while the box is open, and a controller on the box itself.
+    row._scroll = attachRowLock(row, text);
     row.addEventListener('click', () => {
       markRowTouched(row);
       setThinkingOpen(row, !isRowOpen(row));
@@ -1885,9 +2023,10 @@
     // The row receiving the deltas is the live one: expanded, and it collapses on its
     // own the moment something else takes over (see `clearActiveRow`).
     setActiveRow(row);
-    // The open form has a height cap, so the newest reasoning is kept in view the same
-    // way the log is: follow the end unless the reader scrolled the box by hand.
-    if (row._open && !row._textEl._userScrolled) row._textEl.scrollTop = row._textEl.scrollHeight;
+    // The open form has a height cap, so the newest reasoning is kept in view the same way
+    // the log is: the row's own follow light pins the box, and it is a no-op once the
+    // reader scrolled the box up (`setThinkingOpen` re-engages it only on the open).
+    if (row._open && row._scroll) row._scroll.scrollToBottom();
     followActive();
     return row;
   }
@@ -3687,13 +3826,13 @@
       setCardScrollLock(card, false);
       card._needsBottomScroll = true;
     }
-    // Open the just-filled card at its newest content (a locked card is pinned there
-    // anyway, an unlocked one takes the flag `expandedCard` would).
+    // Open the just-filled card at its newest content (a following card is pinned there
+    // anyway, a released one takes the flag `expandedCard` would — without engaging follow).
     if (card._itemScroll && card._itemScroll.locked) {
       card._itemScroll.scrollToBottom();
       card._needsBottomScroll = false;
-    } else if (card._needsBottomScroll && itemsEl) {
-      itemsEl.scrollTop = itemsEl.scrollHeight;
+    } else if (card._needsBottomScroll && itemsEl && card._itemScroll) {
+      card._itemScroll.pinToBottom();
       card._needsBottomScroll = false;
     }
     // The items are what gives this card its height, and the card's height
@@ -3885,8 +4024,8 @@
     if (card._itemScroll && card._itemScroll.locked) {
       card._itemScroll.scrollToBottom();
       card._needsBottomScroll = false;
-    } else if (card._needsBottomScroll && workEl) {
-      workEl.scrollTop = workEl.scrollHeight;
+    } else if (card._needsBottomScroll && workEl && card._itemScroll) {
+      card._itemScroll.pinToBottom();
       card._needsBottomScroll = false;
     }
   }
@@ -3982,9 +4121,10 @@
       // Following a live turn: pin to the newest content.
       card._itemScroll.scrollToBottom();
       card._needsBottomScroll = false;
-    } else if (card._needsBottomScroll && workEl) {
-      // Unlocked (finished) card: open at its newest content, then scroll freely.
-      workEl.scrollTop = workEl.scrollHeight;
+    } else if (card._needsBottomScroll && workEl && card._itemScroll) {
+      // Released (finished) card: open at its newest content, then scroll freely — the pin
+      // does not engage the light, so the dot stays dim and the reader owns the log.
+      card._itemScroll.pinToBottom();
       card._needsBottomScroll = false;
     }
   }
