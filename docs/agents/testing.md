@@ -12,7 +12,7 @@ gitignored, so a leftover is harmless). Before a release, confirm `npm run compi
 `npm run vscode:prepublish` — on a push to `main`, on a `v*` tag, on a pull request and on
 demand, so a red workflow and a red gate are the same thing instead of two lists that drift.
 
-Nineteen build-time guards are the exception (`check:image` runs the `check:png` /
+Twenty build-time guards are the exception (`check:image` runs the `check:png` /
 `check:resample` / `check:jpeg` scripts with it), all run by `vscode:prepublish` so a
 regression fails *packaging* instead of the user's session:
 
@@ -93,6 +93,26 @@ regression fails *packaging* instead of the user's session:
   real window fills up — a wrong cut silently sends the entire dead history, or nothing
   at all — so they are pinned here. Like `check:signals` it is pure node against `out/`,
   and therefore also runs after `compile` in `vscode:prepublish`.
+- `npm run check:compaction` (`tools/check-compaction.js`) — the **handoff summary** of a
+  context rollover (`invariants/context-rollover.md` §6a), the composer's `Write a handoff
+  summary` answer. It drives the compiled `out/agent/compaction.js` and pins the rules that
+  are invisible until a real, enormous window runs them: the source is **one window** (the
+  context base down to the node — harness notices are not user requests, so they are not
+  counted), the first user message is kept **verbatim** while every user message is clipped
+  to 500 chars with the count in the header, only the last 8 assistant texts are kept, a
+  tool call reads `name -> brief -> first line of the result` with a 200-char result line
+  (and its second line never leaks in), a window over **60,000 chars** keeps its head and
+  its tail, drops the middle and announces the clip with a character count, a window that
+  already starts from a handoff summary is marked as one (and the plain pointer title is
+  not), the prompt carries the eleven-section schema while only the **nine** real sections
+  are required (tolerant of heading level and casing, prose rejected), the fallback
+  decision (`timeout` / `error` / `empty` / `invalid` — and a non-string answer never
+  throws), and the request itself (one user message, no tools, `max_tokens` 1500, a cold
+  temperature, a 30 s constant) plus the `outcome=summary` / `outcome=fallback:<reason>`
+  spelling of the diagnostics line. Pure node against `out/`, so like `check:signals` it
+  runs after `compile` in `vscode:prepublish` (`npm run check:compaction`). What it can
+  **not** see: the request itself, the 30 s abort and the one validation retry live in
+  `SessionRuntime.writeHandoffSummary`, which no guard drives.
 - `npm run check:continue` (`tools/check-continue.js`, 86 checks) — the **transparent
   re-issue / resume contract** (`invariants/api-retries.md`): the half of a failed turn that
   used to be narrated to the model. It stubs `vscode` and drives the compiled `Agent` against
@@ -360,8 +380,15 @@ alone, the kill notice lands in that node's history *and* in its re-dumped
 transcript, the harness message carries the user's last request and the last answer
 verbatim **and** names and counts the killed background terminal, the window is
 numbered per branch, and a node that is not context-full falls back to the in-place
-continue. `node tools/rollover-acceptance.js` after `npm run compile`; it reads a few
-private fields, so a refactor may break the script while the product stays fine.
+continue. It drives the **handoff summary** too: with a scripted answer the harness text
+starts with the summary (its title, the summary, the user's last request verbatim, the
+transcript pointer, the killed-work list, the size line), the node stores that text
+(`handoffSummary`), the one request carries the capped / cold / no-tools shape, an answer
+missing a required heading is asked for exactly once more, and an unreachable provider
+leaves the pointer text plus the sentence saying the summary was unavailable — the
+rollover still succeeds. `node tools/rollover-acceptance.js` after `npm run compile`,
+passing the checkout as its argument (its default is another checkout's `out/`); it reads
+a few private fields, so a refactor may break the script while the product stays fine.
 
 `tools/modeltree-acceptance.js` is the second of the four, the same shape for the
 Model Card Tree page's host half — dev-only, **not** in `vscode:prepublish`, no

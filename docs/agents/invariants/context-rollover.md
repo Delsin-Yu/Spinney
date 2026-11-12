@@ -22,6 +22,22 @@ hangs **below** the previous one, joined by a **dashed** edge.
   actually needs a detail, and the carried-over tail (§5) is free text we already
   have in memory.
 
+### …so the summary is a chosen handoff, never a pipeline
+
+The composer's context modal offers `Write a handoff summary` beside `Just continue`
+(§4/§5a), and that does not undo any of the above — it is the same rollover with one
+**opt-in** extra request:
+
+- it is triggered by the user's click **after** the window ended, never at a
+  percentage. The input is the window's own messages, selected and capped at 60,000
+  chars (§6a), not the branch above it — so it fits even in the window that was just
+  refused, and nothing runs "as the history regrows";
+- the pointer is not lost: the summarized text still carries the transcript path, the
+  killed-work list and the user's last request verbatim, so the reversible half stays
+  reversible;
+- and a failure of that one request is a **fallback to the pointer**, never a failed
+  rollover (§6a). The default stays free.
+
 ## 1. The one invariant this changes: display path vs API prefix
 
 `pathIds()` (the **display** path: which cards the view expands, what `path`
@@ -229,7 +245,8 @@ the new window **inherits** the parent's frozen epoch. The question this entry a
 about the *window*, not about the setup, so a window that inherits keeps the bytes the
 conversation was already written in; acting on a drift stays available afterwards, and
 that is what the fork backend is for. **`handoff: 'summary'`** is recorded on the node
-(`TreeNode.handoff`) and today behaves exactly like `'just continue'` — see §5a.
+(`TreeNode.handoff`) and spends the one extra request §5a/§6a describe; `'continue'` is the
+pointer shape.
 
 The host's `rolloverTurn` and `forkTurn` message cases and `rolloverWithSetup` /
 `askSetups` / `forkAndSend` are deleted with the three old entries.
@@ -265,7 +282,10 @@ value cannot claim a window break the host does not perform.
 user's message as a **second, real `role:'user'` message after the harness one**
 (`sendUserMessage(harness, text)`). That order is the point: the harness text is a fact
 about the previous window, the typed text is this turn's request, and a model handed
-only the harness text would be answering a quotation. `buildPath()` prepends the run's
+only the harness text would be answering a quotation. For a summarized rollover the
+harness text *starts* with the summary (§6a) and the summary is additionally stored on the
+node (`TreeNode.handoffSummary`), beside the messages — the item and the block render the
+same bytes, so a reload shows the same handoff. `buildPath()` prepends the run's
 **epoch prompt** — the frozen envelope of the node this rollover started (inherited, §4),
 or a live render for a chain without one — so what the model receives is
 `[epoch.prompt, harness, userText]` (or `[epoch.prompt, harness]` for an empty box). The
@@ -278,29 +298,34 @@ not rendered in the card: it lives on the node that starts the epoch, once per e
 by the ordinary `kind:'user'` item when the composer had text. The card's pinned prompt is
 therefore the user's own message, or nothing at all when the box was empty.
 
-## 5a. The handoff answer, and the pending summary
+## 5a. The handoff answer: the pointer, or a written summary
 
-The context modal offers two answers, and only one of them is implemented:
+The context modal offers two answers, and both are implemented:
 
 - `Just continue` (and every entry that does not ask, such as a rollover started from a
   script) → the pointer shape of §6.
-- `Write a handoff summary` → `handoff: 'summary'`, which `rolloverContext` **records on
-  the new node** (`TreeNode.handoff`, persisted with the node, validated by value at load
-  so an older build reads it as absent) and then treats exactly like `'just continue'`.
-  The code carries the marker:
-  `// TODO(compaction): a 'summary' handoff must spend one extra request to write a
-  summary of the previous window and hand *that* to this node instead of the pointer.`
+- `Write a handoff summary` → `handoff: 'summary'` on the new node (`TreeNode.handoff`,
+  persisted with the node, validated by value at load so an older build reads it as
+  absent), and `rolloverContext` then spends **one extra request** on the current card to
+  write a summary of the previous window. That summary *is* the handoff: the new window's
+  harness text starts with it (§6).
 
-What the follow-up feature inherits: the user's *intent* is stored, the request plumbing
-(`sendUserMessage`'s two user messages) is in place, and nothing else has to change shape.
-Until then the modal's first button is honest about being a plan: both answers open the
-same window, and neither costs an extra request.
+The summary is written **before** the new window exists, so the window's first — and only —
+harness message already carries the right handoff instead of a second kind of one. The
+user already confirmed the rollover, so the composer shows a busy state and the localized
+status line `Preparing the handoff summary…` for the duration.
+
+Nothing else changes shape: the plumbing (`sendUserMessage`'s two user messages) is the
+same, and a summary that cannot be written degrades to the pointer inside the **same**
+rollover — the user's confirmation is never spent twice, and a rollover never fails
+because a summary did (§6).
 
 ## 6. The harness text
 
 Built by `SessionRuntime` (model-facing, therefore **deliberately English**, like
 the `[Harness]` fact line and the `INTERRUPT_NOTICE` literals, and never through
-`l10n.t`). Shape:
+`l10n.t`). There are two shapes, and the handoff answer picks one (§5a): the **pointer**
+(below) and the **summarized** one (§6a). Shape:
 
 ```
 [Harness: context window reset]
@@ -379,6 +404,131 @@ Rules for building it:
 - **Attachments cannot be carried** (a `file_id`'s validity across windows is not
   guaranteed): say *"the original request had <N> attachment(s)"* instead.
 - The leftover list is composed from what was actually killed in §7.
+- **A failed summary says so here.** When the user asked for a handoff summary and it
+  could not be written (§6a), the pointer text is used *and* the first paragraph gains one
+  sentence: `A handoff summary was asked for but could not be written (<reason>), so this
+  window is pointed at the previous one instead.` The reason is one model-facing clause
+  (`the summary request timed out`, `the summary request failed`, `the model returned
+  nothing`, `the answer did not carry the required sections`). Hiding it would leave a
+  window whose next turn believes a summary exists.
+
+## 6a. The summarized rollover, and its request
+
+`Write a handoff summary` replaces the pointer with a **written summary** of the previous
+window. The request, the tolerance and the fallbacks all live in
+`src/agent/compaction.ts` (pure, `vscode`-free, driven by `npm run check:compaction`);
+`SessionRuntime.writeHandoffSummary` owns only the card, the deadline and the busy state.
+
+**The input is one window, bounded, never the whole chain.** `extractCompactionSource`
+selects from `pathMessages(session, P)` — the context base down to the overflowing node,
+i.e. exactly the API prefix without the system prompt — and it does so **before** the
+union kill, because the kill appends harness notices to P as `role:'user'` messages that
+the user never wrote. What it keeps:
+
+- the **first** user message **verbatim** (a handoff that loses the original request is a
+  handoff of the wrong task);
+- **every** user message, each clipped to **500 chars**, with the count stated in the
+  header (`user messages: <N>`) — that list is what `## All User Messages` is written from;
+- the assistant texts of the **last 8** turns, each clipped to **1000 chars**;
+- each tool call as `name -> brief -> first line of the result`, the arguments clipped to
+  **120** chars and that first result line to **200** (the whole entry is one block);
+- a marking line when the window already starts from a handoff summary (see below).
+- Harness-authored text is not a user message and is left out of the list — its three
+  openings are the pointer / resume notes (`[Harness…`), an interruption notice
+  (`[Interruption notice]`) and a background job's completion writeback
+  (`Background command …`), matched by `isHarnessAuthored`. They stay in the transcript the
+  window is pointed at.
+
+The whole source is capped at **60,000 chars**. Over that, the **middle** is dropped —
+head+tail selection keeps the header, the first request and the newest blocks, taking from
+each end in turn — and one marker line says how much was left out and where to read it
+(`…[compaction input clipped: <N> chars from the middle of this window were left out; read
+the transcript for those messages]`). The two anchor blocks survive even if they have to be
+shortened themselves.
+
+**A previous summary is marked, not re-invented.** When the window's first message is the
+harness title `[Harness: context window reset — handoff summary]`
+(`detectPriorHandoffSummary`), the source says the window already starts from a handoff
+summary, and the prompt tells the model to **carry its unresolved items forward** rather
+than re-inventing them. That is the whole point of a rolling summary: the second rollover
+must not lose what the first one already knew.
+
+**The request.** One `clients.complete` on the **chain's own card** (`chainCard(P)`), so
+the summary runs where the conversation ran: no `tools`, non-streaming, `temperature 0.2`,
+`max_tokens 1500`, and a **hard 30 s** `AbortController` that covers the request *and* its
+one validation retry (the bound is the user's wait, not the attempt count). The prompt is
+one English `user` message with the fixed eleven-section schema —
+`Primary Request and Intent` / `Key Technical Concepts` / `Files and Code Sections` /
+`Errors and Fixes` / `Problem Solving` / `All User Messages` / `Pending Tasks` /
+`Current Work` / `Optional Next Step` (quote the original) / `Durable References` /
+`Handoff Contract` — plus the rules that make it usable: file paths with the key snippets
+each marked *re-read before editing*; `Durable References` carrying the transcript path,
+the key file paths and the killed background-job / sub-agent list; and `Handoff Contract`
+stating that *you are the same agent continuing the same task; this summary is your
+memory; exact file contents must be re-read; the summary may be stale against the working
+tree*.
+
+**The validation is by heading.** `missingCompactionSections` accepts any heading level,
+casing, or a trailing colon/period, and requires the **nine** sections
+(`COMPACTION_REQUIRED_SECTIONS`); the two local extras — `Durable References` and
+`Handoff Contract` — are asked for and not required, because a model that folds them into
+its prose still produced a usable handoff. A missing required heading is retried **once**
+(`buildCompactionRetryMessages`: the same request, the model's own answer as its assistant
+turn, and the missing headings named), and the retry is validated the same way.
+
+**Every failure is a fallback, never a failed rollover.** `classifyCompactionAnswer`
+decides in one pure place, and `writeHandoffSummary` never throws:
+
+| what happened | `outcome` | what the new window gets |
+| --- | --- | --- |
+| the nine headings are there | `summary` | the summarized text of §6a |
+| the 30 s deadline fired (first attempt or the retry) | `fallback:timeout` | the pointer text + the unavailable sentence |
+| the request threw (key, network, provider) | `fallback:error` | the same |
+| the answer was empty / whitespace | `fallback:empty` | the same |
+| a required heading is still missing after the retry | `fallback:invalid` | the same |
+
+The rollover then continues exactly as `Just continue` does: same window, same kills, same
+killed-work list. `TreeNode.handoff === 'summary'` is recorded either way (the user's choice
+is a fact), and `TreeNode.handoffSummary` holds the summary text when there is one — the
+same text the harness block carries, stored beside the messages so a reload renders the same
+block and a later feature can read the summary as data.
+
+**Diagnostics.** One line per attempt: `[perf] compaction in=<chars>chars out=<tokens>tok
+ms=<ms> outcome=summary|fallback:<reason>`, built by `compactionDiagLine` and logged through
+`perf()`. A separate `[compaction] summary request failed for …` line goes to the output
+channel with the failure's own message.
+
+**Shape of the summarized harness text** (`buildContextRolloverMessage({ summary })`). The
+order is fixed:
+
+```
+[Harness: context window reset — handoff summary]
+<the summary, verbatim: its eleven sections>
+
+Previous window: node <prevId> of session <sessionId>.
+The user's last request, verbatim: <clipped 2000 chars> (truncated / attachment notes)
+
+<the transcript pointer of §6 — or its degrade sentence>
+Still running from the previous window: none — <N> background terminal(s) and <M> …
+Stopped when this window was opened:
+- <the killed-work list>
+The previous window used <used> of this model's <window>-token context (<pct>%), …
+Redo the user's last request here. If it depends on earlier work, fetch that from the
+transcript first — do not guess.
+```
+
+Rules for this shape, on top of the pointer's:
+
+- **The last user request is still verbatim.** The summary is a model's account of the
+  window; the user's own words are the one thing it must never be the only copy of.
+- **The refusal paragraph is absent.** The summary was written *because* the window ended;
+  repeating the size sentence above the handoff would push it down for no fact. The
+  context-length line still appears, at the end, exactly as in the pointer shape.
+- **The pointer is not dropped, only shortened.** The transcript path, the killed-work list
+  and the "re-read before editing" instruction are what makes a summary safe against a
+  working tree that moved on.
+- The harness title is what the next rollover reads as "this window already starts from a
+  handoff summary" (`COMPACTION_HARNESS_TITLE`), so it may not drift from the detector.
 
 ## 7. Leaving no orphan work behind
 
@@ -430,8 +580,11 @@ Three things the rollover must add on top of `stopNode`:
 | AGENTS.md read-at-use (`liveAgentsMdSources`) | `src/chat/agentsMd.ts` |
 | `#new-context-btn` in `#actions`, the composer's own show/disable rules, `syncContinueButton` (▶ / ↻ only), the `context`/`contextPct` merge in `applyNodeUpdate`, dashed edge, `CTX` badge | `src/chat/webviewShell.ts`, `media/main.js` |
 | `#actions #new-context-btn` (and the removed `#new-setup-btn` / `.node-rollover` / `.node-near` rules), `.edge-context`, `.node-ctx-badge` | `media/style.css` |
+| The handoff summary: the input selection and its 60k bound, the previous-summary marking, the prompt, the heading validation, the fallback decision, the diagnostics line | `src/agent/compaction.ts` |
+| `writeHandoffSummary` (the card, the 30 s deadline, the one validation retry, the busy state), the summarized harness text | `src/chat/runtime.ts` |
+| `TreeNode.handoff` / `TreeNode.handoffSummary` and their load-time validation | `src/chat/tree.ts` |
 | The strings of §9 | `l10n/bundle.l10n.zh-Hans.json`, `l10n/bundle.l10n.zh-Hant.json` |
-| The pure-function guard | `tools/check-context-rollover.js` (`npm run check:rollover`) |
+| The pure-function guards | `tools/check-context-rollover.js` (`npm run check:rollover`), `tools/check-compaction.js` (`npm run check:compaction`) |
 
 ## 9. i18n
 
@@ -440,6 +593,7 @@ Translated (both catalogs, the source literals in the code):
 | Where | English source |
 | --- | --- |
 | host | `Context window {0}` |
+| host | `Preparing the handoff summary…` (the composer's status line while the summary request runs) |
 | host | `Work is still running in this window.` |
 | host | `{0} piece(s) of work are still running here (background terminals and sub-agents). Continuing in a new window stops them; what they produced stays in the transcript.` |
 | host | `Continue and stop them` |
@@ -475,8 +629,15 @@ sends there)`) and the setup modal (`Continue with current setup`, `Continue wit
 setup`, `Continue with a new setup?`, its two bodies, and `Send will ask before using the
 old setup (the one this node froze)`).
 
+The handoff summary choice is deliberately **setting-free**: it is one answer to the
+modal's question (`Write a handoff summary`), it costs exactly one extra request on the
+card the conversation already uses, and there is no `spinney.*` key to enable it, no
+temperature or length to tune and no separate card to pick. A user who wants the free
+handoff answers `Just continue` instead — that is the only switch the feature needs.
+
 Deliberately untranslated (the existing rules, see `i18n.md`): the harness resume
-text (model-facing and shown verbatim in its block), the `CTX` badge (compact dock
+text (the pointer shape **and** the summarized one, whose title line
+`[Harness: context window reset — handoff summary]` is what the next rollover reads) (model-facing and shown verbatim in its block), the `CTX` badge (compact dock
 token), and the `[config]` / `[perf]` diagnostics.
 
 ## 10. Evidence
@@ -498,6 +659,16 @@ token), and the `[config]` / `[perf]` diagnostics.
   carrying `context: 'full'` disables Send and offers the entry, that the `edge-context`
   class lands on the child's connector only, and that the `CTX` badge appears on the
   window-starting card and not on its descendants.
+- `npm run check:compaction` — pure node, against the compiled `src/agent/compaction.ts`: the
+  source is one window (harness notes are not user requests), the first user message is
+  verbatim while every user message is clipped to 500 chars with the count, only the last 8
+  assistant texts are kept, a tool call reads `name -> brief -> first line of the result`
+  with a 200-char result, a window over 60,000 chars keeps its head and its tail and
+  announces the clip, a window that starts from a summary is marked as one, the eleven
+  sections and the nine required headings (tolerant matching, prose rejected), the fallback
+  decision (`timeout` / `error` / `empty` / `invalid`), and the request itself (one user
+  message, no tools, `max_tokens` 1500, temperature 0.2, a 30 s constant) plus the
+  `outcome=` spelling of the diagnostics line.
 - `npm run check:continue` — the retired setup modal (`askSetups` /
   `discardPendingSetup` / `hasUserDrift`) is gone from `src/`.
 - `node tools/rollover-acceptance.js` (dev only, after `npm run compile`) — drives
@@ -506,8 +677,12 @@ token), and the `[config]` / `[perf]` diagnostics.
   no ancestor message, the overflowing node's background terminal is killed while another
   node's job is left alone, the kill notice reaches that node's history *and* its
   re-dumped transcript, the message carries the pointer / clipped tail / attachment
-  count, and a node that is not context-full falls back to the in-place continue. See
-  `testing.md`.
+  count, and a node that is not context-full falls back to the in-place continue. The
+  summarized handoff is driven too: with a scripted answer the harness text starts with
+  the summary and then the user's last request, the pointer, the killed-work list and the
+  size line, the node carries `handoffSummary`, an answer missing a required heading is
+  asked for exactly once more, and an unreachable provider leaves the pointer text plus
+  the unavailable-summary sentence — the rollover still succeeds. See `testing.md`.
 
 ## 11. Deliberately not done
 

@@ -3,6 +3,7 @@
   "⟳ Silent retry {0}/{1}": "⟳ 静默重试 {0}/{1}",
   "Waiting for a free request slot ({0} queued, {1} allowed at once)…": "正在等待空闲的请求槽位（已排队 {0} 个，同时允许 {1} 个）…",
   "Thinking…": "思考中…",
+  "Preparing the handoff summary…": "正在准备交接摘要…",
   "Done": "完成",
   "The provider rejected an image; hiding it and retrying…": "服务商拒绝了图片；正在隐藏该图片并重试…",
   "API key for {0} — stored in the OS-encrypted secret storage, not in settings.json.": "用于 {0} 的 API 密钥 — 保存在操作系统加密的密钥存储中，而不是 settings.json。",

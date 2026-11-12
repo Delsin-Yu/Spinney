@@ -198,13 +198,21 @@ export interface TreeNode {
    * The handoff this node's window was opened with (`rolloverContext`), when the user
    * asked for a specific one instead of the pointer the harness writes itself.
    *
-   * `'summary'` — the composer's compaction entry: the previous window is to be handed
-   * over as a written summary (one extra request) rather than by being pointed at.
-   * Recorded now so the follow-up feature can implement it without a schema change;
-   * today it behaves exactly like the default `'just continue'` pointer, and a value it
+   * `'summary'` — the composer's compaction entry: the previous window was handed over as
+   * a **written summary** (one extra request, `src/agent/compaction.ts`) instead of by
+   * being pointed at. The choice is recorded even when the summary itself could not be
+   * written — that case keeps the pointer text and says so in it — and a value this build
    * does not know is simply ignored (no migration, no repair pass).
    */
   handoff?: 'summary';
+  /**
+   * The **handoff summary** the chosen handoff produced, verbatim, when one was written
+   * (`rolloverContext`, `docs/agents/invariants/context-rollover.md` §5a). It is the same
+   * text the window's harness block carries — stored here so a reload, and any later
+   * feature, can read the summary as data instead of parsing that block. Absent when the
+   * summary could not be written: the window then carries the pointer text, which says so.
+   */
+  handoffSummary?: string;
   /**
    * Image provenance for this node's own `messages`, addressed by position. Persisted
    * beside the messages, never inside a content part (see {@link ImageSource}).
@@ -1065,6 +1073,11 @@ function normalizeTreeSession(raw: AgentSession & { rootId?: string | null }): A
       // validated by value: an unknown one is dropped, so an older build reading a newer
       // state simply sees the default pointer handoff.
       handoff: node.handoff === 'summary' ? 'summary' : undefined,
+      // The summary text that handoff produced, when it could be written. Stored beside the
+      // messages (the harness block carries the same text) so a reload shows exactly what the
+      // new window was given, and so a later feature can read the summary without parsing
+      // the harness block. String-only validation: anything else is dropped, never repaired.
+      handoffSummary: typeof node.handoffSummary === 'string' && node.handoffSummary ? node.handoffSummary : undefined,
       imageSources: normalizeImageSources(node.imageSources),
       // The card/level this turn ran with: healed exactly like the other optional
       // strings on a node, so a state stored before them loads unchanged (no version

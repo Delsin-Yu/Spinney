@@ -60,6 +60,20 @@ import {
 // The transform the image budget is built on (`docs/agents/plans/image-budget.md`): what
 // actually leaves for the provider, so the bytes a request carries are the small ones.
 import { IMAGE_TARGET_MAX_SIDE, ImageTransformRecord, transformImage } from '../agent/imageTransform';
+// The **handoff summary** of a rollover: the pure half of §6 of the rollover contract (the
+// input selection, its bound, the prompt, the heading validation, the fallback decision).
+import {
+  CompactionFailure,
+  CompactionSource,
+  COMPACTION_HARNESS_TITLE,
+  COMPACTION_TIMEOUT_MS,
+  buildCompactionRequest,
+  buildCompactionRetryMessages,
+  classifyCompactionAnswer,
+  compactionDiagLine,
+  extractCompactionSource,
+  missingCompactionSections,
+} from '../agent/compaction';
 import {
   AgentSession,
   DisplayItem,
@@ -300,8 +314,117 @@ function buildContextRolloverMessage(input: {
   killedBackground: Array<{ id: number; command: string; state: string }>;
   /** One entry per sub-agent node it killed: its dump path once its finish handler wrote it. */
   killedSubAgents: Array<{ nodeId: string; transcript?: string }>;
+  /**
+   * The handoff summary written by one extra request (`docs/agents/invariants/context-rollover.md`
+   * §5a/§6). When it is here the new window is a **summarized** rollover: the summary replaces the
+   * pointer's own paragraphs (`summaryFailure` is then absent), and its order is fixed — the
+   * summary, the user's last request verbatim, the transcript pointer, the killed-work list, and
+   * the size of the window that ended.
+   */
+  summary?: string;
+  /**
+   * Why no summary could be written — `'timeout'`, `'error'`, `'empty'` or `'invalid'`. The
+   * pointer text is then used **and** the model is told the summary was unavailable, so a
+   * question about the missing summary has an answer in the window itself.
+   */
+  summaryFailure?: CompactionFailure;
 }): string {
   const paragraphs: string[] = [];
+  // The display path is not cut (the tree stays connected), so "previous window"
+  // names the overflowing node the new one hangs below — not its whole chain.
+  const previousLine = `Previous window: node ${input.previousNodeId} of session ${input.sessionId}.`;
+  // The size of the window that just ended, in the provider's own terms. Stated as a
+  // fact and never as advice: a model that reads "the window was full" without the
+  // numbers tends to try the same oversized request again from the new window.
+  const usageLine = (() => {
+    if (!input.usage) {
+      return '';
+    }
+    const tail =
+      input.reason === 'near'
+        ? "which is past the harness's 90% rollover threshold; nothing was refused yet."
+        : input.reason === 'images'
+          ? 'the refusal was about the bytes of that request, not about these tokens.'
+          : 'which is at or past the limit this provider accepts for one request.';
+    return (
+      `The previous window used ${input.usage.used} of this model's ${input.usage.window}-token context ` +
+      `(${input.usage.pct}%), ${tail}`
+    );
+  })();
+  const transcriptLine = input.transcriptExists
+    ? 'Its full transcript — every message, tool call and result — is on disk:\n' +
+      `  ${input.transcriptPath}\n` +
+      'Read it when you need a detail: read_file on that path, or search_transcripts with sessionId=' +
+      `${input.sessionId} (line 1 is the meta record). Earlier windows of this session have their own files ` +
+      'in the same folder.'
+    : "The previous window's transcript is not available on disk; rely on the carried-over text and ask the " +
+      'user when a detail is missing.';
+  const request =
+    input.request.length > ROLLOVER_REQUEST_CAP ? sliceText(input.request, ROLLOVER_REQUEST_CAP) : input.request;
+  const answer =
+    input.answer.length > ROLLOVER_ANSWER_CAP ? sliceText(input.answer, ROLLOVER_ANSWER_CAP) : input.answer;
+  const notes = [
+    // Clipping is announced: a model that reads a truncated request as the whole
+    // request would silently redo only part of the work.
+    input.request.length > ROLLOVER_REQUEST_CAP
+      ? `(truncated: ${input.request.length} chars total, the full text is in the transcript)`
+      : '',
+    input.attachments > 0 ? `(the original request had ${input.attachments} attachment(s))` : '',
+  ].filter(Boolean);
+  // The user's own words for the last request. In the summarized shape this line is the
+  // whole "quote the original" half of the handoff: the summary is a model's account of
+  // the window, and it must never be the only copy of what the user actually asked.
+  const requestLine =
+    `The user's last request, verbatim: ${request || '(none found)'}` +
+    (notes.length > 0 ? ` ${notes.join(' ')}` : '');
+  // The leftover list is composed from what §7 actually stopped.
+  const stillRunningLine =
+    `Still running from the previous window: none — ${input.killedBackground.length} background terminal(s) and ` +
+    `${input.killedSubAgents.length} sub-agent(s) were stopped when this window was opened, because their ` +
+    "results could not be delivered into a full window. They are recorded in the previous window's transcript, " +
+    "including each job's command, final state and output tail; a sub-agent has its own file (kind=subagent). " +
+    'Read those records before redoing any of that work.';
+  const killedLine =
+    input.killedBackground.length > 0 || input.killedSubAgents.length > 0
+      ? 'Stopped when this window was opened:\n' +
+        [
+          ...input.killedBackground.map((job) => `- background terminal #${job.id} \`${job.command}\` — ${job.state}`),
+          ...input.killedSubAgents.map(
+            (agent) =>
+              `- sub-agent node ${agent.nodeId}${agent.transcript ? ` — transcript: ${agent.transcript}` : ''}`,
+          ),
+        ].join('\n')
+      : '';
+  const redoLine =
+    "Redo the user's last request here. If it depends on earlier work, fetch that from the transcript first — do " +
+    'not guess.';
+
+  // ---- A summarized rollover: the summary *is* the handoff --------------------------------
+  //
+  // Same window, same pointer, one extra request (§5a): the summary is what the next agent
+  // reads first, and the four facts that cannot be summarised away follow it in a fixed
+  // order — the user's last request verbatim, the transcript pointer, the killed-work list,
+  // and the size of the window that ended. The refusal paragraph of the pointer shape is
+  // deliberately absent: the summary was written *because* the window ended, and repeating
+  // its size sentence at the top would push the handoff down for no fact.
+  if (input.summary) {
+    return [
+      COMPACTION_HARNESS_TITLE,
+      input.summary,
+      previousLine,
+      requestLine,
+      transcriptLine,
+      stillRunningLine,
+      killedLine,
+      usageLine,
+      redoLine,
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+  }
+
+  // ---- The pointer shape (§6), with the unavailable-summary note when it was asked for -
+
   // What was refused (or nearly was) is stated *first*, in the provider's own terms: the two
   // refusals are different statements, and a model told the wrong one redoes the wrong thing
   // — under `images` especially, where the fix is "do not re-attach these bytes", not "send
@@ -312,6 +435,13 @@ function buildContextRolloverMessage(input: {
       : input.reason === 'images'
         ? 'The previous conversation could not be sent to the model any more: the provider refused the request because of its images (the attachments it carried were over its per-request image size limit)'
         : 'The previous conversation was stopped before the provider had to refuse it (the context window was nearly used up)';
+  // The fallback is stated, not hidden: the user picked `Write a handoff summary` and got the
+  // pointer, so the window says so — otherwise the next turn would ask for a summary that
+  // was never written.
+  const unavailable = input.summaryFailure
+    ? ` A handoff summary was asked for but could not be written (${summaryFailureText(input.summaryFailure)}), ` +
+      'so this window is pointed at the previous one instead.'
+    : '';
   paragraphs.push(
     '[Harness: context window reset]\n' +
       `${refused}, so this turn continues in a new, empty window of the same session. ` +
@@ -325,48 +455,14 @@ function buildContextRolloverMessage(input: {
           'none of them came along, and attaching them again would cost the same bytes again — have them looked ' +
           'at by a sub-agent and report back in text. '
         : '') +
-      'Nothing above was carried over: do not claim to remember it.',
+      'Nothing above was carried over: do not claim to remember it.' +
+      unavailable,
   );
-  // The display path is not cut (the tree stays connected), so "previous window"
-  // names the overflowing node the new one hangs below — not its whole chain.
-  paragraphs.push(`Previous window: node ${input.previousNodeId} of session ${input.sessionId}.`);
-  // The size of the window that just ended, in the provider's own terms. Stated as a
-  // fact and never as advice: a model that reads "the window was full" without the
-  // numbers tends to try the same oversized request again from the new window.
-  if (input.usage) {
-    const tail =
-      input.reason === 'near'
-        ? "which is past the harness's 90% rollover threshold; nothing was refused yet."
-        : input.reason === 'images'
-          ? 'the refusal was about the bytes of that request, not about these tokens.'
-          : 'which is at or past the limit this provider accepts for one request.';
-    paragraphs.push(
-      `The previous window used ${input.usage.used} of this model's ${input.usage.window}-token context ` +
-        `(${input.usage.pct}%), ${tail}`,
-    );
+  paragraphs.push(previousLine);
+  if (usageLine) {
+    paragraphs.push(usageLine);
   }
-  paragraphs.push(
-    input.transcriptExists
-      ? 'Its full transcript — every message, tool call and result — is on disk:\n' +
-        `  ${input.transcriptPath}\n` +
-        'Read it when you need a detail: read_file on that path, or search_transcripts with sessionId=' +
-        `${input.sessionId} (line 1 is the meta record). Earlier windows of this session have their own files ` +
-        'in the same folder.'
-      : "The previous window's transcript is not available on disk; rely on the carried-over text and ask the " +
-        'user when a detail is missing.',
-  );
-  const request =
-    input.request.length > ROLLOVER_REQUEST_CAP ? sliceText(input.request, ROLLOVER_REQUEST_CAP) : input.request;
-  const answer =
-    input.answer.length > ROLLOVER_ANSWER_CAP ? sliceText(input.answer, ROLLOVER_ANSWER_CAP) : input.answer;
-  const notes = [
-    // Clipping is announced: a model that reads a truncated request as the whole
-    // request would silently redo only part of the work.
-    input.request.length > ROLLOVER_REQUEST_CAP
-      ? `(truncated: ${input.request.length} chars total, the full text is in the transcript)`
-      : '',
-    input.attachments > 0 ? `(the original request had ${input.attachments} attachment(s))` : '',
-  ].filter(Boolean);
+  paragraphs.push(transcriptLine);
   // The tail is what stops the pointer from being useless: a model that does not know
   // what it does not know never looks anything up.
   paragraphs.push(
@@ -374,30 +470,31 @@ function buildContextRolloverMessage(input: {
       `- the user's last request: ${request || '(none found)'}${notes.length > 0 ? ` ${notes.join(' ')}` : ''}\n` +
       `- the last answer you gave: ${answer || '(none)'}`,
   );
-  paragraphs.push(
-    `Still running from the previous window: none — ${input.killedBackground.length} background terminal(s) and ` +
-      `${input.killedSubAgents.length} sub-agent(s) were stopped when this window was opened, because their ` +
-      "results could not be delivered into a full window. They are recorded in the previous window's transcript, " +
-      "including each job's command, final state and output tail; a sub-agent has its own file (kind=subagent). " +
-      'Read those records before redoing any of that work.',
-  );
-  if (input.killedBackground.length > 0 || input.killedSubAgents.length > 0) {
-    paragraphs.push(
-      'Stopped when this window was opened:\n' +
-        [
-          ...input.killedBackground.map((job) => `- background terminal #${job.id} \`${job.command}\` — ${job.state}`),
-          ...input.killedSubAgents.map(
-            (agent) =>
-              `- sub-agent node ${agent.nodeId}${agent.transcript ? ` — transcript: ${agent.transcript}` : ''}`,
-          ),
-        ].join('\n'),
-    );
+  paragraphs.push(stillRunningLine);
+  if (killedLine) {
+    paragraphs.push(killedLine);
   }
-  paragraphs.push(
-    "Redo the user's last request here. If it depends on earlier work, fetch that from the transcript first — do " +
-      'not guess.',
-  );
+  paragraphs.push(redoLine);
   return paragraphs.join('\n\n');
+}
+
+/**
+ * Why a handoff summary is not in front of the model, in one model-facing clause
+ * (`[Harness: context window reset]` says it when the user asked for a summary and the
+ * rollover fell back). English, like the rest of the harness text — a translated
+ * instruction is a different instruction.
+ */
+function summaryFailureText(reason: CompactionFailure): string {
+  switch (reason) {
+    case 'timeout':
+      return 'the summary request timed out';
+    case 'error':
+      return 'the summary request failed';
+    case 'empty':
+      return 'the model returned nothing';
+    default:
+      return 'the answer did not carry the required sections';
+  }
 }
 
 /**
@@ -3423,6 +3520,13 @@ export class SessionRuntime {
     // notices to this node as `role:'user'` messages, and one of those must never be
     // mistaken for the request the user actually made.
     const carry = this.carriedOver(node);
+    // The summary's input is selected from the window **as the model saw it** — the
+    // context base down to this node — and therefore also before the kill: the union kill
+    // appends its own `role:'user'` notices to this node, the user wrote none of them, and
+    // a summary built from them would report the harness' notes as user requests. It is
+    // bounded and it never walks the chain above the base (§6 of the rollover contract).
+    const handoffSource =
+      opts?.handoff === 'summary' ? extractCompactionSource(pathMessages(this.session, nodeId)) : undefined;
     // Leftover work: the same union kill the composer's Stop uses, so "nothing
     // continues" holds for the old line while the conversation moves on. The tasks
     // are captured first because the hub forgets the *running* snapshot once they are
@@ -3444,6 +3548,11 @@ export class SessionRuntime {
       (id) => this.session.nodes[id]?.contextBaseId === id,
     ).length;
     const windowNo = windows + 2;
+    // The one extra request the user's answer already paid for: written **before** the new
+    // window exists, so the window's first message carries the summary and not a second
+    // kind of handoff. A failure here is never a failed rollover — the pointer text covers
+    // it and says so (§6).
+    const handoff = handoffSource ? await this.writeHandoffSummary(node, handoffSource) : undefined;
     const message = buildContextRolloverMessage({
       reason: this.rolloverReason(node),
       sessionId: this.sessionId,
@@ -3453,6 +3562,8 @@ export class SessionRuntime {
       request: carry.request,
       attachments: carry.attachments,
       answer: carry.answer,
+      summary: handoff?.text,
+      summaryFailure: handoff?.failure,
       killedBackground: killedJobs.map((task) => ({
         id: task.id,
         command: clipText(task.command, 80),
@@ -3475,6 +3586,9 @@ export class SessionRuntime {
       freshEpoch: setup === 'latest',
     });
     if (!run) {
+      // The one path that reached here without a turn: nothing is streaming any more, so
+      // the busy state (and the summary status line) must not outlive the attempt.
+      this.setBusy(this.runs.size > 0);
       return false;
     }
     // `beginTurn` treats the basis node as "the user is continuing this line" and
@@ -3483,13 +3597,15 @@ export class SessionRuntime {
     this.stoppedLines.add(nodeId);
     run.items.push({ kind: 'harness', text: message });
     this.post({ type: 'harnessNote', nodeId: run.node.id, text: message });
-    // The handoff the user asked for is *stored* on the node that starts the window, so the
-    // follow-up feature can implement it without a schema change. `'summary'` currently
-    // behaves exactly like `'just continue'`: the pointer shape below.
-    // TODO(compaction): a `'summary'` handoff must spend one extra request to write a
-    // summary of the previous window and hand *that* to this node instead of the pointer.
+    // The handoff the user asked for is recorded on the node that starts the window: the
+    // choice (`handoff`) and, when it could be written, the text itself (`handoffSummary`).
+    // Both are persisted with the node, so a reload shows the same harness block and later
+    // features can tell a summarized window from a pointed one without re-reading the text.
     if (opts?.handoff === 'summary') {
       run.node.handoff = 'summary';
+      if (handoff?.text) {
+        run.node.handoffSummary = handoff.text;
+      }
     }
     // The composer's own text: a REAL user message of this window, after the harness
     // message — one request carrying both, never a quotation of somebody else's turn. The
@@ -3506,6 +3622,93 @@ export class SessionRuntime {
     this.post({ type: 'nodeUpdate', ...this.nodeStatePatch(run.node) });
     void run.agent.sendUserMessage(message, text || undefined);
     return true;
+  }
+
+  /**
+   * Write the **handoff summary** of one window — the composer's `Write a handoff summary`
+   * answer (§5a/§6 of `docs/agents/invariants/context-rollover.md`).
+   *
+   * One request, on the card this chain sends with, and nothing else:
+   *
+   *  - **no tools** and non-streaming (the completion path, like a session title);
+   *  - a low temperature and a capped output (`buildCompactionRequest`);
+   *  - a **hard** {@link COMPACTION_TIMEOUT_MS} deadline covering the request *and* its one
+   *    validation retry, because the bound is the user's wait and not the attempt count;
+   *  - the fixed eleven-section schema, validated by heading: a missing one is retried
+   *    **once**, and no other failure is retried at all.
+   *
+   * It never throws and never decides the rollover: the caller either gets the text or the
+   * reason it could not be written, and the new window opens either way (with the pointer
+   * text, which says in one sentence that the summary was unavailable). The user already
+   * confirmed the rollover, so the composer shows the busy state and the localized status
+   * line for the duration.
+   */
+  private async writeHandoffSummary(
+    node: TreeNode,
+    source: CompactionSource,
+  ): Promise<{ text?: string; failure?: CompactionFailure }> {
+    const card = this.chainCard(node);
+    this.lastStatus = vscode.l10n.t('Preparing the handoff summary…');
+    this.post({ type: 'status', text: this.lastStatus });
+    this.setBusy(true);
+    const started = Date.now();
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), COMPACTION_TIMEOUT_MS);
+    let text = '';
+    let outputTokens = 0;
+    let failure: CompactionFailure | undefined;
+    try {
+      const request = buildCompactionRequest(source);
+      const first = await this.clients.complete(card, {
+        messages: request.messages,
+        maxTokens: request.maxTokens,
+        temperature: request.temperature,
+        signal: controller.signal,
+      });
+      text = first.text;
+      outputTokens += first.usage?.completion_tokens ?? 0;
+      let verdict = classifyCompactionAnswer({ text });
+      if (!verdict.ok && verdict.reason === 'invalid') {
+        // One retry, and only for the schema: a timeout, an error or an empty answer is not
+        // a formatting problem, and asking again would only spend a second request on it.
+        const missing = missingCompactionSections(text);
+        const second = await this.clients.complete(card, {
+          messages: buildCompactionRetryMessages(source, text, missing),
+          maxTokens: request.maxTokens,
+          temperature: request.temperature,
+          signal: controller.signal,
+        });
+        text = second.text;
+        outputTokens += second.usage?.completion_tokens ?? 0;
+        verdict = classifyCompactionAnswer({ text });
+      }
+      if (verdict.ok) {
+        text = verdict.summary;
+      } else {
+        failure = verdict.reason;
+      }
+    } catch (err) {
+      // The abort is this method's own deadline (no Stop can reach it: a rollover starts on
+      // a node with no live turn). Everything else is the provider's or the transport's.
+      text = '';
+      failure = controller.signal.aborted ? 'timeout' : 'error';
+      this.host.output.appendLine(
+        `[compaction] summary request failed for ${node.id}: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    } finally {
+      clearTimeout(timer);
+    }
+    // One line per attempt — in, out, how long, and what came out of it — because "the
+    // rolling summary is on" is otherwise unverifiable in a real window.
+    perf(
+      compactionDiagLine({
+        inputChars: source.chars,
+        outputTokens,
+        ms: Date.now() - started,
+        outcome: failure ?? 'summary',
+      }),
+    );
+    return failure ? { failure } : { text };
   }
 
   /**

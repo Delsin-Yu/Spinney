@@ -491,11 +491,11 @@ Spinney offers this button before a failure too. The button shows from about 90%
 
 1. Click **Continue with new context**. The composer sends your message into the new window. If the node still owns running work, a modal asks first. It names the work that will stop.
 2. Answer the question `Continue in a new context window?`:
-   - `Write a handoff summary`. The agent that takes over receives a summary of this conversation. The summary costs one extra request. This answer is a plan for a later release, so for now it continues like the second answer.
+   - `Write a handoff summary`. Spinney sends one extra request to the same model card. The request reads only the messages of the previous window, up to 60000 characters. The new agent receives the summary first. The summary holds the requests, the files and the code sections, the errors, the pending tasks, and the current work. It also holds the record path, the key file paths, and the stopped jobs. Every code section is marked `re-read before editing`, because your workspace can change. The summary is English, whatever the display language. The composer shows `Preparing the handoff summary…` during the request. If the request fails, or the answer has no required headings, Spinney continues like `Just continue`. The harness message then says that the summary is not available. The rollover does not fail.
    - `Just continue`. Spinney points the new agent at the previous branch. The agent reads the transcript on disk when it needs a detail.
 3. Spinney opens a new card below that node. The edge is dashed, the title is `Context window {0}`, and the badge is `CTX`.
 
-The new window starts with the system prompt, one harness message, and your message. The harness message holds the size of the previous window, your last request, and the last answer, in a shortened form. It also names the transcript file of the previous window. Attachments cannot cross, so the message names them instead.
+The new window starts with the system prompt, one harness message, and your message. The harness message names the transcript file of the previous window, the work that stopped, and the size of the previous window. With `Just continue`, it also holds your last request and the last answer, in a shortened form. With `Write a handoff summary`, it starts with the summary, and your last request in your own words follows it. Attachments cannot cross, so the message names them instead.
 
 The old branch stays usable. You can send into it again, or press **▶ Continue** there, until it overflows again.
 
