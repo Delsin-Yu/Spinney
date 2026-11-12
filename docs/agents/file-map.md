@@ -416,7 +416,10 @@
   them back as `perfDiag` — see `invariants/streaming-perf.md`.
   Canvas gestures live in one block near the end: LMB/MMB drag pans by offset,
   RMB-hold autoscroll-pans towards the cursor (browser middle-click semantics,
-  with an origin marker and the `all-scroll` cursor), ctrl+wheel zooms.
+  with an origin marker and the `all-scroll` cursor), ctrl+wheel zooms,
+  alt+wheel pans vertically — from anywhere in the tree, so a card, a thinking
+  block and the composer pan instead of scrolling themselves — and shift+wheel
+  pans horizontally.
   RMB on a **card header** is the exception to that block: a `.node-head` opens the
   webview's own **node menu** (`openNodeMenu` → the host's `copyNodeId` case in
   `ChatViewProvider.handlePanelMessage`), because the header is `user-select: none`

@@ -72,6 +72,7 @@ The toolbar holds two buttons:
 |---|---|
 | Wheel | Scrolls the view. |
 | `Ctrl`+wheel | Zooms. |
+| `Alt`+wheel | Pans up and down. It also works over a card or the input area. |
 | `Shift`+wheel | Pans sideways. |
 | Middle-button drag | Pans. |
 | Right-button hold | Pans toward the pointer. |
