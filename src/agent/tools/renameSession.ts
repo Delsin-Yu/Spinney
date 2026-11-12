@@ -1,3 +1,4 @@
+import { TOOL_TITLE_DESCRIPTION } from '../types';
 import type { InterceptedTool } from './index';
 
 /**
@@ -18,7 +19,8 @@ export const renameSessionTool: InterceptedTool = {
         properties: {
           title: {
             type: 'string',
-            description: 'The new session title: short (≤ 20 chars), one line, no trailing punctuation.',
+            description:
+              'The new session title: short (≤ 20 chars), one line, no trailing punctuation. It is also the one short human label the UI shows for this step.',
           },
           sessionId: {
             type: 'string',

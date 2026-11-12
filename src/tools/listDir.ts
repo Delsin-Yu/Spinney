@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { AgentTool } from '../agent/types';
+import { AgentTool, TOOL_TITLE_DESCRIPTION } from '../agent/types';
 import { SKIP_DIRS, ensureNotAborted, globToRegex, limitInline, resolvePath } from './index';
 
 /** Cap a recursive listing so one call cannot dump an unbounded tree. */
@@ -19,6 +19,7 @@ export const listDirTool: AgentTool = {
           path: { type: 'string', description: 'Directory path.' },
           glob: { type: 'string', description: 'Optional glob filter, e.g. "*.ts" or "**/*.ts".' },
           recursive: { type: 'boolean', description: 'Walk subdirectories (default false).' },
+          title: { type: 'string', description: TOOL_TITLE_DESCRIPTION },
         },
         required: ['path'],
       },

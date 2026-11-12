@@ -139,6 +139,37 @@ export function clipForUi(text: string, cap = UI_TOOL_CONTENT_CAP): string {
   return `${kept}\n…[truncated ${text.length - kept.length} chars for UI]`;
 }
 
+/**
+ * The model's own one-line label for a step: the `title` argument every tool
+ * schema carries (`TOOL_TITLE_DESCRIPTION` in `agent/types.ts`). It is read out of
+ * the call's arguments **here**, on the host, and stored on the `DisplayItem` — so
+ * the card's step row keeps it even though the display copy of `args` is clipped to
+ * 8 KiB and the row may be rebuilt from a repaint or a reload. Whitespace is
+ * collapsed to one line and the label is capped at the length the schema promises,
+ * because a model that ignores "at most ~60 characters" must not be able to push a
+ * paragraph into a one-line row. Anything unparsable, absent or blank yields
+ * `undefined`, and the webview then falls back to its own `toolBrief()`.
+ */
+export function toolTitleFromArgs(args: unknown): string | undefined {
+  if (typeof args !== 'string' || !args) {
+    return undefined;
+  }
+  let raw: unknown;
+  try {
+    raw = (JSON.parse(args) as { title?: unknown }).title;
+  } catch {
+    return undefined;
+  }
+  if (typeof raw !== 'string') {
+    return undefined;
+  }
+  const label = raw.replace(/\s+/g, ' ').trim();
+  return label ? sliceText(label, TOOL_TITLE_MAX) : undefined;
+}
+
+/** The longest one-line step label the UI shows (the schema asks for ~60). */
+const TOOL_TITLE_MAX = 60;
+
 /** Shrink tool cards in the UI transcript; agent `messages` keep the full tool payload. */
 export function clipDisplayItem(item: DisplayItem): DisplayItem {
   if (item.kind === 'tool') {
@@ -526,9 +557,6 @@ export interface HarnessConfig {
    * `replyLanguageName`.
    */
   replyLanguage: string;
-  foldToolCalls: boolean;
-  foldThinking: boolean;
-  foldWork: boolean;
   maxConcurrentSubagents: number;
   maxLevel2Subagents: number;
   saveSubAgentTranscripts: boolean;
@@ -2589,9 +2617,6 @@ export class SessionRuntime {
       })),
       efforts: effortsFor(this.card),
       thinkingEffort: this.thinkingEffort,
-      foldToolCalls: cfg.foldToolCalls,
-      foldThinking: cfg.foldThinking,
-      foldWork: cfg.foldWork,
       snippets: cfg.promptSnippets,
       // The two setups the composer shows, and whether they disagree: the webview marks
       // Send (and offers the new-setup entry) from this alone.
@@ -4410,6 +4435,10 @@ export class SessionRuntime {
             id: event.id,
             name: event.name,
             args: clipForUi(event.args, 8 * 1024),
+            // The model's own label for this step, stored on the item: the UI's row
+            // reads it back on a repaint instead of deriving one from (the clipped)
+            // arguments. Absent when the call carried no `title`.
+            title: toolTitleFromArgs(event.args),
             status: 'running',
             // The host's start clock, not the webview's: a card created by a repaint
             // mid-call must tick from the same origin the live one does.
@@ -4420,6 +4449,7 @@ export class SessionRuntime {
             id: event.id,
             name: event.name,
             args: clipForUi(event.args, 8 * 1024),
+            title: toolTitleFromArgs(event.args),
             index: event.index,
             nodeId: run.nodeId,
             startedAt: event.startedAt,
@@ -4644,6 +4674,10 @@ export class SessionRuntime {
     if (item) {
       item.status = 'done';
       item.content = clipForUi(content);
+      // `item.title` is deliberately untouched: it was read out of the call's
+      // arguments when the item was created (`toolTitleFromArgs`) and the update
+      // carries no arguments to read it from again — a step's label may not
+      // disappear because its result arrived.
       // The call's own duration: the card freezes on it, and the start clock goes
       // away with it (the pair is "running" or "took this long", never both).
       item.ms = ms;
@@ -5345,7 +5379,7 @@ export class SessionRuntime {
         break;
       case 'toolStart':
         this.commitSubTool(items, event.id, event.name, event.args, event.startedAt);
-        this.post({ type: 'toolStart', id: event.id, name: event.name, args: clipForUi(event.args, 8 * 1024), index: event.index, nodeId: id, startedAt: event.startedAt });
+        this.post({ type: 'toolStart', id: event.id, name: event.name, args: clipForUi(event.args, 8 * 1024), title: toolTitleFromArgs(event.args), index: event.index, nodeId: id, startedAt: event.startedAt });
         break;
       case 'toolEnd':
         this.commitSubToolResult(items, event.id, event.content, event.ms);
@@ -5403,7 +5437,15 @@ export class SessionRuntime {
   }
 
   private commitSubTool(items: DisplayItem[], id: string, name: string, args: string, startedAt: number): void {
-    items.push({ kind: 'tool', id, name, args: clipForUi(args, 8 * 1024), status: 'running', startedAt });
+    items.push({
+      kind: 'tool',
+      id,
+      name,
+      args: clipForUi(args, 8 * 1024),
+      title: toolTitleFromArgs(args),
+      status: 'running',
+      startedAt,
+    });
   }
 
   private commitSubToolResult(items: DisplayItem[], id: string, content: string, ms: number): void {

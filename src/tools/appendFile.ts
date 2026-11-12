@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { AgentTool } from '../agent/types';
+import { AgentTool, TOOL_TITLE_DESCRIPTION } from '../agent/types';
 import { applyEol, detectEol, ensureNotAborted, resolvePath, toLf, verbatimFrameError } from './index';
 
 export const appendFileTool: AgentTool = {
@@ -15,6 +15,7 @@ export const appendFileTool: AgentTool = {
         properties: {
           path: { type: 'string', description: 'File path to append to (created when absent).' },
           content: { type: 'string', description: 'Text to add at the end of the file, as a plain JSON string.' },
+          title: { type: 'string', description: TOOL_TITLE_DESCRIPTION },
         },
         required: ['path', 'content'],
       },

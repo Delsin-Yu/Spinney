@@ -124,8 +124,6 @@ const host = new Proxy(
       maxConcurrentSubagents: 4,
       maxLevel2Subagents: 4,
       autoSessionTitles: false,
-      foldToolCalls: true,
-      foldThinking: true,
       defaultCardId: TEST_CARD_ID,
       replyLanguage: 'English',
     }),

@@ -969,9 +969,6 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     // against the display language of this window (`replyLanguageName` also maps
     // a tag to its CLDR name and falls back to English for a blank locale).
     const replyLanguage = replyLanguageName(cfg.get<string>('replyLanguage') ?? '', vscode.env.language);
-    const foldToolCalls = cfg.get<boolean>('foldToolCalls') ?? true;
-    const foldThinking = cfg.get<boolean>('foldThinking') ?? true;
-    const foldWork = cfg.get<boolean>('foldWork') ?? true;
     const maxConcurrentSubagents = cfg.get<number>('maxConcurrentSubagents') ?? 15;
     const maxLevel2Subagents = cfg.get<number>('maxLevel2Subagents') ?? 2;
     const saveSubAgentTranscripts = cfg.get<boolean>('saveSubAgentTranscripts') ?? true;
@@ -988,7 +985,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     // the list is live on the next `postConfig` — the same shape every other key
     // follows.
     const promptSnippets = resolvePromptSnippets(cfg.get<unknown>('promptSections'));
-    return { defaultCardId, replyLanguage, foldToolCalls, foldThinking, foldWork, maxConcurrentSubagents, maxLevel2Subagents, saveSubAgentTranscripts, saveSessionTranscripts, subAgentTranscriptDir, autoSessionTitles, hopSessionEnabled, promptSnippets };
+    return { defaultCardId, replyLanguage, maxConcurrentSubagents, maxLevel2Subagents, saveSubAgentTranscripts, saveSessionTranscripts, subAgentTranscriptDir, autoSessionTitles, hopSessionEnabled, promptSnippets };
   }
 
   // ---- API keys (SecretStorage: one entry per provider) ----

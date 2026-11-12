@@ -39,6 +39,11 @@
   per-node `signals` queue, handed to a running turn at its next tool boundary or
   injected into the idle owning node. Reaches the provider through the narrow `RuntimeHost`.
   `treeMessage()` builds the `tree` message **without** posting it.
+  `toolTitleFromArgs()` is the one reader of a tool call's `title` argument (every tool
+  schema carries it, `TOOL_TITLE_DESCRIPTION` in `agent/types.ts`): it collapses the label
+  to one line, caps it at 60 characters and stores it on the `DisplayItem` **and** on the
+  `toolStart` message, so the card's step row shows the model's label even though the
+  display copy of `args` is clipped to 8 KiB — and it survives every repaint.
   A full context window is continued rather than compressed by `rolloverContext()` (the
   union kill + settle + flush + re-dump, `beginTurn({ freshContext })`, the harness resume
   text and the `contextFull` flag it ships) — see `invariants/context-rollover.md`.
@@ -95,7 +100,11 @@
   `invariants/context-rollover.md`), `attachNode`, `pruneSession`,
   branch removal (`branchIds` / `detachBranch`), the `isSidecar` predicate (a
   sub-agent `kind:'agent'` window vs. a background job `kind:'bg'` card — both
-  display-only sidecars) and the v1→v2 state migration. Pure data layer, no VS Code UI.
+  display-only sidecars) and the v1→v2 state migration. Its `DisplayItem` is the shape
+  every rendered row is built from: a `kind:'tool'` item carries the model's own one-line
+  label (`title`, read out of the call's arguments by `toolTitleFromArgs` in
+  `runtime.ts`), the host clocks (`startedAt` / `ms`) and the clipped `args` / `content`,
+  so a repaint can rebuild the row instead of re-deriving it. Pure data layer, no VS Code UI.
   A `kind:'bg'` card also carries the dock's removal (`TreeNode.bgDockDismissed`, see
   `invariants/background-terminals.md`).
 - `src/chat/fileWriteQueue.ts` — the coalescing, off-the-host-thread file writer shared by
@@ -396,7 +405,12 @@
   this module (safe: every use is inside `execute()`, i.e. call time).
 - `src/tools/readFile.ts` · `writeFile.ts` · `appendFile.ts` · `replaceInFile.ts` ·
   `listDir.ts` · `searchFiles.ts` · `searchTranscripts.ts` · `execCommand.ts` — the
-  registry tools, each with its schema and its implementation in the same file.
+  registry tools, each with its schema and its implementation in the same file. Every
+  schema (these, the three background tools and every intercepted tool) also declares the
+  same optional `title` argument — `TOOL_TITLE_DESCRIPTION` in `src/agent/types.ts` — the
+  model's one-line label for the step, which the card's tool row shows instead of a derived
+  one. A tool body ignores it; the host reads it (`toolTitleFromArgs`) and stores it on the
+  `DisplayItem`.
 - `src/tools/backgroundTools.ts` — `check_command` /
   `wait_for_command` / `kill_command`, grouped because they all read the same
   `BackgroundRegistry`.
@@ -437,6 +451,21 @@
   active node, composer, streaming meter, live tool drafts, drag-to-resize cards,
   background job cards + `.bgnotify` notification blocks, and the window-global
   terminal dock).
+  **A turn card is one essay.** `.node-ask` pins the user's prompt and `.node-work` is the
+  card's **only scroller**, holding every row of the turn in order — the thinking rows, the
+  tool rows, the notices, the `HARNESS` blocks and the assistant's markdown, with the
+  model's final answer as the **last block** of that flow. There is no second zone an
+  answer could live in: nothing is promoted, measured or folded per card any more, so a
+  live turn and a repaint cannot disagree. The two rows are *thinking* (`.msg.thinking-row`
+  — open while its turn runs, one ellipsised line after, no label; a click toggles it and
+  the open form carries the usage line `[Prompt: {0} + Completion: {1}, Cache Hit: {2},
+  Cache Miss: {3}]`) and *tool* (`.msg.tool` — one line: a status dot, a bold
+  `tr()`-localized verb from `TOOL_VERBS`, the label from `DisplayItem.title` or
+  `toolBrief()` in monospace for a command/pattern, and the elapsed chip; a click expands
+  `.tool-detail` in place — the `> args` line, the result, an error, the usage line).
+  `renderItemInto` (the history repaint) goes through the **same** `addTool` /
+  `makeThinkingRow` / `addAssistant` the live path uses, and `tools/check-webview.js`
+  pins that equivalence.
   Every string it displays goes through its own `tr(message, ...args)` (defined at
   the top of the file): the host has no `vscode.l10n` inside a webview, so it
   injects the catalog as `window.__spinneyL10n` and `tr()` looks the English source

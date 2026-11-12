@@ -4,8 +4,9 @@
  * panel matches the editor in light, dark and high-contrast themes alike.
  */
 :root {
-  /* The card's own cap, in one place: `media/main.js` reads `--node-max-h` back when it
-     has to decide how much room the two zones may take (`cardHeightCap`). */
+  /* The card's own cap, in one place. `media/main.js` never writes a layout height onto
+     a card, so this (or the size the user dragged) is the only limit: a long turn
+     scrolls inside `.node-work` instead of growing the card. */
   --node-max-h:   1200px;
   --bg:           var(--vscode-sideBar-background, #1e1e1e);
   --bg2:          var(--vscode-sideBarSectionHeader-background, #252526);
@@ -535,60 +536,182 @@ button.icon-btn {
 
 .answer del { color: var(--text-dim); }
 
-.thinking {
-  position: relative;
-  margin-bottom: 8px;
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  background: var(--bg3);
-  overflow: hidden;
-}
+/* ---- The two rows of the log ------------------------------------------------
+   A turn is one flow of rows inside `.node-work` (the card's only scroller), so a
+   thinking row and a tool row are *lines in the essay*, not boxes stacked on it: no
+   border, no background, no header. What distinguishes them is what they say and how
+   loud they are — the reasoning is dim italic text, the step is a bold verb. */
 
-.thinking-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
+/* A thinking row: dimmed italic prose while its turn is live, one ellipsised line once
+   the turn is over. The row is the control — there is no label and no chevron, so a
+   click anywhere on it opens the whole reasoning plus the turn's usage line. */
+.thinking-row {
+  align-self: stretch;
+  max-width: 100%;
+  margin: 0;
+  padding: 0 2px;
   cursor: pointer;
-  user-select: none;
-  padding: 5px 8px;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
-.thinking-head .chev {
-  color: var(--text-dim);
-  font-size: 10px;
-  transition: transform 0.15s ease;
-}
-
-.thinking-head .chev.open {
-  transform: rotate(90deg);
-}
-
-.thinking-head .thinking-label {
-  color: var(--accent);
-  font-size: 11px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-}
-
-.thinking-body {
-  padding: 0 8px 8px;
-  border-top: 1px solid var(--border);
+.thinking-row .thinking-text {
   color: var(--text-dim);
   font-style: italic;
+  font-size: 12px;
+  line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-word;
-  line-height: 1.4;
-  max-height: 240px;
-  overflow: auto;
-  /* Room below the scrollbar for the scroll-lock light, so it sits clear of the
-     block's bottom edge (see .scroll-lock-dot). */
-  margin-bottom: 20px;
+  /* The closed form: exactly one line, ending in an ellipsis. `nowrap` +
+     `text-overflow` is what makes it one line whatever the text says, and the open
+     form below undoes all three. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.85;
 }
 
-.thinking-body.hidden {
+.thinking-row:hover .thinking-text {
+  opacity: 1;
+}
+
+/* Open: the whole paragraph, at the size it reads at, with the usage line under it. */
+.thinking-row.open .thinking-text {
+  white-space: pre-wrap;
+  overflow: visible;
+  text-overflow: clip;
+  opacity: 1;
+}
+
+/* The usage line is part of the *open* form only (main.js adds/removes `hidden`), so
+   the closed row stays one line. */
+.thinking-row .usage-line.hidden {
   display: none;
 }
 
+/* A tool row: one line — the status dot, the bold verb, the label and the elapsed
+   chip — and a folded detail under it. The row is the control. */
+.msg.tool {
+  align-self: stretch;
+  max-width: 100%;
+  padding: 2px 2px 0;
+  background: none;
+  border: none;
+  border-radius: 0;
+  font-size: 12px;
+}
+
+.tool-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  -webkit-user-select: none;
+  min-width: 0;
+}
+
+/* The status dot: small, and the only thing that says whether the step is still
+   running. Filled and pulsing while it runs, a plain dim dot once it ended — the
+   elapsed chip next to it then holds the frozen number. */
+.tool-dot {
+  flex: 0 0 auto;
+  align-self: center;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  opacity: 0.6;
+}
+
+.msg.tool.running .tool-dot {
+  background: var(--warn);
+  opacity: 1;
+  animation: pulse 1s ease-in-out infinite;
+}
+
+.msg.tool.done .tool-dot {
+  background: var(--success);
+}
+
+.tool-verb {
+  flex: 0 0 auto;
+  font-weight: 700;
+  color: var(--accent);
+}
+
+/* The label is the step itself: a path or a title in the UI's own type, a command or a
+   pattern in monospace (main.js adds `.mono` per tool). It is the one part of the row
+   that is allowed to be cut off — a long command ends in an ellipsis, the verb and the
+   chip never do. */
+.tool-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.tool-label.mono {
+  font-family: "Consolas", "Courier New", monospace;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* The expanded detail, in place under the row: the `> args` line, the result, an error
+   and the usage line. It scrolls on its own (a 32 KiB result must not become the card's
+   scroll position) and it is the row's own surface, one shade down from the log. */
+.tool-detail {
+  margin: 4px 0 6px 12px;
+  padding: 6px 8px;
+  border-left: 2px solid var(--border);
+  background: var(--bg3);
+  border-radius: 0 6px 6px 0;
+  max-height: 260px;
+  overflow: auto;
+  color: var(--text-dim);
+  scrollbar-gutter: stable;
+}
+
+.tool-detail.hidden {
+  display: none;
+}
+
+/* `> command` — the one line that says what was actually run or read. */
+.tool-args-line {
+  font-family: "Consolas", "Courier New", monospace;
+  font-size: 11px;
+  color: var(--accent-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+  margin-bottom: 4px;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.tool-detail .tool-result {
+  margin: 0;
+  font-family: "Consolas", "Courier New", monospace;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.tool-error {
+  margin-top: 4px;
+  color: var(--error-text);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* The usage line: a footnote on the line above it (the open thinking row, the tool
+   row's detail, the end of an answer), never a block of its own. */
 .usage-line {
   margin-top: 6px;
   padding-top: 6px;
@@ -598,83 +721,7 @@ button.icon-btn {
   color: var(--text-dim);
 }
 
-.msg.tool {
-  align-self: flex-start;
-  max-width: 100%;
-  background: var(--tool-bg);
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--accent);
-  font-family: "Consolas", "Courier New", monospace;
-  font-size: 12px;
-}
-
-.tool-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  cursor: pointer;
-  user-select: none;
-}
-
-.tool-head .chev {
-  color: var(--text-dim);
-  font-size: 10px;
-  transition: transform 0.15s ease;
-}
-
-.tool-head .chev.open {
-  transform: rotate(90deg);
-}
-
-.tool-head .tool-name {
-  color: var(--accent);
-  font-weight: 600;
-}
-
-.tool-head .tool-status {
-  margin-left: auto;
-  color: var(--text-dim);
-  font-size: 11px;
-}
-
-.tool-status.running::before {
-  content: "●";
-  color: var(--warn);
-  margin-right: 4px;
-  animation: pulse 1s ease-in-out infinite;
-}
-
-.tool-status.done::before {
-  content: "✓";
-  color: var(--success);
-  margin-right: 4px;
-}
-
-.tool-status.streaming::before {
-  content: "›";
-  color: var(--accent);
-  margin-right: 4px;
-  animation: pulse 1s ease-in-out infinite;
-}
-
-.msg.tool.live {
-  border-left-color: var(--accent-dim);
-}
-
-.msg.tool.live .tool-name {
-  color: var(--accent-dim);
-}
-
-.tool-body {
-  margin-top: 6px;
-  padding-top: 6px;
-  border-top: 1px solid var(--border);
-  max-height: 240px;
-  overflow: auto;
-  color: var(--text-dim);
-}
-
-.tool-body.hidden {
+.usage-line.hidden {
   display: none;
 }
 
@@ -1204,15 +1251,13 @@ button.icon-btn {
 /* Node content is selectable/copiable (the head + background stay non-selectable so
    panning and checkout clicks don't fight text selection). */
 .node-work,
-.node-answer,
 .node-ask,
 .node-excerpt,
 .node-summary,
-.tool-args,
 .tool-result,
-.tool-brief,
 .usage-line,
-.thinking-body,
+.thinking-text,
+.tool-label,
 .bgnotify-output,
 .bgnotify-cmd,
 /* A job card lives inside #tree-canvas (user-select: none), so its command and
@@ -1257,26 +1302,20 @@ button.icon-btn {
 .node {
   position: absolute;
   width: 320px;
-  /* A long transcript no longer grows the card forever; the items scroll.
-     1200px = twice the old cap (the transcript height plus the composer dock that
-     now lives at the bottom of the active card): a card stacks three zones (ask,
-     work log, answer) and splits its body 1:2 between the last two, so the old
-     height would have halved each of them. The same doubled cap is repeated on
-     `.node.expanded` below — one reading height for the card, not a second
-     opinion. */
+  /* A long turn never grows the card: the whole essay scrolls inside `.node-work`
+     (the card's one scroller) and the head, the pinned ask and the composer stay put.
+     1200px is a reading height, and the drag-resize can raise it — never a second
+     opinion about it (the layout writes no inline size at all). */
   max-height: var(--node-max-h);
   background: var(--assistant-bg);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   /* `visible`, not `hidden`: the resize handle is deliberately placed *outside*
      the card's bottom-right corner (see `.node-resize`), and a clip here would
-     cut it off. Nothing inside needs the clip — every scroller (.node-work,
-     .node-answer, .node-ask, .thinking-body) scrolls on its own — but the
+     cut it off. Nothing inside needs the clip — the two scrollers (`.node-work`,
+     `.node-ask`) and an expanded step's own box scroll on their own — but the
      children that paint their own background must carry the card's rounding
-     instead: `.node-head` at the top, `#composer` at the bottom. Zone 3's band is
-     the third painter and carries none of its own: only a card that hosts no
-     composer (i.e. a non-active one) ends on that band, and there its square
-     corners sit inside this rule's rounded border. */
+     instead: `.node-head` at the top and `#composer` at the bottom. */
   overflow: visible;
   display: flex;
   flex-direction: column;
@@ -1390,27 +1429,25 @@ button.icon-btn {
 .node-status[data-status="done"] { color: var(--success); background: #1d3a2a; }
 
 .node-body {
-  /* Deliberately *un*padded: zone 3's surface and its hairline have to reach the
-     card's edges (that is the whole point of the band), and a padding here would
-     hold them 10px inside it. The inset it used to give every child now lives on
-     the zones themselves — `.node-work-wrap`, `.node-answer-wrap` and
-     `.node-excerpt` each carry 10px — so the only thing that changed is that a
-     zone can now paint all the way out. */
+  /* Bare on purpose: the 10px inset lives on the log's wrapper and on the collapsed
+     preview, so a row can paint across the card's full width when it wants to (the
+     usage hairline, a result's left rule) and still sit inside the card's own edges. */
   padding: 0;
   display: flex;
   flex-direction: column;
   min-height: 0;
+  flex: 1 1 auto;
 }
 
-/* Zone 0 — "the content of this node is on its way" — is the strip a waiting card wears
-   (see `setCardLoading` in main.js). It exists because the symptom this exists for was
-   a card with *nothing at all* in it: three cards measured `work:0 ans:0` next to a
+/* "The content of this node is on its way" — the strip a waiting card wears (see
+   `setCardLoading` in main.js). It exists because the symptom this exists for was a
+   card with *nothing at all* in it: three cards measured `work:0 ans:0` next to a
    `preview` that promised a full session, which is indistinguishable from an empty,
    finished node. It is only displayed for an expanded card that is still waiting
    (`items-loading` is taken off the moment the items render, or when the wait is up),
    so a collapsed card keeps showing its preview and a filled card keeps showing its
    log. `.node-loading` is a child of the body, so it sits under the pinned ask — the
-   zone that is waiting is the body, and this is the line that says so. */
+   part that is waiting is the body, and this is the line that says so. */
 .node-loading {
   display: none;
   align-items: center;
@@ -1435,12 +1472,12 @@ button.icon-btn {
   animation: pulse 1s ease-in-out infinite;
 }
 
-/* Zone 2 (the work log) hangs off a wrapper that is the scroll-lock light's
-   positioning context: the dot is absolute, so it lands in the strip below the
-   work log (the log's own `margin-bottom`), not at the bottom of the whole body.
-   It also owns zone 2's 10px inset now that `.node-body` is bare, and hosts the
-   fold head *above* the scroller, so the head stays put while the log scrolls
-   under it. */
+/* The log's box. It is **not** a scroller — the log inside it is the card's only one —
+   and it exists for two reasons: it is the scroll-lock light's positioning context (the
+   dot is absolute, so it lands in the strip below the log rather than at the bottom of
+   the body), and it carries the 10px inset now that `.node-body` is bare. `hidden` on
+   this wrapper is what a card with nothing in its log wears: the dot goes with it,
+   because a light over an empty box is a light over nothing. */
 .node-work-wrap {
   position: relative;
   display: flex;
@@ -1450,65 +1487,19 @@ button.icon-btn {
   padding: 10px;
 }
 
-/* The fold control for the log: a strip, not content — small dim type over a
-   hairline, so it reads as a control *on* the log instead of as its first item.
-   It is a sibling above `.node-work`, never inside it: a head in the scroller
-   would scroll away from the click that needs it. `flex: 0 0 auto` because a
-   squeezed log must not be able to squeeze its own handle off the card. */
-.node-work-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: 0 0 auto;
-  margin-bottom: 6px;
-  padding-bottom: 3px;
-  border-bottom: 1px solid var(--border);
-  font-size: 11px;
-  color: var(--text-dim);
-  cursor: pointer;
-  user-select: none;
-  -webkit-user-select: none;
-}
-
-/* Hover brightens the label and the chevron together (the chevron deliberately
-   inherits the head's colour) and lifts the hairline to the accent: the whole
-   strip is the click target, so the whole strip answers the pointer. */
-.node-work-head:hover {
-  color: var(--text);
-  border-bottom-color: var(--accent-dim);
-}
-
-/* The chevron uses the shared idiom (`.thinking-head .chev` / `.tool-head .chev`);
-   the rotation rule has to be restated because the existing ones are scoped to
-   those heads. */
-.node-work-head .chev {
-  font-size: 10px;
-  transition: transform 0.15s ease;
-}
-
-.node-work-head .chev.open {
-  transform: rotate(90deg);
-}
-
+/* The card's **one scroller**, holding the whole turn in order: the thinking rows,
+   the tool rows, the notices, the `HARNESS` blocks, the text the turn went through and
+   the final answer as its last block. The card's own cap bounds it, so a scaled card
+   simply reveals more of the same column. */
 .node-work {
   display: flex;
   flex-direction: column;
   gap: 8px;
-  /* Fill its wrapper and scroll inside; the card's own max-height bounds it,
-     so a scaled card reveals more transcript. */
   flex: 1 1 auto;
   min-height: 0;
   overflow-y: auto;
-  /* Room below the scrollbar for the scroll-lock light (see .thinking-body). */
+  /* Room below the scrollbar for the scroll-lock light (see `.scroll-lock-dot`). */
   margin-bottom: 20px;
-}
-
-/* Folded: the scroller is gone (the head above is what unfolds it again) and so is
-   its scroll-lock light — while the log is folded nothing inside it scrolls, so a
-   "follow" light would be a light over nothing. */
-.node.work-folded .node-work,
-.node.work-folded .scroll-lock-dot {
-  display: none;
 }
 
 /* A **monitor**: the card a sidecar window wears while it is not the focused node (see
@@ -1519,155 +1510,39 @@ button.icon-btn {
    depth band instead. The one sidecar that *is* the focused node is the ordinary expanded
    card above, at its own cap (`--node-max-h`) — this number is deliberately not that cap.
    `height` is what makes the card stick to the cell (`max-height` alone still lets a short
-   log shrink the card back to its content); the second line is what holds a long one. The
-   block sits after the fold rule above because it has to win against it: the tail is the
-   whole point of a monitor, so the fold may not take it away. */
+   log shrink the card back to its content); the second line is what holds a long one. */
 .node.monitor {
   height: 200px;
   max-height: 200px;
 }
 
-/* The two zones a *reading* card is made of are out of the picture: the ask belongs to
-   reading a turn, and zone 3 is the answer `promoteAnswer` lifts out of the log — which
-   `syncAnswerZone` refuses to do while the card is a monitor. Hidden rather than emptied,
-   so the focused card gets both back without a re-fill. */
-.node.monitor .node-ask,
-.node.monitor .node-answer-wrap {
+/* The pinned ask belongs to *reading* a turn, and a monitor is a window onto work:
+   hidden rather than emptied, so the focused card gets it back without a re-fill. */
+.node.monitor .node-ask {
   display: none;
-}
-
-/* The log, always: a monitor is a window onto it, so the fold — the automatic one that
-   follows an answer, or a click on the head — may not close it. `display` here and not in
-   the fold rule's own group because that rule is a `display: none` this has to out-order. */
-.node.monitor .node-work {
-  display: flex;
 }
 
 /* The preview is the monitor's footer: the same element the collapsed card shows
    (`monitorCard` writes it), one line under the tail — `-webkit-line-clamp` is
    `.node-excerpt`'s own clamp reduced to what a 200px window has room for — and never the
    part that gives away when the tail is long: the log above is the flexible one. */
-.node.monitor .node-excerpt {
-  flex: 0 0 auto;
-  -webkit-line-clamp: 1;
-}
-
-/* Zone 3 holds the same bubbles zone 2 does, so both scrollers need the widening:
-   without `.node-answer` here the promoted answer falls back to the base
-   `.msg.assistant` (`max-width: 92%`, `align-self: flex-start`) and renders as an
-   inset bubble inside a full-width zone, which is what zone 3 must never look
-   like. */
-.node-work .msg,
-.node-answer .msg {
+.node.monitor /* Every row of the log runs the width of the log (a bubble would inset the essay's
+   own lines), so the widening both the assistant bubble and a job notice need lives
+   here. */
+.node-work .msg {
   max-width: 100%;
 }
 
 .node-work .msg.user,
 .node-work .msg.assistant,
 .node-work .msg.tool,
-.node-work .msg.bgnotify,
-.node-answer .msg.user,
-.node-answer .msg.assistant,
-.node-answer .msg.tool,
-.node-answer .msg.bgnotify {
+.node-work .msg.bgnotify {
   align-self: stretch;
 }
 
-/* How the two zones share the card: the answer's own height grows the card, the log is a
-   strip that scrolls — a conversation growing in zone 2 must not stretch the card. The
-   numbers are measured in JS (`settleAnswerSplit`), because "the height this answer needs"
-   cannot be read in CSS. History, so it is not tried again: a hard 1:2 lock divided the
-   card even when neither zone wanted its half, and a "hug whichever content is longer"
-   rule let a long log stretch the card to its cap. */
-.node.answer-split .node-work-wrap {
-  /* The log takes whatever the answer's pinned share leaves; the wrapper carries the
-     strip's height, so a longer conversation scrolls inside it. */
-  flex: 1 1 0;
-  min-height: 0;
-}
-
-.node.answer-split .node-answer-wrap {
-  /* Its height is the inline one `settleAnswerSplit` measured and wrote; `auto` here
-     would let a long answer push the log back to nothing. */
+.node-excerpt {
   flex: 0 0 auto;
-}
-/* Folded log: the answer is the only zone left to fill the body, so it takes what
-   it needs (`auto`) rather than a share of a card it no longer shares. */
-.node.has-answer.work-folded .node-answer-wrap { flex: 1 1 auto; }
-/* No free space for the folded strip to share: a card the user dragged taller has a
-   definite height, and with `1 1 auto` on both
-   wrappers the free space was split 1:1 between a one-line fold strip and the answer.
-   The strip is a handle, not content, so it hugs its own height; the answer keeps the
-   `1 1 auto` above. */
-.node.has-answer.work-folded .node-work-wrap { flex: 0 0 auto; }
-
-/* One read with the split suspended, for `settleAnswerSplit` (media/main.js): the
-   answer zone hugs its content, so `offsetHeight` *is* the natural height it decides
-   from. The work log's wrapper is deliberately *not* in this rule. Content-sizing it
-   put the log itself — the card's one scroller — at the height of its own content,
-   and a scroll container with nothing to scroll over is a container the engine clamps
-   to `scrollTop: 0`: a card the reader had unlocked to inspect an older tool call was
-   thrown back to the top of its log by every token the agent emitted. The log's
-   natural height needs no stretch — `settleAnswerSplit` reads it off the log's own
-   `scrollHeight`. Last in the group, so it wins for as long as the flag is on. */
-.node.split-measure .node-answer-wrap {
-  flex: 0 0 auto;
-}
-
-/* The one case where the log itself may be let back onto a content basis: it is
-   already showing everything it holds, so there is no offset a reader could lose
-   (`0` is the only representable one) and hugging is exactly how the wrapper's
-   `offsetHeight` becomes the natural height again. `settleAnswerSplit` adds this for
-   that single readability of the measurement and takes it straight back off — a log
-   that *does* overflow is read off its own `scrollHeight` and never stretched. */
-.node.split-measure-log .node-work-wrap {
-  flex: 0 0 auto;
-}
-
-/* Zone 3: the turn's final answer, promoted out of the log (see main.js). It is a
-   full-bleed band — no padding on `.node-body` to stop its surface at the card's
-   edges — and it carries the `--bg2` surface zone 1 (`.node-ask`) uses, so the card
-   reads ask / log / answer = bg2 / card surface / bg2. The hairline on top is the
-   separation: the two zones are stacked, not nested, and this is the line that says
-   so. It has no dot strip: the scroll-lock light belongs to the transcript in zone
-   2, not to the answer. */
-.node-answer-wrap {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  min-height: 0;
-  flex: 1 1 auto;
-  padding: 10px;
-  border-top: 1px solid var(--border);
-  background: var(--bg2);
-  /* The band is the last painted element on a card with no composer, and `.node`
-     does not clip its children, so its square corners poked past the card's arc.
-     Same formula the composer uses; the override below squares them again when
-     `#composer` follows it. */
-  border-radius: 0 0 calc(var(--radius) - 1px) calc(var(--radius) - 1px);
-}
-
-/* A composer-hosting card ends in `#composer` — `mountComposer` appends it as the
-   card's last child (main.js) — so the band's bottom corners are not the card's
-   bottom corners any more. */
-.node:has(#composer) .node-answer-wrap {
-  border-radius: 0;
-}
-
-.node-answer {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow-y: auto;
-}
-
-/* The band *is* the block, so the promoted bubble is flattened onto it: keeping the
-   assistant bubble's `--assistant-bg` and border would stack a box on a box and
-   re-introduce the inset bubble zone 3 exists to remove. Its own rounding and
-   padding stay (it is still a `.msg.assistant`, with the `border-bottom-left-radius`
-   tail that marks the end of the turn's text). */
-.node-answer .msg.assistant {
-  background: none;
-  border: none;
+  -webkit-line-clamp: 1;
 }
 
 .node-excerpt {
@@ -1709,16 +1584,9 @@ button.icon-btn {
   display: none;
 }
 
-/* The body is a bare flex column: both zones inside it (`.node-work-wrap`,
-   `.node-answer-wrap`) scroll on their own and the work wrapper is the scroll-lock
-   light's context, so the body itself is deliberately *not* positioned. */
-.node-body {
-  flex: 1 1 auto;
-  min-height: 0;
-}
-
-/* Zone 1: the user's ask, pinned above the body. It is Markdown now, i.e. an
-   `.answer` inside a `--user-bg` bubble. */
+/* The pinned ask: what the user sent, above the body and outside the scroller, so
+   scrolling a long turn never hides the question. It is Markdown, i.e. an `.answer`
+   inside a `--user-bg` bubble. */
 .node-ask {
   flex: 0 0 auto;
   padding: 8px 10px;
@@ -1910,15 +1778,15 @@ button.icon-btn {
    its own 10px, reaches the card's edge. The offsets therefore have to carry the
    10px again to leave the light exactly where it was: 10px in from the log's right
    edge, in the strip the log's `margin-bottom` reserves below it. Scoped to this
-   host on purpose — a thinking block's dot hangs off its unpadded `.thinking` box
-   and must not move. */
+   host on purpose — nothing else inside a card carries a light any more (a card has
+   exactly one scroller), and the offsets must not move. */
 .node-work-wrap > .scroll-lock-dot {
   right: 20px;
   bottom: 18px;
 }
 
-/* The light only makes sense while its scroll area is visible. */
-.thinking:not(.open) .scroll-lock-dot,
+/* The light only makes sense while its scroll area is visible: a collapsed card (or a
+   monitor, which shows its log but is not a reading card with an ask) hides it. */
 .node:not(.expanded) .scroll-lock-dot {
   display: none;
 }
@@ -1936,21 +1804,8 @@ button.icon-btn {
   height: 0 !important;
 }
 
-.node-work,
-.node-answer,
-.thinking-body {
+.node-work {
   scrollbar-gutter: stable;
-}
-
-.tool-brief {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 11px;
-  color: var(--text-dim);
-  margin-right: 4px;
 }
 
 /* Drag handle to resize a node card: a short wire at the card's bottom-right

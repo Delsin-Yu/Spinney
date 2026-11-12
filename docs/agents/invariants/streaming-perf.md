@@ -19,34 +19,28 @@
   chips go through the same 250 ms local ticker the cards use (the host ships clocks, never a
   counter), and `tools/check-webview.js` pins that the dock's section contains no layout call and
   that an unchanged snapshot rebuilds no row.
-- **The live block is the only expanded one.** `foldThinking` / `foldToolCalls` are
-  the *at rest* default: the thinking block receiving deltas, and a tool call between
-  its first delta and its end, are expanded whatever the default says, and fold back
-  the moment the answer's text takes over, the call reports its result, or the turn
-  ends (`done` / `interrupted` / `error` → `endRun`). Without it a long turn either
-  reasoned behind a closed header or grew one never-collapsing tool card per call.
-  A click on a block's header hands *that* block to the user for good
-  (`_userTouched`), and `applyFoldDefault` skips the live body so a settings change
-  cannot fold it. `setActive` / `clearActive` / `closeActive` in `media/main.js`;
-  `tools/check-webview.js` asserts it ("the live block is always expanded").
-- Transcript scrolling is **per-card and event-driven**, and a card has exactly
-  one scroller: the **work zone** `.node-work`, the middle of the card's three
-  zones (see §"The three zones of a card"). It has a `createScrollController`
-  with a green lock dot (`attachLock(container, host, locked, card)`) and is also the
-  only zone that windows a long transcript; the answer zone has no controller of
-  its own — it opens at its top **once per card** (`_answerOpened`) — so the two zone wrappers
-  and the card classes `has-answer` / `work-folded` are what decide the heights. The controller starts locked only
-  for a **live** turn (`status === 'running'`); a finished node starts unlocked
-  and is positioned at its newest content once on first render, so history is
-  scrollable immediately — and that one move survives as a pending
-  `_needsBottomScroll` when the same pass folded the log, because a `scrollTop`
-  written into a `display: none` scroller is thrown away (§"A repaint never moves a
-  scroller", below). Both item-render paths (`expandedCard` and
-  `renderPath`) apply that default right after `renderNodeItems`, which also ends
-  in `syncAnswerZone(card)`. **A repaint never moves a scroller**: only the follow
-  light (locked → pinned to the bottom) and the once-per-card "opens at its newest
-  content" may move one, and where a fold or unfold is involved the zone is put
-  back where the reader left it.
+- **A turn is one essay, and its rows follow the turn.** The log is a linear flow, so
+  the only row with a *live* state is the thinking row: it is open while its turn runs
+  (the dimmed italic paragraph) and collapses to one ellipsised line the moment the
+  answer's text takes over or the turn ends (`done` / `interrupted` / `error` →
+  `endRun` → `settleRowsFinished`). A click hands *that* row to the user for good
+  (`_userTouched`) and the rule then leaves it exactly where they put it. A tool row
+  is folded at rest whatever it is doing — its one line already says what the step was —
+  and a click opens its detail. `setThinkingOpen` / `setToolOpen` / `setActiveRow` /
+  `clearActiveRow` / `closeActiveRows` in `media/main.js`; `tools/check-webview.js`
+  asserts both halves ("the two rows of a turn").
+- Transcript scrolling is **per-card and event-driven**, and a card has exactly one
+  scroller: `.node-work`, which holds the whole turn (see §"One card, one flow"). It has
+  a `createScrollController` with a green lock dot
+  (`attachLock(container, host, locked, card)`) and it is also the only container that
+  windows a long transcript. The controller starts locked only for a **live** turn
+  (`status === 'running'`); a finished node starts unlocked and is positioned at its
+  newest content once on first render, so history is scrollable immediately — that one
+  move is carried by `_needsBottomScroll`, which the item-render paths
+  (`expandedCard` / `renderPath` / `applyFetchedItems`) consume. **A repaint never moves
+  a scroller**: only the follow light (locked → pinned to the bottom) and the
+  once-per-card "opens at its newest content" may move it (§"A repaint never moves a
+  scroller", below).
   Locked = pinned to bottom with `scroll-locked` hiding and disabling the
   scrollbar; clicking the dot toggles it and hands scrolling back to the user. It is never re-engaged from scroll position (that heuristic
   was unreliable). Instead it follows the turn lifecycle: `setBusy(true)`
@@ -54,223 +48,108 @@
   sub-agent cards lock on `agentStart` / release on `agentDone`
   (`setCardScrollLock`). `scrollToBottom()` is a no-op while the light is off.
   The dot sits in the strip the container reserves below its scrollbar
-  (`margin-bottom: 20px`), inside the card. The tree viewport itself is a
-  pannable canvas (pan/zoom/fit), not a scroll container. The **live-block
-  folding rule above is unchanged** by the split: the block taking deltas is
-  still expanded in place, it simply sits in zone 2 with the rest of the log.
+  (`margin-bottom: 20px`), on `.node-work-wrap` — the log's box, which is not itself a
+  scroller. The tree viewport itself is a pannable canvas (pan/zoom/fit), not a scroll
+  container.
 - `[perf]` lines (request JSON size, assistant-round, tool timings, persist, stream
   flush) go to the **Spinney** output channel. Open View → Output → "Spinney". Every
   one that reaches the diagnostics file also ends with a ` | at=<ISO8601>` stamp, and
   each tool call now writes a `tool-start` line before it runs — see the log section
   below.
 
-### The three zones of a card: `ask` / `work` / `answer`
+### One card, one flow: `ask` + one log
 
-A turn card — and a sub-agent sidecar card — is split into three zones, and the two
-rules above (one scroller, one expanded block) are really properties of that split:
+A turn card — and a sub-agent sidecar card — reads as **one essay**. There are two
+containers and no more:
 
-- **zone 1, `.node-ask`** — the pinned user prompt, Markdown-rendered; it does not
-  change once the card exists.
-- **zone 2, `.node-work`** — the work log: reasoning blocks, tool cards, notices,
-  background and sub-agent notices, `HARNESS` blocks, intermediate assistant text and
-  usage lines. It is the scroller with the green lock dot, and the only zone that
-  windows a long transcript. Its top carries the work log's own fold header
-  (`.node-work-head`, below), and a **folded** log hides the dot with itself: nothing
-  scrolls, so there is nothing to lock.
-- **zone 3, `.node-answer`** — a **conditional** pretty-print of the *tail* of zone 2.
-  It has no lock dot and opens at its top **once per card** (`_answerOpened`); after
-  that a repaint leaves it where the reader left it. It is a surface of its own *around* the
-  answer (below), and the heights of the two zones are a ratio of the card, not a cap
-  on either one.
+- **`.node-ask`** — the pinned user prompt, Markdown-rendered; it does not change once the
+  card exists, and it stays out of the scroller so scrolling a long turn never hides the
+  question.
+- **`.node-work`** — the card's **only scroller**, holding every row of the turn in the
+  order it happened: the thinking rows, the tool rows, the notices, the background and
+  sub-agent notices, the `HARNESS` blocks and the assistant's own markdown. The model's
+  **final answer is simply the last markdown block** of that flow — there is no second
+  place an answer could live, so there is nothing for a live turn and a repaint to
+  disagree about.
 
-**The log folds itself as soon as the answer shows.** A header — chevron + label —
-sits at the top of `.node-work-wrap`, above the log, as `.node-work-head`; the card
-class `work-folded` marks the folded state. The rule is a function of zone 3, exactly
-like the promotion itself: the log folds **exactly while zone 3 is showing**, and
-unfolds while a turn runs or when there is no answer (the two conditions below fail)
-— a card with no answer is a card whose content is *only* the log, so folding it
-would leave a header in place of the card. **Two gestures hand that card to the
-user forever** (`card._workTouched`, the same semantics as a block's `_userTouched`): a
-click on the header, and **releasing the follow light** — the click that says "I am
-reading this card", which may not have the log it is looking at folded away. From then
-on the automatic rule may only refresh the label, never the state. Re-engaging follow
-is a scrolling gesture, not a claim on the fold, and neither sets the mark nor clears
-it; a card with the mark keeps its fold until the user changes it, and the offsets the
-zones remember are what put a reader back where they were (§"A repaint never moves a
-scroller"). The label is `Work log · {0} steps` from the card's tool-card count, or plain
-`Work log` when it holds no tool card. `spinney.foldWork` (default `true`, window
-scope) disables the automatic fold; it rides the existing `config` message
-(`postConfig()` reads `cfg.foldWork`) and therefore applies to cards already on
-screen, like `foldThinking` / `foldToolCalls`.
+That is the whole structure. It replaced a three-zone card (`ask` / `work` / `answer`)
+whose third zone was a *move* of the log's trailing answer run, and the machinery that
+went with it is deliberately **gone**, not disabled: `promoteAnswer` / `demoteAnswer` /
+`syncAnswerZone` (the move), `settleAnswerSplit` + `SPLIT_MEASURE` / `SPLIT_MEASURE_LOG`
+(the measured share), `autoWorkFold` / `setWorkFold` / `updateWorkHead` and the classes
+`has-answer` / `work-folded` / `answer-split`, the containers `.node-answer-wrap` /
+`.node-answer` and the log's fold header `.node-work-head`, plus the per-card memories
+`_answerAnchor` / `_answerOpened` / `_workTouched`. History is why: the split had to be
+*measured* on every append (the answer's natural height is not something a stylesheet can
+read), and every measured pass was a chance to move a reader. One flow needs no
+measurement at all — the card's own cap bounds the log, and a long turn scrolls in it.
 
-The helpers are `setWorkFold` (the one toggler), `autoWorkFold` (the rule above) and
-`updateWorkHead` (the label), and the hooks are the **end** of `demoteAnswer` and
-`promoteAnswer` (where the class flips), the end of `renderNodeItems` (a repaint
-re-derives the fold from the items, exactly like the zones), `routeTo` (label refresh
-only, after the append) and the `config` handler (a changed default re-applies to the
-cards on screen).
+**The two rows.** A tool call and a piece of reasoning are *lines in the essay*, not boxes
+stacked on it, and each has one renderer used by both the live path and the history
+repaint:
 
-**The answer's own height grows the card; the log is a strip that scrolls.** Both wrappers
-are flex children of `.node-body`, and the split is settled in JS (`settleAnswerSplit`)
-rather than in CSS, because "the height this answer needs" is not something a stylesheet
-can read. The card class `answer-split` marks a settled card, and the measurement that
-decides it suspends the split (the card class `split-measure`, whose CSS content-sizes the
-**answer** zone only — the log's natural height comes from its own `scrollHeight` plus the
-wrapper's chrome, or off the wrapper itself in the one case where the log has nothing to
-scroll over, §"A repaint never moves a scroller") and then writes:
+- **a thinking row** (`.msg.thinking-row`, `data-kind="thinking"`) — no header, no
+  chevron, no label: the row *is* the control. Open (while its turn runs) it is the dimmed
+  italic paragraph, and its tail is the turn's usage line
+  (`[Prompt: {0} + Completion: {1}, Cache Hit: {2}, Cache Miss: {3}]`). Closed it is one
+  line of the same text, ellipsised in CSS. \`setThinkingOpen\` owns the two states;
+  \`_open\` mirrors the class.
+- **a tool row** (`.msg.tool`) — one line: a small status dot, the bold verb, the label and
+  the elapsed chip. The verb is per tool and `tr()`-localized (\`TOOL_VERBS\`: Read /
+  Viewed / Wrote / Edited / Appended / Listed / Searched / Recalled / Ran / Checked /
+  Waited / Killed / Fetched / Spawned / Hopped / Finished / Renamed; a name no verb knows
+  keeps its own name). The label is **`DisplayItem.title`** — the `title` argument every
+  tool schema carries, read out of the call's arguments on the host
+  (`toolTitleFromArgs`) and stored on the item, so a clipped argument string can never lose
+  it — else \`toolBrief()\`'s path/command/pattern, set in monospace for a command or a
+  pattern. The detail (`.tool-detail`) is folded at rest and a click toggles it: the
+  `> command / args` line, a `pre` block with the full result (the existing UI caps still
+  apply: args ~8 KiB, result ~32 KiB, enforced host-side by \`clipForUi\`), the error text
+  when there is one, and the usage line. A running row's dot pulses and its chip ticks
+  (250 ms); a finished row's dot goes plain and its chip freezes at the host's `ms`.
 
-- the answer is pinned to the share it can use — `min(answer, room − floor)` as an inline
-  height on `.node-answer-wrap` — and **the answer is what makes the card taller**;
-- the log takes the rest of the body (`flex: 1 1 0`), but **its own growth never grows the
-  card**: its share is `LOG_FLOOR_PX` (360px, and never more than half the room) or its
-  whole content when that is shorter, so a conversation that grows in zone 2 scrolls inside
-  the strip. A height the user dragged is an explicit budget: the answer takes only what it
-  needs and the leftover of that height goes to the log (`max(strip, room − answer)`), which
-  is how more of the work log is asked for — never by the log growing on its own;
-- nothing has to be showing for this: while a turn runs there is no zone 3 yet, and the same
-  strip is what keeps the card from stretching with every tool call.
+Both are also the reason a card no longer grows a block per call: a step that took ten
+tools is ten one-line rows, and the reader who wants the output opens the one they care
+about.
 
-Two rules came first and were wrong, so they are not tried again. A hard 1:2 lock divided
-the card even when neither zone wanted its half — a short answer sat above blank space while
-the log scrolled inside a third of the card. A "hug whichever content is longer" rule then
-let a long log stretch the card to its cap: a thirteen-tool turn pinned every card at 1200px
-whatever its answer said.
+**`renderItemInto` is the same rendering as the live path.** The history repaint builds a
+tool row with the one \`addTool\` (which takes the whole row state —
+\`{ name, args, id, title, usage, status, start, ms, content }\`), a thinking row with the
+one \`makeThinkingRow\`, and an answer with the one \`addAssistant\`; a live call goes through
+\`addLiveTool\` → \`finalizeLiveTool\` and mutates the same element shape instead of building a
+second one. \`tools/check-webview.js\` pins that equivalence by replaying the same items
+through \`path\` and comparing the verb, the label, the classes, the chip and the folded
+detail against what the live messages produced — a repaint that reformatted a turn would be
+a silent regression nobody could see without a window.
 
-The card's cap is **1200px** (`media/style.css`, `.node`), doubled from 600 when the body
-stopped being one scroller, and a card may not be shrunk below
-`header + prompt + composer + SPLIT_FLOOR_PX` (220px): the drag's own floor is a flat
-`MIN_H` (260px), which a multi-line prompt and the input pane already fill, and a card
-squeezed past that point had a log with no height left — one that could not be unfolded
-again. `onResizeMove` clamps to the card's own floor, and `settleAnswerSplit` lifts a
-smaller cap (a size stored before this rule) back up, writing it both into the card's
-style and into the layout's copy of the size so a relayout restores the lift.
-`cardHeightCap` reads the user's drag size, else `--node-max-h` from the stylesheet, and
-**never `card.style.maxHeight`**: the tree layout writes no inline size at all — the only
-inline `height` / `max-height` a card can carry is the user's own drag-resize, or the
-lift `settleAnswerSplit` writes — so reading one back treated the *folded* card's height
-as a hard cap and unfolding the log divided those few pixels — while the max-height,
-being a real cap, pinned the card so it could not grow out of them. The mirror of that
-rule is that the card must actually *be able* to reach the cap: an inline `max-height`
-smaller than it (stale, from a size written while the card was small) is lifted to the
-cap by the same pass, in the card's style and in the layout's copy of the size, and an
-inline `height` smaller than it is dropped outright — an inline `height` is not a cap, so
-a stale one pins the card at the old height and the body is squeezed instead (measured in
-a Chromium fixture: a card pinned at 470px left the log 20px while the pinned answer kept
-its 321px). Without the lift the split is computed for room the card does not have, flex
-squeezes the body, and the log — the only zone without a pinned height — takes the whole
-loss. Settling
-runs from the fold helpers (`setWorkFold` /
-`autoWorkFold`), from `expandedCard`, from the end of a drag-resize and from
-`setBlockOpen` — a block folding inside the log changes the log's content height and the box
-is *measured*, so without that trigger a short log kept the height it had while the block
-was still open (a band of blank space under it) until the next settle happened along. It
-hands the
-tree a debounced `scheduleLayout()` because the card's size just changed. The read clears
-the answer's inline height first: `flex-basis: auto` takes a *set* height as the basis, so
-measuring a zone the previous pass pinned would read the old share instead of the content
-— a squeezed answer then measured small and was given small again, and could never grow
-back however far the card was scaled up. A host with no
-layout at all (the offline webview checker) measures 0, and then no height is written —
-a wrong definite height would be worse than none.
-
-**Zone 3 is a surface, not a bubble.** `.node-answer-wrap` carries a hairline top
-border and its own background (`var(--bg2)`, the same surface as zone 1), and the
-answer bubble inside it is flattened — no background, no border — so the zone itself
-is the block the user reads; the answer has to keep its "stretch to the card width"
-rules through that, or a flattened bubble would shrink to its text.
-
-Zone 3 shows that tail only when **both** hold:
-
-- **P1** the card has no live stream, and
-- **P2** the tail is a **model message** — a contiguous run of assistant-text items
-  that are neither errors nor empty.
-
-Everything else is a *chronological breaker*: a tool call, a `HARNESS` block, a
-notice, a background notice, a new user turn or an error item is newer than the
-promoted message, so it pushes that message back into zone 2 and zone 3 hides. There
-is deliberately no "the answer is finished" flag: the zone is a function of the items
-that are actually there, so the same card gains zone 3 when the tail becomes a model
-message and loses it again the moment a breaker is appended — with no flag to keep in
-sync.
-
-`syncAnswerZone(card)` is that promote-or-hide decision, and it is idempotent through
-`card._answerAnchor` — the element that was zone 2's last child when the promotion
-happened, i.e. the item the promoted run starts after. A second call that finds the
-same tail already promoted moves nothing. `promoteAnswer` puts the run into zone 3
-and adds `has-answer`; `demoteAnswer` returns it to zone 2 and drops the class.
-
-**Demotion runs before any append into zone 2, never after it.** The append is
-exactly what can falsify P2 — the new item is chronologically newer, so the message
-is no longer the tail — and it has to land in a zone 2 that is again showing the
-whole log, not beside a tail still parked in zone 3. The choke point is
-`routeTo(nodeId, fn)`: every routed message is appended through it, so a new message
-kind cannot append first and demote second. One path is deliberately outside that
-routing: a `notice` message carries **no** `nodeId` and lands on the view-focus card,
-so it runs the same pre-append demote for that card.
-
-The call sites are therefore: `endRun`, **after** `runningNodes.delete` (the run is no
-longer live, so P1 can hold now); `onAgentDone` / `onAgentStart` (a sidecar's
-lifecycle is a card's lifecycle: finishing can promote, and starting hides the
-promotion again because P1 fails); `renderNodeItems` (a repaint re-derives the zones
-from the items it was handed); and `routeTo` / `notice`, the pre-append demote above.
-
-That derivation is also why the live DOM and a repaint cannot disagree:
-`syncAnswerZone` is a **pure function of `(items, card state)`**, so a repaint that
-replays the same items reaches the same verdict and builds the same card — there is no
-second copy of "the answer" to keep in sync, and no flag to migrate. The only per-card
-memory behind that verdict is `_answerAnchor`, rebuilt with the card, and "it is already
-promoted" is an early return rather than stored state.
+**The previews still work.** \`.node-excerpt\` (a collapsed card, and a monitor's footer) and
+\`.node-summary\` (a sub-agent's one-line result) are untouched by all of this: they describe
+a card that is not the reading surface, and they never held a row.
 
 ### A repaint never moves a scroller
 
-`settleAnswerSplit` measures the two zones with the split suspended, and the card class
-`split-measure` used to put **both** wrappers on a content basis. Content-sizing the log's
-wrapper stretched `.node-work` — the card's one scroller — to the height of its own
-content, which leaves the container with no scrollable overflow at all: the engine then
-clamps its `scrollTop` to 0 and nothing put it back. That ran on every routed append
-(`routeTo` → `demoteAnswer` → `autoWorkFold` → `settleAnswerSplit`) and on every `tree` /
-`path` repaint (`expandedCard` → `settleAnswerSplit`). A locked card hid it, because it
-pins itself to the bottom right afterwards (`scrollToBottom`); an unlocked card did not, so
-a reader who released the follow light to inspect an older tool call was thrown back to the
-top of the log on every token the agent emitted.
+**The guard is that a repaint never moves a scroller.** The log remembers the last offset it
+was scrolled to — \`rememberScroll\` / \`scrollMemory\` / \`restoreScroll\` on the element, fed
+by a \`scroll\` listener attached when \`createNodeCard\` builds the card — and it is put back
+at that offset after every step that can destroy it: \`renderNodeItems\`' full re-render (a
+\`tree\` / \`path\` repaint) and the window repaint (\`paintItemsWindow\`). It is never restored
+while the card is locked (the follow light owns the bottom) nor while \`_needsBottomScroll\`
+is still pending, so only two things may move a scroller at all: the follow light while it
+is on, and the once-per-card "opens at its newest content".
 
-`.split-measure` therefore content-sizes the **answer** zone only. The log's natural height
-is read two ways, and which one applies is the point: a log that is **already showing
-everything it holds** has no offset a reader could lose (`0` is the only representable one),
-so it is let onto a content basis for that single read (the card class `split-measure-log`)
-and measured off the wrapper exactly as every card was measured before; a log that
-**overflows** is read off its own `scrollHeight` — the number the stretched wrapper stood in
-for — plus the wrapper's chrome: its 10px inset, the fold head above the scroller with its
-own bottom margin, and the log's own 20px dot strip. The strip is still added a second time,
-exactly as the old stretched-wrapper read counted it, because the number is a floor
-comparison and no card's share may move with this change. `scrollHeight` is floored at the
-box height, which is exactly why the no-overflow case cannot use it and hugs instead — and
-that case can never be the one where a reader is thrown to the top, because there is nothing
-there to scroll.
+A routed append is not a rebuild: it appends one row into the log that is already there, so
+there is nothing to restore — which is exactly what the measured split could not say. The
+history is why the rule is written down rather than assumed: when the log was briefly given
+the height of its own content, the engine clamped its \`scrollTop\` to 0 and a reader who had
+released the follow light was thrown to the top of their turn by every token. Nothing on the
+append path measures the log any more.
 
-**The guard is that a repaint never moves a scroller.** Each zone (`.node-work`,
-`.node-answer`) remembers the last offset it was scrolled to — `rememberScroll` /
-`scrollMemory` / `restoreScroll` on the element, fed by a `scroll` listener attached when
-`createNodeCard` builds the card — and it is put back at that offset after every step that
-can destroy it: `settleAnswerSplit`'s measurement, `renderNodeItems`' full re-render,
-unfolding the log in `setWorkFold` and the window repaint (`paintItemsWindow`). It is never
-restored while the card is locked (the follow light owns the bottom) nor while
-`_needsBottomScroll` is still pending, so only two things may move a scroller at all: the
-follow light while it is on, and the once-per-card "opens at its newest content".
-
-**Zone 3 opens at its top once per card, not once per repaint** (the card flag
-`_answerOpened`): the old unconditional `answerEl.scrollTop = 0` in `expandedCard` is what
-undid a reader's position inside a long answer. `_needsBottomScroll` — the once-only "a
-finished card opens at its newest content" — is consumed where the log actually becomes
-visible: the promotion that lifts the answer into zone 3 folds the log in the same pass, and
-a `scrollTop` written into a `display: none` scroller is thrown away, so the flag stays
-pending and `setWorkFold` consumes it on the unfold.
-
-**The window repaint corrects in both directions.** `extendItemsWindow` adjusts the scroll
+**The window repaint corrects in both directions.** \`extendItemsWindow\` adjusts the scroll
 position by the height difference whichever way the window grew; it used to correct the
-upward direction only. `tools/check-webview.js` pins the whole thing: an unlocked card's log
-and answer keep their offsets across a routed append and a `tree` / `path` repaint, and a
-locked card still pins its log to the bottom.
+upward direction only. \`tools/check-webview.js\` pins the whole thing: an unlocked card's log
+keeps its offset across a routed append and a \`tree\` / \`path\` repaint, a locked card still
+pins its log to the bottom, and scrolling a windowed log does not lose the answer as the
+last block.
 
 ### Diagnosing a stutter (the `[perf] op#` traces)
 A stutter — above all when **switching sessions** — is one user-visible operation
