@@ -28,11 +28,11 @@
   `{ os, shell, root, rootKind: 'workspace' | 'scratch' }`; in no-repo mode it
   renders a second line stating that relative paths and the default `cwd` are
   based on the harness root, to use absolute paths for real files and not to
-  assume a repository layout), `{{language}}` (the `## Language` line, from
+  assume a repository layout), `{{language}}` (the `## Language` **answer** line, from
   `languageLine(language)` — the value is the language **name** resolved from
   `spinney.replyLanguage` by `replyLanguageName` (`auto` → the VS Code display
   language, a tag → its CLDR name), with `DEFAULT_REPLY_LANGUAGE` ('English') as
-  the floor when nothing resolves) and
+  the floor when nothing resolves), and
   `{{agentsMd}}` (the AGENTS.md sections in force, built by `agentsMdSection` — the
   module-global snapshots `setGlobalAgentsMd` / `setAgentsMd` fixed at activation;
   `prompt.systemPrompt` takes an optional `agentsMd: AgentsMdSources` argument so a
@@ -91,14 +91,18 @@
 - **The reply language is user-facing only.** `spinney.replyLanguage` (a dropdown
   of `auto` + the language tags VS Code ships display translations for — `en`,
   `zh-Hans`, `zh-Hant` first, then the rest by use, each labelled with the name the
-  prompt will carry) fills the
-  main template's `{{language}}` line with a language name; the sub-agent template
-  keeps `Answer in English`, because a sub-agent reports to the agent that
-  dispatched it and never to the user. That one bullet — there is no second language
-  requirement — covers everything the user reads of the agent: the answer, the
-  **reasoning** (the thinking block) and the **short `exec_command` step title** (the
-  schema's `title` description says the same in the tool channel), while code, file
-  paths, command output and identifiers stay verbatim. A change is a **setup** change, not a
+  prompt will carry) fills the main template's `{{language}}` line with a language
+  name; the sub-agent template keeps `Answer in English`, because a sub-agent reports
+  to the agent that dispatched it and never to the user. That one bullet is the
+  **answer**, and it is the only language requirement in the prompt: the reasoning is
+  **not** asked for there. 0.7.0 put it after a semicolon behind the verb "answering",
+  a revision after that gave it a bullet of its own, and neither moved the model — a
+  chain whose frozen prompt carried either wording still reasoned in English on every
+  block, so both were removed (see `CHANGELOG.md`, Unreleased). The `exec_command` step title stays covered, in
+  the tool channel, by that argument's own schema description. Do not add a
+  thinking-language line back: the prompt is not where that is decided, and one more
+  bullet that the model ignores is worse than none, because it reads as a rule the
+  harness can promise. A change is a **setup** change, not a
   rewrite: `SessionRuntime.applyReplyLanguage` records the new name for the nodes
   frozen from here on and repaints the composer's drift marking
   (`[config] replyLanguage=… (new nodes; frozen chains keep theirs)`); every chain

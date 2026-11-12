@@ -12,7 +12,7 @@ import { ThinkingEffort } from './types';
  *
  *   {{identity}}    who the agent is (harness name + model card + reasoning level)
  *   {{environment}} where it runs (OS / shell / workspace)
- *   {{language}}    the reply language (`spinney.replyLanguage`)
+ *   {{language}}    the answer language (`spinney.replyLanguage`)
  *   {{agentsMd}}    the AGENTS.md sections in force — the systemwide one
  *                   (`~/.spinney/AGENTS.md`), then the workspace one
  *
@@ -149,15 +149,18 @@ export function identityLines(model: string, effort: ThinkingEffort): string[] {
  * falls back to {@link DEFAULT_REPLY_LANGUAGE} instead of sending an empty
  * instruction to the model.
  *
- * One bullet, one requirement: the language covers **what the user reads** —
- * the answer, the agent's own reasoning (the thinking block) and the short
- * `exec_command` step title — and leaves code, file paths, command output and
- * identifiers in their original form. It is not a second language rule, and it
- * is never added to the sub-agent template (a sub-agent reports in English).
+ * One bullet, one requirement: the **answer**. The reasoning was asked for here too
+ * (0.7.0 put it after the semicolon, and a later revision gave it a bullet of its own);
+ * both are gone, because the measurement that prompted it did not move the model: a
+ * chain whose frozen prompt carried either wording still reasoned entirely in English.
+ * The language of the reasoning is the model's, not something a line in this prompt
+ * reaches. The `exec_command` step title stays covered, in the tool channel, by that
+ * argument's own schema description. The "leave code, file paths, command output and
+ * identifiers verbatim" rule is the template's own bullet after this one.
  */
 export function languageLine(language: string): string {
   const lang = (language || '').trim() || DEFAULT_REPLY_LANGUAGE;
-  return `- Default to ${lang}; keep answering in ${lang} even if the user writes another language, unless the user explicitly asks for one. Your reasoning (the thinking block) and the short title you write for each exec_command step use ${lang} too; code, file paths, command output and identifiers stay verbatim.`;
+  return `- Default to ${lang}; keep answering in ${lang} even if the user writes another language, unless the user explicitly asks for one.`;
 }
 
 /**

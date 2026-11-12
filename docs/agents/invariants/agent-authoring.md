@@ -31,9 +31,11 @@ Where the text lives, the template/placeholder mechanics and the two hard rules
   `ChatViewProvider.getConfig()` through `replyLanguageName`
   (`src/agent/languages.ts`); `DEFAULT_REPLY_LANGUAGE = 'English'` in
   `src/agent/prompt.ts` is only the floor when nothing resolves to a language. The
-  line is **one** requirement: the answer, the agent's own reasoning (the thinking
-  block) and the short `exec_command` step title use that language, while code,
-  paths, identifiers and command output stay in their original form. Do not add
+  line is **one** requirement: the **answer**, while code, paths, identifiers and
+  command output stay in their original form. The reasoning is deliberately not named
+  there (two wordings were tried and neither moved the model; see
+  `docs/agents/invariants/system-prompt.md`), and the short `exec_command` step title
+  keeps its own requirement in the tool channel, in that argument's schema. Do not add
   another language requirement (an English-only rule, for
   instance) on top of it. Changing the setting mid-conversation rewrites
   `messages[0]` and can miss the prompt cache (see

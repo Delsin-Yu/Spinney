@@ -138,6 +138,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The reasoning-language requirement is gone.** `## Language` asks one thing again: the
+  **answer**. 0.7.0 packed "your reasoning (the thinking block) and the short title …
+  use X too" into the answer bullet, behind a semicolon; a revision here split it into
+  its own imperative bullet instead. Neither wording moved the model — a chain whose
+  frozen prompt carried the clause reasoned in **English on every block** — so the line
+  was removed rather than reworded a third time. `languageLine()` is back to the answer
+  sentence, the template carries `{{language}}` as its only language placeholder, and
+  the "code, file paths, command output and identifiers verbatim" bullet after it stays.
+  The `exec_command` step title keeps its own requirement in that argument's schema
+  (tool channel), not in the prompt. A template change is **harness drift** for every
+  existing chain (the epoch's `templateHash` no longer matches what the window ships),
+  and it reaches the model only in a **new epoch**.
+- **A step is italic, and a step is what is indented.** A tool line is now marked as a step
+  in two ways and no more: its own wording is *italic* (`.tool-verb` plus a prose
+  `.tool-label`), and the step line alone is inset 15 px under the `Ran N steps` header
+  (`.steps-body > .msg.tool`, which lands a row's text on the header's own label). The inset
+  is per row and never a block: the reasoning row that can ride the same group body keeps the
+  prose's left edge, and the group's body itself carries no padding and no rule down its side.
+  A monospace label (a derived command, path or pattern), the `.tool-elapsed` chip and
+  everything in `.tool-detail` stay upright: Consolas has no true italic, and an 11 px
+  synthesized oblique smears a command's glyphs, while the chip and the detail are metadata
+  and code rather than a step's wording. The expanded detail's own left margin drops from
+  12 px to 6 px, because the row it belongs to is already 15 px in and the two indents would
+  otherwise read as a staircase. **The reasoning is deliberately untouched and unindented**:
+  the italic and the inset both mark what the agent did, not what it thought. The two design
+  comments in `media/style.css`, `docs/agents/invariants/streaming-perf.md` (the three type
+  levels and the tool-row bullet), `docs/agents/file-map.md` (the log's styling and the steps
+  group) and the three manual pages now describe this instead of the old "nothing is italic"
+  rule.
 - **The system prompt says each thing once.** The main template dropped from 6491 to 4429
   characters with no rule lost: the `exec_command` mechanism it used to restate (`run_type`
   semantics, `wait_for_command` / `check_command` / `kill_command`, the foreground setting)

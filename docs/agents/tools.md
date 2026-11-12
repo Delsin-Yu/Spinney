@@ -42,7 +42,9 @@
 > required `title` (`TOOL_TITLE_DESCRIPTION` in `src/agent/types.ts`): one short human
 > sentence, at most about 60 characters, for the step. The description also says to write
 > it in the language the agent is answering the user in, so the visible step row follows
-> the reply language like the answer and the reasoning block do. It is a **display** argument — no
+> the reply language like the answer does: the prompt itself asks only the answer to
+> follow it, so this schema line is the step title's own requirement. It is a **display**
+> argument — no
 > tool body reads it — and the host is what makes it matter: `toolTitleFromArgs`
 > (`src/chat/runtime.ts`) reads it out of the call's arguments and stores it on the turn's
 > `DisplayItem` (`title`), so the card's one-line step row shows the model's sentence instead

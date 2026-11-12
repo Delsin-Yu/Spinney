@@ -545,8 +545,16 @@ button.icon-btn {
    the prose and the reasoning read as normal text (`--text`, 13px), a tool row's line
    is one step down (the bold verb and the label both 12px `--text-dim`, one grey), and the
    expanded detail is one more (11px `--text-dim`). The usage line is the faintest, a
-   10px footnote under whichever row hosts it. Nothing is dimmed or italic to say
-   "process": the levels are size and colour, not a second voice. */
+   10px footnote under whichever row hosts it. The levels are size and colour.
+
+   One mark, and only one, says "this is a step rather than a voice": a step's own line
+   is **italic** (`.tool-verb` and the prose `.tool-label`), and a step is also the only
+   thing inset under a header (`.steps-body > .msg.tool`, 15px, which puts a row's text on
+   the header's own label). The reasoning stays upright **and flush with the prose**, because
+   the agent's own words are not something it *did* — the inset traces each step, never a
+   block around a group. A monospace label stays upright too (a synthesized oblique smears a
+   command's glyphs at 11px), and so do the elapsed chip and the detail, which are metadata
+   and code rather than a step's wording. */
 
 /* A thinking row: the whole paragraph while its turn is live, one ellipsised line once
    the turn is over. The row is the control — there is no label and no chevron, so a
@@ -658,8 +666,10 @@ button.icon-btn {
    flow's last block and nothing is ever lifted out of a group. There can be several
    groups in one turn, and each one has its own fold state: open while its turn runs,
    folded when the turn ends, and a click on its own header always wins for that group.
-   Nothing here is dimmed or italic: a step is text like any other, at the levels the
-   block above spells out. */
+   The header is the group's only line on the log's left edge, together with the reasoning
+   that can ride the same body; only the **step lines** are inset under it (`.steps-body >
+   .msg.tool`, below), one step at a time, so a group reads as a header and the steps that
+   belong to it, never as a second column of the flow. */
 .steps {
   display: block;
   margin: 0;
@@ -713,9 +723,22 @@ button.icon-btn {
   min-width: 0;
 }
 
+/* Only the **step lines** are inset: 15px puts a row's own text on the header's label
+   (a 9px chevron plus its 6px gap, which the header adds against the log's left edge).
+   Everything else that can ride the same body keeps the prose's left edge — the reasoning
+   row above all, because the model's voice is not a step — so the inset marks one step at
+   a time and never draws a block around a group or a rule down its side. */
+.steps-body > .msg.tool {
+  margin-left: 15px;
+}
+
+/* The verb and the prose label are the step's own wording, so they are the italic half
+   of a row (the one mark the log spends on "a step, not a voice"). A monospace label
+   undoes it below, and the elapsed chip is never inside this rule. */
 .tool-verb {
   flex: 0 0 auto;
   font-weight: 700;
+  font-style: italic;
   color: var(--text-dim);
 }
 
@@ -732,19 +755,25 @@ button.icon-btn {
   white-space: nowrap;
   color: var(--text-dim);
   font-size: 12px;
+  font-style: italic;
 }
 
+/* A command or a pattern stays upright: Consolas has no true italic, so 11px oblique is
+   a smeared synthesis — and a path or a command is quoted text, not a step's wording. */
 .tool-label.mono {
   font-family: "Consolas", "Courier New", monospace;
   font-size: 11px;
+  font-style: normal;
   color: var(--text-dim);
 }
 
 /* The expanded detail, in place under the row: the `> args` line, the result, an error
    and the usage line. It scrolls on its own (a 32 KiB result must not become the card's
-   scroll position) and it is the row's own surface, one shade down from the log. */
+   scroll position) and it is the row's own surface, one shade down from the log. Its left
+   margin is small on purpose: the row inside a `.steps-body` is already 15px in, and the
+   detail only has to sit a little deeper than the line it belongs to. */
 .tool-detail {
-  margin: 4px 0 6px 12px;
+  margin: 4px 0 6px 6px;
   padding: 6px 8px;
   border-left: 2px solid var(--border);
   background: var(--bg3);

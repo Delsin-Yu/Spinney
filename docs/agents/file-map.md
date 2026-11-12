@@ -461,7 +461,10 @@
   body, and the following tool row opens a second group. So a turn can hold several groups,
   each with its own count, its own body and its own fold state (open while its turn runs,
   folded when it ends, and a click on that header always wins); thinking rows ride the open
-  group, or the log when none is open. A message's reasoning that trails a run joins that
+  group, or the log when none is open. A group's header stays on the log's left edge, and
+  the only rows inset under it are the **step lines** (`.steps-body > .msg.tool`): a
+  reasoning row that rides the same body keeps the prose's left edge, so the inset marks one
+  step at a time and never a block around the group. A message's reasoning that trails a run joins that
   group's body even when its text arrived first, so the live turn and a repaint put it in
   the same place. **Nothing is moved out of a group**: the turn's final
   answer is simply the flow's last text block, with no frame of its own (`.msg.assistant`
@@ -602,7 +605,12 @@
   — and the log's **three type levels** live here with it: the prose and the reasoning at
   13 px `--text`, a tool row's bold verb and its label both at 12 px `--text-dim`
   (11 px monospace for a *derived* command/pattern only), the expanded `.tool-detail` at
-  11 px `--text-dim`, and the usage line as the faintest footnote.
+  11 px `--text-dim`, and the usage line as the faintest footnote. The log spends exactly
+  one mark on "a step, not a voice": a step's own line is **italic** (`.tool-verb` and a
+  prose `.tool-label`; a monospace label, the elapsed chip and the detail stay upright), and
+  a step is the only thing **inset** — `.steps-body > .msg.tool`'s 15 px left margin, which
+  puts a row's text on its `Ran N steps` label. The inset is per row, never a block: the
+  reasoning that can ride the same body keeps the prose's left edge and stays upright.
 - `media/vendor/markdown-it/` — **vendored, pinned** Markdown renderer
   (`@14.3.1`, MIT): `markdown-it.min.js` (the file the webview loads), `LICENSE`,
   `PROVENANCE.md` (hashes + the third-party code inlined in the bundle). Not an npm

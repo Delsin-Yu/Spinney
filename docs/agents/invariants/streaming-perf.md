@@ -130,6 +130,15 @@ reasoning are normal text (13 px `--text`, upright), a tool row's line is one st
 expanded detail is one more (11 px `--text-dim`), and the usage line stays the faintest
 footnote (10 px `--text-dim`).
 
+Two things and no more say *this is a step*: the step's own line is **italic** (`.tool-verb`
+and a prose `.tool-label`; a `.tool-label.mono`, the `.tool-elapsed` chip and everything in
+`.tool-detail` stay upright), and a step is the only thing **inset** — one rule,
+`.steps-body > .msg.tool { margin-left: 15px }`, which puts a row's text on its
+header's own `Ran N steps` label. The inset traces one step at a time and never a block:
+the reasoning row that rides the same body keeps the prose's left edge and is deliberately
+not italic either, because what the agent *said* is not a step and the italic marks what it
+*did*. `.steps-body` itself carries no padding and no rule down its side.
+
 - **a thinking row** (`.msg.thinking-row`, `data-kind="thinking"`) — no header, no
   chevron, no label: the row *is* the control. Open (while its turn runs) it is the
   paragraph in the same type as the prose (no dim, no italic), capped at **240 px** with
@@ -159,7 +168,10 @@ footnote (10 px `--text-dim`).
   argument string can never lose it — else `toolBrief()`'s path/command/pattern. It is
   12 px `--text-dim` and set in **monospace (11 px) only for a derived command or pattern**:
   `const mono = !title && MONO_LABEL_TOOLS.has(name)` in `addTool` / `addLiveTool` /
-  `appendLiveTool` / `finalizeLiveTool`, so a `title` always reads as normal text. The
+  `appendLiveTool` / `finalizeLiveTool`, so a `title` always reads as normal text. That
+  monospace label is also the one part of the line that stays **upright** — the verb and a
+  prose label are italic — because Consolas has no true italic and an 11 px synthesized
+  oblique smears a command's glyphs. The
   detail (`.tool-detail`) is folded at rest and a click toggles it: the `> command / args`
   line, a `pre` block with the full result (the existing UI caps still apply: args ~8 KiB,
   result ~32 KiB, enforced host-side by `clipForUi`), the error text when there is one, and
