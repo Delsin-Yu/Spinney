@@ -5216,6 +5216,12 @@
   });
 
   // ---- Pan / zoom ----
+  // The camera's gestures: LMB/MMB drag pans by offset, RMB-hold autoscroll-pans
+  // towards the cursor, ctrl/cmd + wheel zooms around the pointer, alt + wheel pans
+  // vertically from anywhere (cards, thinking blocks and the composer included),
+  // shift + wheel pans horizontally, and a plain wheel zooms — except over a native
+  // scroll zone, which keeps its own. The touch layer below adds one-finger pan and
+  // two-finger pinch.
   let dragging = null;
   // The touch layer's live gesture (see "Touch" below) or null. It lives up here
   // because the pointer pan below has to stand down while a finger owns the camera.
@@ -5529,6 +5535,19 @@
     if (e.ctrlKey || e.metaKey) {
       e.preventDefault();
       zoomAt(e.clientX, e.clientY, e.deltaY < 0 ? 1.1 : 0.9);
+      setFollow(false);
+      return;
+    }
+    // alt + wheel pans the whole tree vertically, and it does so *whatever* is under
+    // the pointer — that is why it sits before the native-scroll-zone check below: a
+    // card, its work log / answer / ask, a thinking block and the composer all pan the
+    // camera instead of scrolling themselves. It is the vertical twin of the shift +
+    // wheel pan further down, and the one gesture that moves the tree from inside a
+    // scroller (where a plain wheel is the zone's own).
+    if (e.altKey) {
+      e.preventDefault();
+      pan.y -= e.deltaY;
+      applyTransform();
       setFollow(false);
       return;
     }

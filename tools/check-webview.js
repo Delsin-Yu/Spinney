@@ -5289,6 +5289,217 @@ if (contextLabel !== 'ctx 50%') {
   }
 }
 
+// --- Alt + wheel: the whole tree pans vertically, from anywhere ----------------
+// The wheel is the gesture that was already fully taken: ctrl/cmd scales the viewport,
+// shift pans sideways, a plain wheel over a native scroll zone belongs to that zone
+// (`.node-work`, `.node-answer`, `.node-ask`, `.thinking-body`, `#composer`) and a
+// plain wheel anywhere else zooms. Alt + wheel has to cut through all of it and pan the
+// tree up and down whatever the pointer is over — the composer lives *inside* a card,
+// so without it there is no way to move the camera while the cursor sits over a
+// scroller. It is the vertical twin of the shift pan.
+//
+// The wheel event is dispatched into the real `#tree-wrap` listener and read back off
+// `#tree-canvas`'s `transform`, the same camera the touch block above measures. Each
+// assertion is the thing that would be broken without it:
+//   (a) an alt wheel moves the camera by exactly the wheel's own delta and leaves the
+//       scale alone — a zoom here would be the plain-wheel behaviour it must outrank;
+//   (b) it does so with the pointer over every native scroll zone, and over a card and
+//       a thinking block — the branch sits *before* the zone check, so those zones pan
+//       the camera instead of keeping the wheel for their own scrollbar;
+//   (c) the event is cancelled, so the browser cannot scroll that zone underneath the
+//       pan as well;
+//   (d) the control: the same wheel over the composer *without* alt neither pans nor
+//       zooms nor cancels — it stays the zone's own native scroll — so (b) is a
+//       statement about Alt and not about a wheel that stopped reaching the zones at
+//       all.
+{
+  const wrap = elementById('tree-wrap');
+  const canvas = elementById('tree-canvas');
+  const follow = elementById('follow-btn');
+  /** The camera as the canvas carries it — the numbers inside `applyTransform()`'s string. */
+  const camera = () => {
+    const m = /translate\((-?[\d.]+)px, (-?[\d.]+)px\) scale\((-?[\d.]+)\)/.exec(String(canvas.style.transform || ''));
+    return m ? { x: parseFloat(m[1]), y: parseFloat(m[2]), zoom: parseFloat(m[3]) } : null;
+  };
+  const round = (value) => Math.round(value * 10) / 10;
+  /**
+   * A wheel target as the browser hands one over: only the class / id form of `closest`
+   * is emulated, because that is all the wheel delegate asks about — an element carrying
+   * one of `names` answers for the whole `NATIVE_SCROLL_ZONES` selector list, exactly as
+   * `closest` would, and a target carrying none answers null (the canvas background).
+   */
+  const targetIn = (...names) => ({
+    names,
+    closest(selector) {
+      for (const part of String(selector).split(',')) {
+        const name = part.trim().replace(/^[.#]/, '');
+        if (name && names.indexOf(name) >= 0) return this;
+      }
+      return null;
+    },
+  });
+  const wheelEvent = (deltaY, target, modifiers) => ({
+    deltaY,
+    clientX: 300,
+    clientY: 400,
+    target,
+    defaultPrevented: false,
+    preventDefault() {
+      this.defaultPrevented = true;
+    },
+    ...modifiers,
+  });
+  const wheel = wrap._listeners && wrap._listeners.wheel;
+  if (typeof wheel !== 'function') {
+    problems.push(
+      'the tree wrapper registered no `wheel` handler on #tree-wrap — with none, ctrl/cmd cannot zoom the tree and ' +
+        'alt cannot pan it, and the wheel falls back to whatever the browser makes of the page',
+    );
+  } else {
+    const sendWheel = (event, what) => {
+      try {
+        wheel(event);
+      } catch (err) {
+        problems.push(`the wheel ${what} threw ${err && err.message} — the gesture is dead in the real webview`);
+      }
+      return event;
+    };
+    /**
+     * Engage the follow light the way the touch block does: the button toggles, so a
+     * single click only turns it on when it was off, and the second click is what makes
+     * "follow was on before the wheel" true either way. `keepActiveInView()` can move the
+     * camera, so the state is read *after* the click.
+     */
+    if (typeof follow._listeners?.click === 'function') {
+      follow._listeners.click();
+      if (!follow.classList.contains('active')) follow._listeners.click();
+    }
+    const followWasOn = follow.classList.contains('active');
+
+    // (a) The gesture itself, over the canvas background: deltaY -120 has to move the
+    // tree DOWN by 120 (a wheel up scrolls the view up, so the content travels down),
+    // and the scale must not move.
+    const before = camera();
+    if (!before) {
+      problems.push('the tree canvas carried no `transform` before the alt+wheel step — `applyTransform()` never ran');
+    } else {
+      const down = sendWheel(wheelEvent(-120, targetIn(), { altKey: true }), 'with altKey over the canvas');
+      const after = camera();
+      if (!after) {
+        problems.push('an alt wheel left #tree-canvas without a `transform`');
+      } else {
+        if (Math.abs(after.y - before.y - 120) > 0.01 || Math.abs(after.x - before.x) > 0.01) {
+          problems.push(
+            `an alt wheel of deltaY -120 moved the tree by (${round(after.x - before.x)}, ${round(after.y - before.y)}), ` +
+              'expected (0, 120) — alt + wheel has to pan the whole chat tree vertically, one wheel delta per event',
+          );
+        }
+        if (Math.abs(after.zoom - before.zoom) > 1e-6) {
+          problems.push(
+            `an alt wheel changed the scale from ${before.zoom} to ${after.zoom} — alt + wheel is a PAN; a zoom there ` +
+              'is the plain-wheel behaviour, and the user cannot scroll the view while the pointer is over content',
+          );
+        }
+        if (down.defaultPrevented !== true) {
+          problems.push(
+            'an alt wheel over the canvas was not `defaultPrevented` — the browser keeps its own wheel scrolling for the ' +
+              'page on top of the pan',
+          );
+        }
+      }
+      // The wheel is a manual camera move, so the follow light must drop — otherwise a
+      // streaming turn's auto-pan drags the view back off what the user just looked at.
+      if (followWasOn && follow.classList.contains('active')) {
+        problems.push(
+          'an alt wheel left the follow light engaged — a manual pan has to switch follow off, or the next streaming ' +
+            'update pans the view back out from under the user',
+        );
+      }
+    }
+
+    // (b) + (c) The inner of a card is where this gesture earns its keep: every one of
+    // the five native scroll zones owns the *plain* wheel, and alt has to pan anyway —
+    // one event per zone, each read off the camera, each cancelled. `node` / `node-head`
+    // stand for "a card", `thinking-body` for a thinking block, `composer` for the input
+    // dock that lives inside the checked-out card.
+    for (const zone of ['node', 'node-head', 'node-work', 'node-answer', 'node-ask', 'thinking-body', 'composer']) {
+      const zoneBefore = camera();
+      const event = sendWheel(
+        wheelEvent(90, targetIn(zone), { altKey: true }),
+        `with altKey over .${zone}`,
+      );
+      const zoneAfter = camera();
+      if (!zoneBefore || !zoneAfter) {
+        problems.push(`the camera could not be read around an alt wheel over .${zone} — #tree-canvas carries no \`transform\``);
+        continue;
+      }
+      if (Math.abs(zoneAfter.y - zoneBefore.y + 90) > 0.01) {
+        problems.push(
+          `an alt wheel over .${zone} moved the tree vertically by ${round(zoneAfter.y - zoneBefore.y)}, expected -90 ` +
+            '(the wheel delta, negated) — alt + wheel has to pan from inside a card, a thinking block and the composer, ' +
+            'not only from the empty canvas',
+        );
+      }
+      if (Math.abs(zoneAfter.zoom - zoneBefore.zoom) > 1e-6) {
+        problems.push(`an alt wheel over .${zone} changed the scale — alt + wheel pans, it never zooms`);
+      }
+      if (event.defaultPrevented !== true) {
+        problems.push(
+          `an alt wheel over .${zone} was not \`defaultPrevented\` — the zone's own scrollbar then moves as well, so one ` +
+            'wheel gesture would pan the tree and scroll the log at the same time',
+        );
+      }
+    }
+
+    // (d) The control, on the same target form: without alt the composer keeps its
+    // wheel. Nothing moves, nothing is cancelled — that is the native scroll the alt
+    // branch above is deliberately placed in front of.
+    const controlBefore = camera();
+    const control = sendWheel(wheelEvent(90, targetIn('composer')), 'without altKey over #composer');
+    const controlAfter = camera();
+    if (controlBefore && controlAfter) {
+      if (Math.abs(controlAfter.y - controlBefore.y) > 0.01 || Math.abs(controlAfter.x - controlBefore.x) > 0.01) {
+        problems.push(
+          `a plain wheel over #composer panned the tree by (${round(controlAfter.x - controlBefore.x)}, ` +
+            `${round(controlAfter.y - controlBefore.y)}) — the composer owns a plain wheel (it is one of the native ` +
+            'scroll zones); only alt pans from inside it',
+        );
+      }
+      if (Math.abs(controlAfter.zoom - controlBefore.zoom) > 1e-6) {
+        problems.push('a plain wheel over #composer zoomed the tree — that zone owns the plain wheel, it must scroll itself');
+      }
+    }
+    if (control.defaultPrevented === true) {
+      problems.push(
+        'a plain wheel over #composer was `defaultPrevented` — cancelling it switches off the native scrolling of the ' +
+          'composer, which is the one thing that zone does with a wheel',
+      );
+    }
+
+    // And the other control: the same plain wheel over the canvas background still
+    // zooms, so "alt panned without zooming" cannot be satisfied by a wheel that
+    // stopped zooming everywhere.
+    const plainBefore = camera();
+    sendWheel(wheelEvent(-120, targetIn()), 'without altKey over the canvas background');
+    const plainAfter = camera();
+    if (plainBefore && plainAfter && Math.abs(plainAfter.zoom - plainBefore.zoom) < 1e-6) {
+      problems.push(
+        `a plain wheel over the canvas background left the scale at ${plainAfter.zoom} — the plain wheel still zooms ` +
+          'there; alt is the modifier that makes the same wheel pan instead',
+      );
+    }
+    if (followWasOn && follow.classList.contains('active')) {
+      problems.push('the plain-wheel controls left the follow light engaged — every wheel gesture that moves the camera drops it');
+    }
+
+    notes.push(
+      'alt + wheel: pans the tree one delta per event without touching the scale, from the canvas and from inside a ' +
+        'card, a work log, an answer, an ask, a thinking block and the composer (cancelled each time), while a plain ' +
+        'wheel over the composer still scrolls that zone and over the canvas still zooms',
+    );
+  }
+}
+
 // --- report ------------------------------------------------------------------
 
 /**
