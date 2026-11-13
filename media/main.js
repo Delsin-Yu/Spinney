@@ -2781,8 +2781,9 @@
     spawn_readonly_agents: tr('Spawned research agents'),
     send_agent_message: tr('Sent task instructions'),
     send_readonly_agent_message: tr('Sent research instructions'),
-    hop_session: tr('Hopped session'),
-    finish_hop: tr('Ended hop'),
+    create_session: tr('Started a session'),
+    send_session_message: tr('Messaged a session'),
+    list_sessions: tr('Listed sessions'),
     rename_session: tr('Renamed session'),
   };
   /** The tools whose label is a command line or a pattern, i.e. set in monospace. */
@@ -2931,8 +2932,13 @@
     spawn_readonly_agents: (a) => [agentCountLabel(a), 'read-only'],
     send_agent_message: (a) => [a.id ? `#${a.id}` : ''],
     send_readonly_agent_message: (a) => [a.id ? `#${a.id}` : ''],
-    hop_session: (a) => [a.prompt ? 'hands the work to a new session' : ''],
-    finish_hop: () => [],
+    create_session: (a) => [a.session_name ? '"' + a.session_name + '"' : ''],
+    send_session_message: (a) => [
+      a.session_id ? '#' + a.session_id : '',
+      a.session_node_id ? '#' + a.session_node_id : '',
+    ],
+    list_sessions: (a) => [a.query ? '"' + a.query + '"' : ''],
+    list_nodes: (a) => [a.session_id ? '#' + a.session_id : '', a.query ? '"' + a.query + '"' : ''],
     rename_session: (a) => [a.title ? `"${a.title}"` : ''],
   };
 
@@ -2951,8 +2957,7 @@
 
   /**
    * The tool row's one-line argument summary, or '' when there is nothing worth saying
-   * (a call whose arguments are still streaming has none yet, and `finish_hop` has no
-   * arguments at all).
+   * (a call whose arguments are still streaming has none yet).
    */
   function toolArgsLine(name, args) {
     const a = argsOf(args);
@@ -2982,8 +2987,10 @@
     spawn_agents: 'agents',
     spawn_readonly_agents: 'agents',
     send_agent_message: 'agents',
-    send_readonly_agent_message: 'agents',    hop_session: 'note',
-    finish_hop: 'note',
+    send_readonly_agent_message: 'agents',
+    create_session: 'note',
+    send_session_message: 'note',
+    list_sessions: 'count',
     rename_session: 'note',
   };
 

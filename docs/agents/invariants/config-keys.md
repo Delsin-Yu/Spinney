@@ -88,15 +88,8 @@ used to have a hard-wired 20 s ceiling each, so one call could spend 40 s. A cal
 runs out answers `Error: <tool> timed out after N s (spinney.searchTimeoutSeconds) while
 searching <root>. …` with **no hits and no count**, so a partial page can never read as
 "this is all there is" — which is also what gives the tool description's "prefer many
-small cheap searches" something to enforce),
-`hopSession.enabled` (default `true` — may the main agent hand a task to a fresh
-session with `hop_session`? Read **live at every turn start** and enforced in the
-handler as well, because a chain that already froze its tool set keeps advertising the
-schema and the epoch rules forbid rewriting a sent prefix: switching it off stops new
-chains from being offered the tool and makes the call fail with a sentence. Only the
-hop tool is affected — `list_nodes` / `rename_session` stay, which is why the
-capability is `hopEnabled` and not `canHop`; see `control-plane.md` §"Hop and hop
-back"). `SubAgentPool` clamps `maxConcurrentSubagents`
+small cheap searches" something to enforce).
+`SubAgentPool` clamps `maxConcurrentSubagents`
 to **≥ 1** (a non-positive limit would otherwise deadlock every sub-agent).
 `httpApi.enabled` (default `false` — the local control plane) and `httpApi.port`
 (default `0` = ephemeral).
