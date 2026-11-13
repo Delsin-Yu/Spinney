@@ -6299,6 +6299,152 @@ if (contextLabel !== 'ctx 50%') {
   );
 }
 
+// --- A reasoning row the reader unlocked stays open when the turn ends --------
+// The active-row rule has a second piece of evidence besides a click: the row's own follow
+// light. An open thinking row is a 240 px scroller with a dot of its own, and a reader who
+// scrolls *that* box up is inside the reasoning and intends to read it — so the end of the
+// turn (and the answer taking over) must leave the box exactly where they left it, and must
+// mark the row as theirs so a later pass cannot fold it either. The group the row rides in
+// folds with the turn, so a group holding such a row has to stay open as well: folding it
+// would take the row off screen, which is the very thing the rule exists to prevent.
+//
+// The control is the same turn with nobody touching the box: `done` folds that row to its
+// one line (and its group to its header), which is the rule this exception is measured
+// against. Without it, "the row is still open" would be satisfied by a `done` that folds
+// nothing at all.
+{
+  const READER = 'reader-node';
+  const UNTOUCHED = 'untouched-node';
+  const node = (id) => ({
+    id,
+    parentId: null,
+    children: [],
+    title: id,
+    status: 'running',
+    createdAt: 0,
+    preview: id,
+    usage: null,
+    size: null,
+  });
+  const cardOf = (id) => {
+    for (const child of elementById('tree-canvas').children) {
+      if (child.dataset && child.dataset.id === id) return child;
+    }
+    return null;
+  };
+  /** A `scroll` as the engine delivers it: every listener the box registered. */
+  const scrolled = (element) => {
+    for (const handler of handlersOf(element, 'scroll')) handler({ type: 'scroll' });
+  };
+  /** The card's thinking row, one fold deeper when it rides a steps group's body. */
+  const thinkingRowOf = (card) => {
+    const log = card ? findByClass(card, 'node-work') : null;
+    for (const child of (log && log.children) || []) {
+      if (child.dataset && child.dataset.kind === 'thinking') return child;
+      if (child.classList && child.classList.contains('steps')) {
+        const body = findByClass(child, 'steps-body');
+        for (const inner of (body && body.children) || []) {
+          if (inner.dataset && inner.dataset.kind === 'thinking') return inner;
+        }
+      }
+    }
+    return null;
+  };
+  /**
+   * Start one live turn with a thinking delta: the row exists, is open, and its box's light
+   * is engaged — the state every assertion below starts from.
+   */
+  const liveRun = (id) => {
+    dispatch({ type: 'reset' });
+    dispatch({ type: 'tree', viewId: id, activeId: id, rootId: id, rootIds: [id], nodes: [node(id)] });
+    dispatch({ type: 'path', ids: [id], nodes: [{ id, status: 'running', items: [{ kind: 'user', text: 'the ask' }] }] });
+    dispatch({ type: 'thinkingDelta', nodeId: id, text: 'reasoning that runs past its box' });
+    const card = cardOf(id);
+    const row = thinkingRowOf(card);
+    if (!row || !hasClass(row, 'open')) {
+      problems.push(`the "${id}" fixture has no open thinking row — the reader-unlock case below has nothing to check`);
+      return null;
+    }
+    // Geometry a laid-out box would have: 300 px of reasoning in a 186 px box, so "the
+    // bottom" is 114 and the reader's 40 below is a real upward move.
+    const box = row._textEl;
+    box.scrollHeight = 300;
+    box.clientHeight = 186;
+    return { card, row, box };
+  };
+
+  // (a) The reader's row: the box follows its stream, they scroll it up (its own light
+  // goes out), the turn ends — and the row is still open, marked as theirs, and still
+  // inside a group that did not fold over it.
+  const reader = liveRun(READER);
+  if (reader) {
+    dispatch({ type: 'thinkingDelta', nodeId: READER, text: ' and more' });
+    if (reader.box.scrollTop !== 114) {
+      problems.push(
+        `the reader fixture's reasoning box sits at ${reader.box.scrollTop} after a delta, expected 114 — the box has to ` +
+          'be following before an upward scroll can release it',
+      );
+    }
+    reader.box.scrollTop = 40;
+    scrolled(reader.box);
+    const readerLight = findByClass(reader.row, 'scroll-lock-dot');
+    if (!readerLight || readerLight.classList.contains('locked')) {
+      problems.push(
+        'scrolling the reasoning box up did not release its own light — the release is the evidence the end-of-turn ' +
+          'rule reads, so it has to happen before the `done` below',
+      );
+    }
+    dispatch({ type: 'done', nodeId: READER });
+    if (!hasClass(reader.row, 'open') || !reader.row._open) {
+      problems.push(
+        'a thinking row the reader had scrolled (its own follow light released) folded when the turn ended — the box ' +
+          'they were reading is taken off the screen under them',
+      );
+    }
+    if (reader.row._userTouched !== true) {
+      problems.push(
+        'a thinking row the reader unlocked by scrolling was not marked as theirs (`_userTouched`) — the next pass ' +
+          '(a repaint, a second settle) folds it after all',
+      );
+    }
+    const readerGroup = findByClass(reader.card, 'steps');
+    // A group is what the row rides in: if that group folds, the still-open row is hidden
+    // behind its header, so keeping the row open without keeping the group open is no fix.
+    if (readerGroup && hasClass(readerGroup, 'steps-folded')) {
+      problems.push(
+        "a steps group holding a thinking row the reader unlocked folded when the turn ended — folding the group takes " +
+          'the open row off screen',
+      );
+    }
+  }
+
+  // (b) The control: the same turn, nobody touching the box. `done` folds the row (and its
+  // group), so (a) is a statement about the reader's own move and not about a `done` that
+  // stopped folding anything.
+  const untouched = liveRun(UNTOUCHED);
+  if (untouched) {
+    dispatch({ type: 'done', nodeId: UNTOUCHED });
+    if (hasClass(untouched.row, 'open') || untouched.row._open) {
+      problems.push(
+        'a thinking row nobody touched is still open after `done` — a finished thought is one line of the essay, and ' +
+          'this control is what makes the reader-unlock case above mean anything',
+      );
+    }
+    if (untouched.row._userTouched === true) {
+      problems.push('a thinking row nobody touched was marked `_userTouched` by `done`');
+    }
+    const untouchedGroup = findByClass(untouched.card, 'steps');
+    if (untouchedGroup && !hasClass(untouchedGroup, 'steps-folded')) {
+      problems.push('a steps group whose rows nobody touched did not fold when the turn ended');
+    }
+  }
+
+  notes.push(
+    'a thinking row the reader unlocked (its own follow light released) stays open when the turn ends — with its group — ' +
+      'while a row nobody touched still folds to its one line',
+  );
+}
+
 // --- Touch navigation: a finger pans the tree, two fingers pinch it -----------
 // On a touch screen the pan and the zoom above it are both unreachable: `touch-action` is
 // `auto` on the whole subtree, so the browser classifies a one-finger drag as *its* pan and
@@ -6875,14 +7021,15 @@ if (contextLabel !== 'ctx 50%') {
   }
 }
 
-// --- Alt + wheel: the whole tree pans vertically, from anywhere ----------------
+// --- Alt + wheel / Shift + wheel: the whole tree pans, from anywhere ------------
 // The wheel is the gesture that was already fully taken: ctrl/cmd scales the viewport,
 // shift pans sideways, a plain wheel over a native scroll zone belongs to that zone
 // (`.node-work`, `.node-ask`, `.tool-detail`, `#composer`) and a
 // plain wheel anywhere else zooms. Alt + wheel has to cut through all of it and pan the
 // tree up and down whatever the pointer is over — the composer lives *inside* a card,
 // so without it there is no way to move the camera while the cursor sits over a
-// scroller. It is the vertical twin of the shift pan.
+// scroller. Shift + wheel is its horizontal twin and has to clear the *same* zones: none
+// of them scrolls sideways, so behind their bail-out it is a gesture with no effect.
 //
 // The wheel event is dispatched into the real `#tree-wrap` listener and read back off
 // `#tree-canvas`'s `transform`, the same camera the touch block above measures. Each
@@ -6892,12 +7039,14 @@ if (contextLabel !== 'ctx 50%') {
 //   (b) it does so with the pointer over every native scroll zone, and over a card and
 //       one of its rows — the branch sits *before* the zone check, so those zones pan
 //       the camera instead of keeping the wheel for their own scrollbar;
+//   (b2) a shift wheel moves it sideways by the same delta, over those same six targets,
+//       without a vertical move and without touching the scale;
 //   (c) the event is cancelled, so the browser cannot scroll that zone underneath the
 //       pan as well;
-//   (d) the control: the same wheel over the composer *without* alt neither pans nor
-//       zooms nor cancels — it stays the zone's own native scroll — so (b) is a
-//       statement about Alt and not about a wheel that stopped reaching the zones at
-//       all.
+//   (d) the control: the same wheel over the composer *without* alt (or shift) neither
+//       pans, zooms nor cancels — it stays the zone's own native scroll — so (b) is a
+//       statement about the modifier and not about a wheel that stopped reaching the
+//       zones at all.
 {
   const wrap = elementById('tree-wrap');
   const canvas = elementById('tree-canvas');
@@ -7037,6 +7186,47 @@ if (contextLabel !== 'ctx 50%') {
       }
     }
 
+    // (b2) The horizontal twin of (b), over the same six targets: shift + wheel has to
+    // pan the camera sideways from inside every native scroll zone too. Those zones keep
+    // their own vertical wheel and have no horizontal scroll at all, so a shift branch
+    // behind their bail-out is a gesture that can only be swallowed — a card, a work log,
+    // an ask, an expanded step and the composer then answer a shift wheel with nothing at
+    // all. The delta is the x travel, negated, and the scale must not move.
+    for (const zone of ['node', 'node-head', 'node-work', 'node-ask', 'tool-detail', 'composer']) {
+      const zoneBefore = camera();
+      const event = sendWheel(
+        wheelEvent(90, targetIn(zone), { shiftKey: true }),
+        `with shiftKey over .${zone}`,
+      );
+      const zoneAfter = camera();
+      if (!zoneBefore || !zoneAfter) {
+        problems.push(`the camera could not be read around a shift wheel over .${zone} — #tree-canvas carries no \`transform\``);
+        continue;
+      }
+      if (Math.abs(zoneAfter.x - zoneBefore.x + 90) > 0.01) {
+        problems.push(
+          `a shift wheel over .${zone} moved the tree horizontally by ${round(zoneAfter.x - zoneBefore.x)}, expected -90 ` +
+            '(the wheel delta, negated) — shift + wheel has to pan from inside a card, an expanded step and the composer, ' +
+            'not only from the empty canvas',
+        );
+      }
+      if (Math.abs(zoneAfter.y - zoneBefore.y) > 0.01) {
+        problems.push(
+          `a shift wheel over .${zone} moved the tree vertically by ${round(zoneAfter.y - zoneBefore.y)}, expected 0 — ` +
+            'shift is the horizontal pan, alt is the vertical one',
+        );
+      }
+      if (Math.abs(zoneAfter.zoom - zoneBefore.zoom) > 1e-6) {
+        problems.push(`a shift wheel over .${zone} changed the scale — shift + wheel pans, it never zooms`);
+      }
+      if (event.defaultPrevented !== true) {
+        problems.push(
+          `a shift wheel over .${zone} was not \`defaultPrevented\` — the zone then gets the gesture as well, so one ` +
+            'wheel would pan the tree and scroll the log at the same time',
+        );
+      }
+    }
+
     // (d) The control, on the same target form: without alt the composer keeps its
     // wheel. Nothing moves, nothing is cancelled — that is the native scroll the alt
     // branch above is deliberately placed in front of.
@@ -7048,7 +7238,7 @@ if (contextLabel !== 'ctx 50%') {
         problems.push(
           `a plain wheel over #composer panned the tree by (${round(controlAfter.x - controlBefore.x)}, ` +
             `${round(controlAfter.y - controlBefore.y)}) — the composer owns a plain wheel (it is one of the native ` +
-            'scroll zones); only alt pans from inside it',
+            'scroll zones); only alt (and shift) pans from inside it',
         );
       }
       if (Math.abs(controlAfter.zoom - controlBefore.zoom) > 1e-6) {
@@ -7080,8 +7270,9 @@ if (contextLabel !== 'ctx 50%') {
 
     notes.push(
       'alt + wheel: pans the tree one delta per event without touching the scale, from the canvas and from inside a ' +
-        'card, a work log, an ask, an expanded step and the composer (cancelled each time), while a plain ' +
-        'wheel over the composer still scrolls that zone and over the canvas still zooms',
+        'card, a work log, an ask, an expanded step and the composer (cancelled each time), and shift + wheel does the ' +
+        'same horizontally over those same six targets, while a plain wheel over the composer still scrolls that zone ' +
+        'and over the canvas still zooms',
     );
   }
 }
