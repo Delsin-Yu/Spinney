@@ -314,6 +314,7 @@
   "Web search engine": "网络搜索引擎",
   "Work is still running in this window.": "本窗口仍有工作正在运行。",
   "Write a handoff summary": "撰写交接摘要",
+  "Writing tool call...": "正在编写工具调用…",
   "You have unsaved changes.": "有未保存的修改。",
   "[Prompt: {0} + Completion: {1}, Cache Hit: {2}, Cache Miss: {3}]": "[提示: {0} + 补全: {1}, 缓存命中: {2}, 缓存未命中: {3}]",
   "[raw {0}: {1} chars]": "[原始 {0}：{1} 字符]",

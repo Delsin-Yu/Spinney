@@ -4077,6 +4077,90 @@ if (contextLabel !== 'ctx 50%') {
     }
   }
 
+  // (c0) A tool call the model is still **writing** (`toolCallDelta`, before `toolStart`):
+  // one row with the ordinary tool-row shape and **one fixed label**. There is no argument
+  // text, no elapsed chip (nothing has started yet) and the detail stays folded and empty;
+  // the verb is the one thing that follows the stream, because the tool's name arrives in
+  // pieces. `toolStart` upgrades that same element into the running row, so a live call and
+  // a replayed one are still the same shape.
+  {
+    dispatch({ type: 'toolCallDelta', nodeId: NODE, index: 20, id: 'draft-tool', name: 'read_f' });
+    const row = lastOf('tool');
+    if (!row || !hasClass(row, 'live')) {
+      problems.push('a drafting tool call rendered no `.msg.tool.live` row');
+    } else {
+      if (verbOf(row) !== 'read_f') {
+        problems.push(
+          `a drafting row's verb reads ${JSON.stringify(verbOf(row))}, expected the name fragment it was sent ("read_f")`,
+        );
+      }
+      if (labelOf(row) !== 'Writing tool call...') {
+        problems.push(
+          `a drafting row's label reads ${JSON.stringify(labelOf(row))}, expected the fixed "Writing tool call..."`,
+        );
+      }
+      if (hasClass(findByClass(row, 'tool-label'), 'mono')) {
+        problems.push('a drafting row sets its fixed label in monospace — monospace is for a derived command or pattern');
+      }
+      if (findByClass(row, 'tool-elapsed')) {
+        problems.push('a drafting row carries an elapsed chip — a call that is composing its arguments has not started');
+      }
+      if (findByClass(row, 'tool-args-line') || findByClass(row, 'tool-result')) {
+        problems.push(
+          'a drafting row shows the arguments — half a JSON blob is not a label, and the detail is empty until the call settles',
+        );
+      }
+      expectToolOpen(row, false, 'a drafting tool row');
+      // The rest of the name arrives: the verb follows it **in place**. One row per index —
+      // a second row here is what a reader saw as the same step twice.
+      dispatch({ type: 'toolCallDelta', nodeId: NODE, index: 20, id: 'draft-tool', name: 'ile' });
+      if (lastOf('tool') !== row) {
+        problems.push('a second `toolCallDelta` for one index built a second row — the draft is indexed, not appended');
+      }
+      if (verbOf(row) !== 'Read') {
+        problems.push(
+          `a drafting row's verb reads ${JSON.stringify(verbOf(row))} after the rest of its name arrived, expected "Read"`,
+        );
+      }
+      if (labelOf(row) !== 'Writing tool call...') {
+        problems.push('the draft label changed while the call was being written — it says the one thing that is true');
+      }
+      // `toolStart` is the call settling: the settled arguments and the model's own `title`
+      // replace the draft's fixed line, and the elapsed chip is born.
+      dispatch({
+        type: 'toolStart',
+        nodeId: NODE,
+        index: 20,
+        id: 'draft-tool',
+        name: 'read_file',
+        args: '{"path":"d.ts"}',
+        title: 'read the draft',
+        startedAt: Date.now() - 40,
+      });
+      if (lastOf('tool') !== row) {
+        problems.push('`toolStart` built a second row for a drafting call — the draft is upgraded in place');
+      }
+      if (hasClass(row, 'live')) {
+        problems.push('a finalized draft row still carries `live`');
+      }
+      if (verbOf(row) !== 'Read' || labelOf(row) !== 'read the draft') {
+        problems.push(
+          `a finalized draft reads ${JSON.stringify([verbOf(row), labelOf(row)])}, expected ["Read", "read the draft"] — ` +
+            "the settled arguments and the model's own title replace the draft's fixed line",
+        );
+      }
+      if (!findByClass(row, 'tool-elapsed')) {
+        problems.push('a finalized draft row has no elapsed chip — settling the arguments is when that chip is born');
+      }
+      expectToolOpen(row, false, 'a finalized draft row');
+    }
+    dispatch({ type: 'toolEnd', nodeId: NODE, id: 'draft-tool', content: 'File: d.ts (1 lines, LF)\nx', ms: 40 });
+    notes.push(
+      'draft tool row: one line per call with the fixed "Writing tool call..." label, no arguments and no chip, the verb ' +
+        'following the name, and `toolStart` upgrading that same row',
+    );
+  }
+
   // (d) A tool row: the one line (`Verb label`), the chip, and a detail that holds the
   // `> args` line and, once the call reports, its result. There is deliberately no
   // status dot: the ticking chip is the running cue.

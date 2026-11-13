@@ -2111,24 +2111,6 @@
     setTimeout(settle, ANIMATION_FALLBACK_MS);
   }
 
-  /**
-   * Restart the label's short opacity fade. A live tool's label is **rewritten** per
-   * argument delta, so it is deliberately not wrapped in a span: the same element loses
-   * the class and gets it back in the next frame, which is what restarts a CSS animation
-   * on an element that is already on screen — and, unlike the `offsetWidth` trick, it
-   * reads no layout in the streaming path.
-   */
-  function fadeLabel(labelEl) {
-    if (!labelEl || !labelEl.classList || !animationsOn()) return;
-    labelEl.classList.remove('label-in');
-    if (labelEl._labelFade) return;
-    labelEl._labelFade = true;
-    requestAnimationFrame(() => {
-      labelEl._labelFade = false;
-      labelEl.classList.add('label-in');
-    });
-  }
-
   // ---- Message rendering into a container (defaults to the active node) ----
   // Zone 1 of a card: the pinned user ask (`.node-ask`, top of an expanded card).
   // It does not scroll with the work log and does not trigger tree panning, and it
@@ -4148,6 +4130,15 @@
   const liveTools = Object.create(null);
 
   /**
+   * What a tool row says while the model is still writing the call. The call's arguments
+   * are half a JSON blob by then and the row has no room to lie about them, so the draft
+   * says the one thing that is true for the whole of it — that a call is being written —
+   * and keeps the verb of the tool it is going to be. `finalizeLiveTool` turns the element
+   * into the ordinary row the moment the call settles.
+   */
+  const LIVE_TOOL_LABEL = tr('Writing tool call...');
+
+  /**
    * Bucket key for `owner`: an explicit node id, or — when `owner` is undefined —
    * the node the current routed call writes into, else the view focus node (a
    * legacy, unrouted call writes into that node's card too). '' is the
@@ -4166,27 +4157,29 @@
   }
 
   /**
-   * A tool call whose arguments are still streaming: the same row as `addTool`, with
-   * an empty label that grows with the deltas and no elapsed chip yet (the call has
-   * not started). It is folded like every other row, and a click opens its detail —
-   * which is where the partial arguments show, so what the model is composing is
-   * still readable while it composes it.
+   * A tool call whose name (and arguments) are still streaming: **one row with one fixed
+   * label**. The verb is the tool the first name delta named — a name that arrives in
+   * pieces says what it says until it is whole — and the label is `Writing tool call...`
+   * until the call settles, because the arguments are half a JSON blob and a row that
+   * showed them would be a row a reader has to un-read. There is no elapsed chip (nothing
+   * has started yet) and the detail stays empty until `finalizeLiveTool` paints it from
+   * the settled arguments.
    */
-  function addLiveTool(index, id, name, args) {
+  function addLiveTool(index, id, name) {
     if (!messagesEl) return;
     const node = el('div', 'msg tool live running');
     node.dataset.index = String(index);
     node.dataset.kind = 'tool';
     if (id) node.dataset.id = id;
 
-    // No `title` exists yet at this point — the label is the derived brief and it grows
-    // with the arguments — so a command or a pattern tool is set in monospace here.
-    const head = toolRowHead(name || '', args ? toolBrief(name, args) : '', MONO_LABEL_TOOLS.has(name));
+    // A prose label, so never monospace: monospace is the *derived* command or pattern,
+    // and a draft has none — `finalizeLiveTool` re-derives it from the settled arguments.
+    const head = toolRowHead(name || '', LIVE_TOOL_LABEL, false);
     node.appendChild(head);
 
-    // The detail is painted when the arguments settle (`finalizeLiveTool`): a
-    // half-streamed JSON blob is not something to put in front of a reader, and the row
-    // is folded while it composes anyway.
+    // The detail is painted when the arguments settle (`finalizeLiveTool`): a half-streamed
+    // JSON blob is not something to put in front of a reader, and the row is folded while
+    // it composes anyway.
     const detail = el('div', 'tool-detail hidden');
     node.appendChild(detail);
 
@@ -4199,7 +4192,7 @@
     node._detailEl = detail;
     node._verbEl = byClass(head, 'tool-verb');
     node._labelEl = byClass(head, 'tool-label');
-    node._argsRaw = args || '';
+    node._toolName = name || '';
 
     const group = ensureStepsGroup();
     tuckReasoningIntoRun(group);
@@ -4211,31 +4204,23 @@
     return node;
   }
 
-  /** One streaming delta of a call's arguments: the row's label and detail follow it. */
-  function appendLiveTool(index, id, nameDelta, argsDelta) {
+  /**
+   * One streaming delta of a call: the pieces of its **name** are the only thing this path
+   * can still change, and they change the row's verb in place (a rebuild per delta would
+   * throw away the row the reader may have just opened). Nothing here grows a label or an
+   * argument string: the fixed draft label is what keeps a composing call from rewriting
+   * its own text — and reading its own layout — on every delta it announces.
+   */
+  function appendLiveTool(index, id, nameDelta) {
     const bucket = liveBucket(undefined, true);
     let node = bucket[index];
     if (!node) {
-      node = addLiveTool(index, id, '', '');
+      node = addLiveTool(index, id, nameDelta || '');
+    } else if (nameDelta) {
+      node._toolName = (node._toolName || '') + nameDelta;
+      if (node._verbEl) node._verbEl.textContent = toolVerb(node._toolName);
     }
     if (id) node.dataset.id = id;
-    if (argsDelta) {
-      node._argsRaw = (node._argsRaw || '') + argsDelta;
-      // The label is derived from the arguments as they arrive, in place (a rebuild
-      // per delta would throw away the row the reader may have just opened). The label
-      // is never wrapped: the written text is the whole label, and its element restarts
-      // one short fade (`.label-in`) instead.
-      const name = node._verbEl ? node._verbEl.textContent : '';
-      const label = toolLabel(name, node._argsRaw);
-      if (node._labelEl) {
-        node._labelEl.textContent = label;
-        fadeLabel(node._labelEl);
-      } else if (label && node._rowEl) {
-        node._labelEl = el('span', 'tool-label' + (MONO_LABEL_TOOLS.has(name) ? ' mono' : ''), label);
-        node._rowEl.appendChild(node._labelEl);
-        fadeLabel(node._labelEl);
-      }
-    }
     followActive();
     return node;
   }
@@ -8869,8 +8854,12 @@ function addBackgroundNotice(item) {
         routeTo(msg.nodeId, () => appendUsage(msg.usage), 'usage');
         break;
       case 'toolCallDelta':
-        addTpsTokens((msg.name || '') + (msg.args || ''));
-        routeTo(msg.nodeId, () => appendLiveTool(msg.index, msg.id, msg.name, msg.args), 'toolCallDelta');
+        // The host sends the call's index, id and name and **not its arguments** (see
+        // `queueToolCallDelta`): the draft row is one fixed line (`addLiveTool`), so the
+        // argument bytes are a payload nothing renders. The tok/s readout still counts the
+        // name it did get.
+        addTpsTokens(msg.name || '');
+        routeTo(msg.nodeId, () => appendLiveTool(msg.index, msg.id, msg.name), 'toolCallDelta');
         break;
       case 'toolStart':
         routeTo(msg.nodeId, () => { finalizeStreamingAnswer(); finalizeLiveTool(msg.index, msg.id, msg.name, msg.args, msg.startedAt, null, msg.title); }, 'toolStart');

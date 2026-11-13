@@ -3300,10 +3300,12 @@ button.icon-btn {
                  collapses exactly like the text node it is merged into and the merge
                  itself is invisible;
      .row-in     a row that has just been appended (assistant text, tool, thinking,
-                 notice): one 120 ms fade + 2 px rise, removed again on `animationend`;
-     .label-in   a live tool row's label, whose text is rewritten per argument delta:
-                 the class is removed and re-added on the same element, which restarts
-                 the fade without wrapping the label in a span.
+                 notice): one 120 ms fade + 2 px rise, removed again on `animationend`.
+
+   A tool call still being written is one fixed line (`Writing tool call...`), so no label
+   is rewritten per delta any more and there is no `.label-in` to restart: the only text
+   that changes while a call composes is its verb, and that changes by a name delta that
+   arrives once.
 
    The durations are duplicated in media/main.js as the *fallback* timer
    (`ANIMATION_FALLBACK_MS`, 400 ms): an engine that never fires `animationend` still
@@ -3319,11 +3321,6 @@ button.icon-btn {
   to { opacity: 1; transform: translateY(0); }
 }
 
-@keyframes label-in {
-  from { opacity: 0.35; }
-  to { opacity: 1; }
-}
-
 .chunk-in {
   /* An inline span, never a block: it sits inside the answer's own text run, and it
      deliberately sets no `white-space` — it inherits the host's, so the chunk lays out
@@ -3335,18 +3332,13 @@ button.icon-btn {
   animation: row-in 120ms ease-out;
 }
 
-.tool-label.label-in {
-  animation: label-in 160ms ease-out;
-}
-
 /* The OS' own wish wins, and it is also read in the script (`prefersReducedMotion`):
    with it on, nothing is wrapped in a span at all, so these rules are the second half
    of one decision — a stale class left over from before the wish changed must not
    animate either. */
 @media (prefers-reduced-motion: reduce) {
   .chunk-in,
-  .row-in,
-  .tool-label.label-in {
+  .row-in {
     animation: none;
   }
 }

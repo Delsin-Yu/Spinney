@@ -95,9 +95,10 @@ the merge is idempotent and safe when a repaint or a finalize already removed th
 element, `finalizeStreamingAnswer` settles everything **before** the markdown render,
 and `reset` / `tree` settle the chunks in flight before their cards are replaced. A new
 row (assistant text, tool, thinking, notice) arrives on one `.row-in` fade + 2 px rise
-that is removed again on `animationend`; a live tool row's label is **not** wrapped per
-delta — the same element is rewritten and its `.label-in` class removed and re-added in
-the next frame, so no layout is read in the streaming path. `spinney.streamAnimation`
+that is removed again on `animationend`. A tool call that is still being written is one
+fixed line (`Writing tool call...`, see below), so no label is rewritten per delta and
+there is no `.label-in` fade: the only text a composing call changes is its verb, and
+that changes on a name delta. `spinney.streamAnimation`
 (absent ⇒ on, in the `config` message) turns all of it off into exactly the old
 rendering, and `prefers-reduced-motion: reduce` is honoured in the script as well as in
 `media/style.css`; `tools/check-webview.js` pins that a delta is readable at once and
@@ -193,8 +194,8 @@ not italic either, because what the agent *said* is not a step and the italic ma
   call's arguments on the host (`toolTitleFromArgs`) and stored on the item, so a clipped
   argument string can never lose it — else `toolBrief()`'s path/command/pattern. It is
   12 px `--text-dim` and set in **monospace (11 px) only for a derived command or pattern**:
-  `const mono = !title && MONO_LABEL_TOOLS.has(name)` in `addTool` / `addLiveTool` /
-  `appendLiveTool` / `finalizeLiveTool`, so a `title` always reads as normal text. That
+  `const mono = !title && MONO_LABEL_TOOLS.has(name)` in `addTool` / `finalizeLiveTool`, so
+  a `title` always reads as normal text. That
   monospace label is also the one part of the line that stays **upright** — the verb and a
   prose label are italic — because Consolas has no true italic and an 11 px synthesized
   oblique smears a command's glyphs. The
@@ -209,6 +210,19 @@ not italic either, because what the agent *said* is not a step and the italic ma
 Both are also the reason a card no longer grows a block per call: a step that took ten
 tools is ten one-line rows, and the reader who wants the output opens the one they care
 about.
+
+**A call that is still being written is one row with one fixed label.** While the model
+composes the call's arguments the row says exactly that — `Writing tool call...`
+(`LIVE_TOOL_LABEL`, a `tr()` key) — and nothing else: no argument text, no elapsed chip
+(nothing has started yet), and a detail that stays empty until the call settles. The verb
+is the one thing that follows the stream, because the tool's **name** arrives in pieces
+(`appendLiveTool` appends them and re-reads `toolVerb`); the arguments do not, which is
+why `toolCallDelta` stopped carrying them at all and no longer grows a string in the
+runtime either. `finalizeLiveTool` (on `toolStart`) turns that same element into the real
+row in place — verb, label, monospace, chip and the detail painted from the settled
+arguments — so a live call and a replayed one are still the same element shape.
+`tools/check-webview.js` pins the draft's shape, the verb following two name fragments,
+and that `toolStart` upgrades the same row rather than adding a second one.
 
 **`renderItemInto` is the same rendering as the live path, split the same way.** The
 history repaint builds a tool row with the one \`addTool\` (which takes the whole row state —
