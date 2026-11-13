@@ -1636,9 +1636,14 @@ if (contextLabel !== 'ctx 50%') {
   if (!/Compress/.test(String(compressBtn.textContent || ''))) {
     problems.push(`the compress button reads ${JSON.stringify(compressBtn.textContent)}, expected "Compress"`);
   }
-  // Two buttons on screen (Send + Compress) is where the action row takes its own line.
+  // Two short buttons (Send + Compress) are not a row: the action line is for three.
+  if (elementById('actions').classList.contains('stacked')) {
+    problems.push('the action row takes its own line for Send and Compress alone');
+  }
+  // …and the drift case, where Continue with new context joins them, is where it does.
+  dispatch({ ...base, setup: { node: null, live: null, drift: 'user', reasons: ['card'] } });
   if (!elementById('actions').classList.contains('stacked')) {
-    problems.push('the action row stays inline although Send and Compress are both on screen');
+    problems.push('the action row stays inline although three buttons are on screen');
   }
 
   // 2. The context is `near`: the same button, still enabled, and no second entry appears —

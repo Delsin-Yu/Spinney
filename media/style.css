@@ -201,16 +201,16 @@ body.vscode-high-contrast-light {
   display: flex;
   align-items: center;
   gap: 8px;
-  /* The action row wraps onto a line of its own only while it holds more than one button
-     (`#actions.stacked`, set by `updateComposerButtons`). Three buttons beside four dropdowns
-     left the model select too narrow to read, so they get a line; a lone Send sits at the end
-     of the controls row exactly as it always did. */
+  /* The action row wraps onto a line of its own only while it holds **three or more** buttons
+     (`#actions.stacked`, set by `updateComposerButtons`). `Compress` + `Send` are two short
+     words and sit in the controls row with the dropdowns; the drift case — Compress, Continue
+     with new context and Send — is the one that needs the line. */
   flex-wrap: wrap;
 }
 
 /* The composer's buttons — Stop, Compress, Continue with new context, Send. Inline by default
-   (the model select is the flexible item, so Send lands at the row's end), and a right-aligned
-   line of their own while at least two of them are on screen. */
+   (the model select is the flexible item, so they land at the row's end), and a right-aligned
+   line of their own while three or more of them are on screen. */
 #actions {
   flex: 0 0 auto;
   display: flex;
