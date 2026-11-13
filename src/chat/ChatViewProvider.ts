@@ -5769,6 +5769,80 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   }
 
   /**
+   * Edit one turn's user prompt — the pencil beside a card's pinned ask
+   * (`editUserMessage` from `media/main.js`). The edited text becomes a **new** user turn
+   * branching from the edited node's *parent*, carrying that node's own image
+   * attachments along, so editing the words keeps the images.
+   *
+   * Nothing is rewritten in place: a turn's `messages` are the bytes the provider's
+   * prefix was built from, and a node's prompt is what it was asked. The edited node
+   * therefore stays exactly where it was — an ordinary sibling branch holding the old
+   * wording — and for a node with **no parent** the new turn starts a second forest root
+   * (`onUserMessage`'s explicit `null` basis) instead of branching off the current
+   * checkout. The new node is focused by the ordinary `beginTurn` / `attachNode` path,
+   * so nothing here moves the view.
+   *
+   * Each refusal is one sentence and starts no turn: a node this session does not have,
+   * a sidecar (a sub-agent window or job card has no prompt of its own), an empty text, a
+   * node that is still running or still owns unfinished work, and the two window-level
+   * gates every turn start shares (the reboot hold and read-only).
+   */
+  private async editUserMessage(rt: SessionRuntime, nodeId: string, text: string): Promise<void> {
+    if (this.isHeld()) {
+      rt.postNotice(
+        'warning',
+        vscode.l10n.t('An external controller is rebooting the window; please wait a moment.'),
+      );
+      return;
+    }
+    if (this.readOnly) {
+      rt.postNotice('warning', this.readOnlyNotice());
+      return;
+    }
+    const node = rt.session.nodes[nodeId];
+    if (!node) {
+      rt.postNotice(
+        'warning',
+        vscode.l10n.t('Could not edit that prompt — the node is not part of this session.'),
+      );
+      return;
+    }
+    if (isSidecar(node)) {
+      rt.postNotice('warning', vscode.l10n.t('This card has no prompt of its own to edit.'));
+      return;
+    }
+    const edited = text.trim();
+    if (!edited) {
+      rt.postNotice('info', vscode.l10n.t('Nothing to send: the edited prompt is empty.'));
+      return;
+    }
+    if (node.status === 'running' || rt.runningNodes().includes(nodeId)) {
+      rt.postNotice(
+        'warning',
+        vscode.l10n.t('This turn is still running — wait for it to finish before editing its prompt.'),
+      );
+      return;
+    }
+    if (rt.lockedWorkCount(nodeId) > 0) {
+      rt.postNotice(
+        'warning',
+        vscode.l10n.t(
+          'A background task or sub-agent is still running here — wait for it to finish before editing this prompt.',
+        ),
+      );
+      return;
+    }
+    // The images the edited prompt carried: they are part of the wording being edited,
+    // so they travel with it instead of being silently dropped.
+    const prompt = node.displayItems.find((item) => item.kind === 'user');
+    const attachments = prompt && prompt.attachments ? prompt.attachments : [];
+    // The basis is the edited node's **parent**, never the node: the edited turn is
+    // replaced by a sibling, not extended. `null` (a root node) is a real basis — the new
+    // turn becomes a second root (see `onUserMessage`).
+    await rt.onUserMessage(edited, attachments, { basisNodeId: node.parentId ?? null });
+  }
+
+  /**
    * The composer's **one** new-epoch entry (`newContextTurn`) — the replacement for the
    * three entries that used to disagree: the card's `⧉ Continue in a new window`, the
    * harness-drift `⧉` hint, and the modal a plain send raised when the user changed the
@@ -6052,6 +6126,13 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         return;
       case 'userMessage':
         return this.dispatchUserMessage(rt, String(message.text ?? ''), message.attachments ?? []);
+      case 'editUserMessage':
+        // The pencil beside a card's pinned ask (`media/main.js`): an edit of **that**
+        // card's own prompt, never a composer message — the composer's text and
+        // attachments are not touched by it. The host turns it into a branch from the
+        // edited node's *parent*, so the old wording stays in the tree as an ordinary
+        // sibling (`editUserMessage` above owns every refusal).
+        return this.editUserMessage(rt, String(message.nodeId ?? ''), String(message.text ?? ''));
       case 'newContextTurn':
         // The composer's ONE new-epoch entry: a new context window when the chain is
         // near/full, a fork under the live setup when only the setup drifted. The host

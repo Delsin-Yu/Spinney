@@ -3135,7 +3135,7 @@ export class SessionRuntime {
   async onUserMessage(
     text: string,
     attachments: UserAttachment[] = [],
-    opts?: { basisNodeId?: string },
+    opts?: { basisNodeId?: string | null },
   ): Promise<void> {
     // P3: only the node this turn would continue from must be free — another
     // branch of this session may stream meanwhile. (This mirrors the composer's
@@ -3143,8 +3143,15 @@ export class SessionRuntime {
     // is known.) `basisNodeId` is the **explicit** basis a hop receipt comes back to:
     // the turn branches off that node without moving the session's checkout, which is
     // what lets a receipt land while the user is reading another branch.
-    const basis = opts?.basisNodeId ?? this.session.activeNodeId;
-    if (opts?.basisNodeId !== undefined && !this.session.nodes[opts.basisNodeId]) {
+    //
+    // `'basisNodeId' in opts` — a presence test, never a truthiness read — is what
+    // tells an explicit `null` apart from an absent option. `null` means "no parent":
+    // an edited **root** node's replacement therefore starts a second forest root
+    // instead of silently branching off whatever happens to be checked out
+    // (`editUserMessage` in `ChatViewProvider`).
+    const basis =
+      opts && 'basisNodeId' in opts ? opts.basisNodeId ?? null : this.session.activeNodeId;
+    if (basis && !this.session.nodes[basis]) {
       return;
     }
     // The card this send runs on **and** the card the image path below must use are

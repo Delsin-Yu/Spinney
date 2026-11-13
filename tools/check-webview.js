@@ -7136,6 +7136,208 @@ if (contextLabel !== 'ctx 50%') {
   notes.push('shell: #new-context-btn sits before #send-btn, and the retired ids/classes are gone');
 }
 
+// --- Editing a card's own prompt (the pencil on the pinned ask) ---------------
+// A turn's prompt is the user's own text, so a card offers a small pencil on its
+// pinned ask (`.node-ask-edit`): it swaps the rendered ask for a plain textarea
+// pre-filled with the node's **full prompt text** — the stored text, never the
+// Markdown the ask body shows — plus one hint line. Enter asks the host to branch from
+// the edited node's parent with the edited text (`editUserMessage`; nothing is edited
+// in place, and the composer is not involved at all), Shift+Enter is the textarea's own
+// newline, and Esc puts the rendered ask back. What is pinned here:
+//   - the pencil exists on an idle turn card and on **no** running or sidecar card, and
+//     it follows `state`'s `lockedNodes` without a repaint;
+//   - a click opens an editor holding the raw prompt text, and no Markdown is rendered
+//     into it;
+//   - Enter posts `{ type: 'editUserMessage', nodeId, text }` with that node and that
+//     text — and an empty editor posts nothing; Shift+Enter posts nothing;
+//   - a repaint never leaves a stale textarea behind, and Esc on a fresh edit restores
+//     the ask with the node's original text.
+{
+  const ROOT = 'ask-edit-root';        // finished turn, on the view path → the pencil
+  const RUN = 'ask-edit-running';      // the same card, still streaming → no pencil
+  const SUB = 'ask-edit-sub';          // `kind:'agent'` sidecar → no pencil
+  const ORIGINAL = 'the **original** ask';
+  const row = (id, parentId, children, status, kind, extra) =>
+    Object.assign(
+      { id, parentId, children, title: id, status, createdAt: 0, preview: id, usage: null, size: null },
+      kind ? { kind } : {},
+      extra || {},
+    );
+  // `RUN` is the view focus, so both turn cards are expanded and rendered and the two
+  // halves of the gate are checked in one pass.
+  const treeMsg = {
+    type: 'tree',
+    viewId: RUN,
+    activeId: null,
+    rootId: ROOT,
+    rootIds: [ROOT],
+    nodes: [
+      row(ROOT, null, [RUN, SUB], 'done'),
+      row(RUN, ROOT, [], 'running'),
+      row(SUB, ROOT, [], 'done', 'agent', {
+        items: [{ kind: 'user', text: 'sub-agent instruction' }],
+        summary: true,
+      }),
+    ],
+  };
+  const pathMsg = {
+    type: 'path',
+    ids: [ROOT, RUN],
+    nodes: [
+      { id: ROOT, status: 'done', items: [{ kind: 'user', text: ORIGINAL }] },
+      { id: RUN, status: 'running', items: [{ kind: 'user', text: 'live prompt' }] },
+    ],
+  };
+  const canvas = elementById('tree-canvas');
+  const cardOf = (id) => canvas.children.find((child) => child.dataset && child.dataset.id === id) || null;
+  const askOf = (id) => findByClass(cardOf(id), 'node-ask');
+  const pencilOf = (id) => findByClass(askOf(id), 'node-ask-edit');
+  const editorOf = (id) => findByClass(askOf(id), 'ask-edit-input');
+  const click = (element) => {
+    const handler = element && element._listeners && element._listeners.click;
+    if (typeof handler !== 'function') return false;
+    handler({ stopPropagation() {} });
+    return true;
+  };
+  /** Deliver a `keydown` the way a browser does; returns whether `preventDefault` ran. */
+  const press = (element, key, shiftKey) => {
+    const handler = element && element._listeners && element._listeners.keydown;
+    if (typeof handler !== 'function') return null;
+    let prevented = false;
+    handler({
+      key,
+      shiftKey: !!shiftKey,
+      preventDefault() {
+        prevented = true;
+      },
+      stopPropagation() {},
+    });
+    return prevented;
+  };
+  const editPosts = () => posted.filter((message) => message && message.type === 'editUserMessage');
+
+  dispatch({ type: 'reset' });
+  // `RUN` is live, which is what `state`'s `runningNodes` says — the same authority the
+  // Send/Stop pair reads, and the second half of the pencil's gate.
+  dispatch({ type: 'state', busy: true, status: '', sessionId: 'smoke-session', runningNodes: [RUN], lockedNodes: [] });
+  dispatch(treeMsg);
+  dispatch(pathMsg);
+
+  // (a) Where the pencil may appear.
+  if (!pencilOf(ROOT)) {
+    problems.push('an idle turn card has no edit pencil on its pinned ask');
+  }
+  if (pencilOf(RUN)) {
+    problems.push('a card whose turn is still running offers the edit pencil (the host refuses that edit)');
+  }
+  if (pencilOf(SUB)) {
+    problems.push('a sub-agent card offers the edit pencil (it has no prompt of its own)');
+  }
+  // The host's `state` is the other half of the gate, and it arrives without a repaint.
+  dispatch({ type: 'state', busy: false, status: '', sessionId: 'smoke-session', runningNodes: [], lockedNodes: [ROOT] });
+  if (pencilOf(ROOT)) {
+    problems.push('a node that still owns unfinished work (`lockedNodes`) still offers the edit pencil');
+  }
+  dispatch({ type: 'state', busy: false, status: '', sessionId: 'smoke-session', runningNodes: [], lockedNodes: [] });
+  if (!pencilOf(ROOT)) {
+    problems.push('the edit pencil did not come back once the node stopped being locked');
+  }
+
+  // (b) The editor: the raw text, no Markdown, one hint line.
+  if (!click(pencilOf(ROOT))) {
+    problems.push('the edit pencil has no click handler');
+  } else if (!editorOf(ROOT)) {
+    problems.push('clicking the edit pencil did not put a textarea into the ask');
+  } else {
+    const input = editorOf(ROOT);
+    if (String(input.value) !== ORIGINAL) {
+      problems.push(
+        `the editor is pre-filled with ${JSON.stringify(input.value)}, expected the node's full prompt text ` +
+          `${JSON.stringify(ORIGINAL)}`,
+      );
+    }
+    if (findByClass(askOf(ROOT), 'answer')) {
+      problems.push('the ask still renders Markdown while the editor is open');
+    }
+    if (!findByClass(askOf(ROOT), 'ask-edit-hint')) {
+      problems.push('the prompt editor carries no hint line');
+    }
+
+    // (c) Shift+Enter is a newline; Enter posts that node and that text.
+    posted.length = 0;
+    input.value = 'edited with a newline';
+    if (press(input, 'Enter', true)) {
+      problems.push('Shift+Enter was prevented — the editor could never insert a newline');
+    }
+    if (editPosts().length > 0) {
+      problems.push(`Shift+Enter posted ${JSON.stringify(editPosts())}, expected a newline and nothing else`);
+    }
+    posted.length = 0;
+    input.value = 'edited prompt';
+    press(input, 'Enter', false);
+    const sent = editPosts()[0];
+    if (!sent || sent.nodeId !== ROOT || sent.text !== 'edited prompt') {
+      problems.push(
+        `Enter in the prompt editor posted ${JSON.stringify(posted)}, expected ` +
+          `{ type: 'editUserMessage', nodeId: '${ROOT}', text: 'edited prompt' }`,
+      );
+    }
+    if (posted.some((message) => message && message.type === 'userMessage')) {
+      problems.push('editing a prompt posted a `userMessage` — the composer is not part of this edit');
+    }
+    posted.length = 0;
+    input.value = '   ';
+    press(input, 'Enter', false);
+    if (editPosts().length > 0) {
+      problems.push(`Enter on an empty editor posted ${JSON.stringify(editPosts())} — there is nothing to send`);
+    }
+
+    // (d) A repaint closes the editor and puts the ask back.
+    input.value = 'still typing';
+    dispatch(treeMsg);
+    if (editorOf(ROOT)) {
+      problems.push('a repaint left a stale textarea in the ask');
+    }
+    if (!findByClass(askOf(ROOT), 'answer')) {
+      problems.push('a repaint did not put the rendered ask back');
+    }
+
+    // (e) Esc on a fresh edit: the ask comes back with the original text, and nothing
+    // is sent.
+    posted.length = 0;
+    if (!click(pencilOf(ROOT))) {
+      problems.push('the edit pencil did not open a second editor after a repaint');
+    } else {
+      const second = editorOf(ROOT);
+      if (!second) {
+        problems.push('the pencil opened no editor after the repaint');
+      } else {
+        second.value = 'throw this away';
+        press(second, 'Escape', false);
+        if (editorOf(ROOT)) {
+          problems.push('Esc left the prompt editor open');
+        }
+        const body = findByClass(askOf(ROOT), 'answer');
+        if (!body) {
+          problems.push('Esc did not put the rendered ask back');
+        } else if (String(body.innerHTML).indexOf('original') < 0) {
+          problems.push(
+            `Esc restored ${JSON.stringify(body.innerHTML)}, expected the node's original ask ` +
+              `${JSON.stringify(ORIGINAL)}`,
+          );
+        }
+        if (editPosts().length > 0) {
+          problems.push(`Esc posted ${JSON.stringify(editPosts())} — a cancel sends nothing`);
+        }
+        if (!pencilOf(ROOT)) {
+          problems.push('the edit pencil did not come back with the cancelled ask');
+        }
+      }
+    }
+  }
+  notes.push('prompt edit: the pencil on an idle turn card only, Enter posts the node and the edited text, a repaint leaves no textarea, Esc restores the ask');
+}
+
 // --- report ------------------------------------------------------------------
 
 /**

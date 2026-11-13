@@ -2616,10 +2616,76 @@ button.icon-btn {
      cap generously and scroll instead of clipping. */
   max-height: 260px;
   overflow-y: auto;
+  /* The ask's edit pencil is positioned against this box (`.node-ask-edit`). */
+  position: relative;
+  /* Room for that pencil at the top-right, so a long first line never runs under it. */
+  padding-right: 26px;
 }
 
 .node-ask.hidden {
   display: none;
+}
+
+/* The edit pencil on the pinned ask (`syncAskEdit` in media/main.js): it swaps the ask
+   for an editor of the card's **own** prompt. Hover/focus-revealed like `.node-del`,
+   because it changes the card rather than doing the obvious thing on a stray click.
+   The host decides whether the edit is allowed; this only says where it sits. */
+.node-ask-edit {
+  position: absolute;
+  top: 4px;
+  right: 5px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--text-dim);
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+
+.node:hover .node-ask-edit,
+.node.active .node-ask-edit,
+.node-ask-edit:focus-visible {
+  opacity: 1;
+}
+
+.node-ask-edit:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+/* The open editor: a plain textarea (never Markdown — the ask body's `.answer` is what
+   the editor replaces) and one hint line about Enter / Shift+Enter / Esc. */
+.ask-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ask-edit-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 64px;
+  max-height: 220px;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--user-fg);
+  background: var(--user-bg);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  resize: vertical;
+}
+
+.ask-edit-hint {
+  font-size: 10px;
+  color: var(--text-dim);
 }
 
 .node-ask .msg.user.prompt {

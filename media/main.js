@@ -1847,6 +1847,20 @@
   function addUserPrompt(text, attachments) {
     if (!promptEl) return;
     promptEl.innerHTML = '';
+    // The card's own prompt is remembered here (`_askText` / `_askAtts`), together
+    // with the ask it just rendered: the ask body is *Markdown*, so it is not the text
+    // an editor can be pre-filled with, and a cancel has to put the same ask back
+    // (`beginAskEdit` / `renderAsk`). The ask element survives a repaint (only its
+    // children are replaced), but the card is where the two live, so any card-level
+    // pass can read them back.
+    const card = askCardOf(promptEl);
+    if (card) {
+      card._askText = typeof text === 'string' ? text : '';
+      card._askAtts = attachments || [];
+    }
+    // A render of the ask is the end of any edit that was open on it, whatever the
+    // reason for the render: a repaint must never leave a stale textarea behind.
+    promptEl._askEditing = false;
     const node = el('div', 'msg user prompt');
     node.dataset.kind = 'user';
     if (attachments && attachments.length) {
@@ -1870,7 +1884,151 @@
       node.appendChild(body);
     }
     promptEl.appendChild(node);
+    // The pencil belongs to the ask, so it is put back with it — a render that wiped
+    // the ask's children took the button with them.
+    syncAskEdit(card);
     return node;
+  }
+
+  // ---- Editing a card's own prompt (the pencil on the pinned ask) --------------
+  // A turn's prompt is the user's own text, and re-reading a card often reveals a typo
+  // or a missing detail. The pencil on the ask (`syncAskEdit`) swaps the rendered ask
+  // for a plain editor; pressing Enter asks the host to start a **new turn** from the
+  // edited node's parent with the edited text (`editUserMessage`), which is what makes
+  // the old wording stay in the tree as an ordinary sibling branch. The composer is
+  // not involved anywhere here: this edits *this card's* prompt, it does not compose a
+  // new message, so the composer's text and attachments stay untouched.
+
+  /**
+   * The card an ask belongs to: `.node-ask` is created directly inside the card
+   * (`createNodeCard`) and is a child of it for the card's whole life, so the parent
+   * is the card — and `_nodeId` is what says so, rather than trusting any element.
+   */
+  function askCardOf(ask) {
+    const card = ask && ask.parentElement;
+    return card && card._nodeId ? card : null;
+  }
+
+  /**
+   * The pencil beside a card's pinned ask, created lazily and kept on the card
+   * (`_askEditBtn`) so a repaint puts the **same** element back instead of stacking a
+   * second one. It is offered only where editing can go through: an expanded,
+   * non-sidecar card whose node is not running and does not still own unfinished work
+   * — the same four refusals the host re-checks (`editUserMessage` in
+   * `ChatViewProvider`). The ask's own `hidden` class is what keeps it out of sight on
+   * a collapsed card or a monitor window; there is nothing to edit without a prompt.
+   */
+  function syncAskEdit(card) {
+    if (!card || !card.querySelector) return;
+    const id = card._nodeId;
+    const meta = id ? treeNodes[id] : null;
+    const ask = card.querySelector('.node-ask');
+    if (!ask) return;
+    const want =
+      !!id &&
+      !!card._askText &&
+      !isSidecarKind(meta && meta.kind) &&
+      (!meta || meta.status !== 'running') &&
+      !runningNodes.has(id) &&
+      !lockedNodes.has(id);
+    const btn = card._askEditBtn;
+    if (!want) {
+      if (btn) {
+        btn.remove();
+        card._askEditBtn = null;
+      }
+      return;
+    }
+    // The open editor owns the ask: a pencil inside it would be a second way to
+    // cancel the same edit.
+    if (ask._askEditing) return;
+    if (btn) {
+      ask.appendChild(btn);
+      return;
+    }
+    const button = el('button', 'node-ask-edit', '✎');
+    button.title = tr('Edit this prompt — the answer starts a new branch from the same point');
+    button.dataset.role = 'ask-edit';
+    button.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      beginAskEdit(card);
+    });
+    card._askEditBtn = button;
+    ask.appendChild(button);
+  }
+
+  /**
+   * Swap the rendered ask for an editor: a textarea pre-filled with the node's **full**
+   * prompt text — the stored text, never the Markdown the ask body shows, because the
+   * editor must not render Markdown — plus one hint line. Esc restores the rendered ask;
+   * Enter asks the host to branch with the edited text and leaves the editor open until
+   * the host answers (a repaint closes it, a refusal does not eat the typing);
+   * Shift+Enter is the textarea's own newline.
+   */
+  function beginAskEdit(card) {
+    const id = card && card._nodeId;
+    const ask = card && card.querySelector ? card.querySelector('.node-ask') : null;
+    if (!id || !ask || ask._askEditing) return;
+    ask._askEditing = true;
+    ask.innerHTML = '';
+    const box = el('div', 'ask-edit');
+    const input = el('textarea', 'ask-edit-input');
+    input.value = typeof card._askText === 'string' ? card._askText : '';
+    const hint = el('div', 'ask-edit-hint', tr('Enter sends, Shift+Enter adds a newline, Esc cancels'));
+    input.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape') {
+        ev.preventDefault();
+        ev.stopPropagation();
+        renderAsk(card);
+        return;
+      }
+      // Shift+Enter is left to the textarea: it inserts a newline and posts nothing.
+      if (ev.key !== 'Enter' || ev.shiftKey) return;
+      ev.preventDefault();
+      const edited = String(input.value || '').trim();
+      // An empty edit is nothing to send; the host refuses it too.
+      if (!edited) return;
+      vscode.postMessage({ type: 'editUserMessage', nodeId: id, text: edited });
+    });
+    box.appendChild(input);
+    box.appendChild(hint);
+    ask.appendChild(box);
+    // The caret goes where the user is about to type. A card that is not on screen
+    // (a hidden ask) cannot take it, and that is fine — the editor is still open.
+    if (typeof input.focus === 'function') input.focus();
+  }
+
+  /**
+   * Put the rendered ask back: the way out of the editor, for Esc and for a repaint.
+   * It renders from the card's stored prompt, so what comes back is exactly what was
+   * there before the edit — Markdown, image attachments and the pencil included.
+   */
+  function renderAsk(card) {
+    const ask = card && card.querySelector ? card.querySelector('.node-ask') : null;
+    if (!ask) return;
+    // A focused editor is going away with the ask's body: hand the caret back first, so
+    // nothing keeps the focus on an element that no longer exists.
+    const open = byClass(ask, 'ask-edit-input');
+    if (open && typeof open.blur === 'function') open.blur();
+    const prevPrompt = promptEl;
+    promptEl = ask;
+    try {
+      addUserPrompt(card._askText, card._askAtts);
+    } finally {
+      promptEl = prevPrompt;
+    }
+  }
+
+  /**
+   * A repaint never leaves a stale editor behind: a card that is (re)described with its
+   * ask already rendered does not go through `addUserPrompt`, so the open editor — a
+   * textarea nobody asked to keep — is closed here first. Cheap when nothing was open.
+   */
+  function cancelAskEdit(card) {
+    const ask = card && card.querySelector ? card.querySelector('.node-ask') : null;
+    if (!ask || !ask._askEditing) return false;
+    renderAsk(card);
+    return true;
   }
 
   function addNotice(kind, text) {
@@ -5553,6 +5711,9 @@
       if (typeof msg.contextPct === 'number') treeNodes[msg.id].contextPct = msg.contextPct;
     }
     if (card) syncContinueButton(card, treeNodes[msg.id] || { id: msg.id, status: msg.status, children: [] });
+    // The pencil on the ask is gated on the node's status too (`syncAskEdit`), and this
+    // patch is how a turn's end reaches its card without a repaint.
+    if (card) syncAskEdit(card);
     // The context state is half of what the composer's own two buttons read (a refused
     // request disables Send and offers the new-epoch entry), and it can arrive *after*
     // the tree was drawn — exactly how a turn dies on a context-length error.
@@ -6224,6 +6385,10 @@
         const statusEl = card.querySelector('.node-status');
         if (statusEl) statusEl.textContent = n.status || '';
         syncContinueButton(card, n);
+        // A repaint never leaves an editor (or a stale textarea) behind, and the
+        // pencil's own gates — running / locked — come from this same description.
+        cancelAskEdit(card);
+        syncAskEdit(card);
         // A card `renderPath` created from a node the `tree` had not described yet
         // still has to pick the `CTX` marker up here (never in a streaming patch:
         // the head exists once).
@@ -6362,6 +6527,11 @@
     }
     for (const id in nodeEls) {
       const meta = treeNodes[id] || { title: '', status: 'done', preview: '' };
+      // A repaint never leaves an editor (or a stale textarea) behind: the rendered ask
+      // goes back **before** this pass re-describes the card, and the pencil is re-read
+      // after it (its gates are the node's status and the two sets `state` fills). Same
+      // rule as the first pass in `renderTree`.
+      cancelAskEdit(nodeEls[id]);
       const onPath = activePathSet.has(id) || agentExpanded(id);
       // Same rule as in `renderTree`: a sidecar is a monitor unless it is the focused
       // node, which is the one card that still renders as the ordinary expanded card.
@@ -6377,6 +6547,7 @@
       // Same story as in `renderTree`: the `CTX` marker belongs to the card, not to
       // one repaint — and this pass can be the one that creates the card.
       syncCtxBadge(nodeEls[id], meta);
+      syncAskEdit(nodeEls[id]);
       // A job card has no conversation: its body mirrors the live job.
       if (meta.kind === 'bg') {
         renderBgBody(nodeEls[id], meta);
@@ -8137,6 +8308,10 @@
         // refuses every turn there, so the composer says so up front instead of letting a
         // send fail. A host that predates the flag sends nothing: not read-only.
         readOnly = msg.readOnly === true;
+        // The ask's edit pencil is gated on exactly these two sets — a running or locked
+        // node is refused host-side (`editUserMessage`) — so every card re-reads them.
+        // The `tree` did not change, which is why this cannot wait for a repaint.
+        for (const id in nodeEls) syncAskEdit(nodeEls[id]);
         updateComposerButtons();
         setBusy(msg.busy);
         setStatus(msg.status);

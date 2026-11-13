@@ -461,7 +461,13 @@
   background job cards + `.bgnotify` notification blocks, and the window-global
   terminal dock).
   **A turn card is one essay.** `.node-ask` pins the user's prompt and `.node-work` is the
-  card's **only scroller**, holding every row of the turn in order. The process is grouped
+  card's **only scroller**, holding every row of the turn in order. The ask also carries the
+  small `.node-ask-edit` pencil of an idle turn card (`syncAskEdit` / `beginAskEdit`): a click
+  swaps the rendered ask for a textarea holding the node's **raw** prompt text plus one hint
+  line (Enter sends, Shift+Enter adds a newline, Esc cancels), Enter posts
+  `editUserMessage` — which the host turns into a branch from the edited node's **parent**,
+  never an in-place rewrite — and Esc, or any repaint, puts the rendered ask back.
+  The process is grouped
   **per run of tool rows**: a tool row opens a `.steps` group (`data-kind="steps"`) with a
   `Ran N steps` / `Ran 1 step` header over its own `.steps-body`, and the next assistant
   **text** closes it — the prose is appended to `.node-work` itself, never into a group's
