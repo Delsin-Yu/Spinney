@@ -168,6 +168,22 @@ export interface DisplayItem {
   title?: string;
   args?: string;
   content?: string;
+  /**
+   * `kind:'tool'` only: the lines this call added and removed, read by the host out of
+   * its own result (`takeLineDiff` in `runtime.ts`, computed by `lineDiff` in
+   * `src/tools/index.ts`), so the card's chip survives a repaint instead of being
+   * recomputed from a file that has moved on. Absent for a call that changed no line and
+   * for every tool that is not a file writer, and both sides then draw nothing.
+   */
+  diff?: { add: number; del: number };
+  /**
+   * `kind:'background'` only: this notice **opens the next round** of its node (a job
+   * finished while the node was idle, and the harness started a turn from the notice). It
+   * is a boundary in the log rather than a step: the run above it ends here, and the round
+   * below it gets its own steps. Absent on a notice delivered mid-turn, which is one step of
+   * the run that was already going.
+   */
+  round?: boolean;
   status?: 'running' | 'done';
   /**
    * `kind:'tool'` only: the host clock (ms) when the call started running, and the
@@ -180,6 +196,14 @@ export interface DisplayItem {
   error?: boolean;
   attachments?: UserAttachment[];
   usage?: Usage;
+  /**
+   * `kind:'background'` only: which producer the notice came from — a background terminal
+   * or a sub-agent batch. It is stored because `kind` on a display item can only say
+   * `background` (that is the *item* type), and a repaint that lost this distinction drew
+   * a sub-agent batch as a terminal: wrong title, wrong viewer. Absent on an item stored by
+   * a build that did not record it, where the webview falls back to the old guess.
+   */
+  producer?: 'background' | 'subagent';
   /** For a background notice card: the status phrase, e.g. "finished with exit code 0". */
   doneText?: string;
 }
@@ -304,6 +328,14 @@ export interface TreeNode {
   /** kind === 'bg': terminal-state snapshot, written when the process ends. */
   bgExitCode?: number | null;
   bgKilled?: boolean;
+  /**
+   * `kind:'bg'` only: this job was started **detached** (`run_type: "detached"`). A
+   * durable fact about how it started, written with the terminal snapshot, and the one
+   * thing the window-global dock needs to leave it out (a detached job is session-wide and
+   * belongs to no node). It says nothing about a lock or a notice — `backgroundTaskDetached`
+   * still reads the live task for the `shared` badge.
+   */
+  bgDetached?: boolean;
   bgElapsedMs?: number;
   /** kind === 'bg': last ~800 chars of output, captured at the terminal state. */
   bgOutputTail?: string;

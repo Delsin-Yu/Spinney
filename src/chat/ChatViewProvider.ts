@@ -403,8 +403,10 @@ function bgDockHandle(sessionId: string, taskId: number): string {
 }
 
 /**
- * One job of the window-global terminal dock (`backgroundsGlobal`): every background
- * command of every session, running or finished, as one flat list.
+ * One job of the window-global terminal dock (`backgroundsGlobal`): every **detached**
+ * command of every session, running or finished, as one flat list. A detached job is
+ * session-wide fire-and-forget (it locks no node and notifies nobody), so the dock is its
+ * only home; a `background` job lives beside its node instead.
  *
  * It is the same job the owning node's `kind:'bg'` card renders, plus the two things a
  * dock row alone can say — which **session** it belongs to (its title) and the card node
@@ -563,6 +565,25 @@ function globalAgentsMdStub(): string {
   );
   return `<!-- ${note} -->\n`;
 }
+
+/**
+ * The image bytes a `read_image` viewer may be handed in one answer: a data URL inflates
+ * the file by a third, so 4 MiB of image is already a ~5.5 MB message, and anything larger
+ * is a page the reader should look at in an editor instead (the row offers the click).
+ */
+const IMAGE_VIEW_MAX_BYTES = 4 * 1024 * 1024;
+
+/** The content types the image viewer can inline by file extension. */
+const IMAGE_VIEW_TYPES: Record<string, string> = {
+  png: 'image/png',
+  jpg: 'image/jpeg',
+  jpeg: 'image/jpeg',
+  gif: 'image/gif',
+  webp: 'image/webp',
+  bmp: 'image/bmp',
+  svg: 'image/svg+xml',
+  avif: 'image/avif',
+};
 
 /**
  * The coordinator. P1 split every per-session / per-turn concern out into
@@ -951,7 +972,15 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     this.backgroundHub.setHooks({
       onUpdated: (owner) => this.runtimes.get(owner.sessionId)?.refreshBackgrounds(),
       onFinish: (owner, task) => this.runtimes.get(owner.sessionId)?.onBackgroundFinished(owner, task),
-      onRegistered: (owner, task) => this.runtimes.get(owner.sessionId)?.onBackgroundRegistered(owner, task),
+      onRegistered: (owner, task) => {
+        // A **new** job can reuse an id: the minting counter lives in the hub, which is
+        // in-memory, so every reload starts again at 1. `bgDismissed` is keyed
+        // `(sessionId, taskId)` and is rebuilt from the durable `bgDockDismissed` records,
+        // so without this line a job dismissed before a reload would silence the next job
+        // that happens to take the same id. A job that has just started is never dismissed.
+        this.bgDismissed.delete(bgDockHandle(owner.sessionId, task.id));
+        this.runtimes.get(owner.sessionId)?.onBackgroundRegistered(owner, task);
+      },
     });
     // Runtimes are created on demand (`runtimeFor`), NOT for every stored
     // session: a runtime builds its own agent history when it is constructed, and
@@ -4375,6 +4404,47 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   }
 
   /**
+   * The pixels a `read_image` viewer asked for, as a data URL.
+   *
+   * The webview cannot read a file and the panel's `asWebviewUri` is not the same thing for
+   * every scope, so the host reads the file and inlines it: `img-src data:` is already in
+   * the shell's CSP. The bytes travel once, when the row is expanded, and the cap keeps a
+   * wall-sized screenshot from becoming a multi-megabyte message (a file over it is
+   * answered with the reason, and the viewer says so).
+   *
+   * The answer also carries the file's mtime, because the viewer is about **that call's**
+   * image: if the file has been rewritten since, the pixels below are the current file, and
+   * the row says so instead of pretending they are what the model saw.
+   */
+  private async answerImageUrl(sessionId: string, message: any): Promise<void> {
+    const requestId = String(message?.requestId ?? '');
+    const filePath = String(message?.path ?? '');
+    const answer = (payload: Record<string, unknown>) =>
+      this.postTo(sessionId, { type: 'imageUrlAnswer', requestId, ...payload });
+    if (!filePath) {
+      answer({ error: 'no path' });
+      return;
+    }
+    try {
+      const stat = await fs.promises.stat(filePath);
+      if (!stat.isFile()) {
+        answer({ error: 'not a file', mtime: stat.mtimeMs });
+        return;
+      }
+      if (stat.size > IMAGE_VIEW_MAX_BYTES) {
+        answer({ error: 'too large', mtime: stat.mtimeMs, bytes: stat.size });
+        return;
+      }
+      const bytes = await fs.promises.readFile(filePath);
+      const ext = (/\.([a-z0-9]+)$/i.exec(filePath) || [])[1];
+      const type = IMAGE_VIEW_TYPES[String(ext || '').toLowerCase()] || 'application/octet-stream';
+      answer({ url: `data:${type};base64,${bytes.toString('base64')}`, mtime: stat.mtimeMs, bytes: stat.size });
+    } catch (err) {
+      answer({ error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  /**
    * Window recovery: VS Code recreated this webview panel from the editor state
    * it serialized at shutdown (`registerWebviewPanelSerializer`, wired in
    * extension.ts). Adopt the panel, bind it to the session it was showing and
@@ -5404,11 +5474,13 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
 
   // ---- The window-global terminal dock ----
   //
-  // Every background command of the window — running or finished, whatever session
-  // and whatever tab — is one list, broadcast as `backgroundsGlobal` to **every**
-  // open chat panel. It is not a second kind of state: each row is the same job the
-  // owning node's `kind:'bg'` card renders (the webview builds both from one shared
-  // body builder), so the dock can never say something the card does not.
+  // Every **detached** command of the window — running or finished, whatever session and
+  // whatever tab — is one list, broadcast as `backgroundsGlobal` to **every** open chat
+  // panel. A detached job is session-wide fire-and-forget: it locks no node, notifies
+  // nobody, so this list is the only place that can show it or kill it. A `background` job
+  // is a node job and lives beside its node (the `kind:'bg'` card), never here. Each row is
+  // still the same job body the card renders (one shared builder), so the dock can never
+  // say something a card does not.
   //
   // Two sources, de-duplicated by `(sessionId, id)`: the live hub tasks of every
   // session, and the persisted `kind:'bg'` record nodes of every session (delivered
@@ -5467,6 +5539,14 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
           return;
         }
         const task = live.get(taskId);
+        // Only a **detached** job belongs in the window-global dock: it is session-wide
+        // fire-and-forget, it locks no node and notifies nobody, so this list is the only
+        // place that can show it (or kill it). A `background` job is a node job — it has a
+        // card of its own beside that node, and that card is where it lives. Without a live
+        // task the record's own durable flag answers (a restored job has no hub entry).
+        if (task ? task.detached !== true : node?.bgDetached !== true) {
+          return;
+        }
         const running = task ? task.status === 'running' : false;
         // The record is the only clock a restored card has: the job's start is the
         // card's own `createdAt`, and its frozen duration gives the end.
@@ -6018,6 +6098,23 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         }
         return;
       }
+      case 'openFile': {
+        // A viewer's own click (an image, a diff's path): show the file in an editor tab.
+        // The path comes from a tool call this session ran, and the only thing this does
+        // is open it, so nothing is written and nothing outside this window changes.
+        const target = String(message.path ?? '');
+        if (!target) {
+          return;
+        }
+        void vscode.commands.executeCommand('vscode.open', vscode.Uri.file(target));
+        return;
+      }
+      case 'imageUrl':
+        // A `read_image` viewer asked for pixels. The webview cannot read a file, so the
+        // host answers with bytes; the answering itself is asynchronous, and this handler
+        // is not (`SessionRuntime` calls it synchronously for most message types).
+        void this.answerImageUrl(session.id, message);
+        return;
       case 'killBackground':
         // Two senders, one action: a job card's ✕ posts a bare `{ id }` (resolved in the
         // tab's own session), the window-global dock posts `{ sessionId, id }` because it

@@ -542,58 +542,82 @@ button.icon-btn {
 /* ---- The three type levels of the log ---------------------------------------
    A turn is one flow of rows inside `.node-work` (the card's only scroller), so what
    distinguishes them is what they say and how loud they are, in exactly three levels:
-   the prose and the reasoning read as normal text (`--text`, 13px), a tool row's line
-   is one step down (the bold verb and the label both 12px `--text-dim`, one grey), and the
-   expanded detail is one more (11px `--text-dim`). The usage line is the faintest, a
-   10px footnote under whichever row hosts it. The levels are size and colour.
+   the prose reads as normal text (`--text`, 13px), the closed form of every **process**
+   row — a thinking row and a tool row alike — is one step down (the bold italic verb and
+   its label, both 12px `--text-dim`, one grey), and the expanded detail is one more
+   (11px `--text-dim`). The usage line is the faintest, a 10px footnote under whichever
+   row hosts it. The levels are size and colour.
 
-   One mark, and only one, says "this is a step rather than a voice": a step's own line
-   is **italic** (`.tool-verb` and the prose `.tool-label`), and a step is also the only
-   thing inset under a header (`.steps-body > .msg.tool`, 15px, which puts a row's text on
-   the header's own label). The reasoning stays upright **and flush with the prose**, because
-   the agent's own words are not something it *did* — the inset traces each step, never a
-   block around a group. A monospace label stays upright too (a synthesized oblique smears a
-   command's glyphs at 11px), and so do the elapsed chip and the detail, which are metadata
-   and code rather than a step's wording. */
+   One mark says "this is the process rather than the answer": the row's own line is
+   **italic** (`.thinking-verb`, `.tool-verb` and the prose `.tool-label`), and the row is
+   **inset** 15px like every other process line — a thinking row carries that inset itself
+   (`.thinking-row`), a step takes it from its group (`.steps-body > .msg.tool`, the same
+   15px, which is the header's chevron and its gap). Nothing that *opens* is italic: the tag
+   stays a tag and an expanded paragraph reads upright, because a screen of oblique grey is
+   tiring; it stays dimmed all the same, since it is still the process and not the answer. A
+   monospace label stays upright too (a synthesized oblique smears a command's glyphs at
+   11px), and so do the elapsed chip and the detail, which are metadata and code rather
+   than a step's wording. */
 
-/* A thinking row: the whole paragraph while its turn is live, one ellipsised line once
-   the turn is over. The row is the control — there is no label and no chevron, so a
-   click anywhere on it opens the whole reasoning plus the turn's usage line. The row is
-   also the positioning context of its own follow light (the open form is a scroller). */
+/* A thinking row: the tag `Thinking`, then the text of the thinking. Closed, the row is
+   one flex line (the tag, then the ellipsised start of the text); open, it is a block, and
+   the text's own block element puts the whole thinking on the line under the tag. The row
+   is the control — there is no chevron — so a click anywhere on it opens it plus the turn's
+   usage line. The row is also the positioning context of its own follow light (the open form
+   is a scroller), and it carries its own 15px inset: process is inset, the answer is not. */
 .thinking-row {
   position: relative;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
   align-self: stretch;
   max-width: 100%;
-  margin: 0;
+  margin: 0 0 0 15px;
   padding: 0 2px;
   cursor: pointer;
   user-select: text;
   -webkit-user-select: text;
 }
 
+/* The tag reads exactly like a step's verb — bold, italic, 12px, the same dim grey — so
+   the two kinds of process row start the same way and the text after them is what differs. */
+.thinking-verb {
+  flex: 0 0 auto;
+  font-weight: 700;
+  font-style: italic;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
 .thinking-row .thinking-text {
-  color: var(--text);
-  font-style: normal;
-  font-size: 13px;
+  flex: 1 1 auto;
+  min-width: 0;
+  color: var(--text-dim);
+  font-style: italic;
+  font-size: 12px;
   line-height: 1.5;
-  white-space: pre-wrap;
   word-break: break-word;
   /* The closed form: exactly one line, ending in an ellipsis. `nowrap` +
      `text-overflow` is what makes it one line whatever the text says, and the open
-     form below undoes all three. */
+     form below undoes both. */
+  white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
-.thinking-row:hover .thinking-text {
-  opacity: 1;
+/* Open: the row becomes a block, so the tag keeps its own line and the whole thinking reads
+   under it, upright at 13px — the italic is the *closed* line's mark, not the paragraph's —
+   while it stays dim, because it is still the process. It is never taller than a reading
+   window: the thinking scrolls inside its own box instead of pushing the turn below the
+   fold. */
+.thinking-row.open {
+  display: block;
 }
 
-/* Open: the whole paragraph, at the size it reads at, with the usage line under it —
-   but never taller than a reading window: the reasoning scrolls inside its own box
-   instead of pushing the turn below the fold. */
 .thinking-row.open .thinking-text {
+  margin-top: 2px;
+  font-style: normal;
+  font-size: 13px;
   white-space: pre-wrap;
   overflow: auto;
   text-overflow: clip;
@@ -601,6 +625,11 @@ button.icon-btn {
   scrollbar-gutter: stable;
 }
 
+/* The thinking is plain text, shown exactly as the model wrote it: `pre-wrap` keeps its
+   line breaks and its indentation, and nothing is reinterpreted. Markdown was tried here
+   and taken back out — the model's reasoning is not a document, and Markdown's own rules
+   (four spaces = a code block, a leading dash = a list, a blank line = a paragraph gap)
+   made it read taller than it was written. */
 /* The usage line is part of the *open* form only (main.js adds/removes `hidden`), so
    the closed row stays one line. Its right end keeps clear of the light below the box. */
 .thinking-row .usage-line.hidden {
@@ -723,11 +752,12 @@ button.icon-btn {
   min-width: 0;
 }
 
-/* Only the **step lines** are inset: 15px puts a row's own text on the header's label
-   (a 9px chevron plus its 6px gap, which the header adds against the log's left edge).
-   Everything else that can ride the same body keeps the prose's left edge — the reasoning
-   row above all, because the model's voice is not a step — so the inset marks one step at
-   a time and never draws a block around a group or a rule down its side. */
+/* A **step line** takes its inset here: 15px puts a row's own text on the header's label (a
+   9px chevron plus its 6px gap, which the header adds against the log's left edge). A
+   thinking row that rides the same body is already 15px in on its own rule
+   (`.thinking-row`) — the same distance, for the same reason — so process is inset under the
+   header and the answer is not, one line at a time, and never a block drawn around a group
+   or a rule down its side. */
 .steps-body > .msg.tool {
   margin-left: 15px;
 }
@@ -789,9 +819,38 @@ button.icon-btn {
   display: none;
 }
 
-/* `> command` — the one line that says what was actually run or read. */
-.tool-args-line {
+/* The argument summary that sits above a viewer which does not name its own arguments
+   (see `.tool-args-line` above, where the markup is introduced). */
+
+.tool-detail .tool-result {
+  margin: 0;
   font-family: "Consolas", "Courier New", monospace;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* ---- The tool viewers ------------------------------------------------------
+   A row's detail is one viewer, not a dump. The viewer owns its own surface and its
+   own scrolling, so the `has-viewer` form of the detail gives up the box it uses for
+   the plain `<pre>`: an inner scroller inside an outer one would fight the reader's
+   wheel. Every viewer is selectable text; none of them is a control. */
+
+.tool-detail.has-viewer {
+  padding: 0;
+  background: none;
+  border: none;
+  border-radius: 0;
+  max-height: none;
+  overflow: visible;
+}
+
+/* The argument summary: one dim line of plain words where the JSON used to be. It is
+   the first line of the detail and it never wraps into a block of its own. */
+.tool-args-line {
   font-size: 11px;
   color: var(--text-dim);
   white-space: pre-wrap;
@@ -801,9 +860,770 @@ button.icon-btn {
   -webkit-user-select: text;
 }
 
-.tool-detail .tool-result {
-  margin: 0;
+/* A code surface: a path head over a virtualised list. Rows are exactly
+   `CODE_LINE_H` (16px) tall, which is what makes the window arithmetic exact — so the
+   text never wraps, and long lines are read by scrolling sideways (the line numbers
+   stay pinned to the left edge). */
+.code-view {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--tool-bg);
+  overflow: hidden;
+}
+
+.code-head,
+.entries-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg2);
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.code-path,
+.entries-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-family: "Consolas", "Courier New", monospace;
+}
+
+.code-note {
+  flex: 0 0 auto;
+  color: var(--warn);
+}
+
+.code-count,
+.entries-count {
+  flex: 0 0 auto;
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.code-scroll {
+  max-height: 320px;
+  overflow: auto;
+  scrollbar-gutter: stable;
+}
+
+.code-spacer {
+  position: relative;
+  min-width: 100%;
+  width: max-content;
+}
+
+.code-window {
+  position: absolute;
+  left: 0;
+  top: 0;
+  right: auto;
+  min-width: 100%;
+}
+
+.code-line {
+  display: flex;
+  align-items: stretch;
+  height: 16px;
+  line-height: 16px;
+  font-family: "Consolas", "Courier New", monospace;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: pre;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.code-no {
+  position: sticky;
+  left: 0;
+  flex: 0 0 auto;
+  min-width: 34px;
+  padding: 0 6px 0 4px;
+  text-align: right;
+  background: var(--tool-bg);
+  color: var(--text-dim);
+  opacity: 0.65;
+  font-variant-numeric: tabular-nums;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.code-text {
+  flex: 0 0 auto;
+  padding-right: 10px;
+}
+
+.code-empty,
+.entries-empty {
+  padding: 4px 8px;
+  color: var(--text-dim);
+  font-size: 11px;
+}
+
+/* A terminal: the command, the tool's own bracketed status line, then the output on
+   the deeper surface. The status is the only coloured part — a non-zero exit is the
+   one thing a reader must not miss. */
+.term-view {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--tool-bg);
+  overflow: hidden;
+}
+
+.term-cmd {
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg2);
+  font-family: "Consolas", "Courier New", monospace;
+  font-size: 11px;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.term-status {
+  padding: 2px 8px;
+  font-family: "Consolas", "Courier New", monospace;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.term-status.bad {
+  color: var(--error-text);
+}
+
+.term-out {
+  margin: 0;
+  padding: 4px 8px 6px;
+  max-height: 260px;
+  overflow: auto;
+  font-family: "Consolas", "Courier New", monospace;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* A directory listing: the path and its count, then one row per entry. Directories
+   keep the `/` the tool puts on them and are drawn a shade brighter. */
+.entries-view {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--tool-bg);
+  overflow: hidden;
+}
+
+.entries-list {
+  max-height: 260px;
+  overflow: auto;
+  padding: 3px 0;
+  scrollbar-gutter: stable;
+}
+
+.entries-row {
+  padding: 0 8px;
+  font-family: "Consolas", "Courier New", monospace;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: pre;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.entries-row.dir {
+  color: var(--text);
+}
+
+.entries-note {
+  padding: 3px 8px 5px;
+  border-top: 1px solid var(--border);
+  font-size: 10px;
+  color: var(--warn);
+}
+
+/* A diff surface: the same fixed-row geometry as the code view (one reader, one grid),
+   with two number gutters and full-width tints. Green is what appeared, red what went,
+   and a `gap` row is the quiet line that says context was dropped between two hunks. */
+.diff-view {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--tool-bg);
+  overflow: hidden;
+}
+
+.diff-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg2);
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.diff-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: "Consolas", "Courier New", monospace;
+}
+
+.diff-note {
+  flex: 0 0 auto;
+  color: var(--warn);
+}
+
+.diff-count-add,
+.diff-count-del {
+  margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+
+.diff-count-del {
+  margin-left: 0;
+}
+
+.diff-count-add {
+  color: var(--success);
+}
+
+.diff-count-del {
+  color: var(--error-text);
+}
+
+.diff-scroll {
+  max-height: 320px;
+  overflow: auto;
+  scrollbar-gutter: stable;
+}
+
+.diff-spacer {
+  position: relative;
+  min-width: 100%;
+  width: max-content;
+}
+
+.diff-window {
+  position: absolute;
+  left: 0;
+  top: 0;
+  min-width: 100%;
+}
+
+.diff-row {
+  display: flex;
+  align-items: stretch;
+  height: 16px;
+  line-height: 16px;
+  font-family: "Consolas", "Courier New", monospace;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: pre;
+  user-select: text;
+  -webkit-user-select: text;
+  min-width: 100%;
+}
+
+.diff-row.add {
+  background: color-mix(in srgb, var(--success) 24%, var(--tool-bg));
+}
+
+.diff-row.del {
+  background: color-mix(in srgb, var(--error-text) 24%, var(--tool-bg));
+}
+
+/* A changed line's text is the brightest text in the surface: the band behind it is what
+   says "changed", so the words must not be the thing that gets dimmed. The tint is mixed
+   into the surface colour rather than laid over it, which is what stops it reading as a
+   fog on top of the glyphs. */
+.diff-row.add .diff-text,
+.diff-row.del .diff-text {
+  color: var(--text);
+}
+
+.diff-row.gap {
+  background: none;
+  color: var(--text-dim);
+  opacity: 0.6;
+  padding-left: 8px;
+}
+
+.diff-old,
+.diff-new {
+  flex: 0 0 auto;
+  position: sticky;
+  min-width: 34px;
+  padding: 0 6px 0 4px;
+  text-align: right;
+  color: var(--text-dim);
+  opacity: 0.65;
+  font-variant-numeric: tabular-nums;
+  background: var(--tool-bg);
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* Both gutters ride together, so the old column sticks to the row and the new one to the
+   old one: a reader scrolling sideways must never lose the numbers. On a changed row the
+   gutter takes the row's own band (`inherit`), so the tint is one continuous stripe
+   instead of a card with two light squares punched in it. */
+.diff-old {
+  left: 0;
+  z-index: 2;
+}
+
+.diff-new {
+  left: 34px;
+  z-index: 2;
+}
+
+.diff-row.add .diff-old,
+.diff-row.add .diff-new,
+.diff-row.del .diff-old,
+.diff-row.del .diff-new {
+  background: inherit;
+}
+
+.diff-mark {
+  flex: 0 0 auto;
+  width: 14px;
+  text-align: center;
+  opacity: 0.8;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+.diff-row.add .diff-mark {
+  color: var(--success);
+}
+
+.diff-row.del .diff-mark {
+  color: var(--error-text);
+}
+
+.diff-text {
+  flex: 0 0 auto;
+  padding-right: 10px;
+}
+
+.diff-empty {
+  padding: 4px 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* Search hits: path, line, text. The path is allowed to shrink (it is the longest), the
+   line number never is, and a context line is one shade quieter than a real hit. */
+.hits-view {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--tool-bg);
+  overflow: hidden;
+}
+
+.hits-head,
+.results-head,
+.agents-head,
+.doc-head,
+.image-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg2);
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+.hits-note,
+.results-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.hits-list,
+.results-body {
+  max-height: 280px;
+  overflow: auto;
+  padding: 3px 0;
+  scrollbar-gutter: stable;
+}
+
+.hits-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 0 8px;
+  font-family: "Consolas", "Courier New", monospace;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.hits-row.ctx {
+  opacity: 0.7;
+}
+
+.hits-path {
+  flex: 0 1 auto;
+  min-width: 40px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+  color: var(--text);
+}
+
+.hits-line {
+  flex: 0 0 auto;
+  min-width: 28px;
+  text-align: right;
+  opacity: 0.65;
+  font-variant-numeric: tabular-nums;
+}
+
+.hits-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Web results: the number, a link title, the URL, then the snippet. */
+.results-query,
+.results-attempts,
+.results-prose {
+  font-family: "Consolas", "Courier New", monospace;
+}
+
+.results-query {
+  color: var(--text);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.results-attempts,
+.results-prose {
+  padding: 2px 8px;
+  font-size: 10px;
+  color: var(--text-dim);
+  opacity: 0.75;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.results-item {
+  display: grid;
+  grid-template-columns: 18px 1fr;
+  column-gap: 6px;
+  padding: 3px 8px;
+}
+
+.results-index {
+  grid-row: 1 / span 3;
+  text-align: right;
+  font-size: 10px;
+  color: var(--text-dim);
+  opacity: 0.65;
+  font-variant-numeric: tabular-nums;
+}
+
+.results-title {
+  font-size: 12px;
+  color: var(--accent);
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.results-title:hover {
+  text-decoration: underline;
+}
+
+.results-url,
+.results-snippet {
+  grid-column: 2;
+  font-size: 10px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.results-url {
+  font-family: "Consolas", "Courier New", monospace;
+  opacity: 0.7;
+}
+
+.results-snippet {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* A fetched page: the URL and its HTTP facts, then the extracted text. This is the one
+   prose viewer, so its body wraps — a web page read by scrolling sideways is unreadable. */
+.doc-view {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--tool-bg);
+  overflow: hidden;
+}
+
+.doc-url {
+  font-family: "Consolas", "Courier New", monospace;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+
+.doc-tag {
+  padding: 0 4px;
+  border: 1px solid var(--warn);
+  border-radius: 3px;
+  color: var(--warn);
+}
+
+.doc-status,
+.doc-note {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.doc-note {
+  color: var(--warn);
+}
+
+.doc-body {
+  margin: 0;
+  padding: 6px 8px;
+  max-height: 280px;
+  overflow: auto;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* An image: what the model was shown, clipped to the call's own region. The box is the
+   click target (it opens the source file in an editor), so the cursor says so. */
+.image-view {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--tool-bg);
+  overflow: hidden;
+}
+
+.image-path {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: "Consolas", "Courier New", monospace;
+  color: var(--text);
+}
+
+.image-size {
+  flex: 0 0 auto;
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
+}
+
+.image-note {
+  flex: 0 0 auto;
+  color: var(--warn);
+}
+
+.image-note.hidden {
+  display: none;
+}
+
+.image-box {
+  position: relative;
+  overflow: hidden;
+  margin: 6px 8px;
+  max-width: calc(100% - 16px);
+  cursor: pointer;
+  background: var(--bg2);
+}
+
+.image-el {
+  display: block;
+}
+
+/* A sub-agent batch: one block per agent — its short id and duration on the top line, its
+   final answer below, rendered as Markdown (a report with tables and lists is the normal
+   shape, not the exception). */
+.agents-view {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--tool-bg);
+  overflow: hidden;
+}
+
+.agents-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+  border-top: 1px solid var(--border);
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.agents-row:first-of-type {
+  border-top: none;
+}
+
+.agents-id {
+  flex: 0 0 auto;
+  font-family: "Consolas", "Courier New", monospace;
+  color: var(--text);
+}
+
+.agents-model,
+.agents-ms {
+  flex: 0 0 auto;
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
+}
+
+.agents-ms {
+  font-family: "Consolas", "Courier New", monospace;
+}
+
+/* The answer takes its own line under the id, full width. */
+.agents-summary {
+  flex: 1 1 100%;
+  min-width: 0;
+  padding-top: 2px;
+  color: var(--text-dim);
+}
+
+.agents-row.failed .agents-id {
+  color: var(--error-text);
+}
+
+/* ---- Rendered Markdown inside a viewer -------------------------------------
+   A sub-agent's answer is a document, so `md-body` carries the marks the answer bubble
+   carries: paragraphs, lists, code, quotes, tables and links, at the viewer's type scale. */
+.md-body {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+.md-body > *:first-child {
+  margin-top: 0;
+}
+
+.md-body > *:last-child {
+  margin-bottom: 0;
+}
+
+.md-body p,
+.md-body ul,
+.md-body ol,
+.md-body pre,
+.md-body blockquote,
+.md-body table {
+  margin: 0 0 6px;
+}
+
+.md-body ul,
+.md-body ol {
+  padding-left: 18px;
+}
+
+.md-body h1,
+.md-body h2,
+.md-body h3,
+.md-body h4,
+.md-body h5,
+.md-body h6 {
+  margin: 6px 0 3px;
+  font-size: 11px;
+  color: var(--text);
+}
+
+.md-body code {
+  font-family: "Consolas", "Courier New", monospace;
+  font-size: 10px;
+  background: var(--bg3);
+  border-radius: 3px;
+  padding: 0 3px;
+}
+
+.md-body pre {
+  padding: 4px 6px;
+  border-radius: 4px;
+  background: var(--bg3);
+  overflow-x: auto;
+}
+
+.md-body pre code {
+  background: none;
+  padding: 0;
+}
+
+.md-body blockquote {
+  padding-left: 8px;
+  border-left: 2px solid var(--border);
+}
+
+.md-body a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.md-body a:hover {
+  text-decoration: underline;
+}
+
+.md-body table {
+  border-collapse: collapse;
+  font-size: 10px;
+}
+
+.md-body th,
+.md-body td {
+  padding: 1px 6px;
+  border: 1px solid var(--border);
+  text-align: left;
+}
+
+.md-body th {
+  color: var(--text);
+  background: var(--bg2);
+}
+
+
+/* A one-line fact viewer (`list_nodes`, a hop, a rename): the tool's own sentence,
+   which is already the whole answer. */
+.note-view {
   font-size: 11px;
   color: var(--text-dim);
   white-space: pre-wrap;
@@ -835,63 +1655,98 @@ button.icon-btn {
   display: none;
 }
 
-/* ---- Background completion card (chat) ---- */
+/* A completion notice that **opens a round**: one dim line in the flow, the boundary
+   between the answer above it and the steps below it. It is collapsed at rest so the
+   boundary still reads as one line, and a click folds the batch summary out under it —
+   a notice with no body (no content) is not a click target at all.
+   A mid-turn notice is the other shape (`msg.tool.bgnotify`, inside the run). */
+.msg.notice-line {
+  align-self: stretch;
+  max-width: 100%;
+  margin: 2px 0 0;
+  padding: 0 2px;
+}
+
+/* The whole line is the accent colour: it is the one row in the log that is not the
+   agent's work and not its words, it is the **event** that ended one round and started
+   the next, and it sits flush with the prose for that reason. */
+.msg.notice-line .notice-text {
+  font-size: 11px;
+  color: var(--accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+/* `***title*** *sentence*`: the title in the bold-italic a step's verb wears, the context
+   in the italic a label wears. */
+.msg.notice-line .notice-title {
+  font-weight: 700;
+  font-style: italic;
+}
+
+.msg.notice-line .notice-context {
+  font-style: italic;
+}
+
+.msg.notice-line .notice-id {
+  margin-bottom: 4px;
+  font-family: "Consolas", "Courier New", monospace;
+  font-size: 10px;
+  color: var(--text-dim);
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.msg.notice-line .notice-text:hover {
+  text-decoration: underline;
+}
+
+/* ---- Background completion notice (chat) ----
+   A notice is a **step**, not a block: it wears the tool row (`msg tool`) and the same
+   folded detail, so a finished job reads as one line in the essay instead of a wall of
+   output dropped between two paragraphs. Only its own tag and chip are its own. */
 .msg.bgnotify {
   align-self: stretch;
   max-width: 100%;
-  background: var(--tool-bg);
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--success);
-  font-family: "Consolas", "Courier New", monospace;
+  background: none;
+  border: none;
+  border-radius: 0;
+  padding: 2px 2px 0;
   font-size: 12px;
 }
 
-.msg.bgnotify .bgnotify-head {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
+/* The tag sits in the verb's slot, so it takes the verb's mark (bold and italic,
+   `.tool-verb` supplies the size and the dim grey) and drops the pill the *job cards* wear
+   for the same class — only its colour says which producer it is. It is a localized phrase
+   now, so it never wraps. */
 .msg.bgnotify .bgnotify-badge {
   flex: 0 0 auto;
-  padding: 1px 5px;
-  border-radius: 4px;
-  background: var(--accent-dim);
-  color: #fff;
-  font-size: 9px;
-  font-weight: 600;
-  letter-spacing: 0.02em;
+  font-style: italic;
+  background: none;
+  padding: 0;
+  border-radius: 0;
+  letter-spacing: 0;
+  font-size: 12px;
+  white-space: nowrap;
+  color: var(--text-dim);
 }
 
-.msg.bgnotify .bgnotify-id {
+.msg.bgnotify .bgnotify-badge.sub {
+  background: none;
   color: var(--accent);
-  font-weight: 600;
 }
 
 .msg.bgnotify .bgnotify-status {
+  flex: 0 0 auto;
   margin-left: auto;
   color: var(--text-dim);
-  font-size: 11px;
-}
-
-.msg.bgnotify .bgnotify-cmd {
-  margin-top: 4px;
-  color: var(--text);
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.msg.bgnotify .bgnotify-output {
-  margin: 4px 0 0;
-  padding: 6px 8px;
-  background: var(--bg3);
-  border: 1px solid var(--border);
-  border-radius: 4px;
-  color: var(--text-dim);
-  white-space: pre-wrap;
-  word-break: break-word;
-  max-height: 200px;
-  overflow: auto;
+  font-size: 10px;
+  font-family: "Consolas", "Courier New", monospace;
+  white-space: nowrap;
 }
 
 /* Background job cards: a `kind: 'bg'` sidecar window right of the owning node.
@@ -947,6 +1802,29 @@ button.icon-btn {
   color: var(--text-dim);
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
+}
+
+/* The line diff of a file-modifying call: `+12 -3`, in the elapsed chip's own type, so
+   the head stays one line of small numbers at its right end instead of growing a
+   coloured badge that competes with the label. Green is what the call added, red what it
+   removed, and a side that is zero is not drawn at all (a pure append reads `+40`, never
+   `+40 -0`) — the rule and the reason live in `syncDiff`. */
+.tool-diff {
+  flex: 0 0 auto;
+  display: inline-flex;
+  gap: 4px;
+  font-size: 10px;
+  font-family: "Consolas", "Courier New", monospace;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.tool-diff-add {
+  color: var(--success);
+}
+
+.tool-diff-del {
+  color: var(--error-text);
 }
 
 /* `Delivered` badge (D1): this sidecar's completion signal already reached the

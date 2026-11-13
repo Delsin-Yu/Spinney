@@ -171,6 +171,25 @@ export function toolTitleFromArgs(args: unknown): string | undefined {
 /** The longest one-line step label the UI shows (the schema asks for ~60). */
 const TOOL_TITLE_MAX = 60;
 
+/**
+ * The line diff a file-modifying tool appended to its result (` (+12 -3)`, from
+ * `lineDiffSuffix` in `src/tools/index.ts`), taken back off it.
+ *
+ * The numbers go onto the `DisplayItem` and the card draws them as one chip, so a
+ * repaint shows the same chip without re-reading the file; the text the card keeps is the
+ * tool's own sentence without the marker, because the marker is for the chip. A result
+ * with no marker — any tool that changes nothing, and every tool that is not a file
+ * writer — yields no diff and no chip.
+ */
+function takeLineDiff(content: string): { content: string; diff?: { add: number; del: number } } {
+  const match = / \(\+(\d+) -(\d+)\)$/.exec(content);
+  if (!match) return { content };
+  return {
+    content: content.slice(0, match.index),
+    diff: { add: Number(match[1]), del: Number(match[2]) },
+  };
+}
+
 /** Shrink tool cards in the UI transcript; agent `messages` keep the full tool payload. */
 export function clipDisplayItem(item: DisplayItem): DisplayItem {
   if (item.kind === 'tool') {
@@ -4459,12 +4478,14 @@ export class SessionRuntime {
         break;
       case 'toolEnd':
         if (run) {
-          this.updateToolItem(run, event.id, event.content, event.ms);
+          const result = takeLineDiff(event.content);
+          this.updateToolItem(run, event.id, result.content, event.ms, result.diff);
           this.post({
             type: 'toolEnd',
             id: event.id,
             name: event.name,
-            content: clipForUi(event.content),
+            content: clipForUi(result.content),
+            diff: result.diff,
             nodeId: run.nodeId,
             ms: event.ms,
           });
@@ -4670,11 +4691,20 @@ export class SessionRuntime {
     }
   }
 
-  private updateToolItem(run: TurnRun, id: string, content: string, ms: number): void {
+  private updateToolItem(
+    run: TurnRun,
+    id: string,
+    content: string,
+    ms: number,
+    diff?: { add: number; del: number },
+  ): void {
     const item = run.items.find((it) => it.kind === 'tool' && it.id === id);
     if (item) {
       item.status = 'done';
       item.content = clipForUi(content);
+      // The line diff of a file-modifying call, taken off the result by the caller: it
+      // is stored with the item so the card's chip is still there after a repaint.
+      if (diff) item.diff = diff;
       // `item.title` is deliberately untouched: it was read out of the call's
       // arguments when the item was created (`toolTitleFromArgs`) and the update
       // carries no arguments to read it from again — a step's label may not
@@ -4682,7 +4712,10 @@ export class SessionRuntime {
       // The call's own duration: the card freezes on it, and the start clock goes
       // away with it (the pair is "running" or "took this long", never both).
       item.ms = ms;
-      item.startedAt = undefined;
+      // `startedAt` is kept, unlike before: it is the only record of **when** the call
+      // ended, and an image row compares a file's mtime against that moment to say whether
+      // the pixels it shows are still the ones the call was sent. Nothing reads it for a
+      // done row except that comparison — the chip is driven by `ms` alone.
     }
   }
 
@@ -5383,8 +5416,11 @@ export class SessionRuntime {
         this.post({ type: 'toolStart', id: event.id, name: event.name, args: clipForUi(event.args, 8 * 1024), title: toolTitleFromArgs(event.args), index: event.index, nodeId: id, startedAt: event.startedAt });
         break;
       case 'toolEnd':
-        this.commitSubToolResult(items, event.id, event.content, event.ms);
-        this.post({ type: 'toolEnd', id: event.id, name: event.name, content: clipForUi(event.content), nodeId: id, ms: event.ms });
+        {
+          const result = takeLineDiff(event.content);
+          this.commitSubToolResult(items, event.id, result.content, event.ms, result.diff);
+          this.post({ type: 'toolEnd', id: event.id, name: event.name, content: clipForUi(result.content), diff: result.diff, nodeId: id, ms: event.ms });
+        }
         break;
       case 'usage':
         this.commitSubUsage(items, event.usage);
@@ -5449,11 +5485,18 @@ export class SessionRuntime {
     });
   }
 
-  private commitSubToolResult(items: DisplayItem[], id: string, content: string, ms: number): void {
+  private commitSubToolResult(
+    items: DisplayItem[],
+    id: string,
+    content: string,
+    ms: number,
+    diff?: { add: number; del: number },
+  ): void {
     const item = items.find((it) => it.kind === 'tool' && it.id === id);
     if (item) {
       item.status = 'done';
       item.content = clipForUi(content);
+      if (diff) item.diff = diff;
       item.ms = ms;
       item.startedAt = undefined;
     }
@@ -5759,6 +5802,11 @@ export class SessionRuntime {
     }
     const out = task.handle.getOutput().trim();
     node.bgCommand = task.command;
+    // A durable fact about **how the job started**, not a lock or notice claim: the
+    // window-global dock leaves detached jobs out, and a record restored after a reload
+    // must still be able to say it was one. (The `shared` badge keeps reading the live
+    // task — `backgroundTaskDetached` — because a lock story cannot be verified later.)
+    node.bgDetached = task.detached === true ? true : undefined;
     node.bgExitCode = task.exitCode;
     node.bgKilled = task.killed === true;
     // The card's own frozen duration (the hub is in-memory, so this is what a
@@ -5805,7 +5853,9 @@ export class SessionRuntime {
   }
 
   private buildBackgroundSignal(owner: BackgroundOwner, task: BackgroundTask): SignalNotice {
-    const cmd = this.truncateField(task.command, 100);
+    // The model's own title, when the call carried one: the notice is read by a person, and
+    // "Running the test suite" beats the command line it stood for.
+    const cmd = this.truncateField(task.title || task.command, 100);
     // How long the job ran. `finishedAt` is set by the registry's `complete()`, which
     // every ending goes through (natural exit, kill, session teardown).
     const took = formatDuration((task.finishedAt ?? Date.now()) - task.startedAt);
@@ -5948,7 +5998,7 @@ export class SessionRuntime {
           },
           abort.signal,
         );
-        this.renderSignalCards(nodeId, batch);
+        this.renderSignalCards(nodeId, batch, true);
         continue;
       }
       // Same node, `fresh: false`: the notice and the reply are appended to the turn
@@ -5960,7 +6010,9 @@ export class SessionRuntime {
         retry = true;
         continue;
       }
-      this.renderSignalCards(nodeId, batch);
+      // The notice opens this round: it is a boundary in the log, not a step of the run
+      // above it (`round: true` — see `renderSignalCards`).
+      this.renderSignalCards(nodeId, batch, true);
       this.lastStatus = batch.some((s) => s.kind === 'subagent')
         ? vscode.l10n.t('Sub-agents finished')
         : vscode.l10n.t('Background terminal finished');
@@ -6033,8 +6085,15 @@ export class SessionRuntime {
    * block is part of that node's own transcript (`DisplayItem.kind: 'background'`),
    * so a reload re-renders it, and it is deliberately **not** a `kind:'user'` item:
    * replaying one of those would be skipped, or would clobber the pinned prompt.
+   *
+   * `startsRound` says what the block **is** in the log, and the two cases are not the
+   * same thing: a notice delivered at a tool boundary of a running turn is one step of
+   * that run, while a notice that triggers the very next turn (`beginInjectedTurn`, or a
+   * resumed sub-agent run) is a **boundary** — it ends the run above it, and the round it
+   * opens gets its own `Ran N steps`. The flag travels on the item, so a repaint divides
+   * the log the same way the live turn did.
    */
-  private renderSignalCards(nodeId: string, batch: SignalNotice[]): void {
+  private renderSignalCards(nodeId: string, batch: SignalNotice[], startsRound = false): void {
     const node = this.session.nodes[nodeId];
     for (const signal of batch) {
       if (signal.taskId != null) {
@@ -6043,13 +6102,21 @@ export class SessionRuntime {
       if (node) {
         node.displayItems.push({
           kind: 'background',
+          // The item's own `kind` can only say `background`; the producer is what a repaint
+          // needs to draw the same notice the live turn drew (`producer`).
+          producer: signal.card.kind,
           id: String(signal.card.id),
           name: signal.card.name,
           doneText: signal.card.doneText,
           content: signal.card.content,
+          round: startsRound || undefined,
         });
       }
-      this.post({ type: 'backgroundNotice', nodeId, item: signal.card });
+      this.post({
+        type: 'backgroundNotice',
+        nodeId,
+        item: { ...signal.card, round: startsRound || undefined },
+      });
     }
     this.settleSignals(batch);
     this.persistTurn();

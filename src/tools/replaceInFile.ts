@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import { AgentTool } from '../agent/types';
-import { applyEol, detectEol, ensureNotAborted, eolLabelOf, resolvePath, toLf, verbatimFrameError } from './index';
+import { applyEol, detectEol, ensureNotAborted, eolLabelOf, lineDiff, lineDiffSuffix, resolvePath, toLf, verbatimFrameError } from './index';
 
 export const replaceInFileTool: AgentTool = {
   definition: {
@@ -55,6 +55,8 @@ export const replaceInFileTool: AgentTool = {
     // mangling the file; the function form inserts newText verbatim.
     const result = matchContent.replace(matchOld, () => matchNew);
     await fs.promises.writeFile(filePath, applyEol(result, eol), 'utf8');
-    return `Replaced one occurrence in ${filePath}.`;
+    // Both versions are already in hand (the whole file, in canonical LF), so this is a
+    // real line diff of the edit rather than a count of the replaced block.
+    return `Replaced one occurrence in ${filePath}.${lineDiffSuffix(lineDiff(matchContent, result))}`;
   },
 };

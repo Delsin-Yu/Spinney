@@ -90,7 +90,7 @@ const asFrameText = (headerObj, key, payload) =>
     const plain = file('plain.txt');
     const wrote = await call('write_file', { path: plain, content: 'one\ntwo\n' });
     check('a JSON call still writes the file', exists(plain) && read(plain) === 'one\ntwo\n', JSON.stringify(read(plain)));
-    check('and reports the write', /^Wrote .*\(3 lines, LF\)\.$/.test(wrote), wrote.trim());
+    check('and reports the write', /^Wrote .*\(3 lines, LF\)\. \(\+2 -0\)$/.test(wrote), wrote.trim());
 
     const frameTextFile = file('frame-text.txt');
     const frameText = await reg.execute('write_file', asFrameText({ path: frameTextFile }, 'content', 'verbatim\ntext'));
@@ -160,11 +160,11 @@ const asFrameText = (headerObj, key, payload) =>
     const fresh = file(path.join('nested', 'fresh.txt'));
     const freshAnswer = await call('append_file', { path: fresh, content: 'one\ntwo\n' });
     check('a missing file and its parents are created', exists(fresh) && read(fresh) === 'one\ntwo\n', JSON.stringify(read(fresh)));
-    check('the answer counts the lines', freshAnswer === `Appended to ${fresh} (3 lines added, 3 lines total).`, freshAnswer);
+    check('the answer counts the lines', freshAnswer === `Appended to ${fresh} (3 lines added, 3 lines total). (+2 -0)`, freshAnswer);
 
     const grownAnswer = await call('append_file', { path: fresh, content: 'three\n' });
     check('content is added at the end, in order', read(fresh) === 'one\ntwo\nthree\n', JSON.stringify(read(fresh)));
-    check('the answer reports the addition and the total', grownAnswer === `Appended to ${fresh} (1 lines added, 4 lines total).`, grownAnswer);
+    check('the answer reports the addition and the total', grownAnswer === `Appended to ${fresh} (1 lines added, 4 lines total). (+1 -0)`, grownAnswer);
 
     const crlfFile = file('crlf.txt');
     fs.writeFileSync(crlfFile, 'first\r\nsecond\r\n', 'utf8');
@@ -195,9 +195,12 @@ const asFrameText = (headerObj, key, payload) =>
     const rewrite = file('crlf.txt');
     const rewriteAnswer = await call('write_file', { path: rewrite, content: 'only\nline\n' });
     check('write_file still overwrites', read(rewrite) === 'only\r\nline\r\n', JSON.stringify(read(rewrite)));
-    check('and still reports the file EOL', /\(3 lines, CRLF\)\.$/.test(rewriteAnswer), rewriteAnswer.trim());
+    check('and still reports the file EOL', /\(3 lines, CRLF\)\. \(\+2 -4\)$/.test(rewriteAnswer), rewriteAnswer.trim());
     const replaced = await call('replace_in_file', { path: target, oldText: 'beta', newText: 'gamma\ndelta' });
     check('replace_in_file still replaces exactly once', /^Replaced one occurrence in /.test(replaced) && read(target) === 'alpha\ngamma\ndelta\n', read(target));
+    // The line diff rides on the same answer, and for an edit it is the real one: one line
+    // in, two lines out, so `+2 -1` rather than a count of the replaced block.
+    check('and reports the lines it changed', /\(\+2 -1\)$/.test(replaced), replaced.trim());
   } finally {
     fs.rmSync(tmpRoot, { recursive: true, force: true });
   }

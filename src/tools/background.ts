@@ -232,6 +232,13 @@ export interface BackgroundTask {
   /** Opaque token given to the agent (a monotonic counter per registry). */
   id: number;
   command: string;
+  /**
+   * The model's own one-line title for the call that started this job (`exec_command`
+   * requires one). The completion notice shows it instead of the raw command: "Running
+   * the test suite" is what the reader needs, `npm test -- --runInBand` is what the model
+   * typed. Absent when the call carried none or the job was started outside a tool.
+   */
+  title?: string;
   cwd: string;
   startedAt: number;
   /** Host clock (ms) when the process ended; null while it still runs. */
@@ -283,7 +290,7 @@ export interface BackgroundTask {
    */
   notifyAgent: boolean;
   /**
-   * True for a **detached** job (`exec_command`'s `run_type: "detached"`):
+   * True for a **global** job (`exec_command`'s `run_type: "global"`):
    * session-wide and fire-and-forget. It is still owned by the node that started
    * it — its card renders in that node's column and it is torn down (killed) with
    * that node's session — but it **locks no node** (the composer never turns into
@@ -350,11 +357,15 @@ export class BackgroundRegistry {
     notifyAgent = true,
     id?: number,
     detached = false,
+    title = '',
   ): number {
     const taskId = id ?? ++this.counter;
     const task: BackgroundTask = {
       id: taskId,
       command,
+      // The model's own one-line title for the call that started it (see
+      // `BackgroundTask.title`): the completion notice reads it instead of the command.
+      title: title || undefined,
       cwd,
       startedAt: Date.now(),
       finishedAt: null,

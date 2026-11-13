@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { AgentTool } from '../agent/types';
-import { applyEol, detectEol, ensureNotAborted, eolLabelOf, resolvePath, toLf, verbatimFrameError } from './index';
+import { applyEol, detectEol, ensureNotAborted, eolLabelOf, lineDiff, lineDiffSuffix, resolvePath, toLf, verbatimFrameError } from './index';
 
 export const writeFileTool: AgentTool = {
   definition: {
@@ -34,13 +34,17 @@ export const writeFileTool: AgentTool = {
     // exactly as supplied.
     let finalContent = content;
     let label = eolLabelOf(content);
+    // What the file held before, for the line diff the card shows: '' for a new file,
+    // which makes the whole write read as added lines.
+    let before = '';
     if (fs.existsSync(filePath)) {
       const existing = await fs.promises.readFile(filePath, 'utf8');
+      before = existing;
       label = eolLabelOf(existing);
       finalContent = applyEol(toLf(content), detectEol(existing));
     }
     await fs.promises.writeFile(filePath, finalContent, 'utf8');
     const lines = toLf(finalContent).split('\n').length;
-    return `Wrote ${filePath} (${lines} lines, ${label}).`;
+    return `Wrote ${filePath} (${lines} lines, ${label}).${lineDiffSuffix(lineDiff(before, finalContent))}`;
   },
 };

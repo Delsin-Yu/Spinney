@@ -169,6 +169,90 @@ export function eolLabelOf(content: string): string {
   return eol === '\r\n' ? 'CRLF' : eol === '\r' ? 'CR' : 'LF';
 }
 
+// ---- The line diff a file-modifying tool reports ----
+/**
+ * The lines a file-modifying call added and removed: `{ add, del }`.
+ *
+ * The tools are the only place that holds both versions, which is why this lives here
+ * and not in the UI: `execute` returns one string, so a count that the card can draw has
+ * to be computed before the file is written. The card's chip is built from it
+ * (`DisplayItem.diff`), and the model reads the same number in the result line.
+ *
+ * The algorithm is the cheap one that is still exact for the edits we make: strip the
+ * lines the two versions share at the top and at the bottom, then take the longest
+ * common subsequence of what is left (`add = b - lcs`, `del = a - lcs`). A middle too
+ * large to diff (a full rewrite of a big file) falls back to "all removed, all added",
+ * which is true, only less fine-grained.
+ */
+export interface LineDiff {
+  add: number;
+  del: number;
+}
+
+/** Cells of the LCS table above which the middle is not diffed line by line. */
+const LINE_DIFF_MAX_CELLS = 4_000_000;
+
+/** The lines of a text, CRLF-normalised, without the phantom line a trailing newline makes. */
+function diffLines(text: string): string[] {
+  if (!text) return [];
+  const lines = toLf(text).split('\n');
+  if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+  return lines;
+}
+
+/** The length of the longest common subsequence of two line arrays. */
+function lcsLength(a: string[], b: string[]): number {
+  if (!a.length || !b.length) return 0;
+  let prev = new Uint32Array(b.length + 1);
+  let cur = new Uint32Array(b.length + 1);
+  for (let i = 1; i <= a.length; i++) {
+    for (let j = 1; j <= b.length; j++) {
+      cur[j] = a[i - 1] === b[j - 1] ? prev[j - 1] + 1 : Math.max(prev[j], cur[j - 1]);
+    }
+    const swap = prev;
+    prev = cur;
+    cur = swap;
+    cur.fill(0);
+  }
+  return prev[b.length];
+}
+
+export function lineDiff(before: string, after: string): LineDiff {
+  const a = diffLines(before);
+  const b = diffLines(after);
+  let head = 0;
+  while (head < a.length && head < b.length && a[head] === b[head]) head++;
+  let tail = 0;
+  while (
+    tail < a.length - head &&
+    tail < b.length - head &&
+    a[a.length - 1 - tail] === b[b.length - 1 - tail]
+  ) {
+    tail++;
+  }
+  const midA = a.slice(head, a.length - tail);
+  const midB = b.slice(head, b.length - tail);
+  if (!midA.length && !midB.length) return { add: 0, del: 0 };
+  if (!midA.length) return { add: midB.length, del: 0 };
+  if (!midB.length) return { add: 0, del: midA.length };
+  if ((midA.length + 1) * (midB.length + 1) > LINE_DIFF_MAX_CELLS) {
+    return { add: midB.length, del: midA.length };
+  }
+  const common = lcsLength(midA, midB);
+  return { add: midB.length - common, del: midA.length - common };
+}
+
+/**
+ * The suffix a file-modifying tool appends to its result so the card can draw the chip:
+ * ` (+12 -3)`. The host reads it back (`takeLineDiff`) and stores it on the display item;
+ * the model reads it as the same fact in words it can use. Nothing is appended when the
+ * call changed no line — a `(+0 -0)` would be a claim about nothing.
+ */
+export function lineDiffSuffix(diff: LineDiff): string {
+  if (!diff.add && !diff.del) return '';
+  return ` (+${diff.add} -${diff.del})`;
+}
+
 /** Compile a glob (supporting `*` and a recursive `**`) into a regex over slash-joined paths. */
 export function globToRegex(glob: string): RegExp {
   const s = glob

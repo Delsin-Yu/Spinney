@@ -41,14 +41,14 @@ export function execForegroundSeconds(): number {
  *    background (never killed, never refused) and the result carries its id;
  *  - `background` — a **node** job from the start: it registers immediately, locks
  *    its node's composer on Stop, and sends a completion notice when it ends;
- *  - `detached` — a session-wide, fire-and-forget job: it locks no node, never
+ *  - `global` — a window-wide, fire-and-forget job: it locks no node, never sends
  *    notifies, and is read on demand (`check_command` / `wait_for_command`).
  *
  * No value carries a deadline. A job runs until its process ends or until
  * something kills it (`kill_command`, Stop, the card's kill button, or the
  * session going away).
  */
-const RUN_TYPES = ['foreground', 'background', 'detached'] as const;
+const RUN_TYPES = ['foreground', 'background', 'global'] as const;
 
 /** One of {@link RUN_TYPES}. */
 type RunType = (typeof RUN_TYPES)[number];
@@ -69,7 +69,7 @@ const COMMAND_HEARTBEAT_MS = 30_000;
  */
 function removedArgumentError(): Error {
   return new Error(
-    'timeout_behavior was removed; pass run_type "foreground" | "background" | "detached". ' +
+    'timeout_behavior was removed; pass run_type "foreground" | "background" | "global". ' +
       'There is no per-call timeout any more. Nothing was started.',
   );
 }
@@ -168,13 +168,13 @@ function backgroundStartMessage(id: number, command: string, cwd: string): strin
   );
 }
 
-/** The result of `run_type: "detached"`: nothing locks, nothing notifies. */
-function detachedStartMessage(id: number, command: string, cwd: string): string {
+/** The result of `run_type: "global"`: nothing locks, nothing notifies. */
+function globalStartMessage(id: number, command: string, cwd: string): string {
   return (
-    `[command started detached: id ${id}]\n` +
+    `[command started global: id ${id}]\n` +
     `Command: ${command}\n` +
     `Working directory: ${cwd}\n` +
-    `This job is session-wide and fire-and-forget: it locks no node (the composer stays on Send for it) ` +
+    `This job is bound to this VS Code window and is fire-and-forget: it locks no node (the composer stays on Send for it) ` +
     `and no completion notice will be sent, so check_command(${id}) is how its result is read. ` +
     `wait_for_command(${id}) waits for it up to the seconds you give and returns the moment it ends — ` +
     `no notice follows that wait. kill_command(${id}) stops it. ` +
@@ -353,7 +353,7 @@ export function makeExecCommandTool(getAccess: () => BackgroundAccess | null): A
       function: {
         name: 'exec_command',
         description:
-          'Run a shell command and return its combined stdout/stderr; the first line of the result names the directory the command ran in. Every call must carry a short human title (for example "Running the test suite"), because the folded step row displays it instead of the command. Use for builds, tests, git, npm, etc. Prefer the tool that names the work for reading, listing, searching and session history; the shell is for what no tool covers. Do not use the shell for search: no grep, rg, findstr, Select-String, find or locate — search_files (with its own hard time budget, exclusions, binary skipping and scope echo) and search_transcripts answer those, and a shell search has no budget behind it, so one wide pattern can hold the turn. The one case that belongs here is a genuinely large search that needs a long-running job (a whole-drive or multi-repository sweep): that is a background job, not a foreground grep. Every command starts in the harness root (the workspace folder, or the harness scratch folder when no folder is open), which is the default cwd — pass cwd (relative to the harness root, or an absolute path) to run somewhere else, instead of prefixing the command with "cd <dir> && ". Never put the command in the background yourself ("&", "nohup", "disown", "Start-Process"): a process the harness did not spawn cannot be tracked, waited for or stopped. There is no per-call timeout: run_type says what the call is, and every job lives until its process ends or something kills it. run_type "foreground" (the default) runs the command in this turn and returns its output; when the command is still running after spinney.execForegroundSeconds (30 seconds unless changed), it is moved to the background instead of being killed — nothing is lost — and the result carries its id and what to do next. Use the foreground for anything that finishes quickly (a build, a test run, a git command) and never add your own shell timeout. run_type "background" starts a job on this node immediately and returns its id: it belongs to this node, so the composer shows Stop until it ends, and its completion notice reaches you when it finishes; use it for work that is known to be long but still belongs to this turn. run_type "detached" starts a session-wide, fire-and-forget job: it locks no node (the composer keeps offering Send), never sends a completion notice, and is read by asking — use it for a long-lived thing (a dev server, an emulator, a watcher) whose result you collect later. Never sleep to wait for a command and never poll a running one: wait_for_command(id) waits up to the seconds you give and returns the moment the command ends, while check_command(id) is only a status read. A job that notifies you will wake you by itself, so continue other work or end your turn instead of watching it; kill_command(id) stops a job you no longer need. Commands run through the detected shell (currently ' +
+          'Run a shell command and return its combined stdout/stderr; the first line of the result names the directory the command ran in. Every call must carry a short human title (for example "Running the test suite"), because the folded step row displays it instead of the command. Use for builds, tests, git, npm, etc. Prefer the tool that names the work for reading, listing, searching and session history; the shell is for what no tool covers. Do not use the shell for search: no grep, rg, findstr, Select-String, find or locate — search_files (with its own hard time budget, exclusions, binary skipping and scope echo) and search_transcripts answer those, and a shell search has no budget behind it, so one wide pattern can hold the turn. The one case that belongs here is a genuinely large search that needs a long-running job (a whole-drive or multi-repository sweep): that is a background job, not a foreground grep. Every command starts in the harness root (the workspace folder, or the harness scratch folder when no folder is open), which is the default cwd — pass cwd (relative to the harness root, or an absolute path) to run somewhere else, instead of prefixing the command with "cd <dir> && ". Never put the command in the background yourself ("&", "nohup", "disown", "Start-Process"): a process the harness did not spawn cannot be tracked, waited for or stopped. There is no per-call timeout: run_type says what the call is, and every job lives until its process ends or something kills it. run_type "foreground" (the default) runs the command in this turn and returns its output; when the command is still running after spinney.execForegroundSeconds (30 seconds unless changed), it is moved to the background instead of being killed — nothing is lost — and the result carries its id and what to do next. Use the foreground for anything that finishes quickly (a build, a test run, a git command) and, whenever you are not sure how long a command takes, use the foreground too: it is the safe default, because nothing is lost when it runs long. Never add your own shell timeout. run_type "background" starts a job on this node immediately and returns its id: it belongs to this node, so the composer shows Stop until it ends, and its completion notice reaches you when it finishes; use it for work that is known to be long but still belongs to this turn. run_type "global" starts a window-wide, fire-and-forget job: it locks no node (the composer keeps offering Send), never sends a completion notice, and is read by asking — use it for a long-lived thing (a dev server, an emulator, a watcher) whose result you collect later. Never sleep to wait for a command and never poll a running one: wait_for_command(id) waits up to the seconds you give and returns the moment the command ends, while check_command(id) is only a status read. A job that notifies you will wake you by itself, so continue other work or end your turn instead of watching it; kill_command(id) stops a job you no longer need. Commands run through the detected shell (currently ' +
           getShell().label +
           ') and in that shell syntax (bash-style for bash/sh, PowerShell syntax otherwise).',
         parameters: {
@@ -367,9 +367,9 @@ export function makeExecCommandTool(getAccess: () => BackgroundAccess | null): A
             },
             run_type: {
               type: 'string',
-              enum: ['foreground', 'background', 'detached'],
+              enum: ['foreground', 'background', 'global'],
               description:
-                'What the call is, and the only thing that decides it. "foreground" (the default) runs the command in this turn and returns its output; a command still running after spinney.execForegroundSeconds (30 seconds unless changed) is moved to the background and its id comes back in the result. "background" starts a job on this node immediately (its id comes back at once): it locks this node — the composer shows Stop until it ends — and its completion notice reaches you when it finishes. "detached" starts a session-wide, fire-and-forget job: it locks no node, never sends a completion notice, and is read with check_command or wait_for_command. No run_type carries a timeout or a deadline.',
+                'What the call is, and the only thing that decides it. Decide by the job\'s **lifecycle**, not by how long you guess it will take: "foreground" (the default) runs the command now and returns its output — use it for anything whose result you want in this turn, and use it when you are not sure how long the command takes, because a command still running after spinney.execForegroundSeconds (30 seconds unless changed) is moved to the background and its id comes back, so nothing is lost. "background" starts a job on this node immediately and returns its id at once — use it only when you expect a long command and want to keep working in this turn while it runs: it locks this node (the composer shows Stop until it ends) and its completion notice reaches you when it finishes. "global" starts a window-wide, fire-and-forget job — use it only for a long-lived thing (a dev server, an emulator, a watcher) that outlives the turn: it locks no node, never sends a completion notice, and is read with check_command or wait_for_command. No run_type carries a timeout or a deadline.',
             },
             title: { type: 'string', description: TOOL_TITLE_DESCRIPTION },
           },
@@ -392,11 +392,11 @@ export function makeExecCommandTool(getAccess: () => BackgroundAccess | null): A
       assertUsableCwd(cwd, cwdArg);
       const explicit = args.run_type === undefined || args.run_type === null ? null : String(args.run_type);
       if (explicit !== null && !(RUN_TYPES as readonly string[]).includes(explicit)) {
-        throw new Error(`Invalid run_type "${explicit}". Use "foreground", "background", or "detached".`);
+        throw new Error(`Invalid run_type "${explicit}". Use "foreground", "background", or "global".`);
       }
       const runType: RunType = (explicit ?? 'foreground') as RunType;
       /** The two values that never wait in the foreground at all. */
-      const startsInBackground = runType === 'background' || runType === 'detached';
+      const startsInBackground = runType === 'background' || runType === 'global';
       const sliceSec = execForegroundSeconds();
       const sliceMs = sliceSec * 1000;
       const access = getAccess();
@@ -416,14 +416,17 @@ export function makeExecCommandTool(getAccess: () => BackgroundAccess | null): A
       // A promoted job is registered under the node whose turn spawned it, so it
       // renders in that node's card and its completion notice returns to that branch
       // even if the user has moved the view elsewhere meanwhile.
-      const register = (detached: boolean) => access!.hub.register(owner!, handle, command, cwd, detached);
+      // The call's own `title` rides along on the task: the completion notice shows it
+      // instead of the raw command, which is the same rule the tool row follows.
+      const register = (detached: boolean) =>
+        access!.hub.register(owner!, handle, command, cwd, detached, String(args.title ?? '').trim());
 
       if (runType === 'background') {
         return backgroundStartMessage(register(false), command, cwd);
       }
 
-      if (runType === 'detached') {
-        return detachedStartMessage(register(true), command, cwd);
+      if (runType === 'global') {
+        return globalStartMessage(register(true), command, cwd);
       }
 
       return limitInline(

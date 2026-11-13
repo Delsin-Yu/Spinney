@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { AgentTool } from '../agent/types';
-import { applyEol, detectEol, ensureNotAborted, resolvePath, toLf, verbatimFrameError } from './index';
+import { applyEol, detectEol, ensureNotAborted, lineDiff, lineDiffSuffix, resolvePath, toLf, verbatimFrameError } from './index';
 
 export const appendFileTool: AgentTool = {
   definition: {
@@ -44,6 +44,8 @@ export const appendFileTool: AgentTool = {
     const lineCount = (text: string) => toLf(text).split('\n').length;
     const total = lineCount(existing + finalContent);
     const added = total - (existing ? lineCount(existing) : 0);
-    return `Appended to ${filePath} (${added} lines added, ${total} lines total).`;
+    // Appending can only add lines, so the diff's `del` is 0 and the card draws no red
+    // half; the number still comes from the same helper as the other two file tools.
+    return `Appended to ${filePath} (${added} lines added, ${total} lines total).${lineDiffSuffix(lineDiff(existing, existing + finalContent))}`;
   },
 };

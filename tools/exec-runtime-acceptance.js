@@ -241,7 +241,7 @@ const startJob = (ms, detached = false) => {
     }),
   );
   const REMOVED =
-    'timeout_behavior was removed; pass run_type "foreground" | "background" | "detached". ' +
+    'timeout_behavior was removed; pass run_type "foreground" | "background" | "global". ' +
     'There is no per-call timeout any more. Nothing was started.';
   check('the call is refused', removed.threw, removed.threw ? undefined : `returned: ${firstLine(removed.text)}`);
   check('the sentence is the frozen one', removed.text === REMOVED, short(removed.text, 'removed'));
@@ -330,17 +330,17 @@ const startJob = (ms, detached = false) => {
 
   registeredBefore = registered.length;
   const detachedRun = await timed(
-    'case 4-detached',
-    withAccess.execute({ command: slowCommand(4000), title: 'A detached command', run_type: 'detached' }, undefined),
+    'case 4-global',
+    withAccess.execute({ command: slowCommand(4000), title: 'A global command', run_type: 'global' }, undefined),
   );
-  check('"detached" leads with the started id', /^\[command started detached: id \d+\]/.test(detachedRun.text), firstLine(detachedRun.text));
-  check('"detached" returns at once', detachedRun.ms < 700, `${detachedRun.ms}ms`);
+  check('"global" leads with the started id', /^\[command started global: id \d+\]/.test(detachedRun.text), firstLine(detachedRun.text));
+  check('"global" returns at once', detachedRun.ms < 700, `${detachedRun.ms}ms`);
   const detachedJob = registered[registered.length - 1];
-  check('"detached" registers a detached job', detachedJob && detachedJob.detached === true, `detached=${String(detachedJob && detachedJob.detached)}`);
-  check('"detached" says it locks no node', /locks no node/.test(detachedRun.text), short(detachedRun.text, 'locks no node'));
-  check('"detached" says no notice is sent', /no completion notice will be sent/.test(detachedRun.text), short(detachedRun.text, 'no completion notice'));
-  check('"detached" says it has no deadline', /no deadline/.test(detachedRun.text), short(detachedRun.text, 'no deadline'));
-  check('"detached" names wait_for_command and check_command', /wait_for_command\(\d+\)/.test(detachedRun.text) && /check_command\(\d+\)/.test(detachedRun.text));
+  check('"global" registers a global job', detachedJob && detachedJob.detached === true, `detached=${String(detachedJob && detachedJob.detached)}`);
+  check('"global" says it locks no node', /locks no node/.test(detachedRun.text), short(detachedRun.text, 'locks no node'));
+  check('"global" says no notice is sent', /no completion notice will be sent/.test(detachedRun.text), short(detachedRun.text, 'no completion notice'));
+  check('"global" says it has no deadline', /no deadline/.test(detachedRun.text), short(detachedRun.text, 'no deadline'));
+  check('"global" names wait_for_command and check_command', /wait_for_command\(\d+\)/.test(detachedRun.text) && /check_command\(\d+\)/.test(detachedRun.text));
   if (detachedJob) await killJob(detachedJob);
 
   const invalid = await timed(
@@ -349,7 +349,7 @@ const startJob = (ms, detached = false) => {
   );
   check(
     'an old behavior name as run_type is refused, naming the three values',
-    invalid.threw && /Invalid run_type/.test(invalid.text) && /"foreground", "background", or "detached"/.test(invalid.text),
+    invalid.threw && /Invalid run_type/.test(invalid.text) && /"foreground", "background", or "global"/.test(invalid.text),
     short(invalid.text, 'Invalid run_type'),
   );
 
@@ -468,7 +468,7 @@ const startJob = (ms, detached = false) => {
   check('`timeout` is gone from the schema', !props.includes('timeout') && !props.includes('timeout_behavior'));
   check(
     'run_type is the three values, in order',
-    (schema.parameters.properties.run_type.enum || []).join(',') === 'foreground,background,detached',
+    (schema.parameters.properties.run_type.enum || []).join(',') === 'foreground,background,global',
     (schema.parameters.properties.run_type.enum || []).join(','),
   );
   check(
@@ -579,7 +579,7 @@ const startJob = (ms, detached = false) => {
     process.exit(1);
   }
   console.log(
-    `PASS exec-runtime: ${total}/${total} checks — run_type is foreground, background or detached, no job has a ` +
+    `PASS exec-runtime: ${total}/${total} checks — run_type is foreground, background or global, no job has a ` +
       'deadline, a foreground command past spinney.execForegroundSeconds is moved to the background instead of ' +
       'being killed, and wait_for_command / check_command / kill_command are how the id is used',
   );

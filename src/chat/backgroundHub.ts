@@ -120,9 +120,10 @@ export class BackgroundHub {
     command: string,
     cwd: string,
     detached = false,
+    title = '',
   ): number {
     const id = this.mintId(owner.sessionId);
-    this.registryFor(owner).register(handle, command, cwd, true, id, detached);
+    this.registryFor(owner).register(handle, command, cwd, true, id, detached, title);
     this.ownerIndex(owner.sessionId).set(id, owner);
     const task = this.findRegistry(owner.sessionId, owner.nodeId)?.get(id);
     if (task) {

@@ -1193,9 +1193,46 @@
     return null;
   }
 
+  /**
+   * The line diff of a file-modifying call, as one chip in the row's head: `+12` in the
+   * success colour, `-3` in the error colour, in the same 10px monospace the elapsed chip
+   * uses (both are numbers about a call, not words about it).
+   *
+   * A side that is zero is not drawn at all — a pure append is `+40`, never `+40 -0` — and
+   * a call that changed no line draws no chip: `+0 -0` would be a claim about nothing. The
+   * numbers come from the host (`DisplayItem.diff`, read out of the call's own result), so
+   * a repaint and the live turn draw the same chip, and `beforeEl` keeps it left of the
+   * elapsed chip wherever both exist.
+   */
+  function syncDiff(parent, diff, beforeEl) {
+    if (!parent) return null;
+    const add = diff ? Math.max(0, Number(diff.add) || 0) : 0;
+    const del = diff ? Math.max(0, Number(diff.del) || 0) : 0;
+    let chip = byClass(parent, 'tool-diff');
+    if (!add && !del) {
+      if (chip) chip.remove();
+      return null;
+    }
+    if (!chip) {
+      chip = el('span', 'tool-diff', '');
+      // Only an anchor that really is a child of `parent` may be used: inserting before
+      // a foreign element would move the chip into the wrong subtree.
+      if (beforeEl && beforeEl.parentElement === parent) parent.insertBefore(chip, beforeEl);
+      else parent.appendChild(chip);
+    }
+    chip.textContent = '';
+    if (add) chip.appendChild(el('span', 'tool-diff-add', '+' + add));
+    if (del) chip.appendChild(el('span', 'tool-diff-del', '-' + del));
+    return chip;
+  }
+
   // ---- Markdown ----
+  // `linkify` is OFF: it turned a bare `AGENTS.md` (and any `file.ext`, version number or
+  // dotted identifier) into a web link, which is wrong far more often than it is right in a
+  // coding conversation. Explicit `[text](url)` links still work, and so do the result URLs
+  // the web-search viewer builds itself; a real autolink is a separate, later question.
   const md = window.markdownit
-    ? window.markdownit({ html: false, breaks: true, linkify: true, typographer: false })
+    ? window.markdownit({ html: false, breaks: true, linkify: false, typographer: false })
     : null;
 
   function escapeHtml(text) {
@@ -1478,12 +1515,12 @@
   // ---- The two rows of the log: a thinking line and a tool line ----------------
   // A turn reads as one essay, so the log holds *rows*, not nested blocks:
   //
-  //  - a **thinking row** (`.msg.thinking-row`, `data-kind="thinking"`): while its
-  //    turn is live it is open — a dimmed italic paragraph. When the turn ends it
-  //    collapses to a single ellipsised line with no label (the text itself is the
-  //    label), and a click toggles it: the open form is the whole text plus the
-  //    turn's usage line. There is no header and no chevron, so the row is the
-  //    control.
+  //  - a **thinking row** (`.msg.thinking-row`, `data-kind="thinking"`): the tag
+  //    `Thinking` and the text of the thinking. While its turn is live it is open — the
+  //    tag on its own line, the whole text under it, upright and dimmed. When the turn
+  //    ends it collapses to one ellipsised line (the tag, then the start of the text),
+  //    and a click toggles it: the open form is the whole text plus the turn's usage
+  //    line. There is no chevron, so the row is the control.
   //  - a **tool row** (`.msg.tool`, one line): a status dot, the bold localized
   //    verb, the label (`DisplayItem.title`, else `toolBrief()`) and the elapsed
   //    chip. It is folded at rest whatever it is doing (the row already says what
@@ -1543,7 +1580,12 @@
     row._open = !!open;
     row.classList.toggle('open', row._open);
     const detail = byClass(row, 'tool-detail');
-    if (detail) detail.classList.toggle('hidden', !row._open);
+    if (detail) {
+      detail.classList.toggle('hidden', !row._open);
+      // A virtualised viewer paints from its own measured height, which only exists
+      // once the detail is on screen — so opening is where it gets asked again.
+      if (row._open && detail._paint) detail._paint();
+    }
   }
 
   /** A click on either row hands it to the user: the live rule below stops here. */
@@ -1646,10 +1688,14 @@
       n = group._count || 0;
     } else {
       for (const child of group._body.children || []) {
-        if (child.dataset && child.dataset.kind === 'tool') n++;
+        // A thought is a step of the turn, so it counts exactly like a tool call does.
+        if (child.dataset && (child.dataset.kind === 'tool' || child.dataset.kind === 'thinking')) n++;
       }
     }
     const label = group._head && group._head.querySelector('.steps-label');
+    // A thought **is** a step of the turn: the header counts the rows that carry the turn's
+    // process, which is its tool calls and its reasoning. A turn that only thought before it
+    // answered still has one step, and that step is the thought.
     if (label) label.textContent = n === 1 ? tr('Ran 1 step') : tr('Ran {0} steps', n);
   }
 
@@ -1879,17 +1925,22 @@
   }
 
   /**
-   * One thinking row: the turn's reasoning, as a single element in the flow.
+   * One thinking row: the turn's thinking, as a single element in the flow.
    *
-   * `thinking` is the text the item already holds (a repaint) or `''` (the live
-   * path, which appends into `_textEl` as the deltas arrive). There is no header and
-   * no chevron on purpose — a row with a "Thinking" label above a one-line
-   * ellipsised paragraph spends two lines saying one thing. The whole row is the
-   * control.
+   * It is shaped like a tool row — a bold italic verb in the reader's language, the text
+   * after it — because the thinking is the agent's process, not its answer, and the two
+   * rows are read the same way. `thinking` is the text the item already holds (a repaint)
+   * or `''` (the live path, which appends into `_textEl` as the deltas arrive). There is
+   * no chevron: the whole row is the control.
+   *
+   * The tag is a `<b>` and the text a `<div>` on purpose: closed, the row is a flex line
+   * (the tag, then the ellipsised start of the text); open, the row becomes a block and
+   * the text's own block element puts the whole thinking on the line under the tag.
    */
   function makeThinkingRow(thinking) {
     const row = el('div', 'msg thinking-row');
     row.dataset.kind = 'thinking';
+    row.appendChild(el('b', 'thinking-verb', tr('Thinking')));
     const text = el('div', 'thinking-text');
     if (thinking) text.textContent = thinking;
     row.appendChild(text);
@@ -1927,6 +1978,10 @@
   function ensureThinkingRow() {
     const last = messagesEl ? logTail().lastElementChild : null;
     if (last && last.dataset && last.dataset.kind === 'thinking') return last;
+    // Every thought is a step of the turn, so a thought that opens a run opens its fold —
+    // a reasoning row is never loose in the flow, not even when the run has no tool call at
+    // all (a turn that only thought before it answered still folds that thought away).
+    ensureStepsGroup();
     return addThinkingRow('');
   }
 
@@ -1985,10 +2040,16 @@
       return last;
     }
     // A row with no bubble under it yet: the bubble that follows belongs to it, and
-    // takes its usage line back with it (`_thinkingRow`).
+    // takes its usage line back with it (`_thinkingRow`). The row may already be **inside
+    // the run above** (a thought is tucked into the group its first tool call opened), so
+    // the lookup looks one fold deeper when the flow's last element is that group.
     const prev = last;
     const node = addAssistant('', false);
-    if (node && prev && prev.dataset && prev.dataset.kind === 'thinking') node._thinkingRow = prev;
+    if (node && prev) {
+      const above =
+        prev.dataset && prev.dataset.kind === 'steps' && prev._body ? prev._body.lastElementChild : prev;
+      if (above && above.dataset && above.dataset.kind === 'thinking') node._thinkingRow = above;
+    }
     node._text = text || '';
     renderAnswer(node, false);
     return node;
@@ -2061,6 +2122,24 @@
     return element._textNode;
   }
 
+  /**
+   * One thinking delta into the row's own text, appended to the text node it already owns.
+   *
+   * The thinking is shown **verbatim**, never as Markdown: it is not a document. The model
+   * writes its own layout with indentation and blank lines, and Markdown reinterprets
+   * exactly that (four spaces become a code block, a leading `-` becomes a list, a blank
+   * line becomes a paragraph gap), so the rendered text reads taller than the text the model
+   * emitted and no longer says what it said. The one thing Markdown would buy here, links,
+   * is what it gets most wrong: a bare `AGENTS.md` is turned into a URL.
+   */
+  function pushThinkingText(row, text) {
+    if (!row || !row._textEl) return;
+    textNodeOf(row._textEl).appendData(text);
+    // A thought is a step, so a delta that lands in an open run changes that run's count:
+    // the header has to be refreshed here, or it keeps the number it had before the thought.
+    if (openSteps) updateStepsHead(openSteps);
+  }
+
   function appendThinking(text) {
     if (!messagesEl) return;
     // **One message, one row and one block.** A provider may interleave the reasoning
@@ -2092,14 +2171,14 @@
         }
         bubble._thinkingRow = row;
       }
-      textNodeOf(row._textEl).appendData(text);
+      pushThinkingText(row, text);
       // No `setActiveRow` / `setThinkingOpen(row, true)` here: a delta that joins a row
       // the answer already took over must not take the reading back to the reasoning.
       followActive();
       return row;
     }
     const row = ensureThinkingRow();
-    textNodeOf(row._textEl).appendData(text);
+    pushThinkingText(row, text);
     // The row receiving the deltas is the live one: expanded, and it collapses on its
     // own the moment something else takes over (see `clearActiveRow`).
     setActiveRow(row);
@@ -2248,9 +2327,11 @@
 
   // ---- The tool row: one bold verb and a label -------------------------------
   // A tool call is one line in the essay: `**Read** src/chat/tree.ts`. The verb is
-  // the tool's *kind* of action in the reader's language (`tr()`-localized, one word
-  // per tool); the label is the model's own `title` for the step when it gave one,
-  // else the argument that identifies the step (the path, the command, the pattern).
+  // the tool's *kind* of action in the reader's language (`tr()`-localized, one phrase
+  // per kind of action: the three tools that change a file say `Edited`, because the
+  // reader only has to know the file changed); the label is the model's own `title`
+  // for the step when it gave one, else the argument that identifies the step (the
+  // path, the command, the pattern).
   // The label is monospace for a command or a pattern and plain for everything else,
   // because a shell line and a path read best in the two different shapes.
   // Each entry asks `tr()` for its verb, at load, so the shipped catalogues carry all of
@@ -2258,26 +2339,26 @@
   const TOOL_VERBS = {
     read_file: tr('Read'),
     read_image: tr('Viewed'),
-    write_file: tr('Wrote'),
+    write_file: tr('Edited'),
     replace_in_file: tr('Edited'),
-    append_file: tr('Appended'),
-    list_dir: tr('Listed'),
-    list_nodes: tr('Listed'),
-    search_files: tr('Searched'),
-    web_search: tr('Searched'),
-    search_transcripts: tr('Recalled'),
+    append_file: tr('Edited'),
+    list_dir: tr('Viewed folder'),
+    list_nodes: tr('Viewed nodes'),
+    search_files: tr('Searched files'),
+    web_search: tr('Searched web'),
+    search_transcripts: tr('Searched chats'),
     exec_command: tr('Ran'),
     check_command: tr('Checked'),
     wait_for_command: tr('Waited'),
     kill_command: tr('Killed'),
     web_fetch: tr('Fetched'),
-    spawn_agents: tr('Spawned'),
-    spawn_readonly_agents: tr('Spawned'),
-    send_agent_message: tr('Spawned'),
-    send_readonly_agent_message: tr('Spawned'),
-    hop_session: tr('Hopped'),
-    finish_hop: tr('Finished'),
-    rename_session: tr('Renamed'),
+    spawn_agents: tr('Spawned task agents'),
+    spawn_readonly_agents: tr('Spawned research agents'),
+    send_agent_message: tr('Sent task instructions'),
+    send_readonly_agent_message: tr('Sent research instructions'),
+    hop_session: tr('Hopped session'),
+    finish_hop: tr('Ended hop'),
+    rename_session: tr('Renamed session'),
   };
   /** The tools whose label is a command line or a pattern, i.e. set in monospace. */
   const MONO_LABEL_TOOLS = new Set([
@@ -2350,6 +2431,159 @@
     return given || toolBrief(name, args);
   }
 
+  // ---- The detail: one presentation per kind of tool --------------------------
+  // A row's detail used to be the raw arguments and the raw result, so a card read like
+  // a debug trace: `> {"path":"a.ts","startLine":1}` and then a wall of text. It is now
+  // one **viewer per kind of tool**, built from the same two strings the host already
+  // stores (`DisplayItem.args` and `.content`). No payload is added anywhere: the
+  // renderers read the tool's own result text, which is why `check-webview` pins one
+  // real sample per kind — a rewording must fail the guard instead of quietly emptying
+  // the card.
+  //
+  // The other half is `TOOL_ARG_SUMMARY`: one human line per tool in place of the JSON.
+  // A tool this build does not know still gets its scalar pairs, never braces.
+
+  /** A tool's argument object, or null while unparsable (streaming) / absent. */
+  function argsOf(args) {
+    if (!args || args === '{}') return null;
+    try {
+      const parsed = JSON.parse(args);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** `lines 3-40`, `from line 3`, `to line 40`, or '' — the range half of a summary. */
+  function lineRangeLabel(a) {
+    const from = Number(a && a.startLine) || 0;
+    const to = Number(a && a.endLine) || 0;
+    if (!from && !to) return '';
+    if (from && to) return `lines ${from}-${to}`;
+    return from ? `from line ${from}` : `to line ${to}`;
+  }
+
+  /** `12 lines` for a string that is about to be written, or '' when there is none. */
+  function lineCountLabel(text) {
+    const s = String(text === undefined || text === null ? '' : text);
+    if (!s) return '';
+    return `${s.replace(/\r\n?/g, '\n').replace(/\n$/, '').split('\n').length} lines`;
+  }
+
+  /** `3 agents` for a spawn, however the model spelled the array. */
+  function agentCountLabel(a) {
+    const list = Array.isArray(a && a.agents) ? a.agents : null;
+    if (!list) return '';
+    return `${list.length} agent${list.length === 1 ? '' : 's'}`;
+  }
+
+  /**
+   * One line of plain words per tool, the replacement for `> {json}`. A field the call
+   * did not carry contributes nothing, so no line is ever `undefined` or `null`.
+   */
+  const TOOL_ARG_SUMMARY = {
+    read_file: (a) => [a.path, lineRangeLabel(a)],
+    read_image: (a) => [a.path, a.rect ? 'a region' : ''],
+    write_file: (a) => [a.path, lineCountLabel(a.content)],
+    replace_in_file: (a) => [a.path],
+    append_file: (a) => [a.path, lineCountLabel(a.content)],
+    list_dir: (a) => [a.path, a.glob ? `glob ${a.glob}` : '', a.recursive ? 'recursive' : ''],
+    search_files: (a) => [
+      a.pattern ? `pattern "${a.pattern}"` : '',
+      a.path || '',
+      a.glob ? `glob ${a.glob}` : '',
+      a.caseSensitive ? 'case sensitive' : '',
+      a.context ? `${a.context} lines of context` : '',
+    ],
+    search_transcripts: (a) => [a.pattern ? `pattern "${a.pattern}"` : '', a.kind || '', a.sessionId || ''],
+    web_search: (a) => [a.query ? `"${a.query}"` : ''],
+    web_fetch: (a) => [a.url],
+    exec_command: (a) => [a.command],
+    check_command: (a) => [a.pid !== undefined ? `#${a.pid}` : ''],
+    wait_for_command: (a) => [a.pid !== undefined ? `#${a.pid}` : '', a.seconds ? `${a.seconds}s` : ''],
+    kill_command: (a) => [a.pid !== undefined ? `#${a.pid}` : ''],
+    spawn_agents: (a) => [agentCountLabel(a)],
+    spawn_readonly_agents: (a) => [agentCountLabel(a), 'read-only'],
+    send_agent_message: (a) => [a.id ? `#${a.id}` : ''],
+    send_readonly_agent_message: (a) => [a.id ? `#${a.id}` : ''],
+    hop_session: (a) => [a.prompt ? 'hands the work to a new session' : ''],
+    finish_hop: () => [],
+    rename_session: (a) => [a.title ? `"${a.title}"` : ''],
+  };
+
+  /** The scalar pairs of an unknown tool's arguments: keys and values, never JSON. */
+  function scalarSummary(a) {
+    if (!a) return [];
+    const out = [];
+    for (const key of Object.keys(a)) {
+      const value = a[key];
+      if (value === null || value === undefined || value === '' || value === false) continue;
+      if (typeof value === 'object') continue;
+      out.push(`${key} ${value}`);
+    }
+    return out;
+  }
+
+  /**
+   * The tool row's one-line argument summary, or '' when there is nothing worth saying
+   * (a call whose arguments are still streaming has none yet, and `finish_hop` has no
+   * arguments at all).
+   */
+  function toolArgsLine(name, args) {
+    const a = argsOf(args);
+    if (!a) return '';
+    const make = TOOL_ARG_SUMMARY[name];
+    const parts = (make ? make(a) : scalarSummary(a)).map((p) => String(p || '').trim()).filter(Boolean);
+    return parts.join('  ·  ');
+  }
+
+  /** Which viewer a tool's result opens in. No entry means the plain `<pre>` fallback. */
+  const TOOL_KIND = {
+    read_file: 'code',
+    write_file: 'code',
+    replace_in_file: 'diff',
+    append_file: 'diff',
+    exec_command: 'terminal',
+    check_command: 'terminal',
+    wait_for_command: 'terminal',
+    kill_command: 'terminal',
+    list_dir: 'entries',
+    read_image: 'image',
+    list_nodes: 'count',
+    search_files: 'hits',
+    search_transcripts: 'hits',
+    web_search: 'results',
+    web_fetch: 'document',
+    spawn_agents: 'agents',
+    spawn_readonly_agents: 'agents',
+    send_agent_message: 'agents',
+    send_readonly_agent_message: 'agents',    hop_session: 'note',
+    finish_hop: 'note',
+    rename_session: 'note',
+  };
+
+  /**
+   * The kinds whose viewer already says what the arguments were (a code surface names
+   * the file, a terminal shows the command, an entry listing the directory): showing the
+   * summary line above them would say it twice.
+   */
+  const KIND_HIDES_ARGS = new Set(['code', 'diff', 'terminal', 'entries', 'image', 'count', 'note', 'results', 'document', 'agents']);
+
+  /**
+   * The reasoning that immediately precedes a run's **first** tool row belongs inside that
+   * run: it is the thought that led to the call, not a paragraph floating above it. Called
+   * once per group, right after it opens — an empty body is the only one it fills — and from
+   * both the live path and the repaint path, which is what keeps the two the same shape.
+   *
+   * Only the row directly above the group moves, and only a thinking row, so an answer or a
+   * notice between the reasoning and the run stops the move: those are boundaries.
+   */
+  function tuckReasoningIntoRun(group) {
+    if (!group || !group._body || group._body.firstChild) return;
+    const prev = group.previousElementSibling;
+    if (prev && prev.dataset && prev.dataset.kind === 'thinking') group._body.appendChild(prev);
+  }
+
   /**
    * One tool card by its message id, walked depth-first.
    *
@@ -2391,6 +2625,829 @@
     return head;
   }
 
+  // ---- The viewers -----------------------------------------------------------
+  // Each one takes the tool's own result text and nothing else. They are deliberately
+  // small and boring: the point is that a card shows a file, a terminal, a listing or a
+  // sentence, never a JSON blob or an undifferentiated wall of text.
+
+  /** The code surface's row height. Fixed: the list is virtualised, so a row that grew
+   * with its text would break every offset arithmetic below. */
+  const CODE_LINE_H = 16;
+  /** Rows rendered above and below the window, so a fast scroll never shows a hole. */
+  const CODE_OVERSCAN = 20;
+  /** How tall the code surface is before it scrolls inside itself. */
+  const CODE_VIEW_H = 320;
+
+  /** `read_file`'s result: `File: <path> (<range>)` then the body. */
+  function readFileView(content) {
+    const text = String(content || '');
+    const nl = text.indexOf('\n');
+    const header = nl < 0 ? text : text.slice(0, nl);
+    const body = nl < 0 ? '' : text.slice(nl + 1);
+    const parsed = /^File: (.*) \((.*)\)$/.exec(header);
+    if (!parsed) return { text, path: '', startLine: 1, numbers: false, note: '' };
+    const [, path, range] = parsed;
+    // A TRUNCATED answer has a hole in the middle, so it keeps the raw text: a gutter
+    // with invented numbers would be a lie about where each line sits.
+    if (/^\[TRUNCATED/.test(body)) return { text: body, path, startLine: 1, numbers: false, note: tr('truncated excerpt') };
+    const whole = /^(\d+) lines, /.exec(range);
+    if (whole) return { text: body, path, startLine: 1, numbers: true, note: '' };
+    const part = /^lines (\d+)-(\d+) of \d+, /.exec(range);
+    if (part) {
+      // A ranged read prefixes every line with `N: `, which the gutter replaces.
+      const stripped = body.replace(/^\d+: ?/gm, '');
+      return { text: stripped, path, startLine: Number(part[1]), numbers: true, note: '' };
+    }
+    return { text: body, path, startLine: 1, numbers: false, note: '' };
+  }
+
+  /**
+   * One code surface: a header line (the path, a note, the count) over a virtualised
+   * list of fixed-height rows. Only the visible window is in the DOM, so a 20k-line
+   * answer costs the same as a 40-line one. Rows never wrap (the reader scrolls
+   * sideways) which is what keeps every row exactly `CODE_LINE_H` tall, and the line
+   * numbers stay pinned to the left edge while the text slides under them.
+   */
+  function codeViewer(opts) {
+    const lines = String(opts.text === undefined || opts.text === null ? '' : opts.text).split('\n');
+    // A trailing newline is not a line of its own.
+    if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+    const view = el('div', 'code-view');
+    const head = el('div', 'code-head');
+    if (opts.path) head.appendChild(el('span', 'code-path', opts.path));
+    if (opts.note) head.appendChild(el('span', 'code-note', opts.note));
+    head.appendChild(el('span', 'code-count', lines.length === 1 ? tr('1 line') : tr('{0} lines', lines.length)));
+    view.appendChild(head);
+
+    const scroller = el('div', 'code-scroll');
+    const spacer = el('div', 'code-spacer');
+    const windowEl = el('div', 'code-window');
+    spacer.appendChild(windowEl);
+    scroller.appendChild(spacer);
+    view.appendChild(scroller);
+    if (lines.length <= 0) {
+      view.appendChild(el('div', 'code-empty', tr('(empty)')));
+      return view;
+    }
+    spacer.style.height = lines.length * CODE_LINE_H + 'px';
+
+    const paint = () => {
+      const total = lines.length;
+      const viewport = scroller.clientHeight || CODE_VIEW_H;
+      const scrolled = scroller.scrollTop || 0;
+      let first = Math.floor(scrolled / CODE_LINE_H) - CODE_OVERSCAN;
+      if (first < 0) first = 0;
+      let count = Math.ceil(viewport / CODE_LINE_H) + CODE_OVERSCAN * 2;
+      if (first + count > total) count = total - first;
+      windowEl.textContent = '';
+      windowEl.style.top = first * CODE_LINE_H + 'px';
+      for (let i = 0; i < count; i++) {
+        const row = el('div', 'code-line');
+        // The gutter keeps its slot even when numbers are not known, so the text starts
+        // at the same x whether or not a range was read.
+        row.appendChild(
+          el('span', 'code-no', opts.numbers ? String((opts.startLine || 1) + first + i) : ''),
+        );
+        row.appendChild(el('span', 'code-text', lines[first + i]));
+        windowEl.appendChild(row);
+      }
+    };
+    view._paint = paint;
+    scroller.addEventListener('scroll', paint);
+    paint();
+    return view;
+  }
+
+  /**
+   * One terminal: the command that ran, the status line the tool put in brackets, and
+   * the output. The status line is the one thing coloured: a non-zero exit, a failed
+   * start or a truncated dump is the error colour, everything else stays dim.
+   */
+  function terminalViewer(content, command) {
+    const text = String(content || '');
+    const view = el('div', 'term-view');
+    if (command) view.appendChild(el('div', 'term-cmd', '$ ' + command));
+    const head = /^\[([^\]]*)\]\n?/.exec(text);
+    if (head) {
+      const status = el('div', 'term-status', head[1]);
+      if (/exited with (?!code 0\b).*code|could not start|failed to start|exceeded|truncated/i.test(head[1])) {
+        status.classList.add('bad');
+      }
+      view.appendChild(status);
+      view.appendChild(el('pre', 'term-out', text.slice(head[0].length)));
+    } else {
+      view.appendChild(el('pre', 'term-out', text));
+    }
+    return view;
+  }
+
+  /** One directory listing: the path and its count, then a row per entry. */
+  function entriesViewer(content) {
+    const text = String(content || '');
+    const nl = text.indexOf('\n');
+    const header = nl < 0 ? text : text.slice(0, nl);
+    const body = nl < 0 ? '' : text.slice(nl + 1);
+    const parsed = /^Directory: (.*)$/.exec(header);
+    const view = el('div', 'entries-view');
+    const head = el('div', 'entries-head');
+    if (parsed) head.appendChild(el('span', 'entries-path', parsed[1]));
+    head.appendChild(el('span', 'entries-count', ''));
+    view.appendChild(head);
+    const rows = body.split('\n').filter((line) => line && line !== '(empty)');
+    let capped = '';
+    if (rows.length && /^…\[listing stopped at/.test(rows[rows.length - 1])) capped = rows.pop();
+    head.lastChild.textContent = rows.length === 1 ? tr('1 entry') : tr('{0} entries', rows.length);
+    if (!rows.length) view.appendChild(el('div', 'entries-empty', tr('(empty)')));
+    const list = el('div', 'entries-list');
+    for (const entry of rows) {
+      const row = el('div', 'entries-row' + (entry.endsWith('/') ? ' dir' : ''));
+      row.appendChild(el('span', 'entries-name', entry));
+      list.appendChild(row);
+    }
+    if (rows.length) view.appendChild(list);
+    if (capped) view.appendChild(el('div', 'entries-note', capped.replace(/^…\[|\]$/g, '')));
+    return view;
+  }
+
+  // ---- The line differ -------------------------------------------------------
+  // Two strings in, one flat array of rows out. The webview bundles nothing from
+  // node_modules, and one readable screen of JS is cheaper to trust than a diff library
+  // plus its tree. The row model is flat and **pre-numbered**: a hunk is not an object
+  // here, it is a run of rows with no `gap` inside, so the painter walks the array once
+  // and never looks ahead to decide whether to draw an ellipsis.
+  //
+  // Invariants the painter relies on: `add`/`del` equal the number of `add`/`del` rows;
+  // a `ctx`/`del` row carries a 1-based old number and a `ctx`/`add` row a 1-based new
+  // one, the other side being null; identical content yields no rows at all.
+
+  /** Split a text into lines: CRLF and a lone CR are both line ends, and a trailing
+   * newline terminates the last line instead of opening an empty one. */
+  function diffLines(text) {
+    const s = text === null || text === undefined ? '' : String(text);
+    const normalized = s.replace(/\r\n?/g, '\n');
+    if (normalized === '') return [];
+    const lines = normalized.split('\n');
+    if (lines[lines.length - 1] === '') lines.pop();
+    return lines;
+  }
+
+  /**
+   * The whole edit script: an LCS length table filled bottom-up, then walked top-down into
+   * rows. Ties go to `del` first, so a replaced line always reads `- old` then `+ new`
+   * rather than interleaving, and the same two texts always give the same rows.
+   */
+  function diffEditScript(a, b) {
+    const n = a.length;
+    const m = b.length;
+    const w = m + 1;
+    const dp = new Uint32Array((n + 1) * w);
+    for (let i = n - 1; i >= 0; i--) {
+      const row = i * w;
+      const next = row + w;
+      for (let j = m - 1; j >= 0; j--) {
+        dp[row + j] =
+          a[i] === b[j] ? dp[next + j + 1] + 1 : dp[next + j] >= dp[row + j + 1] ? dp[next + j] : dp[row + j + 1];
+      }
+    }
+    const rows = [];
+    let i = 0;
+    let j = 0;
+    while (i < n && j < m) {
+      if (a[i] === b[j]) {
+        rows.push({ type: 'ctx', old: i + 1, new: j + 1, text: a[i] });
+        i++;
+        j++;
+      } else if (dp[(i + 1) * w + j] >= dp[i * w + j + 1]) {
+        rows.push({ type: 'del', old: i + 1, new: null, text: a[i] });
+        i++;
+      } else {
+        rows.push({ type: 'add', old: null, new: j + 1, text: b[j] });
+        j++;
+      }
+    }
+    while (i < n) rows.push({ type: 'del', old: i + 1, new: null, text: a[i++] });
+    while (j < m) rows.push({ type: 'add', old: null, new: j + 1, text: b[j++] });
+    return rows;
+  }
+
+  /**
+   * Which slices of the edit script are worth showing: each change keeps `ctx` lines of
+   * air, and two changes share a hunk exactly when their windows touch or overlap (that is
+   * when nothing would be elided). A single dropped line justifies a `gap` row: showing
+   * fewer context lines than asked for, without saying so, would misrepresent the file.
+   */
+  function diffHunkSpans(rows, ctx) {
+    const changes = [];
+    for (let k = 0; k < rows.length; k++) if (rows[k].type !== 'ctx') changes.push(k);
+    if (!changes.length) return [];
+    const last = rows.length - 1;
+    const spans = [];
+    let start = Math.max(0, changes[0] - ctx);
+    let end = Math.min(last, changes[0] + ctx);
+    for (let c = 1; c < changes.length; c++) {
+      const k = changes[c];
+      const s = Math.max(0, k - ctx);
+      const e = Math.min(last, k + ctx);
+      if (s <= end + 1) {
+        end = Math.max(end, e);
+      } else {
+        spans.push([start, end]);
+        start = s;
+        end = e;
+      }
+    }
+    spans.push([start, end]);
+    return spans;
+  }
+
+  /** Cells of the LCS table above which the middle is not diffed line by line. */
+  const DIFF_MAX_CELLS = 4000000;
+
+  function diffRows(oldText, newText) {
+    const a = diffLines(oldText);
+    const b = diffLines(newText);
+    // Equal lines mean "no change" even when the bytes differ (CRLF vs LF, a trailing
+    // newline appearing): a file re-saved by another OS must not read as changed.
+    if (a.length === b.length && a.every((line, i) => line === b[i])) return { rows: [], add: 0, del: 0 };
+    // Past the ceiling the LCS is refused outright: a slow wrong answer is worse than a
+    // fast honest one, so the whole old side is removed and the whole new side added.
+    if ((a.length + 1) * (b.length + 1) > DIFF_MAX_CELLS) {
+      const rows = [];
+      for (let i = 0; i < a.length; i++) rows.push({ type: 'del', old: i + 1, new: null, text: a[i] });
+      for (let j = 0; j < b.length; j++) rows.push({ type: 'add', old: null, new: j + 1, text: b[j] });
+      return { rows, add: b.length, del: a.length };
+    }
+    const all = diffEditScript(a, b);
+    let add = 0;
+    let del = 0;
+    for (const row of all) {
+      if (row.type === 'add') add++;
+      else if (row.type === 'del') del++;
+    }
+    const spans = diffHunkSpans(all, 3);
+    const rows = [];
+    for (let s = 0; s < spans.length; s++) {
+      if (s > 0) rows.push({ type: 'gap' });
+      for (let k = spans[s][0]; k <= spans[s][1]; k++) rows.push(all[k]);
+    }
+    return { rows, add, del };
+  }
+
+  /**
+   * A diff surface: the same fixed-row, virtualised list the code viewer uses (both are
+   * read the same way), with two gutters and a full-width tint per row. The gutters hold
+   * the old and the new line number; when the change's position in the file is not known
+   * (an edit anchored on text, not on a line) the numbers are simply absent rather than
+   * invented, and the `gap` row stands in for git's "⋯".
+   */
+  function diffViewer(opts) {
+    const rows = opts.rows || [];
+    const view = el('div', 'diff-view');
+    const head = el('div', 'diff-head');
+    if (opts.path) head.appendChild(el('span', 'diff-path', opts.path));
+    if (opts.note) head.appendChild(el('span', 'diff-note', opts.note));
+    head.appendChild(el('span', 'diff-count-add', '+' + (opts.add || 0)));
+    head.appendChild(el('span', 'diff-count-del', '-' + (opts.del || 0)));
+    view.appendChild(head);
+    if (!rows.length) {
+      view.appendChild(el('div', 'diff-empty', tr('no line changed')));
+      return view;
+    }
+    const scroller = el('div', 'diff-scroll');
+    const spacer = el('div', 'diff-spacer');
+    const windowEl = el('div', 'diff-window');
+    spacer.appendChild(windowEl);
+    scroller.appendChild(spacer);
+    view.appendChild(scroller);
+    spacer.style.height = rows.length * CODE_LINE_H + 'px';
+    const paint = () => {
+      const total = rows.length;
+      const viewport = scroller.clientHeight || CODE_VIEW_H;
+      const scrolled = scroller.scrollTop || 0;
+      let first = Math.floor(scrolled / CODE_LINE_H) - CODE_OVERSCAN;
+      if (first < 0) first = 0;
+      let count = Math.ceil(viewport / CODE_LINE_H) + CODE_OVERSCAN * 2;
+      if (first + count > total) count = total - first;
+      windowEl.textContent = '';
+      windowEl.style.top = first * CODE_LINE_H + 'px';
+      for (let i = 0; i < count; i++) {
+        const row = rows[first + i];
+        if (row.type === 'gap') {
+          windowEl.appendChild(el('div', 'diff-row gap', '⋯'));
+          continue;
+        }
+        const line = el('div', 'diff-row ' + row.type);
+        line.appendChild(el('span', 'diff-old', row.old === null || !opts.numbers ? '' : String(row.old)));
+        line.appendChild(el('span', 'diff-new', row.new === null || !opts.numbers ? '' : String(row.new)));
+        line.appendChild(el('span', 'diff-mark', row.type === 'add' ? '+' : row.type === 'del' ? '-' : ' '));
+        line.appendChild(el('span', 'diff-text', row.text));
+        windowEl.appendChild(line);
+      }
+    };
+    view._paint = paint;
+    scroller.addEventListener('scroll', paint);
+    paint();
+    return view;
+  }
+
+  /**
+   * `append_file`'s change is a pure addition at the end of the file, so there is nothing to
+   * compute: the numbers come from the tool's own "M lines added, N lines total" sentence,
+   * which is the one thing the result text already knows and the arguments do not.
+   */
+  function appendRows(content, argsContent) {
+    const added = diffLines(argsContent);
+    const stats = /^Appended to .*\((\d+) lines added, (\d+) lines total\)/.exec(String(content || ''));
+    const total = stats ? Number(stats[2]) : 0;
+    const start = total ? total - added.length + 1 : 1;
+    return added.map((text, i) => ({ type: 'add', old: null, new: start + i, text }));
+  }
+
+  // ---- The text viewers: hits, web results, a fetched page, a sub-agent batch ----
+  // Each parses the tool's own result text (the shapes are pinned in `check-webview`).
+  // A line the parser does not recognise is kept rather than dropped: a card that loses
+  // a line silently is worse than one that shows a line it could not classify.
+
+  /** `src/a.ts:12: text` and `src/a.ts-12- text` (a context line), as search prints them. */
+  const HIT_LINE = /^(.+?)([:-])(\d{1,9})\2 (.*)$/;
+
+  /**
+   * The hits of `search_files` / `search_transcripts`: the path, the line and the text,
+   * with the cap note and the scope echo the tool appends kept underneath. Without hit
+   * lines (no matches, a timeout, a spilled answer) the text is shown as it came.
+   */
+  function hitsViewer(content) {
+    const text = String(content || '');
+    const view = el('div', 'hits-view');
+    const head = el('div', 'hits-head');
+    const hits = [];
+    const notes = [];
+    let plain = 0;
+    for (const line of text.split('\n')) {
+      if (!line) continue;
+      const hit = HIT_LINE.exec(line);
+      if (hit) {
+        hits.push({ path: hit[1], ctx: hit[2] === '-', line: hit[3], text: hit[4] });
+        continue;
+      }
+      plain++;
+      notes.push(line);
+    }
+    if (!hits.length) {
+      // Nothing hit-shaped: the result is prose (no matches, a timeout, a spill pointer),
+      // so it is shown whole rather than rendered as an empty list.
+      return el('div', 'note-view', text);
+    }
+    head.appendChild(el('span', 'hits-count', tr('{0} hits', hits.length)));
+    for (const note of notes) head.appendChild(el('span', 'hits-note', note));
+    view.appendChild(head);
+    const list = el('div', 'hits-list');
+    for (const hit of hits) {
+      const row = el('div', 'hits-row' + (hit.ctx ? ' ctx' : ''));
+      const path = el('span', 'hits-path', hit.path);
+      path.title = hit.path;
+      row.appendChild(path);
+      row.appendChild(el('span', 'hits-line', hit.line));
+      row.appendChild(el('span', 'hits-text', hit.text));
+      list.appendChild(row);
+    }
+    view.appendChild(list);
+    return view;
+  }
+
+  /** One web result block: `1. title`, then three-space-indented url and snippet lines. */
+  function resultsViewer(content) {
+    const text = String(content || '');
+    const lines = text.split('\n');
+    const view = el('div', 'results-view');
+    const head = el('div', 'results-head');
+    let cursor = 0;
+    const header = lines.length ? /^web_search "(.*?)" — (.*)$/.exec(lines[0]) : null;
+    if (header) {
+      head.appendChild(el('span', 'results-query', header[1]));
+      head.appendChild(el('span', 'results-meta', header[2]));
+      cursor = 1;
+      if (/^attempts: /.test(lines[cursor] || '')) {
+        const attempts = el('div', 'results-attempts', lines[cursor].slice('attempts: '.length));
+        view.appendChild(head);
+        view.appendChild(attempts);
+        cursor++;
+        head._after = true;
+      }
+    }
+    if (!head._after) view.appendChild(head);
+    const body = el('div', 'results-body');
+    let item = null;
+    const flush = () => {
+      if (!item) return;
+      const row = el('div', 'results-item');
+      row.appendChild(el('span', 'results-index', item.index));
+      const title = el('a', 'results-title', item.title);
+      title.href = item.url || '#';
+      title.title = item.url || '';
+      row.appendChild(title);
+      if (item.url) row.appendChild(el('span', 'results-url', item.url));
+      if (item.meta) row.appendChild(el('span', 'results-snippet', item.meta));
+      body.appendChild(row);
+      item = null;
+    };
+    for (; cursor < lines.length; cursor++) {
+      const line = lines[cursor];
+      if (!line) {
+        flush();
+        continue;
+      }
+      const numbered = /^(\d+)\. (.*)$/.exec(line);
+      if (numbered) {
+        flush();
+        item = { index: numbered[1], title: numbered[2], url: '', meta: '' };
+        continue;
+      }
+      if (item && /^ {3}/.test(line)) {
+        const value = line.trim();
+        if (!item.url && /^https?:\/\//.test(value)) item.url = value;
+        else item.meta = item.meta ? `${item.meta} ${value}` : value;
+        continue;
+      }
+      if (!item) {
+        // Prose between the blocks (a note, the untrusted-data sentence). Its first line
+        // is enough: the rest is addressed to the model, not to the reader.
+        if (!body._prose) body.appendChild(el('div', 'results-prose', line));
+        body._prose = true;
+        continue;
+      }
+      item.meta = item.meta ? `${item.meta} ${line.trim()}` : line.trim();
+    }
+    flush();
+    view.appendChild(body);
+    return view;
+  }
+
+  /** A fetched page: the URL and the HTTP facts, then the text as it was extracted. */
+  function documentViewer(content) {
+    const text = String(content || '');
+    if (/^(Error: |web_fetch refused)/.test(text)) return el('div', 'note-view', text);
+    const split = text.indexOf('\n\n');
+    const header = split < 0 ? text : text.slice(0, split);
+    const body = split < 0 ? '' : text.slice(split + 2);
+    const view = el('div', 'doc-view');
+    const head = el('div', 'doc-head');
+    const view_ = head;
+    for (const line of header.split('\n')) {
+      if (!line) continue;
+      if (/^web_fetch /.test(line)) {
+        const url = el('span', 'doc-url', line.slice('web_fetch '.length));
+        view_.appendChild(url);
+      } else if (/^Untrusted web content/.test(line)) {
+        view_.appendChild(el('span', 'doc-tag', tr('web content')));
+      } else if (/^HTTP /.test(line) || /^via the provider/.test(line)) {
+        view_.appendChild(el('span', 'doc-status', line));
+      } else {
+        view_.appendChild(el('span', 'doc-note', line));
+      }
+    }
+    view.appendChild(head);
+    if (body) view.appendChild(el('pre', 'doc-body', body));
+    return view;
+  }
+
+  /** The short id a card's row uses for a sub-agent. */
+  function shortNodeId(id) {
+    return String(id || '').slice(-6);
+  }
+
+  /**
+   * A sub-agent batch. Its result is a single-line JSON document (the runtime builds it),
+   * so it is parsed rather than regexed: `results[]` for a sync batch, `spawned`/`ids` for
+   * an async one, `resumed`/`id` for a follow-up. A non-JSON answer (an error sentence)
+   * is shown as it came.
+   */
+  function agentsViewer(content) {
+    const text = String(content || '');
+    if (/^Error: /.test(text)) return el('div', 'note-view', text);
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      return el('div', 'note-view', text);
+    }
+    const rows = [];
+    if (Array.isArray(data.results)) {
+      for (const item of data.results) {
+        rows.push({
+          id: shortNodeId(item.agentNodeId),
+          ok: item.ok !== false,
+          model: item.modelName || item.model || '',
+          ms: item.durationMs,
+          summary: item.summary || '',
+        });
+      }
+    } else if (typeof data.resumed === 'string' || typeof data.id === 'string') {
+      rows.push({
+        id: shortNodeId(data.id),
+        ok: data.ok !== false,
+        model: data.modelName || data.model || '',
+        ms: data.durationMs,
+        summary: data.summary || (data.async ? tr('still running') : ''),
+      });
+    } else if (Array.isArray(data.ids)) {
+      for (const id of data.ids) {
+        const done = Array.isArray(data.done) && data.done.indexOf(id) >= 0;
+        const running = Array.isArray(data.running) && data.running.indexOf(id) >= 0;
+        rows.push({
+          id: shortNodeId(id),
+          ok: true,
+          model: '',
+          ms: undefined,
+          summary: running ? tr('still running') : done ? tr('finished') : '',
+        });
+      }
+    }
+    const view = el('div', 'agents-view');
+    if (!rows.length) return el('div', 'note-view', text);
+    const head = el('div', 'agents-head');
+    head.appendChild(el('span', 'agents-count', rows.length === 1 ? tr('1 agent') : tr('{0} agents', rows.length)));
+    view.appendChild(head);
+    for (const row of rows) view.appendChild(agentRow(row));
+    return view;
+  }
+
+  /**
+   * Markdown into an element, when there is a renderer; the plain text when there is not.
+   * The offline checker loads this script with no markdown-it (by design), so the fallback
+   * is what keeps a rendered block's text observable to a guard.
+   */
+  function markdownInto(element, text) {
+    if (!element) return;
+    if (md) {
+      element.innerHTML = renderMarkdown(text || '');
+      element.classList.add('md-body');
+    } else {
+      element.textContent = text || '';
+    }
+  }
+
+  /** One sub-agent block: its short id and duration on the top line, its report below. */
+  function agentRow(entry) {
+    const row = el('div', 'agents-row' + (entry.ok ? '' : ' failed'));
+    row.appendChild(el('span', 'agents-id', '#' + entry.id));
+    if (entry.model) row.appendChild(el('span', 'agents-model', entry.model));
+    if (entry.ms !== undefined && entry.ms !== null) row.appendChild(el('span', 'agents-ms', formatDuration(entry.ms)));
+    if (entry.summary) {
+      // The summary **is** the sub-agent's final answer, Markdown and all (a report with
+      // tables and lists is the normal case), so it is rendered rather than flattened.
+      const body = el('div', 'agents-summary');
+      markdownInto(body, entry.summary);
+      row.appendChild(body);
+    }
+    return row;
+  }
+
+  /**
+   * One line per finished sub-agent, as the runtime writes them into a batch notice:
+   * `Sub-agent #abc123 finished in 9.1s: <summary>`, where the summary may run over many
+   * lines (it is the agent's whole final answer). A line that is neither is kept as prose,
+   * because a batch body the viewer does not recognise must not lose its text.
+   */
+  const BATCH_LINE = /^Sub-agent #(\S+) (finished|failed|killed|stopped)\b(.*)$/;
+  const BATCH_TIME = /([\d.]+)\s*(ms|s|m|h)\b/;
+
+  /**
+   * A finished sub-agent batch: the same rows the `spawn_agents` viewer draws, built from
+   * the notice's prose instead of from a tool result (the runtime writes the batch body as
+   * text). Everything after an agent's own line belongs to that agent's answer, so the rows
+   * are rebuilt by walking the body once.
+   */
+  function batchViewer(content) {
+    const text = String(content || '');
+    const entries = [];
+    const prose = [];
+    for (const line of text.split('\n')) {
+      const head = BATCH_LINE.exec(line.trim());
+      if (head) {
+        const time = BATCH_TIME.exec(head[3] || '');
+        const rest = (head[3] || '').replace(/^[\s\S]*?:/, '');
+        entries.push({
+          id: head[1],
+          ok: head[2] === 'finished',
+          ms: time ? parseDurationLabel(`${time[1]}${time[2]}`) : undefined,
+          summary: rest.trim(),
+        });
+        continue;
+      }
+      if (entries.length) entries[entries.length - 1].summary += '\n' + line;
+      else prose.push(line);
+    }
+    if (!entries.length) return el('pre', 'tool-result', text);
+    const view = el('div', 'agents-view');
+    const head = el('div', 'agents-head');
+    head.appendChild(el('span', 'agents-count', entries.length === 1 ? tr('1 agent') : tr('{0} agents', entries.length)));
+    view.appendChild(head);
+    for (const entry of entries) view.appendChild(agentRow(entry));
+    for (const line of prose) view.appendChild(el('div', 'agents-prose', line));
+    return view;
+  }
+
+  /** `9.1s` / `1.2m` / `340ms` → milliseconds, for the batch's own duration labels. */
+  function parseDurationLabel(label) {
+    const match = /^(\d+(?:\.\d+)?)\s*(ms|s|m|h)$/.exec(String(label || '').trim());
+    if (!match) return undefined;
+    const value = Number(match[1]);
+    const unit = { ms: 1, s: 1000, m: 60000, h: 3600000 }[match[2]];
+    return Math.round(value * unit);
+  }
+
+  /**
+   * `list_nodes`'s result is a whole tree, and a reader does not want the tree in a card:
+   * the size of the session is the fact. `handleListNodes` already leads with it
+   * (`session <id> "<title>" — <N> nodes, checked out: …`), so the header is the viewer.
+   */
+  function countViewer(content) {
+    const text = String(content || '');
+    const header = /(?:^|\n)session (\S+) "(.*)" — (\d+) nodes/.exec(text);
+    if (!header) return el('div', 'note-view', text);
+    return el('div', 'note-view', tr('Checked {0} nodes in {1} ({2})', header[3], header[2], header[1]));
+  }
+
+  /** Pending `imageUrl` requests, keyed by the id the host echoes back. */
+  const imageRequests = new Map();
+  let imageRequestSeq = 0;
+
+  /** Ask the host for one image's bytes, once, when its row is expanded. */
+  function requestImageUrl(path, done) {
+    if (!path) {
+      done(null);
+      return;
+    }
+    const id = 'img' + ++imageRequestSeq;
+    imageRequests.set(id, done);
+    vscode.postMessage({ type: 'imageUrl', requestId: id, path });
+  }
+
+  /**
+   * One image, as the **model** was shown it.
+   *
+   * The viewer is about that call's image: the box clips to the call's own `rect`, which is
+   * exactly the region that was uploaded, and the downscale the harness applies is invisible
+   * at display size. The pixels come from the file, because a webview cannot read one, and
+   * the host answers with the file's mtime beside them: a file rewritten after the call is
+   * flagged, since the pixels below are then the current file and not what the model saw.
+   * A single click opens the source file in an editor.
+   */
+  function imageViewer(a, content, since) {
+    const view = el('div', 'image-view');
+    const head = el('div', 'image-head');
+    if (a.path) {
+      const pathEl = el('span', 'image-path', a.path);
+      pathEl.title = a.path;
+      head.appendChild(pathEl);
+    }
+    // The transform's own sentence (`1920x1080, rect 10,20 200x150 -> 200x150`) carries the
+    // size that was actually sent, which is the one fact worth repeating.
+    const facts = /-> (\d+x\d+)/.exec(String(content || ''));
+    if (facts) head.appendChild(el('span', 'image-size', facts[1]));
+    const warn = el('span', 'image-note hidden');
+    head.appendChild(warn);
+    view.appendChild(head);
+    const box = el('div', 'image-box');
+    box.title = tr('open the file in the editor');
+    const img = el('img', 'image-el');
+    img.alt = a.path || tr('image');
+    box.appendChild(img);
+    view.appendChild(box);
+    box.addEventListener('click', () => {
+      if (a.path) vscode.postMessage({ type: 'openFile', path: a.path });
+    });
+    const rect = a.rect && typeof a.rect === 'object' ? a.rect : null;
+    /** Clip the box to `rect` and scale the picture so that region fits it. */
+    const fit = () => {
+      const natural = { w: img.naturalWidth || 0, h: img.naturalHeight || 0 };
+      if (!rect || !natural.w || !natural.h) {
+        img.style.maxWidth = '100%';
+        img.style.maxHeight = '240px';
+        return;
+      }
+      const scale = Math.min(1, 240 / Math.max(1, Number(rect.h) || 1), 420 / Math.max(1, Number(rect.w) || 1));
+      box.style.width = Math.round((Number(rect.w) || 0) * scale) + 'px';
+      box.style.height = Math.round((Number(rect.h) || 0) * scale) + 'px';
+      img.style.maxWidth = 'none';
+      img.style.maxHeight = 'none';
+      img.style.width = Math.round(natural.w * scale) + 'px';
+      img.style.height = Math.round(natural.h * scale) + 'px';
+      img.style.marginLeft = -Math.round((Number(rect.x) || 0) * scale) + 'px';
+      img.style.marginTop = -Math.round((Number(rect.y) || 0) * scale) + 'px';
+    };
+    img.addEventListener('load', fit);
+    requestImageUrl(String(a.path || ''), (answer) => {
+      if (!answer || !answer.url) {
+        warn.classList.remove('hidden');
+        warn.textContent =
+          answer && answer.error === 'too large'
+            ? tr('the image is too large to show here')
+            : tr('the file could not be read');
+        return;
+      }
+      img.src = answer.url;
+      if (since && answer.mtime && answer.mtime > since) {
+        warn.classList.remove('hidden');
+        warn.textContent = tr('the file changed after this call');
+      }
+      fit();
+    });
+    return view;
+  }
+
+  /**
+   * The viewer for one tool result, or the plain `<pre>` when this build has no viewer
+   * for that kind (an unknown tool, or a kind that is not built yet). The fallback is a
+   * compatibility path, not the normal one.
+   */
+  function buildToolViewer(kind, name, args, content, since) {
+    const a = argsOf(args) || {};
+    if (kind === 'image') return imageViewer(a, content, since);
+    if (kind === 'diff') {
+      const clipped = /…\[truncated \d+ chars for UI\]/.test(String(args || ''));
+      if (clipped) {
+        // The two halves of the change did not survive the display clip, so no diff can be
+        // reconstructed. Saying so beats drawing a change that is not the one that ran.
+        return el('div', 'diff-empty', tr('the call arguments were truncated for display, so this change cannot be shown'));
+      }
+      if (name === 'append_file') {
+        const rows = appendRows(content, a.content);
+        return diffViewer({ path: a.path, rows, add: rows.length, del: 0, numbers: true, note: '' });
+      }
+      const result = diffRows(String(a.oldText || ''), String(a.newText || ''));
+      return diffViewer({
+        path: a.path,
+        rows: result.rows,
+        add: result.add,
+        del: result.del,
+        // An edit anchored on text has no line of its own in the file, so the gutters stay
+        // empty rather than showing numbers relative to a block nobody can locate.
+        numbers: false,
+        note: '',
+      });
+    }
+    if (kind === 'code') {
+      if (name === 'write_file') {
+        // `write_file` overwrites, so its result carries no body: the content written is
+        // the argument. The args are clipped for display, and the surface says so rather
+        // than pretending the file ends where the clip does.
+        const clipped = /…\[truncated \d+ chars for UI\]/.test(String(args || ''));
+        return codeViewer({
+          text: a.content,
+          path: a.path,
+          startLine: 1,
+          numbers: true,
+          note: clipped ? tr('arguments truncated for display') : '',
+        });
+      }
+      const parsed = readFileView(content);
+      return codeViewer({ ...parsed });
+    }
+    if (kind === 'terminal') return terminalViewer(content, a.command);
+    if (kind === 'entries') return entriesViewer(content);
+    if (kind === 'hits') return hitsViewer(content);
+    if (kind === 'results') return resultsViewer(content);
+    if (kind === 'document') return documentViewer(content);
+    if (kind === 'agents') return agentsViewer(content);
+    if (kind === 'count') return countViewer(content);
+    if (kind === 'note') return el('div', 'note-view', content);
+    return el('pre', 'tool-result', content);
+  }
+
+  /**
+   * Paint a row's detail. It is rebuilt whole rather than patched, because every part
+   * of it (the summary line, the viewer, the error, the usage line) is decided by the
+   * payload, and a live row changes shape exactly twice: when the arguments settle and
+   * when the result arrives. The usage line is the assistant message's, not the call's,
+   * so it is passed through untouched.
+   */
+  function paintToolDetail(detail, opts) {
+    if (!detail) return;
+    const name = opts.name || '';
+    const kind = TOOL_KIND[name] || '';
+    detail.textContent = '';
+    // A viewer that names the file / shows the command / lists the directory already
+    // says what the arguments were; only a kind that does not (a search, a spawn, a
+    // rename) gets the summary line above it. A row that has no result yet keeps the
+    // summary whatever its kind, so an opened live row is never blank.
+    const viewerSaysArgs = !!kind && !!opts.content && KIND_HIDES_ARGS.has(kind);
+    if (opts.args && !viewerSaysArgs) {
+      const line = toolArgsLine(name, opts.args);
+      if (line) detail.appendChild(el('div', 'tool-args-line', line));
+    }
+    detail.classList.toggle('has-viewer', !!opts.content && !!kind);
+    if (opts.content) detail.appendChild(buildToolViewer(kind, name, opts.args, opts.content, opts.since));
+    if (opts.error) detail.appendChild(el('div', 'tool-error', opts.error));
+    if (opts.usage) detail.appendChild(el('div', 'usage-line', formatUsage(opts.usage)));
+    detail._paint = () => {
+      for (const child of detail.children || []) {
+        if (child._paint) child._paint();
+      }
+    };
+  }
+
   /**
    * One tool row, live or replayed. `opts` is the whole state a row has:
    *   `{ name, args, id, title, usage, status, start, ms, content, error }`
@@ -2410,6 +3467,9 @@
     node.dataset.kind = 'tool';
     const mono = !opts.title && MONO_LABEL_TOOLS.has(name);
     const head = toolRowHead(name, toolLabel(name, args, opts.title), mono);
+    // The line diff of a file-modifying call, before the elapsed chip (the head reads
+    // verb, label, `+12 -3`, time).
+    syncDiff(head, opts.diff);
     // The call's own duration: `start` for a call that is running, `ms` for one that is
     // already over (a repaint of history). Neither is passed while a call is still
     // streaming its arguments — nothing has started yet, so the row deliberately shows
@@ -2417,12 +3477,16 @@
     syncElapsed(head, 'tool-elapsed', opts.start, opts.ms);
     node.appendChild(head);
     const detail = el('div', 'tool-detail hidden');
-    if (args && args !== '{}') {
-      detail.appendChild(el('div', 'tool-args-line', '> ' + describeArgs(args).replace(/\n+/g, ' ')));
-    }
-    if (opts.content) detail.appendChild(el('pre', 'tool-result', opts.content));
-    if (opts.error) detail.appendChild(el('div', 'tool-error', opts.error));
-    if (opts.usage) detail.appendChild(el('div', 'usage-line', formatUsage(opts.usage)));
+    paintToolDetail(detail, {
+      name,
+      args,
+      content: opts.content,
+      error: opts.error,
+      usage: opts.usage,
+      // The call's own end, when both halves are known: an image row compares the file's
+      // mtime against it to say whether the pixels below are still the ones it was sent.
+      since: opts.start != null && opts.ms != null ? opts.start + opts.ms : null,
+    });
     node.appendChild(detail);
     head.addEventListener('click', () => {
       markRowTouched(node);
@@ -2430,6 +3494,8 @@
     });
     node._rowEl = head;
     node._detailEl = detail;
+    node._name = name;
+    node._args = args;
     node._label = toolLabel(name, args, opts.title);
     node._title = opts.title;
     const group = ensureStepsGroup();
@@ -2482,11 +3548,10 @@
     const head = toolRowHead(name || '', args ? toolBrief(name, args) : '', MONO_LABEL_TOOLS.has(name));
     node.appendChild(head);
 
+    // The detail is painted when the arguments settle (`finalizeLiveTool`): a
+    // half-streamed JSON blob is not something to put in front of a reader, and the row
+    // is folded while it composes anyway.
     const detail = el('div', 'tool-detail hidden');
-    const argsEl = el('pre', 'tool-args');
-    const argsText = document.createTextNode(args || '');
-    argsEl.appendChild(argsText);
-    detail.appendChild(argsEl);
     node.appendChild(detail);
 
     head.addEventListener('click', () => {
@@ -2498,10 +3563,10 @@
     node._detailEl = detail;
     node._verbEl = byClass(head, 'tool-verb');
     node._labelEl = byClass(head, 'tool-label');
-    node._argsText = argsText;
-    node._argsEl = argsEl;
+    node._argsRaw = args || '';
 
     const group = ensureStepsGroup();
+    tuckReasoningIntoRun(group);
     logTail().appendChild(node);
     updateStepsHead(group);
     liveBucket(undefined, true)[index] = node;
@@ -2517,12 +3582,12 @@
       node = addLiveTool(index, id, '', '');
     }
     if (id) node.dataset.id = id;
-    if (argsDelta && node._argsText) {
-      node._argsText.appendData(argsDelta);
+    if (argsDelta) {
+      node._argsRaw = (node._argsRaw || '') + argsDelta;
       // The label is derived from the arguments as they arrive, in place (a rebuild
       // per delta would throw away the row the reader may have just opened).
       const name = node._verbEl ? node._verbEl.textContent : '';
-      const label = toolLabel(name, node._argsEl.textContent || '');
+      const label = toolLabel(name, node._argsRaw);
       if (node._labelEl) {
         node._labelEl.textContent = label;
       } else if (label && node._rowEl) {
@@ -2581,14 +3646,12 @@
       // its elapsed chip is born.
       syncElapsed(node._rowEl, 'tool-elapsed', start, ms);
     }
-    // The detail is rebuilt from the same three parts `addTool` writes (args line,
-    // result, usage), so the folded row holds exactly what a repaint would fill it with.
-    if (node._detailEl) {
-      node._detailEl.innerHTML = '';
-      if (args && args !== '{}') {
-        node._detailEl.appendChild(el('div', 'tool-args-line', '> ' + describeArgs(args).replace(/\n+/g, ' ')));
-      }
-    }
+    // The arguments are settled: this is the first moment the detail has anything to
+    // say, so it is painted from here on (and repainted whole when the result arrives).
+    node._name = name;
+    node._args = args;
+    node._start = start;
+    paintToolDetail(node._detailEl, { name, args });
     followActive();
     return node;
   }
@@ -2618,7 +3681,7 @@
    * over a call that has already answered. The row is *not* opened by this: a finished
    * step is one line, and the result is one click away.
    */
-  function updateTool(id, content, ms) {
+  function updateTool(id, content, ms, diff) {
     if (!messagesEl) return;
     const node = toolNodeById(messagesEl, id);
     if (!node) return;
@@ -2626,8 +3689,20 @@
     node.classList.add('done');
     const head = node._rowEl || byClass(node, 'tool-row');
     if (head) syncElapsed(head, 'tool-elapsed', null, ms);
+    // Left of the frozen time chip, where the head's design keeps it.
+    if (head) syncDiff(head, diff, byClass(head, 'tool-elapsed'));
     const detail = node._detailEl || byClass(node, 'tool-detail');
-    if (detail && content) detail.appendChild(el('pre', 'tool-result', content));
+    // The result arrives: the row's detail is painted whole from the settled arguments
+    // and the result, exactly as a repaint of the same item would paint it.
+    if (detail && content) {
+      paintToolDetail(detail, {
+        name: node._name,
+        args: node._args,
+        content,
+        since: node._start != null && ms != null ? node._start + ms : null,
+      });
+      if (detail._paint) detail._paint();
+    }
     clearActiveRow(node);
     followActive();
   }
@@ -2644,23 +3719,99 @@
     node.classList.toggle('done', status === 'done');
   }
 
+  /**
+   * A completion notice: a background terminal or a sub-agent batch finished.
+   *
+   * It wears the tool row's clothes on purpose — the producer tag (`BG` / `SUB`) sits where a
+   * step's verb sits, the job's id and command are the label, the outcome is the chip, and
+   * the output is folded one click away. A notice is the same kind of line as a step:
+   * something the turn did, finished. It used to be a bordered block with its output always
+   * open, which dropped a wall of text into the middle of the essay every time a job ended.
+   */
   function addBackgroundNotice(item) {
     if (!messagesEl) return;
-    const node = el('div', 'msg bgnotify');
+    // A notice that **opens the next round** is a boundary, not a step: it ends the run
+    // above it and then stands alone in the flow as one dim line, with the batch summary
+    // folded behind it (a click opens it; it is collapsed at rest, so the boundary still
+    // reads as one line). The round it starts gets its own `Ran N steps`, so a node that
+    // async work resumed reads as answer / notice / steps / answer instead of one run that
+    // swallows two.
+    if (item.round) {
+      closeStepsGroup();
+      const isSub = (item.producer || item.kind) === 'subagent';
+      // The line reads like a step's own line: a **title** in the verb's slot and a short
+      // human sentence beside it, both italic, all of it in the accent colour because this
+      // is the one row in the log that is an *event* rather than work or words.
+      const done = String(item.doneText || '');
+      // The runtime's `doneText` is prose for the model, not for the reader, so only its two
+      // facts are taken: how many, and how long.
+      const duration = (/\(([^)]+)\)\s*$/.exec(done) || [])[1] || '';
+      const count = (/^(\d+)/.exec(done) || [])[1] || '';
+      const subject = isSub ? (count ? tr('{0} agents', count) : '') : String(item.name || '');
+      const context = [subject, duration].filter(Boolean).join(' · ');
+      const line = el('div', 'msg notice-line');
+      line.dataset.kind = 'background';
+      line.dataset.round = '1';
+      const text = el('div', 'notice-text');
+      text.appendChild(el('b', 'notice-title', isSub ? tr('Sub-agent finished') : tr('Background job finished')));
+      if (context) {
+        text.appendChild(document.createTextNode(' '));
+        text.appendChild(el('i', 'notice-context', context));
+      }
+      line.appendChild(text);
+      if (item.content || item.id != null) {
+        // Nothing to fold means no fold: a notice with no body and no id stays a plain line
+        // and is not a click target (the handler is only attached when there is something
+        // to open).
+        const detail = el('div', 'tool-detail hidden');
+        if (item.id != null && item.id !== '') detail.appendChild(el('div', 'notice-id', '#' + item.id));
+        if (item.content) detail.appendChild(isSub ? batchViewer(item.content) : terminalViewer(item.content, ''));
+        line.appendChild(detail);
+        text.addEventListener('click', () => {
+          markRowTouched(line);
+          setToolOpen(line, !isRowOpen(line));
+        });
+        line._detailEl = detail;
+      }
+      line._rowEl = text;
+      messagesEl.appendChild(line);
+      followActive();
+      return line;
+    }
+    const node = el('div', 'msg tool done bgnotify');
     node.dataset.kind = 'background';
-    const head = el('div', 'bgnotify-head');
-    // The badge names the producer, so a background terminal and a sub-agent batch
-    // are told apart at a glance (they used to share the same "BG").
-    head.appendChild(el('span', 'bgnotify-badge ' + (item.kind === 'subagent' ? 'sub' : 'bg'), item.kind === 'subagent' ? 'SUB' : 'BG'));
-    head.appendChild(el('span', 'bgnotify-id', '#' + (item.id != null ? item.id : '')));
+    // The tag names the producer, so a background terminal and a sub-agent batch are told
+    // apart at a glance (they used to share the same "BG").
+    const isSub = (item.producer || item.kind) === 'subagent';
+    const head = el('div', 'tool-row');
+    // The tag is a word, not a code: `BG`/`SUB` were three letters a reader had to learn,
+    // and both are localized like every other verb in the log.
+    head.appendChild(
+      el(
+        'b',
+        'tool-verb bgnotify-badge ' + (isSub ? 'sub' : 'bg'),
+        isSub ? tr('Sub-agent finished') : tr('Background job finished'),
+      ),
+    );
+    const command = isSub ? '' : item.name || item.cmd || '';
+    const id = item.id != null && item.id !== '' ? '#' + item.id : '';
+    const label = [id, command].filter(Boolean).join(' ');
+    if (label) head.appendChild(el('span', 'tool-label mono', label));
     head.appendChild(el('span', 'bgnotify-status', item.doneText || tr('finished')));
     node.appendChild(head);
-    if (item.name || item.cmd) {
-      node.appendChild(el('div', 'bgnotify-cmd', item.name || item.cmd));
-    }
+    const detail = el('div', 'tool-detail hidden');
+    // A batch notice is the same rows the `spawn_agents` viewer draws (its body is prose,
+    // not JSON, so it is parsed); a job notice is a terminal, command and output.
     if (item.content) {
-      node.appendChild(el('pre', 'bgnotify-output', item.content));
+      detail.appendChild(isSub ? batchViewer(item.content) : terminalViewer(item.content, command));
     }
+    node.appendChild(detail);
+    head.addEventListener('click', () => {
+      markRowTouched(node);
+      setToolOpen(node, !isRowOpen(node));
+    });
+    node._rowEl = head;
+    node._detailEl = detail;
     logTail().appendChild(node);
     followActive();
     return node;
@@ -2683,18 +3834,42 @@
       // The reasoning travels with the text but belongs to the run above it, and this
       // group's body is still empty (`_lazy` holds its rows until the click that builds
       // it). The row joins that queue, so it lands in the body in its original order
-      // instead of being appended before the tool rows the body receives later.
+      // instead of being appended before the tool rows the body receives later. It counts
+      // as a step, exactly like a live thought does.
       if (openSteps && openSteps._lazy && item.thinking) {
         openSteps._lazy.push({ kind: 'assistant', thinking: item.thinking });
+        openSteps._count = (openSteps._count || 0) + 1;
+        updateStepsHead(openSteps);
         renderItemInto({ ...item, thinking: undefined });
         return;
       }
       renderItemInto(item);
       return;
     }
+    // A message that is **only** reasoning opens the fold it belongs to, the same way the
+    // live path does: a thought is a step, so it is never loose in the flow.
+    if (item.kind === 'assistant' && !String(item.text || '').length && !item.error && item.thinking) {
+      const group = ensureStepsGroup();
+      if (group) {
+        if (!group._lazy) group._lazy = [];
+        group._lazy.push({ kind: 'assistant', thinking: item.thinking });
+        group._count = (group._count || 0) + 1;
+        updateStepsHead(group);
+        if (!group._userTouched) setStepsFold(group, true);
+        return;
+      }
+    }
+    if (item.kind === 'background' && item.round) {
+      // The same boundary the live path draws: the run above ends, the notice is the flow's
+      // own line, and the next round's steps open a group of their own.
+      closeStepsGroup();
+      renderItemInto(item);
+      return;
+    }
     if (item.kind === 'tool') {
       const group = ensureStepsGroup();
       if (group) {
+        tuckReasoningIntoRun(group);
         if (!group._lazy) group._lazy = [];
         group._lazy.push(item);
         group._count = (group._count || 0) + 1;
@@ -3021,6 +4196,12 @@
         start: running ? item.startedAt : null,
         ms: item.ms,
         content: !running ? item.content : undefined,
+        // The line diff the host read out of the call's own result: the chip a repaint
+        // draws is the one the live turn drew.
+        diff: item.diff,
+        // A done call still remembers when it ended, so an image row can say whether the
+        // file was rewritten after it (the chip reads `start` only while running).
+        since: !running && item.ms != null && item.startedAt != null ? item.startedAt + item.ms : null,
       });
     }
   }
@@ -3270,11 +4451,12 @@
     const head = el('div', 'term-dock-row-head');
     head.appendChild(el('span', 'term-dock-session', job.sessionTitle || ''));
     if (job.detached === true) {
-      // The same untranslated `shared` token the card wears, with the same sentence.
-      const shared = el('span', 'node-shared-badge', 'shared');
-      shared.title =
-        'This job does not block the composer and will not notify the agent; read its result with check_background_terminal.';
-      head.appendChild(shared);
+      // The same untranslated `global` token the card wears, with the same sentence: it
+      // says the job's lifecycle is bound to this window, not to a node.
+      const badge = el('span', 'node-shared-badge', 'global');
+      badge.title =
+        'This job is bound to this VS Code window: it does not block the composer and will not notify the agent; read its result with check_command.';
+      head.appendChild(badge);
     }
     if (job.delivered === true) {
       head.appendChild(el('span', 'node-delivered-badge', tr('Delivered')));
@@ -3446,14 +4628,22 @@
    * task), never re-derived here — and it is absent for a card restored after a
    * restart, because that card has no live job to be detached from.
    */
+  /**
+   * The `global` badge marks a job whose lifecycle is bound to this **VS Code window**
+   * rather than to the node that started it: it blocks no composer, notifies nobody, and
+   * is read with `check_command`. (It used to say `shared`, which described how it felt
+   * rather than what it is.) The badge is a property of the job, so it is synced wherever
+   * a job card is rendered — the snapshot, a `tree`, a `path` — and not only while the job
+   * is in the snapshot.
+   */
   function syncSharedBadge(card, meta) {
     if (!card) return;
     const wanted = !!(meta && meta.kind === 'bg' && meta.bgDetached === true);
     let badge = byClass(card, 'node-shared-badge');
     if (wanted && !badge) {
-      badge = el('span', 'node-shared-badge', 'shared');
+      badge = el('span', 'node-shared-badge', 'global');
       badge.title =
-        'This job does not block the composer and will not notify the agent; read its result with check_command or wait_for_command.';
+        'This job is bound to this VS Code window: it does not block the composer and will not notify the agent; read its result with check_command or wait_for_command.';
       const head = card.querySelector('.node-head');
       const status = head.querySelector('.node-status');
       if (status) head.insertBefore(badge, status); else head.appendChild(badge);
@@ -6988,8 +8178,18 @@
       case 'toolStart':
         routeTo(msg.nodeId, () => { finalizeStreamingAnswer(); finalizeLiveTool(msg.index, msg.id, msg.name, msg.args, msg.startedAt, null, msg.title); }, 'toolStart');
         break;
+      case 'imageUrlAnswer': {
+        // The host's answer to one `imageUrl` request: a data URL, or the reason there is
+        // none. The wait is per request, so a row that was folded again simply drops it.
+        const done = imageRequests.get(msg.requestId);
+        if (done) {
+          imageRequests.delete(msg.requestId);
+          done(msg);
+        }
+        return;
+      }
       case 'toolEnd':
-        routeTo(msg.nodeId, () => updateTool(msg.id, msg.content, msg.ms), 'toolEnd');
+        routeTo(msg.nodeId, () => updateTool(msg.id, msg.content, msg.ms, msg.diff), 'toolEnd');
         break;
       case 'agentStart':
         onAgentStart(msg);
