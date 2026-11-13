@@ -8225,7 +8225,7 @@ function addBackgroundNotice(item) {
   function updateNewContextButton() {
     const drift = !!(SETUP && SETUP.drift);
     const reason = newContextBlockedReason();
-    newContextBtn.textContent = tr('New setup');
+    newContextBtn.textContent = tr('Continue with new context');
     newContextBtn.classList.toggle('hidden', !drift || focusIsRunning() || focusIsLocked());
     newContextBtn.disabled = !!reason;
     newContextBtn.title = reason

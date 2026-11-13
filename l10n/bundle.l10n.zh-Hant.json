@@ -77,7 +77,7 @@
   "Collapse or expand the terminal dock": "折疊或展開終端塢",
   "Compress": "壓縮",
   "Move this conversation into a new context window: a pointer (Simple) or a compression turn (Agentic). The harness asks which, and which setup the new window uses.": "把這段對話移到新的內容視窗：指標（Simple）或壓縮回合（Agentic）。Spinney 會問選哪一種，以及新視窗用哪一套設定。",
-  "New setup": "新設定",
+  "Continue with new context": "在新內容視窗中繼續",
   "Continue this conversation under the setup the composer shows now. The tree forks, so the old one keeps its own bytes.": "照輸入區現在顯示的設定繼續這段對話。樹會分岔，舊樹保留自己的位元組。",
   "Compression instruction": "壓縮指令",
   "Compression of window {0}": "視窗 {0} 的壓縮",

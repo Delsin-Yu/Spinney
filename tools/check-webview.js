@@ -1516,9 +1516,9 @@ if (contextLabel !== 'ctx 50%') {
   if (hidden(newContextBtn)) {
     problems.push('a harness drift does not show the setup entry');
   }
-  if (!/New setup/.test(String(newContextBtn.textContent || ''))) {
+  if (!/Continue with new context/.test(String(newContextBtn.textContent || ''))) {
     problems.push(
-      `the setup entry reads ${JSON.stringify(newContextBtn.textContent)}, expected "New setup"`,
+      `the setup entry reads ${JSON.stringify(newContextBtn.textContent)}, expected "Continue with new context"`,
     );
   }
   if (!newContextBtn.title) {
