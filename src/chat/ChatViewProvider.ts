@@ -864,7 +864,11 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     // the list is live on the next `postConfig` — the same shape every other key
     // follows.
     const promptSnippets = resolvePromptSnippets(cfg.get<unknown>('promptSections'));
-    return { defaultCardId, replyLanguage, replyLanguageTag: replyLanguageTagValue, maxConcurrentSubagents, maxLevel2Subagents, saveSubAgentTranscripts, saveSessionTranscripts, subAgentTranscriptDir, autoSessionTitles, promptSnippets };
+    // The appear animation (`docs/agents/invariants/streaming-perf.md`). It is a
+    // paint-only flag: with it off the webview renders exactly as it did before the
+    // animation existed, and the text is complete in either case.
+    const streamAnimation = cfg.get<boolean>('streamAnimation') ?? true;
+    return { defaultCardId, replyLanguage, replyLanguageTag: replyLanguageTagValue, maxConcurrentSubagents, maxLevel2Subagents, saveSubAgentTranscripts, saveSessionTranscripts, subAgentTranscriptDir, autoSessionTitles, promptSnippets, streamAnimation };
   }
 
   // ---- API keys (SecretStorage: one entry per provider) ----

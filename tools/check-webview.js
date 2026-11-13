@@ -7276,6 +7276,152 @@ if (contextLabel !== 'ctx 50%') {
     );
   }
 }
+// --- the appear animation never holds the text --------------------------------
+// The animation of how characters and rows *appear* may never be load-bearing: the text
+// of a delta is **complete in the DOM** the moment it arrives, and only its opacity is
+// animated. Three statements, each of which would be a silent regression in a window:
+//
+//   - a delta is fully readable at once — no rate-limited reveal, no queue, no flush:
+//     the answer reads the concatenation of its deltas straight after they were
+//     dispatched, with no timer and no frame in between;
+//   - the transient `.chunk-in` span holds **only the newest chunk**: the settled prefix
+//     is merged back into the answer's own `Text` node before the next span opens, which
+//     is what keeps the streaming surface one Text node and one `appendData`;
+//   - `streamAnimation: false` in the `config` message renders exactly what the webview
+//     rendered before the animation existed: no span, no class, the same text.
+//
+// This block runs **last** of the synchronous checks (nothing below it reads the UI
+// state), and it puts the flag back to on at the end so a later block cannot inherit
+// "off" from it.
+{
+  const NODE = 'anim-node';
+  const cardEl = () =>
+    Array.from(elementById('tree-canvas').children).find((child) => child.dataset && child.dataset.id === NODE);
+  const logEl = () => {
+    const card = cardEl();
+    return card ? findByClass(card, 'node-work') : null;
+  };
+  /** Every `.chunk-in` span inside an element — the transient form of a delta. */
+  const chunksIn = (root, into) => {
+    const out = into || [];
+    for (const child of (root && root.children) || []) {
+      if (hasClass(child, 'chunk-in')) out.push(child);
+      chunksIn(child, out);
+    }
+    return out;
+  };
+  /**
+   * Everything an element reads as text: the stub's `textContent` is a plain property, so
+   * a live `Text` node and a fading chunk are both read off the subtree — which is also
+   * what a browser shows on screen.
+   */
+  const textOf = (element) => {
+    if (!element) return '';
+    if (element.nodeType === 3) return String(element.data || element.nodeValue || '');
+    let out = element.textContent ? String(element.textContent) : '';
+    for (const child of element.children || []) out += textOf(child);
+    return out;
+  };
+  const boot = () => {
+    dispatch({ type: 'reset' });
+    dispatch({
+      type: 'tree',
+      viewId: NODE,
+      activeId: NODE,
+      rootId: NODE,
+      nodes: [
+        {
+          id: NODE,
+          parentId: null,
+          children: [],
+          title: 'anim',
+          status: 'running',
+          createdAt: 0,
+          preview: 'anim',
+          usage: null,
+          size: null,
+        },
+      ],
+    });
+    dispatch({ type: 'path', ids: [NODE], nodes: [{ id: NODE, status: 'running', items: [] }] });
+    dispatch({ type: 'state', busy: true, status: '', sessionId: 'anim-session', runningNodes: [NODE] });
+  };
+  /** The answer's own bubble — the last row of the log, which is the text in flow. */
+  const answerEl = () => {
+    const log = logEl();
+    const kids = (log && log.children) || [];
+    const last = kids.length ? kids[kids.length - 1] : null;
+    if (!last || (last.dataset || {}).kind !== 'assistant') return null;
+    return findByClass(last, 'answer');
+  };
+
+  // (a) Two deltas, read immediately. Nothing has fired `animationend` and no fallback
+  // timer has run, so this is exactly the state a reader sees mid-fade.
+  boot();
+  dispatch({ type: 'delta', nodeId: NODE, text: 'Hello ' });
+  dispatch({ type: 'delta', nodeId: NODE, text: 'world' });
+  {
+    const answer = answerEl();
+    if (!answer) {
+      problems.push('the appear animation: two deltas rendered no answer bubble — the streaming block is gone');
+    } else {
+      const read = textOf(answer);
+      if (read !== 'Hello world') {
+        problems.push(
+          `the appear animation: a delta's text reads ${JSON.stringify(read)} immediately after the delta, expected ` +
+            '"Hello world" — the text has to be complete in the DOM at once, because only the appearance is animated',
+        );
+      }
+      const spans = chunksIn(answer);
+      if (spans.length > 1) {
+        problems.push(`the appear animation: the answer holds ${spans.length} .chunk-in spans, expected at most one`);
+      } else if (spans.length === 1 && textOf(spans[0]) !== 'world') {
+        problems.push(
+          `the appear animation: the fading span holds ${JSON.stringify(textOf(spans[0]))}, expected only the newest ` +
+            'chunk ("world") — the settled prefix belongs to the answer\'s own Text node',
+        );
+      }
+    }
+  }
+
+  // (b) The setting off: no span, no class, the same complete text.
+  dispatch({ type: 'config', streamAnimation: false });
+  boot();
+  dispatch({ type: 'delta', nodeId: NODE, text: 'no animation' });
+  dispatch({ type: 'delta', nodeId: NODE, text: ' at all' });
+  {
+    const answer = answerEl();
+    if (!answer) {
+      problems.push('the appear animation (`streamAnimation: false`): two deltas rendered no answer bubble');
+    } else {
+      const spans = chunksIn(answer);
+      if (spans.length > 0) {
+        problems.push(
+          `\`streamAnimation: false\` still wrapped ${spans.length} delta(s) in a .chunk-in span — the setting has to ` +
+            'render exactly what the webview rendered before the animation existed',
+        );
+      }
+      const read = textOf(answer);
+      if (read !== 'no animation at all') {
+        problems.push(
+          `\`streamAnimation: false\`: the answer reads ${JSON.stringify(read)}, expected "no animation at all"`,
+        );
+      }
+      const log = logEl();
+      const kids = (log && log.children) || [];
+      const last = kids.length ? kids[kids.length - 1] : null;
+      if (last && last.classList.contains('row-in')) {
+        problems.push('`streamAnimation: false` still marked the appended answer row with `.row-in`');
+      }
+    }
+  }
+  // The flag goes back to on, the setting's own default: the block is the last one, but a
+  // check added below it must not inherit "off" from a fixture.
+  dispatch({ type: 'config', streamAnimation: true });
+
+  notes.push('appear animation: a delta is complete at once, one span holds only the newest chunk, and the setting off renders exactly the old shapes');
+}
+
 // --- the shell document: where the new-epoch button sits, and what is gone -------
 // `media/main.js` cannot assert this: the DOM stub builds an element per id on demand,
 // so the *document* has to be read as text. Two facts matter, both from

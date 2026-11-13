@@ -501,7 +501,14 @@
   place — the `> args` line, the result, an error, the usage line, all 11 px `--text-dim`).
   `renderItemInto` (the history repaint) goes through the **same** `addTool` /
   `makeThinkingRow` / `addAssistant` the live path uses and splits the items with the same
-  per-run rule, and `tools/check-webview.js` pins both halves. While a thinking row is
+  per-run rule, and `tools/check-webview.js` pins both halves. The **appear animation**
+  lives here too: a delta's newest characters briefly sit in a transient `.chunk-in` span
+  that the script merges back into the answer's (or the thinking row's) own `Text` node on
+  `animationend`, a new row arrives on `.row-in`, and a live tool row's label restarts
+  `.label-in` in place — all of it off when `spinney.streamAnimation` is false or the OS
+  asks for reduced motion (`animationsOn` in the animation block above the message
+  rendering; the CSS and its `@media (prefers-reduced-motion: reduce)` block are at the
+  end of `media/style.css`). While a thinking row is
   open, its 240 px box carries its own small green **follow** dot (`attachRowLock`), whose
   click `stopPropagation`s the row's click (which opens and closes the row). The log
   carries one green dot (`attachLock`): green means **following** the newest content, an
