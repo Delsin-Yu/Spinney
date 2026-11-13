@@ -5,6 +5,60 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **A viewer for every tool call.** A tool row used to open onto its raw arguments and a wall
+  of result text. Every tool now opens its own view, built from the two strings the host
+  already stores (`DisplayItem.args` and `.content`): a code surface with a line-number
+  gutter (`read_file`, `write_file`; virtualised, one line per row, no wrapping, the gutter
+  pinned while the text scrolls sideways), a red/green diff (`replace_in_file`,
+  `append_file`; the rows are computed in the webview from the call's own arguments, and an
+  edit anchored on text shows no line numbers because its place in the file is not known), a
+  terminal (`exec_command` and the three job tools), a directory listing, search hits, web
+  results, a fetched page (the one view that wraps), an image clipped to the call's own
+  `rect` with a click that opens the file, a sub-agent batch whose answer is rendered as
+  Markdown, a node count, or one plain sentence. A tool with no view keeps the raw result as
+  a compatibility path. The collapsed chip still reads the tool's own `(+N -M)` sentence.
+- **A step fold now holds the whole process.** A thought is a step: it counts in the group
+  header and lives inside the fold of the run it opens, so no reasoning row floats loose in
+  the flow — a turn that only thought before it answered gets a fold of its own. The
+  closed form is unchanged: one line, and one click opens it.
+- **A completion notice that starts a round is a boundary.** An async job finishing on an
+  idle node used to append its notice wherever the flow happened to be, letting one `Ran N
+  steps` group swallow two rounds and add their counts together. The notice now ends the run
+  above it, stands alone as one accent line (`Sub-agent finished · 2 agents · 44s`), and the
+  round it opens gets its own group. Its batch summary is folded behind a click. A notice
+  delivered mid-turn keeps the tool-row shape and rides the run, which is what it is.
+
+### Changed
+
+- **`run_type` is `foreground`, `background` or `global`** — the values name the lifecycle a
+  job is bound to, which is the reason `detached` went away (it described how the call felt).
+  The schema now says when to use each, including the one rule that matters most: when you
+  are not sure how long a command takes, use the foreground, because a command that runs
+  long is moved to the background by itself and nothing is lost.
+- **The window-global dock lists `global` jobs only.** A `background` job is a node job and
+  lives on the card beside its node; the dock is where a session-wide, never-notifying job
+  can be seen and killed. The `shared` badge is now `global`, on the card and in the dock.
+- **Tool row verbs read as one phrase per kind of action**, and a tool's arguments are shown
+  as one line of plain words instead of JSON. The three file-writing tools share one verb
+  (`Edited` / `编辑文件`): to the reader they are one thing — the file was edited.
+
+### Fixed
+
+- **A dismissed dock row no longer silences a later job.** Dismissals are stored per
+  `(sessionId, taskId)` and survive a reload, while the task id counter lives in memory and
+  restarts at 1: a job that reused a dismissed id was dropped from the dock for good. A
+  registration now clears the stale dismissal.
+- **A repainted completion notice kept its producer.** The stored item's `kind` can only say
+  `background`, so after a reload a sub-agent batch was drawn as a terminal: wrong title, and
+  its Markdown report flattened into raw text. The item now carries `producer`, and the dock
+  reads a `global` job's flag from the durable `bgDetached` record.
+- **A background job's completion notice shows the model's `title`**, not the command line,
+  the same rule the step row follows.
+
 ## [0.7.0] - 2026-11-13
 
 ### Added

@@ -7,7 +7,7 @@
   | --- | --- | --- | --- | --- |
   | `foreground` (**the default**) | runs in this turn and returns its output; a command still running after `spinney.execForegroundSeconds` is **moved to the background** | a node job, at the promotion | **yes**, from the promotion on | yes |
   | `background` | a node job from the start; its id comes back at once | a node job | **yes** | yes |
-  | `detached` | **fire-and-forget**: session-wide | a **detached** job | **no** | **no** |
+  | `global` | **fire-and-forget**: bound to this VS Code window | a **global** job (`detached: true` on the task — the field name is the internal one, the value is `global`) | **no** | **no** |
 
   `spinney.execForegroundSeconds` (seconds, default **30**, minimum 10, maximum
   999999999999) is the **foreground slice**, read live per call
@@ -32,7 +32,7 @@
 
   The one refusal that is left is the **removed arguments** (`removedArgumentError`),
   thrown **before anything is spawned** — no process, no job, nothing started:
-  `timeout_behavior was removed; pass run_type "foreground" | "background" | "detached".
+  `timeout_behavior was removed; pass run_type "foreground" | "background" | "global".
   There is no per-call timeout any more. Nothing was started.` (the registry adds the
   `Error: ` prefix). A bare `timeout` gets the same sentence: the two went away together,
   and silently ignoring one would read as "my timeout is in force" — the opposite of what
@@ -84,10 +84,10 @@
     command untouched. The wait is a `Promise.race` between the hub's own waiter and a
     timer, and the timeout **aborts a local controller** so the waiter leaves the task —
     a timed-out wait leaves no trace.
-  - A **detached** job may be waited on too; its timeout text adds `This job is detached,
-    so no completion notice will arrive for it either: its result is read only by asking
-    again (check_command(4) or another wait_for_command(4))`. A timed-out wait on a
-    detached job keeps `notifyAgent` false, because that flag is the job's identity.
+  - A **global** job may be waited on too; its timeout text adds `This job is global (bound to
+    this VS Code window), so no completion notice will arrive for it either: its result is
+    read only by asking again (check_command(4) or another wait_for_command(4))`. A timed-out
+    wait on a global job keeps `notifyAgent` false, because that flag is the job's identity.
 - **Three tools manage a job, and they take a numeric `pid`** —
   `check_command` / `wait_for_command` / `kill_command`, all in
   `src/tools/backgroundTools.ts`, even though what `exec_command` hands back is a
@@ -116,10 +116,10 @@
   byte-identical) and before the output: `You may continue with other work or end your
   turn: the completion notice for id 3 will reach you when it finishes. Do not poll it —
   this is a status read, not a wait; wait_for_command(3) waits for it and returns the moment
-  it ends.` — or, for a **detached** job, `This job never notifies: read it once when you
+  it ends.` — or, for a **global** job, `This job never notifies: read it once when you
   actually need the result, not in a loop. wait_for_command(3) waits for it up to the
   seconds you give.` The difference is the whole reason the line exists: a node job will wake
-  the turn by itself, a detached one never will, and a model told "wait" for a job that
+  the turn by itself, a global one never will, and a model told "wait" for a job that
   cannot notify would poll forever. These are **model-facing** strings, so they are
   deliberately not localized — the same locale-free token the webview's chips render, not a
   translated status word.
@@ -147,8 +147,8 @@
   keyed by `(session, node)`: `registries: Map<sessionId, Map<nodeId, BackgroundRegistry>>`
   (`registryFor(owner)` creates lazily) plus a per-session `id → owner` index
   (`lookup(sessionId, id)`). A job therefore belongs to the **node whose turn spawned it** and
-  renders beside that node's card — never another branch or session. A **detached** job
-  (`run_type: "detached"`) is not a second kind of bucket: it is a task in that same
+  renders beside that node's card — never another branch or session. A **global** job
+  (`run_type: "global"`) is not a second kind of bucket: it is a task in that same
   `(session, node)` bucket with `detached: true`, so it keeps its owner, its card and its
   place in every listing and kill — and only its **lock** and its **notice** are off (the
   composer keeps offering Send, the delivery path reads `notifyAgent: false`). Its id
@@ -229,7 +229,7 @@
   command and the output tail — the same three parts a dock row renders, so the two views cannot
   disagree) — plus a `kill` button (built by
   `killBackgroundButton`, which posts `killBackground { id }`) only while the job runs. A
-  **detached** job's card also wears the `shared` badge: `treeMessage` sets `bgDetached` from
+  **global** job's card also wears the `global` badge: `treeMessage` sets `bgDetached` from
   the **live task** (the hub's `lookup`), never from the node, so a card restored after a
   reload — which has no task left to ask — renders as the plain record it is, and the badge
   says why that job's composer stayed on Send. Its tooltip names `check_command` /
@@ -253,21 +253,29 @@
   persisted terminal state. The webview keys the snapshot by `task.id` and patches the card of
   each tree node with a `bgTaskId` (`renderBackgrounds`, `media/main.js`); the host coalesces
   the snapshot (~200 ms) so a chatty process cannot freeze the webview.
-- **The window-global terminal dock.** Every background command of the window — running or
-  finished, delivered or not, whatever session — is also one list, on **every** chat tab:
-  `#term-dock` is a `fixed` element at the top-right of the body (`z-index` 1500: above the cards
-  and the autoscroll origin at 1000, below the node / snippet menus at 2000), with a collapsible
-  header `Terminals · {0} running` and one row per job. It is a **view** of the same jobs, never a
-  second state: a row's body is `buildBgBody` — the builder the `kind:'bg'` card uses — plus the
-  session title, the `kill` button while the job runs, the `shared` / `Delivered` badges, the
-  local elapsed chip and the **✕** when the job is finished. The host broadcasts it as
-  `backgroundsGlobal` (`ChatViewProvider.globalBackgroundJobs` / `postBackgroundsGlobal`),
-  coalesced ~200 ms exactly like the per-session snapshot, to **every** open panel; a tab that
-  comes up (`ready`) is sent one at once, so a reload never shows an empty dock until the next job
-  happens to change. `jobs[]` is de-duplicated by `(sessionId, id)` — a task id is session-local,
-  so the pair is a job's identity and the same number in two sessions is two jobs — and built from
-  the live hub tasks of every session **plus** the persisted `kind:'bg'` record nodes of every
-  session (delivered ones included: the hub is in-memory, the record is what survives a reload).
+- **The window-global terminal dock.** Every **`global`** command of the window — running or
+  finished, whatever session — is also one list, on **every** chat tab. A `background` job is a
+  node job and lives on the card beside its node; it is never here (the dock is the only place a
+  session-wide job that never notifies can be seen or killed). `#term-dock` is a `fixed` element
+  at the top-right of the body (`z-index` 1500: above the cards and the autoscroll origin at 1000,
+  below the node / snippet menus at 2000), with a collapsible header `Terminals · {0} running` and
+  one row per job. It is a **view** of the same jobs, never a second state: a row's body is
+  `buildBgBody` — the builder the `kind:'bg'` card uses — plus the session title, the `kill`
+  button while the job runs, the `global` / `Delivered` badges, the local elapsed chip and the
+  **✕** when the job is finished. The host broadcasts it as `backgroundsGlobal`
+  (`ChatViewProvider.globalBackgroundJobs` / `postBackgroundsGlobal`), coalesced ~200 ms exactly
+  like the per-session snapshot, to **every** open panel; a tab that comes up (`ready`) is sent
+  one at once, so a reload never shows an empty dock until the next job happens to change.
+  Membership is decided by the **live** task (`task.detached === true`) and, for a job whose
+  process is gone, by the durable `bgDetached` flag written onto its record, so a reload draws
+  the same dock. Two traps that are already paid for: a registration must clear a stale
+  `bgDismissed` entry for its id (dismissals persist, the id counter does not — it restarts at 1
+  after every reload), and the record's `kind` can only say `background`, so a notice's producer
+  travels separately (`DisplayItem.producer`) or a repaint draws a sub-agent batch as a terminal.
+  `jobs[]` is de-duplicated by `(sessionId, id)` — a task id is session-local, so the pair is a
+  job's identity and the same number in two sessions is two jobs — and built from the live hub
+  tasks of every session **plus** the persisted `kind:'bg'` record nodes of every session
+  (delivered ones included: the hub is in-memory, the record is what survives a reload).
   Each entry carries `sessionId`, `sessionTitle`, `id`, `cardNodeId`, `command`, `status`,
   `exitCode`, `killed`, `detached`, `startedAt`, `finishedAt`, `outputTail`, `delivered` and
   `dismissed`. `detached` is the **live** task's flag (a restored record has no task to ask,
@@ -325,7 +333,7 @@
   followed by a `postTree()`), the job leaves the `backgrounds` snapshot, and the card stays as
   a record with a `Delivered` badge plus its persisted `bg*` terminal fields. A tool-initiated
   kill or a `wait_for_command` that carried the result (`notifyAgent=false`) skips the notice
-  and settles the card directly. A **detached** job is the third ending no notice follows, and
+  and settles the card directly. A **global** job is the third ending no notice follows, and
   the only one that is structural rather than incidental: `onBackgroundFinished` returns before
   a `SignalNotice` is ever built — nothing is queued for a tool boundary, nothing is injected
   into an idle owner, nothing is written back — and it settles the card itself (`delivered`
@@ -393,7 +401,7 @@
   persisted `bgElapsedMs` is the same subtraction done once when the terminal state is snapshotted.
   A task has **no deadline field at all**: the `timeoutMs` / `deadlineAt` pair, the single armed
   `setTimeout`, the registry's `budgetTimers` map and `remainingBudgetMs` were deleted with the
-  budget model, so a job simply runs. A **detached** job carries `detached: boolean` — set once at
+  budget model, so a job simply runs. A **global** job carries `detached: boolean` — set once at
   `register` (its last argument) and never changed afterwards — and the registry sets
   `notifyAgent: false` together with it, because that is the mechanism the delivery path already
   understands. The coordinator needs to read only `detached` for the lock rule, and the job itself
