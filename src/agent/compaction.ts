@@ -633,7 +633,7 @@ function killedParagraph(input: { killedBackground?: KilledJobLine[]; killedSubA
 /** The size line: how full the window that ended was, in the provider's own terms. */
 function usageParagraph(
   usage: { used: number; window: number; pct: number } | undefined,
-  reason: 'full' | 'near' | 'images' | 'compress',
+  reason: 'full' | 'near' | 'images' | 'compress' | 'manual',
 ): string {
   if (!usage) {
     return '';
@@ -645,7 +645,9 @@ function usageParagraph(
         ? 'the refusal was about the bytes of that request, not about these tokens.'
         : reason === 'compress'
           ? 'the window was compressed to continue the conversation in a shorter one.'
-          : 'which is at or past the limit this provider accepts for one request.';
+          : reason === 'manual'
+            ? 'the user opened a new window by hand: nothing was refused and the window still had room left.'
+            : 'which is at or past the limit this provider accepts for one request.';
   return (
     `The previous window used ${usage.used} of this model's ${usage.window}-token context ` +
     `(${usage.pct}%), ${tail}`
@@ -689,9 +691,11 @@ export function buildContextRolloverMessage(input: PointerFacts & {
    * anything is refused. It is stated because "it was refused" would be a lie in the last
    * case, and naming the wrong refusal sends the model after the wrong fix. `'compress'` is
    * the Agentic answer's own case: the window ended because it was compressed, whatever its
-   * fill level, and the size line then claims no reason.
+   * fill level, and the size line then claims no reason. `'manual'` is the Simple answer taken
+   * below 90% (the Send button's right-click): nothing was refused and the window still had
+   * room, which is the one thing that sentence must not get wrong.
    */
-  reason: 'full' | 'near' | 'images' | 'compress';
+  reason: 'full' | 'near' | 'images' | 'compress' | 'manual';
   /** The user's last request, raw: clipped here, and the clip is announced. */
   request: string;
   /** How many `image_url` / `file` parts that request carried (they cannot come along). */
@@ -756,12 +760,24 @@ export function buildContextRolloverMessage(input: PointerFacts & {
     (notes.length > 0 ? ` ${notes.join(' ')}` : '');
   const killedLine = killedParagraph({ killedBackground, killedSubAgents });
   const filesLine = filesParagraph(input.files ?? []);
+  const killedCount = killedBackground.length + killedSubAgents.length;
+  // Three shapes, because every sentence here is a fact the next window acts on:
+  //  - nothing was killed: one clause, no reason and no instruction — there is no record to
+  //    read, and "0 … were stopped because …" is a sentence that says nothing;
+  //  - work was killed by a **full** window (or an image refusal): the reason is the refusal,
+  //    which is why those results could never arrive;
+  //  - work was killed by a hand-off the user asked for: the reason is the hand-over itself,
+  //    and claiming a full window there is the lie `rolloverReason` exists to avoid.
   const stillRunningLine =
-    `Still running from the previous window: none — ${killedBackground.length} background terminal(s) and ` +
-    `${killedSubAgents.length} sub-agent(s) were stopped when this window was opened, because their ` +
-    "results could not be delivered into a full window. They are recorded in the previous window's transcript, " +
-    "including each job's command, final state and output tail; a sub-agent has its own file (kind=subagent). " +
-    'Read those records before redoing any of that work.';
+    killedCount === 0
+      ? 'Still running from the previous window: none — no background terminal and no sub-agent was running when it was handed over.'
+      : `Still running from the previous window: none — ${killedBackground.length} background terminal(s) and ` +
+        `${killedSubAgents.length} sub-agent(s) were stopped when this window was opened, ` +
+        (input.reason === 'full' || input.reason === 'images'
+          ? 'because their results could not be delivered into a full window.'
+          : 'so that nothing keeps running on a line this window no longer continues.') +
+        " They are recorded in the previous window's transcript, including each job's command, final state " +
+        'and output tail; a sub-agent has its own file (kind=subagent). Read those records before redoing any of that work.';
   const redoLine =
     "Redo the user's last request here. If it depends on earlier work, fetch that from the transcript first — do " +
     'not guess.';
@@ -796,7 +812,9 @@ export function buildContextRolloverMessage(input: PointerFacts & {
       ? 'The previous conversation could not be sent to the model any more (the provider refused it: the context window was full)'
       : input.reason === 'images'
         ? 'The previous conversation could not be sent to the model any more: the provider refused the request because of its images (the attachments it carried were over its per-request image size limit)'
-        : 'The previous conversation was stopped before the provider had to refuse it (the context window was nearly used up)';
+        : input.reason === 'manual'
+          ? "The previous conversation was moved into a new window at the user's request (the previous window still had room left)"
+          : 'The previous conversation was stopped before the provider had to refuse it (the context window was nearly used up)';
   const paragraphs: string[] = [];
   paragraphs.push(
     `${ROLLOVER_HARNESS_TITLE}\n` +

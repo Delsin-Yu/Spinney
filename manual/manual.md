@@ -534,6 +534,8 @@ The window that a compression produced has no delete button. Delete the compress
 
 The compression node is a normal card in the tree. Click it to read what it did. It shows its own tool lines.
 
+Both `HARNESS` blocks show four lines. Click a block to read all of it. A block of four lines or fewer stays open.
+
 ## 11. Settings reference
 
 All keys start with `spinney.`. Open the Settings UI, or edit `settings.json`.

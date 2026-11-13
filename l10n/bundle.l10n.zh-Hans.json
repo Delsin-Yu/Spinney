@@ -73,6 +73,7 @@
   "Clear finished": "清除已结束的",
   "Clear key": "清除密钥",
   "Clear token": "清除令牌",
+  "Click to show the whole message the harness wrote": "点击展开 harness 写下的整段文字",
   "Collapse or expand the terminal dock": "折叠或展开终端坞",
   "Compact and Continue": "压缩并继续",
   "Compact this conversation and continue in a new context window (the harness asks first)": "压缩此对话并在新的上下文窗口中继续（harness 会先询问）",

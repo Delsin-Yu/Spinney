@@ -2382,11 +2382,34 @@
   }
 
   /**
-   * A message the *harness* wrote inside this node's own transcript — currently the
-   * ▶ Continue turn, which resumes the node in place instead of growing a new card
-   * (`SessionRuntime.continueFrom`). It is an inline block, not a user bubble (the
-   * user did not type it) and not the pinned prompt (that still holds what the user
-   * asked for); it shows the exact text the model received.
+   * How many lines a **folded** `HARNESS` block shows. The two blocks that carry the
+   * compression chain — the instruction the compression turn receives and the handoff the
+   * window below it starts from — are thousands of characters of model-facing text, so a
+   * reader gets the opening four lines and the answer below them, not a wall to scroll past.
+   */
+  const HARNESS_FOLD_LINES = 4;
+
+  /**
+   * Whether a harness text folds. The host wraps its harness text at about a hundred
+   * characters a line, and a text with no newlines wraps on the card's own width, so both
+   * counts are checked: a one-sentence `▶ Continue` fact stays open, and a compression
+   * instruction folds however it happens to arrive.
+   */
+  function harnessFolds(text) {
+    const value = String(text || '');
+    return (
+      value.split('\n').length > HARNESS_FOLD_LINES || value.length > HARNESS_FOLD_LINES * 110
+    );
+  }
+
+  /**
+   * A message the *harness* wrote inside this node's own transcript — the ▶ Continue turn,
+   * which resumes the node in place instead of growing a new card
+   * (`SessionRuntime.continueFrom`), and the two blocks of a compression
+   * (`docs/agents/invariants/compress-node.md`). It is an inline block, not a user bubble
+   * (the user did not type it) and not the pinned prompt (that still holds what the user
+   * asked for); it shows the exact text the model received. A long one is folded to
+   * {@link HARNESS_FOLD_LINES} lines and a click opens it.
    */
   function addHarnessNote(text) {
     if (!messagesEl) return;
@@ -2394,6 +2417,14 @@
     node.dataset.kind = 'harness';
     node.appendChild(el('span', 'harness-badge', tr('HARNESS')));
     node.appendChild(el('span', 'harness-text', text));
+    if (harnessFolds(text)) {
+      node.classList.add('foldable', 'folded');
+      node.title = tr('Click to show the whole message the harness wrote');
+      node.addEventListener('click', () => {
+        markRowTouched(node);
+        node.classList.toggle('folded');
+      });
+    }
     logTail().appendChild(node);
     followActive();
     return node;

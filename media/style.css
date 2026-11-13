@@ -57,6 +57,44 @@ body {
   overflow: hidden;
 }
 
+/* Native widgets follow the **page's** colour scheme, not the theme's colours. Without
+   `color-scheme` a Chromium webview paints the default LIGHT scrollbar however dark every
+   colour of the page is — and `.node-work` keeps its gutter reserved even when the content
+   is short (`scrollbar-gutter: stable`), so that column reads as a white strip down the
+   card's right edge. VS Code puts the theme kind on `body`; the two classes below are the
+   two answers, and high contrast keeps its own dark or light kind. */
+body.vscode-dark,
+body.vscode-high-contrast {
+  color-scheme: dark;
+}
+
+body.vscode-light,
+body.vscode-high-contrast-light {
+  color-scheme: light;
+}
+
+/* …and the bar itself is themed, so a scroller reads as part of the card it belongs to
+   (the log, a code surface, a tool detail, the entries list). Track and corner stay
+   transparent: they are the page's own background here, never a strip of their own. */
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track,
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  border-radius: 5px;
+  background: var(--vscode-scrollbarSlider-background, #4a4a4a);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--vscode-scrollbarSlider-hoverBackground, #5a5a5a);
+}
+
 .dot {
   width: 9px;
   height: 9px;
@@ -2899,6 +2937,7 @@ button.icon-btn {
    resumes the node in place): an inline block, not a bubble — the user did not
    type it, and the card's pinned prompt still shows what the user asked for. */
 .msg.harness-note {
+  position: relative;
   align-self: stretch;
   display: block;
   padding: 5px 8px;
@@ -2910,6 +2949,35 @@ button.icon-btn {
   border-radius: 6px;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* A folded HARNESS block: four lines of the message the model received, and a click for the
+   rest (`addHarnessNote`, HARNESS_FOLD_LINES). The compression turn's instruction and the
+   handoff a window starts from are tens of thousands of characters; the reader wants to know
+   the block is there and how it opens, not to scroll past it to reach the answer below. The
+   clamp is on the block because the badge and the first line share it, and the fade is the
+   whole hint: the block's title says what a click does, and there is no second control. */
+.msg.harness-note.foldable {
+  cursor: pointer;
+}
+
+.msg.harness-note.foldable.folded {
+  /* Four lines at 11px / 1.45, plus this block's own 10px of padding and 2px of border
+     (everything here is border-box). */
+  max-height: calc(4 * 1.45em + 12px);
+  overflow: hidden;
+}
+
+.msg.harness-note.folded::after {
+  content: '';
+  position: absolute;
+  right: 1px;
+  bottom: 1px;
+  left: 1px;
+  height: 1.6em;
+  border-radius: 0 0 5px 5px;
+  background: linear-gradient(transparent, var(--bg2));
+  pointer-events: none;
 }
 
 .msg.harness-note .harness-badge {

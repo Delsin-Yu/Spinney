@@ -122,6 +122,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A long `HARNESS` block shows its first four lines.** The two blocks of a compression (the
+  instruction the compression turn receives and the handoff the window below it starts from)
+  are tens of thousands of characters of model-facing text; a reader gets the opening lines and
+  a click, and a `HARNESS` block of four lines or fewer stays open. The fold is CSS — the text
+  the card holds is never cut.
 - **The compression node is a card of its own.** It wears `CMP` instead of `CTX`, has no
   composer, and carries its own ⏹ Stop while it runs (there is no input dock to host the
   composer's). Once it has produced its window it is sealed: no ▶ Continue, and the host
@@ -172,6 +177,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A hand-over says nothing it cannot back up.** Two sentences in the harness text were
+  written for the full-window case and then said on every trigger: the leftover-work line
+  read `none — 0 background terminal(s) and 0 sub-agent(s) were stopped …, because their
+  results could not be delivered into a full window` when nothing had been running and the
+  window was at 30 %, and a `Simple` hand-over taken below 90 % still said the window "was
+  nearly used up". The leftover line now has three shapes (nothing killed: one clause, no
+  reason; killed by a refusal: the refusal; killed by a hand-over: the hand-over), and the
+  reason is `manual` whenever the user moved the conversation by hand — the size line then
+  states the fill level without claiming a threshold.
+- **The scrollbars follow the theme.** A webview without `color-scheme` paints Chromium's
+  light scrollbar whatever the theme's colours are, and `.node-work` keeps its scrollbar
+  gutter reserved (`scrollbar-gutter: stable`), so a white strip sat down the card's right
+  edge. The page now declares the scheme VS Code puts on `body`, and the bar itself is drawn
+  with the theme's slider colour over a transparent track.
 - **A tool call that the agent is still writing shows one line.** The drafting row used to
   arrive with an empty verb and an empty label, because the tool name was dropped on the way
   in. It now shows the fixed label `Writing tool call...` until the call starts, and then the

@@ -485,8 +485,19 @@ function makeElement(id) {
         syncClassName();
         return on;
       },
-      add: (name) => { element.classList._set.add(name); syncClassName(); },
-      remove: (name) => { element.classList._set.delete(name); syncClassName(); },
+      // Variadic, like the real `DOMTokenList`: `add('a', 'b')` adds both.
+      add: (...names) => {
+        for (const name of names) {
+          if (name) element.classList._set.add(name);
+        }
+        syncClassName();
+      },
+      remove: (...names) => {
+        for (const name of names) {
+          if (name) element.classList._set.delete(name);
+        }
+        syncClassName();
+      },
       contains: (name) => element.classList._set.has(name),
     },
     style: { setProperty() {}, removeProperty() {}, getPropertyValue: () => '' },
@@ -3425,6 +3436,52 @@ if (contextLabel !== 'ctx 50%') {
   }
   if (findByClass(cards.get(B), 'harness-note')) {
     problems.push('a harness continue message for another node leaked into a different card');
+  }
+  // A **long** harness block folds to its opening lines (`HARNESS_FOLD_LINES` in main.js), and
+  // a short one does not: the compression turn's instruction and the handoff a window starts
+  // from are tens of thousands of characters, and the reader must not have to scroll past them
+  // to reach the answer. The fade and the clamp are CSS; what this pins is the two classes and
+  // the one click that opens and folds it again.
+  if (!harnessBlock) {
+    // the block was not rendered at all, which the check above already reported
+  } else if (harnessBlock.classList.contains('foldable')) {
+    problems.push('a one-sentence harness fact is folded (it fits in the four lines)');
+  } else {
+    const longText =
+      '[Harness: compression turn]\n\nYou are the compression node between two context windows of one conversation: ' +
+      'the window above you ends here, and the window below you starts from your answer. Everything it will know ' +
+      'about the window above is what you write now.\n\nPrevious window: node p0 of session s.\n\n--- BEGIN WINDOW ---\n\n' +
+      'the previous window\'s own messages, selected and bounded: '.repeat(12);
+    dispatch({ type: 'harnessNote', nodeId: A, text: longText });
+    const blocks = [];
+    (function walk(root) {
+      for (const child of (root && root.children) || []) {
+        if (child.classList && child.classList.contains('harness-note')) blocks.push(child);
+        walk(child);
+      }
+    })(cards.get(A));
+    const folded = blocks[blocks.length - 1];
+    if (folded === harnessBlock || !folded) {
+      problems.push('the long harness block was not rendered into the continued node');
+    } else if (!folded.classList.contains('folded') || !folded.classList.contains('foldable')) {
+      problems.push('a long harness block is not folded to its opening lines');
+    } else if (String(findByClass(folded, 'harness-text').textContent) !== longText) {
+      problems.push('a folded harness block lost part of the text (the fold must be CSS, not a cut string)');
+    } else {
+      const foldClick = folded._listeners && folded._listeners.click;
+      if (typeof foldClick !== 'function') {
+        problems.push('a folded harness block has no click handler (there is no way to open it)');
+      } else {
+        foldClick({ stopPropagation() {} });
+        if (folded.classList.contains('folded')) {
+          problems.push('a click on a folded harness block did not open it');
+        }
+        foldClick({ stopPropagation() {} });
+        if (!folded.classList.contains('folded')) {
+          problems.push('a second click on an opened harness block did not fold it again');
+        }
+      }
+    }
   }
 
   // Clicking the button must ask the host to continue *that* node — and ask for

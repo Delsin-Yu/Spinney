@@ -1948,12 +1948,19 @@ export class SessionRuntime {
    * `contextState()` reports both refusals as `'full'` (deliberately: both mean "this request
    * cannot be sent"). No threshold is involved; the refusal text is the only trigger.
    */
-  private rolloverReason(node: TreeNode): 'full' | 'near' | 'images' {
+  private rolloverReason(node: TreeNode): 'full' | 'near' | 'images' | 'manual' {
     const failure = node.status === 'error' ? lastFailureText(node) : undefined;
     if (failure && windowFullReason(failure) === 'images') {
       return 'images';
     }
-    return this.contextState(node) === 'full' ? 'full' : 'near';
+    if (this.contextState(node) === 'full') {
+      return 'full';
+    }
+    // `near` is the 90% suggestion; anything below it is the user's own "move this now" (the
+    // Send button's right-click, `force`). The harness text must not claim a window that was
+    // nearly used up when it had room left — a model told the wrong reason acts on it
+    // (`docs/agents/invariants/context-rollover.md` §6).
+    return this.contextState(node) === 'near' ? 'near' : 'manual';
   }
 
   /**

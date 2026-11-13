@@ -318,6 +318,47 @@ console.log('-- the pointer text (Simple) --');
   });
   ok('a near window says nothing was refused', near.includes('nothing was refused yet') && !near.includes('the context window was full'));
   ok('  … and it degrades the missing transcript', near.includes('not available on disk'));
+  // A hand-over the user asked for below 90%: `manual`. Nothing was refused and the window had
+  // room, so neither the refusal sentence nor the "nearly used up" one may appear, and with
+  // nothing killed the leftover line states that in one clause — no reason, no instruction to
+  // go and read records that do not exist.
+  const manual = C.buildContextRolloverMessage({
+    reason: 'manual',
+    sessionId: 's',
+    previousNodeId: 'p',
+    transcriptPath: '/x.jsonl',
+    transcriptExists: true,
+    request: 'r',
+    attachments: 0,
+    answer: 'a',
+    firstRequest: 'r',
+    files: [],
+    usage: { used: 30, window: 100, pct: 30 },
+  });
+  ok('a manual window states the user moved it, not a refusal', manual.includes('at the user') && manual.includes('still had room left'));
+  ok('  … and it does not claim the 90% threshold', !manual.includes('90%') && !manual.includes('nearly used up'));
+  ok(
+    '  … and the leftover line says nothing was running, in one clause',
+    manual.includes('no background terminal and no sub-agent was running when it was handed over') &&
+      !manual.includes('Read those records before redoing'),
+  );
+  ok(
+    '  … while a killed job under a manual hand-over gives the hand-over as the reason',
+    C.buildContextRolloverMessage({
+      reason: 'manual',
+      sessionId: 's',
+      previousNodeId: 'p',
+      transcriptPath: '/x.jsonl',
+      transcriptExists: true,
+      request: 'r',
+      attachments: 0,
+      answer: 'a',
+      firstRequest: 'r',
+      files: [],
+      killedBackground: [{ id: 1, command: 'npm run build', state: 'stopped by the hand-off' }],
+      killedSubAgents: [],
+    }).includes('so that nothing keeps running on a line this window no longer continues'),
+  );
   ok('  … with an absent killed-work list', !near.includes('Stopped when this window was opened:'));
 }
 
