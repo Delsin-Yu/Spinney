@@ -1779,6 +1779,21 @@ button.icon-btn {
   color: var(--accent);
 }
 
+/* A message delivered from another session: its tag is a word like the other two, and its
+   body is plain prose (no terminal frame, no batch rows). */
+.msg.bgnotify .bgnotify-badge.session {
+  background: none;
+  color: var(--text);
+}
+
+.msg.bgnotify .session-msg-body {
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--text);
+  opacity: 0.85;
+  font-size: 12px;
+}
+
 .msg.bgnotify .bgnotify-status {
   flex: 0 0 auto;
   margin-left: auto;
