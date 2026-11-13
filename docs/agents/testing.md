@@ -511,33 +511,22 @@ throttled to one per 500 ms, so the two clocks have to be reconciled in the only
 webview runs without a host. See the same issue, and the ladder, in
 `invariants/streaming-perf.md`.
 
-## The hop suite's shape (a live window only)
+## The `sessionMessage` suite's shape (a live window only)
 
-`node tools/harness-test.mjs --suite hop` is the one suite whose contract is a **timing**
-one, so it is written as a sequence of observations rather than a single wait. The point it
-pins is that **the hopped-to session decides when it returns**:
+`node tools/harness-test.mjs --suite sessionMessage` pins the one session-tool contract a pure
+function cannot: a message may only land on a node that is **idle**.
 
-1. two refusals first (`returnTo` without `originSessionId`, and with a `sessionId`), then a
-   real hop off a busy origin session;
-2. the child's id must appear in `/state.hops` before its first turn ends, and the armed hop
-   must carry **no** `finishRequested` — the child has not decided anything yet;
-3. the child's first turn ends **while a background job it started still runs**, exactly the
-   shape that used to return early — and **no receipt may land**, neither then nor after the
-   job ends and the child session goes idle: the hop is still in `/state.hops`, still
-   without `finishRequested`;
-4. the child is then **steered** (`POST /continue`) with a prompt that calls `finish_hop`
-   three times — once with a node id that does not exist (the tool must answer an `Error:`
-   naming the problem, read out of the child's own dump), once with the dispatch node's id
-   (accepted, same landing node as the default), and once more (the "no armed hop" error,
-   because the hand-back is spent);
-5. only now does the receipt have to appear in the origin: `[session hop receipt]`, naming
-   the child id and `search_transcripts sessionId=<childId>`, **without** any `status:`
-   wording, branched off the hop's return node (`meta.parentId === hop.originNodeId`), with
-   no focus move; the hop has left `/state.hops` and `pendingReceipts` is 0.
-
-The decoy session from the older suite stays: it must not steal the receipt. What changed is
-where the wait sits — the "no receipt yet" observations moved **before** the scripted
-`finish_hop`, because a turn end (even a busy one going idle) is no longer a hand-back.
+1. `POST /session/start` with a prompt creates a session and starts its first turn;
+2. while that turn runs, `POST /session/message` to its first node is **409** with
+   `busy: true`, so the caller can wait and retry instead of stacking two agents on one
+   conversation line;
+3. the session going idle (no run, no unfinished work in `lockedNodes`) makes the same
+   request answer **200** with the new turn's `nodeId`, and that node is a child of the node
+   the caller named;
+4. the two mis-addressing refusals are checked too: an unknown `sessionId` and an unknown
+   `nodeId` are both 409, never "the active session";
+5. `GET /state` carries no `hops` and no `pendingReceipts`: nothing is delivered
+   automatically any more, and the only return path is another `send_session_message`.
 
 ## Windowed checks (the bounded wait, and what no guard can see)
 

@@ -50,7 +50,7 @@
   "spinney.autoSessionTitles.description": "自动为会话命名：在第一个回合之后，以及对话增长后（最多每 2 分钟一次）。标题由模型生成，请求失败时回退到第一条消息。手动重命名会话会锁定其标题。在此功能之前创建的会话会在激活时命名一次。",
   "spinney.maxInlineToolOutput.description": "search_files / list_dir / search_transcripts 结果以内联方式返回的最大大小（字节）。更大的结果会写入临时文件，只返回其路径和简短预览。设为 0 则始终内联。",
   "spinney.streamAnimation.description": "为正轮流式输出的文字和行加上动画。新字符和新行淡入，不会一次整块出现。关闭后每个字符和每一行都会立即绘制。操作系统的减少动态效果设置也会关闭它。",
-  "spinney.httpApi.enabled.description": "在 127.0.0.1 上开放本地 HTTP 控制面（需 bearer token 鉴权），让 tools/hyper-vscode 之类的外部控制器可以读取状态、等待智能体进入空闲、导航到某个节点并从该节点继续。默认关闭；/continue 允许调用方让智能体执行一条指令，因此请把它视为本地信任边界。",
+  "spinney.httpApi.enabled.description": "在 127.0.0.1 上开放本地 HTTP 控制面（需 bearer token 鉴权），让控制器可以读取状态、等待智能体进入空闲、导航到某个节点、向某个节点投递消息、排队重载本窗口，并从某个节点继续。默认关闭；/continue 允许调用方让智能体执行一条指令，因此请把它视为本地信任边界。",
   "spinney.httpApi.port.description": "HTTP 控制面使用的端口。0 表示自动选择空闲端口；所选端口和 token 会写入 <globalStorage>/http/<instanceId>.json，供 supervisor 发现。",
   "spinney.providers.balance.description": "该端点的剩余额度如何读取。`none` 不读取余额，`deepseek` 读取 `GET /user/balance`，`openrouter` 读取 `GET /credits`（剩余 = 总额度减去已用量），`moonshot` 读取 `GET /users/me/balance`。该读取不会重试。省略此字段的行会使用其主机对应的方言（`api.deepseek.com` → `deepseek`，其他 → `none`）。",
   "spinney.providers.sessionHeader.description": "该端点如何被告知一个请求属于哪段对话。`none` 不发送此类请求头；`opencode` 发送 `x-opencode-session: ses_<上下文窗口>`，OpenCode Console 网关要求每个请求都带上它（包括 Go 套餐）。值是每个上下文窗口一个——滚动或分叉会开始新的一个——子智能体使用自己的值。省略此字段的行会使用其主机对应的方言（`opencode.ai` → `opencode`，其他 → `none`）。",

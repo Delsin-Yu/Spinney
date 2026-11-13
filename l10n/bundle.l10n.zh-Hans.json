@@ -365,8 +365,6 @@
   "Spawned research agents": "派发研究",
   "Sent task instructions": "发送任务指令",
   "Sent research instructions": "发送研究指令",
-  "Hopped session": "跳转会话",
-  "Ended hop": "结束跳转",
   "Renamed session": "重命名会话",
   "Ran 1 step": "执行了 1 步",
   "Ran {0} steps": "执行了 {0} 步",
@@ -390,5 +388,15 @@
   "Sub-agent finished": "子智能体完成",
   "Background job finished": "后台任务完成",
   "arguments truncated for display": "参数在显示时被截断",
-  "the call arguments were truncated for display, so this change cannot be shown": "这次调用的参数在显示时被截断，无法还原改动"
+  "the call arguments were truncated for display, so this change cannot be shown": "这次调用的参数在显示时被截断，无法还原改动",
+  "Could not edit that prompt — the node is not part of this session.": "无法编辑该提示词：这个节点不属于当前会话。",
+  "This card has no prompt of its own to edit.": "这张卡片没有自己的提示词可编辑。",
+  "Nothing to send: the edited prompt is empty.": "没有可发送的内容：编辑后的提示词为空。",
+  "This turn is still running — wait for it to finish before editing its prompt.": "这一轮仍在运行，请等它结束后再编辑提示词。",
+  "A background task or sub-agent is still running here — wait for it to finish before editing this prompt.": "这里仍有后台任务或子智能体在运行，请等它结束后再编辑这条提示词。",
+  "Edit this prompt — the answer starts a new branch from the same point": "编辑这条提示词：回答会从同一点开启一个新分支",
+  "Enter sends, Shift+Enter adds a newline, Esc cancels": "Enter 发送，Shift+Enter 换行，Esc 取消",
+  "Started a session": "开启了会话",
+  "Messaged a session": "向会话发送了消息",
+  "Listed sessions": "列出了会话"
 }

@@ -19,12 +19,9 @@
  *     concurrent conversations without bookkeeping (each sub-agent counts its own
  *     rounds).
  *   - The main agent and a sub-agent are told apart by the advertised tool list: only the
- *     main agent gets `hop_session` (`SessionRuntime` calls `setCanHop(true)` for it and
- *     never for a sub-agent), so a fan-out round can never be replayed into a child and
- *     recursion stays one level deep. The one main agent with an extra script is a
- *     **hopped child**: it also advertises `finish_hop`, and it calls it itself once the
- *     work is done (that call, not a turn end, is what hands the report back). It is
- *     matched before the main plan for that reason.
+ *     main agent gets `create_session` (`SessionRuntime` calls `setCanSessions(true)` for
+ *     it and never for a sub-agent), so a fan-out round can never be replayed into a child
+ *     and recursion stays one level deep.
  *   - A request that advertises **no tools** is always answered with a plain message:
  *     a session-title or summary completion can never be fed a tool call.
  *   - It must never be the bottleneck: answers are written as fast as the socket takes
@@ -142,27 +139,10 @@ export function chooseReply(body, fixtureRoot) {
   if (names.length === 0) {
     return { round, tool: null, text: 'sim: ok', note: 'no tools advertised — never a tool call' };
   }
-  const isMain = names.includes('hop_session');
-  // A session a `return_when_finished` hop started is a *main* session too (`hop_session`
-  // is advertised there), but it also carries `finish_hop` — the hand-back that is the
-  // only thing which brings the caller back. It gets its own script, checked **before**
-  // the main plan, so a fan-out is never replayed into a hopped child.
-  const isHopChild = names.includes('finish_hop');
+  const isMain = names.includes('create_session');
   const text = requestText(body);
   const isSub = /\[sim:sub \d+\]/.test(text);
   const root = searchPathFrom(body, fixtureRoot);
-  if (isHopChild) {
-    const hopChild = [
-      { tool: { name: 'search_files', args: { pattern: SEARCH_TOKEN, path: root, maxResults: 300 } }, note: 'hop child 1: whole-tree scan' },
-      { tool: { name: 'read_file', args: { path: 'README.md' } }, note: 'hop child 2: one small read' },
-      // The hand-back, emitted once the work is done and before the closing answer: the
-      // receipt reaches the origin only because the child asked for it.
-      { tool: { name: 'finish_hop', args: {} }, note: 'hop child 3: finish_hop — the hand-back' },
-    ];
-    const step = hopChild[round];
-    if (step) return { round, tool: step.tool, text: '', note: step.note };
-    return { round, tool: null, text: 'sim: hop report complete.', note: 'hop child closing answer' };
-  }
   if (isMain) {
     const main = [
       { tool: { name: 'search_files', args: { pattern: SEARCH_TOKEN, path: root, maxResults: 300 } }, note: 'main 1: hit-heavy whole-tree scan' },

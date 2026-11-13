@@ -70,7 +70,7 @@
   `src/chat/sessionTitles.ts` (`clipLine`, the digest summary, the auto title),
   `titleFromPrompt` (`src/chat/tree.ts`), the provisional session / sub-agent titles in
   `src/chat/runtime.ts`, and `src/chat/ChatViewProvider.ts` (`summaryPreview`, the
-  `hop_session` title, the hop receipt's 8000-unit answer). The one cut at the **head** is a
+  `create_session` name, the cross-session message). The one cut at the **head** is a
   background terminal's output tail — `tailText` (`src/chat/runtime.ts`, the `BackgroundInfo`
   tail and `node.bgOutputTail`) — where the danger is the same half on the other side: text
   that begins on a low surrogate. Log-only, on a string that leaves through a log line:

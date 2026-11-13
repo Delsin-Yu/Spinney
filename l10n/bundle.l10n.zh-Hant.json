@@ -365,8 +365,6 @@
   "Spawned research agents": "派發研究",
   "Sent task instructions": "傳送任務指令",
   "Sent research instructions": "傳送研究指令",
-  "Hopped session": "跳轉工作階段",
-  "Ended hop": "結束跳轉",
   "Renamed session": "重新命名工作階段",
   "Ran 1 step": "執行了 1 步",
   "Ran {0} steps": "執行了 {0} 步",
@@ -390,5 +388,15 @@
   "Sub-agent finished": "子智慧體完成",
   "Background job finished": "背景工作完成",
   "arguments truncated for display": "參數在顯示時被截斷",
-  "the call arguments were truncated for display, so this change cannot be shown": "這次呼叫的參數在顯示時被截斷，無法還原改動"
+  "the call arguments were truncated for display, so this change cannot be shown": "這次呼叫的參數在顯示時被截斷，無法還原改動",
+  "Could not edit that prompt — the node is not part of this session.": "無法編輯該提示詞：這個節點不屬於目前的工作階段。",
+  "This card has no prompt of its own to edit.": "這張卡片沒有自己的提示詞可編輯。",
+  "Nothing to send: the edited prompt is empty.": "沒有可傳送的內容：編輯後的提示詞為空。",
+  "This turn is still running — wait for it to finish before editing its prompt.": "這一輪仍在執行，請等它結束後再編輯提示詞。",
+  "A background task or sub-agent is still running here — wait for it to finish before editing this prompt.": "這裡仍有背景工作或子代理在執行，請等它結束後再編輯這條提示詞。",
+  "Edit this prompt — the answer starts a new branch from the same point": "編輯這條提示詞：回答會從同一點開啟一個新分支",
+  "Enter sends, Shift+Enter adds a newline, Esc cancels": "Enter 傳送，Shift+Enter 換行，Esc 取消",
+  "Started a session": "開啟了工作階段",
+  "Messaged a session": "向工作階段傳送了訊息",
+  "Listed sessions": "列出了工作階段"
 }
