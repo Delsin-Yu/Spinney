@@ -16,8 +16,10 @@
  *   5. `POST /continue`        send a user message that continues from a node
  *   6. `POST /session/start`   create (or jump to) a session and optionally send
  *                              a caller-supplied prompt as its first turn
- *   7. `POST /stop`            cancel a node's run (or every run of a session)
- *   8. `POST /reload-window`   ask VS Code to reload this window (202; the reply
+ *   7. `POST /session/message` deliver a message to one node of one session and
+ *                              start a turn there (409 while that node is busy)
+ *   8. `POST /stop`            cancel a node's run (or every run of a session)
+ *   9. `POST /reload-window`   ask VS Code to reload this window (202; the reply
  *                              is observed as a *new* instance on the other side).
  *                              `idle: true` queues it instead: the window reloads
  *                              as soon as nothing is running, and `continue` is
@@ -83,34 +85,6 @@ export interface ControlState {
   runningSubAgents: number;
   runningBackgrounds: boolean;
   sessions: ControlSessionInfo[];
-  /**
-   * The session hops this window is holding: one in flight per origin session, plus
-   * the children that were started and have not reported back yet. `targetSessionId`
-   * is absent while the child session does not exist (its origin turn is still
-   * running). Empty when nothing is hopping.
-   */
-  hops: ControlHopInfo[];
-  /** How many finished children are waiting for their return node to be free. */
-  pendingReceipts: number;
-}
-
-/** One in-flight session hop, as the control plane reports it. */
-export interface ControlHopInfo {
-  originSessionId: string;
-  /** The node the answer goes back to (`returnNodeId` overrides it). */
-  originNodeId: string;
-  /** The child session, once created. */
-  targetSessionId?: string;
-  returnNodeId?: string;
-  /** `return_when_finished` (the default) is the only armed kind; `fire_and_forget` never is. */
-  mode: 'return_when_finished' | 'fire_and_forget';
-  armedAt: number;
-  /**
-   * True once the child called `finish_hop`: the hand-back is the only thing that
-   * brings a hop back, so an armed hop with this absent is one whose child has not
-   * decided to return yet (a turn end or an interrupt does not set it).
-   */
-  finishRequested?: boolean;
 }
 
 export interface ControlResult {
@@ -124,8 +98,6 @@ export interface ControlResult {
   runningBackgrounds?: boolean;
   /** `POST /session/start`: whether the caller's prompt was sent as a turn. */
   prompted?: boolean;
-  /** `POST /session/start`: the start was queued to run when the turn ends. */
-  queued?: boolean;
   /** `POST /reload-window`: the optional continue was stored and will be sent after
    *  the reload (the caller must not post `/continue` a second time). */
   continueQueued?: boolean;
@@ -135,8 +107,6 @@ export interface ControlResult {
    * reply is `{ ok: true, deferred: true, continueQueued: true }`.
    */
   deferred?: boolean;
-  /** `POST /session/start {returnTo}`: the origin session the answer goes back to. */
-  originSessionId?: string;
   /** `POST /stop`: how many agents (one per run) were cancelled. */
   stopped?: number;
 }
@@ -166,23 +136,22 @@ export interface ControlHost {
   /**
    * Start a session and optionally send a caller-supplied prompt as its first
    * turn. Without `sessionId` a fresh session is created (and titled from the
-   * prompt); with it the caller jumps to that session instead. `returnTo` arms a
-   * hop: the fresh session's final answer is delivered back to `originSessionId`
-   * (required — the API never guesses), as a new branch off `returnNodeId` when that
-   * is given. `nodeId` checks out a node in the target session first.
+   * prompt); with it the caller jumps to that session instead. `nodeId` checks out
+   * a node in the target session first.
    */
   controlStartSession(opts: {
     sessionId?: string;
     nodeId?: string;
     title?: string;
     prompt?: string;
-    returnTo?: boolean;
-    returnNodeId?: string;
-    /** The origin session of a `returnTo` hop; required with `returnTo`. */
-    originSessionId?: string;
-    /** `return_when_finished` (default) | `fire_and_forget`; the latter never hops. */
-    mode?: string;
   }): Promise<ControlResult>;
+  /**
+   * Deliver a message into one node of one session (`POST /session/message`) and
+   * start a turn there. The node must exist and be idle: a running or busy target
+   * is `409`, so the caller can wait and retry instead of stacking two agents on
+   * one conversation line.
+   */
+  controlSessionMessage(opts: { sessionId: string; nodeId: string; message: string }): Promise<ControlResult>;
   /**
    * Reload this window (`workbench.action.reloadWindow`). It refuses while anything
    * is live, so a caller that *is* a turn cannot use the immediate form — that is
@@ -420,12 +389,30 @@ export class ControlServer implements vscode.Disposable {
           nodeId: typeof body.nodeId === 'string' ? body.nodeId : undefined,
           title: typeof body.title === 'string' ? body.title : undefined,
           prompt: typeof body.prompt === 'string' ? body.prompt : undefined,
-          returnTo: body.returnTo === true,
-          returnNodeId: typeof body.returnNodeId === 'string' ? body.returnNodeId : undefined,
-          originSessionId: typeof body.originSessionId === 'string' ? body.originSessionId : undefined,
-          mode: typeof body.mode === 'string' ? body.mode : undefined,
         });
-        send(result.ok ? (result.queued ? 202 : 200) : 409, result);
+        send(result.ok ? 200 : 409, result);
+        return;
+      }
+      if (route === 'POST /session/message') {
+        const body = await this.readBody(req);
+        if (typeof body.sessionId !== 'string' || !body.sessionId) {
+          send(400, { ok: false, error: 'sessionId is required' });
+          return;
+        }
+        if (typeof body.nodeId !== 'string' || !body.nodeId) {
+          send(400, { ok: false, error: 'nodeId is required (the node the message branches off)' });
+          return;
+        }
+        if (typeof body.message !== 'string' || !body.message.trim()) {
+          send(400, { ok: false, error: 'message is required (supplied by the caller)' });
+          return;
+        }
+        const result = await this.host.controlSessionMessage({
+          sessionId: body.sessionId,
+          nodeId: body.nodeId,
+          message: body.message,
+        });
+        send(result.ok ? 200 : 409, result);
         return;
       }
       if (route === 'POST /reload-window') {

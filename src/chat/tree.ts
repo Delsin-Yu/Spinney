@@ -392,17 +392,6 @@ export interface AgentSession {
    */
   legacyEpoch?: boolean;
   /**
-   * The hop that **started** this session (a `return_when_finished` hop only): the
-   * origin session, and the node the report returns to unless the child's
-   * `finish_hop` names another. It is what gives this session's main agent the
-   * `finish_hop` tool for its whole life: a frozen tool set must not change under a
-   * chain that has already sent it, so a session that has handed back keeps
-   * advertising the tool (and answers "no armed hop") instead of silently losing it
-   * — which would read as setup drift and open the rollover dialog on a later turn.
-   * A `fire_and_forget` child has no such field: it has no one to hand back to.
-   */
-  hopOrigin?: { sessionId: string; nodeId: string };
-  /**
    * The session's own model / thinking-effort **seed**: the values a session whose
    * nodes have no card of their own starts from. The live model of a conversation
    * is a property of the **node** (`TreeNode.model` / `TreeNode.effort`, resolved
@@ -1018,21 +1007,6 @@ function normalizeImageBytes(raw: unknown): number | undefined {
   return typeof raw === 'number' && Number.isInteger(raw) && raw >= 0 ? raw : undefined;
 }
 
-/** Read a session's hop origin back: both halves must be non-empty strings, else nothing. */
-function normalizeHopOrigin(raw: unknown): { sessionId: string; nodeId: string } | undefined {
-  if (!raw || typeof raw !== 'object') {
-    return undefined;
-  }
-  const entry = raw as { sessionId?: unknown; nodeId?: unknown };
-  if (typeof entry.sessionId !== 'string' || !entry.sessionId) {
-    return undefined;
-  }
-  if (typeof entry.nodeId !== 'string' || !entry.nodeId) {
-    return undefined;
-  }
-  return { sessionId: entry.sessionId, nodeId: entry.nodeId };
-}
-
 /** Read a node's image provenance back, dropping anything malformed or unaddressed. */
 function normalizeImageSources(raw: unknown): ImageSourceEntry[] | undefined {
   if (!Array.isArray(raw)) {
@@ -1097,7 +1071,6 @@ function normalizeTreeSession(raw: AgentSession & { rootId?: string | null }): A
     activeNodeId: raw.activeNodeId ?? null,
     orphanItems: Array.isArray(raw.orphanItems) ? raw.orphanItems : [],
     legacyEpoch: raw.legacyEpoch === true ? true : undefined,
-    hopOrigin: normalizeHopOrigin(raw.hopOrigin),
   };
   // The session's model/effort **seed** (the last link of the per-node card
   // resolution): absent in every state stored before the seed existed, so an old

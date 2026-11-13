@@ -34,12 +34,13 @@ Control plane routes (all require `Authorization: Bearer <token>`):
 | Route | Behaviour |
 | --- | --- |
 | `GET /health` | `{ok, instanceId, pid, port, startedAt, busy, sessionId}` |
-| `GET /state` | `{busy, sessionId, activeNodeId, runningSubAgents, runningBackgrounds, sessions, hops, pendingReceipts}` — the window's `busy`, its active session, its checked-out node, how many sub-agents it is running and whether it owns a running background terminal, plus the session list; each session carries `id`, `title`, `nodes`, `active`, `titleSource`, `titleLocked`, `running`, `runningNodes`, `lockedNodes`, `runningBackgrounds`, `backgroundNodes`, `model`/`modelName`/`effort` — the **checked-out node's** card and level, not a session-wide value (`SessionRuntime.model` is a getter over the node's own card, its nearest ancestor's, else the session seed). `hops` is the in-flight hop list (`{originSessionId, originNodeId, targetSessionId?, returnNodeId?, mode, armedAt, finishRequested?}` — `targetSessionId` is absent until the child session exists, and `finishRequested` is present only once the child called `finish_hop`: an armed hop without it is one whose child has not decided to return yet, because a turn end or an interrupt no longer brings a hop back) and `pendingReceipts` is how many finished children are waiting for their return node to be free |
+| `GET /state` | `{busy, sessionId, activeNodeId, runningSubAgents, runningBackgrounds, sessions}` — the window's `busy`, its active session, its checked-out node, how many sub-agents it is running and whether it owns a running background terminal, plus the session list; each session carries `id`, `title`, `nodes`, `active`, `titleSource`, `titleLocked`, `running`, `runningNodes`, `lockedNodes`, `runningBackgrounds`, `backgroundNodes`, `model`/`modelName`/`effort` — the **checked-out node's** card and level, not a session-wide value (`SessionRuntime.model` is a getter over the node's own card, its nearest ancestor's, else the session seed) |
 | `POST /wait-for-finish` | block until idle (`scope:'turn'` default = the active session's run; `scope:'all'` also waits for every sub-agent / background job), then flush the last persist. `timeoutMs` defaults to **30000** ms (the host clamps it to ≤600000); when it expires the reply is **408** `{ok:false, error:'timeout', busy, runningSubAgents, runningBackgrounds, sessionId, nodeId}`. `holdMs` arms a **hold** (`isHeld()`) that refuses every turn start for that long; `interrupt:true` is the escape hatch |
 | `POST /navigate` | check out a node (and open/focus that session's tab) |
 | `POST /continue` | send a caller-supplied message (`{sessionId?, nodeId?, message}`) that continues from a node — node-scoped, so a run on another branch does not block it |
 | `POST /stop` | `{sessionId?, nodeId?}` — with `nodeId` a **union kill**: that node's live run, every background terminal it owns and every sub-agent it is still running, and nothing continues (the notices are written back into that node's history, so they ride the next request instead of opening a turn); without `nodeId`, cancel every run of the session (else the active session) and leave background jobs alone. Returns `{ok, sessionId, nodeId, stopped}`. Nothing running is `stopped: 0`; an unknown session is 409. Never touches the reload hold |
-| `POST /session/start` | create a session (`{title?, prompt?}`) or jump to one (`{sessionId, nodeId?, prompt?}`) and send `prompt` as its first turn; `returnTo:true` **requires** `originSessionId` (+ optional `returnNodeId`) and hops back with the answer as a new branch of that origin — when the child session calls its own `finish_hop`, never at a turn end |
+| `POST /session/start` | create a session (`{title?, prompt?}`) or jump to one (`{sessionId, nodeId?, prompt?}`) and send `prompt` as its first turn |
+| `POST /session/message` | `{sessionId, nodeId, message}` — deliver a message into **one node of one session** and start a turn there, the same delivery the agent's `send_session_message` makes. 200 with `{ok, sessionId, nodeId}`; **409** when that node is running a turn or still owns unfinished work (wait and retry), and 409 for an unknown session / node. `sessionId` and `nodeId` are required (400) — this route never means "the active session" |
 | `POST /reload-window` | 202, then `workbench.action.reloadWindow`. Without `idle` it is the immediate form: it refuses while a turn, sub-agent or background job is live (409), and a caller that is *itself* a turn is refused by its own existence. An optional body `{ continue: { message, sessionId?, nodeId? } }` is **persisted before the reload** and delivered by the next instance once it is idle; the reply then carries `continueQueued: true` and the caller must not post `/continue`. With `idle: true` it is the **deferred** form: 202 `{ok, deferred: true, continueQueued: true}` and the window waits for its own idle moment (see "Deferred reload"); `continue.sessionId` **and** `continue.nodeId` are then both required (400), because the request that queued it is gone by the time it fires |
 
 **Session jump** (`POST /session/start`): the agent can hand a task to a *fresh*
@@ -54,21 +55,12 @@ Sessions are independent now, so "the busy case" only matters where concurrency
 cannot help:
 
 - Caller is idle → the session is created/switched and the prompt runs now (200).
-- Caller is busy, the request has **no `sessionId`** and a `prompt`, and it is not a hop
+- Caller is busy, the request has **no `sessionId`** and a `prompt`
   → a fresh session is created and started **immediately** (200), running concurrently
   with the caller. That concurrency is the point of P1, not a queued start.
 - Caller supplies `sessionId` → the target is resolved explicitly and refused only while
   the **target node** (`nodeId`, else the session's view focus) has a live run — P3, so a
   session streaming on another branch may still accept a start on a free node (200).
-- A hop (`returnTo:true`) **does** queue (202 `{ok, queued:true, originSessionId}`): its
-  contract is "the caller's turn is over, the fresh session reports back when it calls
-  `finish_hop`", so the start
-  waits for the **origin session** to be idle (`finishTurn` → `kickHopWork`; other
-  sessions may keep running). The origin is **explicit** — `returnTo` without
-  `originSessionId` is refused, and `sessionId` + `returnTo` is refused too (a hop always
-  creates a fresh session; use `/continue` to bring a message back). A hop is also
-  refused while its session owns a running background terminal, and a third mode is not
-  accepted with `returnTo` (`fire_and_forget` never returns).
 - Busy without a `prompt` and without a `sessionId` → 409; call
   `POST /wait-for-finish` first.
 
@@ -86,87 +78,43 @@ deferred path arms this very hold itself, 30 s, at the moment it fires — a que
 does **not** hold the window while it waits, or a long turn could never end the way its
 own Stop intends. Do not weaken it.
 
-**Hop and hop back** (`returnTo:true` + `originSessionId`, and the agent-facing
-`hop_session` / `finish_hop` / `list_nodes` tools): a hop queues a fresh session and arms a `Hop`
-record. Its child's id is written the moment the session is created — before its first
-turn can start — and the *return* trip matches on that id alone, never on "a session
-created after the hop was armed", which is how a receipt used to be attributed to the
-wrong conversation when a second session was created while the hop was in flight.
+**The session tools** (`create_session` / `send_session_message` / `list_sessions` /
+`list_nodes`, plus `rename_session`) are the agent-facing half of the same surface,
+and they are one capability (`canSessions`, main agent only): a caller that may start
+a session and message a node also has to be able to name them, and a sub-agent or a
+sidecar card never may.
 
-A `return_when_finished` child's first prompt carries a model-facing **preamble**
-(English, never localized — it is prompt text, not a UI string): it names the origin
-session id and the dispatch node, says that **nothing returns automatically**, tells
-the child to call `finish_hop` when the work is complete, explains that the optional
-`source_session_node_id` chooses where the reply lands, points at
-`search_transcripts sessionId=<origin>` for the caller's node ids, and says the user
-may interrupt or steer it at any time. The session's title still comes from the
-origin's own `title` argument (a provisional seed from the dispatcher's prompt when it
-gave none; the preamble never names the child).
+`create_session` starts a fresh session and gives it its first turn, then returns
+**immediately**: the turn is dispatched, not awaited, no tab is opened or focused
+(`startFreshSession` runs with `open: false`, so `activeSessionId` does not move), and
+the turn still runs and persists — `postTo` simply drops messages for a session with
+no tab. The title is the caller's `session_name` applied as a **manual** title
+(`applySessionTitle(…, 'manual')`), so the automatic namer never overwrites it.
+Nothing reports back on its own, so the result names the new session id and its first
+node id and says how to hear back.
 
-**The hopped-to session decides when it returns.** `finish_hop` is advertised only to
-the main agent of a session a `return_when_finished` hop started — never to a
-`fire_and_forget` child, never to a sub-agent — and it is set **before that session's
-first turn**, so the epoch's frozen tool schemas include it. It comes from the
-session's own record (`AgentSession.hopOrigin`), not from the in-flight hop, so a
-handed-back session keeps the tool (and answers `Error: this session has no armed hop
-(it was already handed back, or none was started).`) instead of losing a tool its
-frozen set already sent — which would read as setup drift. The argument
-`source_session_node_id` must name an existing **non-sidecar** node of the origin
-session; anything else is refused with an error naming the problem.
+`send_session_message` is that way back, and the only channel between conversations
+in either direction: `{session_id, session_node_id, prompt}` delivers `prompt` as a
+user message to that exact node and starts a turn there, branched off that node
+(`onUserMessage` with an explicit `basisNodeId`) — never off whatever tab has focus,
+and without moving the window's session pointer. It is **refused** while the target
+node is running (`runningNodes().includes(node)`) or still owns unfinished work
+(`lockedNodes()`), naming the node and telling the caller to wait or read `list_nodes`;
+an unknown session, an unknown node and a sidecar node (a sub-agent window or a
+`kind:'bg'` job card) are refused the same way. `POST /session/message` is the same
+delivery over the control plane, 409 while the node is busy.
 
-Until `finish_hop` is called the armed hop is **inert**: `maybeDeliverHopReturn` does
-nothing at all — no recorded answer, no receipt, no retire — so a turn end, an
-interrupt and a Stop leave the hop armed and the caller waiting. That is what makes a
-hopped session steerable. Once it is called the existing idle-wait path runs unchanged:
-the turn's final assistant text is recorded on `hop.pendingReturn`, and the receipt is
-queued when the child session is **idle** — a running turn, a running **node**
-background terminal, a running sub-agent batch or a queued completion notice all keep
-it waiting, exactly the set `runningNodes()` / `lockedNodes()` reports. `kickHopWork`
-re-checks once a second, every later turn end (a steer) refreshes the answer, and the
-hop is retired **there**, at the delivery. A detached job (`run_type: "detached"`) is
-not part of that set by design: it never reports back, so a dev server cannot hold a
-hop forever. Waiting for real idleness is not cosmetic: without it a hop came back
-while the child's gate run continued in the background, and the origin went on to clear
-the child's repo lock and run its own commands on the same working tree.
-
-The receipt is a **user message** back into the origin session, and it names the
-hand-back rather than an exit status:
-
-`[session hop receipt] The child session "<title>" (<childId>) called finish_hop and
-handed back its report.` — then, under `Its final reply:`, that turn's final assistant
-text (clipped to 8 KB; `(the new session produced no text reply)` when there was none)
-and `(search_transcripts sessionId=<childId> has the full trace if you need it)`. There
-is no `status:` wording: the child's own call is what ended the hop.
-
-The message branches off the **landing node** — the child's `source_session_node_id`,
-else the hop's `returnNodeId`, else the node the hop was dispatched from — and is
-delivered by `SessionRuntime.onUserMessage` with an explicit `basisNodeId`, so:
-
-- it does **not** open or focus the origin's tab, and it does not move that session's
-  checkout — an answer arriving while the user reads another branch lands quietly;
-- it is not a user *send*: no setup-drift dialog (which could fork the tree or swallow
-  the answer), no composer clear, no API-key nudge;
-- if the landing node is busy, owns a background job, or the reload hold is armed, the
-  receipt **waits** in `pendingReceipts` and is retried by `kickHopWork` (200 ms) until
-  the node frees up, instead of being dropped while the agent was told it succeeded.
-
-`mode: "fire_and_forget"` is the same hop with no return trip: no receipt, no record
-kept, and nothing written into the origin's tree (the child session appears in the
-session list, and `search_transcripts` can read it later). Its session carries no
-`hopOrigin`, so it never sees `finish_hop`. `list_nodes` renders the
-active session's tree (node ids, status, parent, title) so the agent can name a branch
-point — node ids are otherwise invisible to the model.
-
-Guards: **one hop per origin session** (a hop in another session is independent, so two
-sessions can hop at once), the origin and the return node must exist, `returnNodeId` is
-refused with `fire_and_forget`, a hop is refused while its session owns a running
-**node** background terminal (`rt.hasRunningNodeBackground()` in `handleHopSession` — a
-detached job is fire-and-forget and deliberately does not block a hop), and the
-whole tool is off while `spinney.hopSession.enabled` is `false` (`hopEnabled`, apart from
-`canHop`, so `list_nodes` / `rename_session` stay). Deleting a session retires every hop
-that touches it (origin or child). The hop bookkeeping itself is in memory only: a
-window reload drops in-flight hops, and the child's transcript is then the only trace —
-though the child keeps its `hopOrigin` and with it the (now inert) `finish_hop` tool.
+`list_sessions` names the window's sessions — id, title, node count, active node,
+running-node count, the focused marker and the title bookkeeping — because nothing
+else hands the model a session id. `list_nodes` renders one session's tree
+(`session_id` defaults to the caller's own) and takes every node's state from the live
+runtime: `running` from that session's runs, `busy` from `lockedNodes()`, and
+`checked out` only for the session the window is focused on. A session with no runtime
+is idle by definition — a turn only runs inside a runtime — so the renderer never
+guesses from a stored `status` field, which would resurrect a turn that ended before a
+reload. `list_nodes` reads another session through two `RuntimeHost` hooks
+(`runningNodesIn` / `lockedNodesIn`); a runtime owns one session, the provider owns
+them all.
 
 **Deferred reload** (`POST /reload-window { idle: true, continue }`): the form a
 *command* uses, and the only one that works from inside a turn.
