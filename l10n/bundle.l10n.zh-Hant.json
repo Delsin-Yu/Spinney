@@ -281,6 +281,7 @@
   "The token is removed with the next save; the provider key is used again.": "權杖將於下次儲存時移除；之後重新使用服務商金鑰。",
   "Their transcript dumps are deleted from disk, so search_transcripts will no longer find them.": "它們的逐字稿會從磁碟刪除，search_transcripts 將再也找不到它們。",
   "There is no checked-out turn to delete.": "沒有可刪除的簽出回合。",
+  "The turn above this card is still running. Wait for it to finish, then edit this prompt.": "上方這個回合仍在執行。等它結束，再修改這條提示詞。",
   "Thinking": "思考",
   "Thinking effort": "推理力度",
   "Thinking…": "思考中…",

@@ -5639,7 +5639,19 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     // The basis is the edited node's **parent**, never the node: the edited turn is
     // replaced by a sibling, not extended. `null` (a root node) is a real basis — the new
     // turn becomes a second root (see `onUserMessage`).
-    await rt.onUserMessage(edited, attachments, { basisNodeId: node.parentId ?? null });
+    const basis = node.parentId ?? null;
+    // A send into a **streaming** basis is refused by `onUserMessage` with **no notice**
+    // (the composer's own Stop already says why there). Nothing says it here: the user
+    // pressed Enter in a textarea and the editor would just sit there. So this path, which
+    // can now start on a running card, names the one case it can still hit.
+    if (basis && rt.promptBlocker(basis)?.code === 'running') {
+      rt.postNotice(
+        'warning',
+        vscode.l10n.t('The turn above this card is still running. Wait for it to finish, then edit this prompt.'),
+      );
+      return;
+    }
+    await rt.onUserMessage(edited, attachments, { basisNodeId: basis });
   }
 
   /**

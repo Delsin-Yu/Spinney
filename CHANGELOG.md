@@ -20,6 +20,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   frozen prompt and tool set, its card and its level, and no API key anywhere on the path.
   `npm run check:payload` (in `vscode:prepublish`) fails packaging if a second constructor or
   a hard-coded body field grows back beside it.
+- **A prompt can be edited while its turn is still running.** The pencil on a card's pinned
+  question used to be refused there. The edit never rewrites the turn: it branches from the
+  turn above the card, so the streaming turn is not touched, and two branches of one session
+  can run at the same time. The one remaining rule is the tree's own: a card with no prompt,
+  and a sub-agent or job card, still have nothing to edit.
 - **A prompt is addressed to a session, not to a node.** `send_session_message` became
   `send_session_prompt`: it starts one turn on the target session's own active node, which is
   exactly where a human's own send lands, so no node id is ever carried across a conversation
@@ -143,6 +148,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A tool call that the agent is still writing shows one line.** The drafting row used to
+  arrive with an empty verb and an empty label, because the tool name was dropped on the way
+  in. It now shows the fixed label `Writing tool call...` until the call starts, and then the
+  verb, the label and the time replace it. The webview is no longer sent the half-written
+  arguments either: the row never rendered them, and the transport stops paying for them.
+- **The green follow dot is centred on the scrollbar of the work log.** It used to sit half a
+  scrollbar width to the left of the bar it belongs to, because its offset was a fixed number
+  and the gutter is the webview's own. The offset is now measured from the element (the left
+  and right offsets of the log inside its wrapper, minus the log's own width), and the fixed
+  value stays only as the fallback for a page with no layout.
 - **A session an agent opened no longer starts with a fresh exchange budget.** `create_session`
   carried the caller as `from` but no rounds, so its first node had no `roundsAllowance` and the
   prompt path's `inherited ?? cap` read that as "take the ceiling": an agent with 4 rounds left
