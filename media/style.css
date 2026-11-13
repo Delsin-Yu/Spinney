@@ -2935,6 +2935,28 @@ button.icon-btn {
   color: var(--bg);
 }
 
+/* The ⏹ Stop of a **compression** card (`syncContinueButton` in media/main.js): that card
+   has no composer, so this is the only way to end its turn. Same slot and size as
+   `.node-continue`, warned-coloured so it never reads as "continue". */
+.node-stop {
+  flex: 0 0 auto;
+  margin-left: 6px;
+  padding: 1px 6px;
+  font-size: 10px;
+  line-height: 16px;
+  color: var(--text);
+  background: var(--bg3);
+  border: 1px solid var(--warn);
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.node-stop:hover {
+  background: var(--warn);
+  border-color: var(--warn);
+  color: var(--bg);
+}
+
 /* Manual follow light: sits in the strip the scroll container reserves below itself
    (`margin-bottom`), docked in the bottom-right corner of the transcript area. Green
    means "following the newest content"; dim means the reader owns the offset. A click

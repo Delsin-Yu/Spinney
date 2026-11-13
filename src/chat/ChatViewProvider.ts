@@ -4327,7 +4327,17 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     // A branch owns its background jobs: deleting it kills whatever it spawned,
     // so the confirmation says so before anything is torn down.
     const jobs = rt.runningBackgroundsForNodes(ids);
+    // A compression node's branch **is** the chain it produced: deleting it removes the
+    // compression turn, the window it wrote, and everything below that window. Saying so is
+    // the whole point — the confirm must not read like "one turn goes away".
+    const compressNote =
+      node.role === 'compress'
+        ? vscode.l10n.t(
+            'Compression: this branch is a compression node, the window it produced, and everything below that window.',
+          )
+        : '';
     const detail = [
+      compressNote,
       agents > 0
         ? vscode.l10n.t(
             'History: {0} turn(s) and {1} sub-agent card(s) are removed from this conversation.',
@@ -4380,6 +4390,15 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   private branchDeletionBlocked(session: AgentSession, rt: SessionRuntime, nodeId: string): string {
     if (rt.isRunning() || rt.agentRunning()) {
       return vscode.l10n.t('Cannot delete a branch while the agent is running. Wait for the turn to finish.');
+    }
+    // A **resume** window is the result of a compression, and deleting it on its own would
+    // leave the compression node holding a handoff nobody can read. It is removed with its
+    // compression node — one branch, one deletion, one confirmation that says so
+    // (`docs/agents/invariants/compress-node.md` §5).
+    if (session.nodes[nodeId]?.role === 'resume') {
+      return vscode.l10n.t(
+        'This window is the result of a compression — delete the compression node above it instead, which removes this window with it.',
+      );
     }
     if (branchIds(session, nodeId).some((id) => rt.hasRunningSubAgent(id))) {
       return vscode.l10n.t('Cannot delete a branch that contains a running sub-agent. Kill it first.');
@@ -5616,33 +5635,33 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   }
 
   /**
-   * The composer's **one** new-epoch entry (`newContextTurn`) — the replacement for the
-   * three entries that used to disagree: the card's `⧉ Continue in a new window`, the
-   * harness-drift `⧉` hint, and the modal a plain send raised when the user changed the
-   * model / effort / language.
+   * The composer's **one** new-epoch entry (`newContextTurn`, and the Send button's own
+   * right-click, `compressNow`) — the replacement for the three entries that used to
+   * disagree: the card's `⧉ Continue in a new window`, the harness-drift `⧉` hint, and the
+   * modal a plain send raised when the user changed the model / effort / language.
    *
    * The backend is the **trigger**, never a choice of the webview
-   * (`SessionRuntime.newEpochTrigger`):
+   * (`SessionRuntime.newEpochTrigger`) — with one exception, the right-click: that one *is*
+   * the user's explicit "move this conversation now", so it skips the trigger question and
+   * opens the window whatever the fill level.
    *
-   *  - context `near`/`full` → a **new context window** (`rolloverContext`), the only
-   *    answer to a history that no longer fits. Its preconditions are re-checked here
-   *    (a node, not a sidecar, not running, no conversational child) and a failure is a
-   *    notice — nothing is started, nothing is killed.
+   *  - context `near`/`full` (or the right-click) → a **new context window**, asked as one
+   *    question with two answers (`confirmCompression`): the pointer rollover (Simple, no
+   *    extra request) or a compression node (Agentic, one more turn, a written handoff).
+   *    Its preconditions are re-checked here (a node, not a sidecar, not running, no
+   *    conversational child) and a failure is a notice — nothing is started, nothing killed.
    *  - setup drift only → a **fork** under the live setup (`forkTree`), so the old tree
    *    keeps the bytes and the provider cache entry it was built with. The composer's
    *    text becomes a normal send in the new tree; with an empty box there is nothing to
    *    send and the fork alone is the whole action.
    *
-   * Then **one** modal question (the details differ per backend), and after the answer
-   * the trigger is re-validated: the state may have changed while the question was open
-   * (a turn finished, a dropdown moved, the window filled), and sending under an answer
-   * given for a different state would be the bug this check exists for. Dismissing the
-   * modal sends nothing, kills nothing and leaves the composer's text alone.
+   * Dismissing the modal sends nothing, kills nothing and leaves the composer's text alone.
    */
   private async newContextEntry(
     rt: SessionRuntime,
     text: string,
     attachments: UserAttachment[],
+    opts?: { compress?: boolean },
   ): Promise<void> {
     if (this.isHeld()) {
       rt.postNotice(
@@ -5655,7 +5674,10 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       rt.postNotice('warning', this.readOnlyNotice());
       return;
     }
-    const trigger = rt.newEpochTrigger();
+    // The right-click on Send is a deliberate entry (`compressNow`): it asks for a new window
+    // here and now, so the trigger question does not apply to it.
+    const forced = opts?.compress === true;
+    const trigger = forced ? 'context' : rt.newEpochTrigger();
     if (!trigger) {
       rt.postNotice(
         'info',
@@ -5664,8 +5686,23 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       return;
     }
     const nodeId = rt.session.activeNodeId ?? '';
-    if (trigger === 'context' && !rt.canRollover(nodeId)) {
-      // One predicate covers all four preconditions, and `false` here means the state
+    if (trigger === 'drift') {
+      const answer = await this.confirmEpochChange(rt);
+      if (!answer) {
+        return;
+      }
+      if (rt.newEpochTrigger() !== 'drift') {
+        rt.postNotice(
+          'warning',
+          vscode.l10n.t('Nothing was sent: the setup or the context window changed while the question was open. Try again.'),
+        );
+        return;
+      }
+      await this.forkEntry(rt, text, attachments);
+      return;
+    }
+    if (!rt.canCompress(nodeId)) {
+      // One predicate covers every structural precondition, and `false` here means the state
       // moved between the click and this line.
       rt.postNotice(
         'warning',
@@ -5673,25 +5710,22 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       );
       return;
     }
-    const answer = await this.confirmEpochChange(rt, trigger);
-    if (!answer) {
+    const choice = await this.confirmCompression();
+    if (!choice) {
       return;
     }
-    if (rt.newEpochTrigger() !== trigger) {
+    // Re-validated after the question: a turn may have finished, or a child appeared, while
+    // it was open — and acting on an answer given for another state is the bug this check
+    // exists for.
+    if (!rt.canCompress(nodeId)) {
       rt.postNotice(
         'warning',
         vscode.l10n.t('Nothing was sent: the setup or the context window changed while the question was open. Try again.'),
       );
       return;
     }
-    if (trigger === 'drift') {
-      await this.forkEntry(rt, text, attachments);
-      return;
-    }
-    // The new window inherits the checked-out chain's frozen epoch (`'current'`): the
-    // question this entry asks is about the *window*, not about the setup, and a window
-    // that inherits keeps the bytes the conversation was already written in. Acting on a
-    // drift is still available afterwards — the composer's entry stays offerable.
+    // Killing a ten-minute build is a side effect the user did not ask for, so it is asked
+    // about separately, whichever handoff they picked.
     const work = rt.lockedWorkCount(nodeId);
     if (work > 0) {
       const ok = await this.confirmKillBackgrounds(
@@ -5703,10 +5737,23 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         return;
       }
     }
-    const started = await rt.rolloverContext(nodeId, 'current', {
-      text,
-      handoff: answer === 'summary' ? 'summary' : 'continue',
-    });
+    // The new window inherits the checked-out chain's frozen epoch: the question this entry
+    // asks is about the *window*, not about the setup, and a window that inherits keeps the
+    // bytes the conversation was already written in.
+    if (choice === 'agentic') {
+      // The chain runs on after this method returns: the compression turn, then the window.
+      // The composer is cleared only when the handoff was really delivered — a compression
+      // the user stops must not eat the text they typed.
+      void rt.compressAndContinue(nodeId, { text }).then((delivered) => {
+        if (delivered) {
+          this.postTo(rt.sessionId, { type: 'composerClear' });
+        }
+      });
+      return;
+    }
+    // `force`: the user answered this question about this node, and a window that still has
+    // room is a legitimate moment to move on (the right-click entry has no fill condition).
+    const started = await rt.rolloverContext(nodeId, 'current', { text, force: true });
     if (!started) {
       rt.postNotice(
         'warning',
@@ -5735,43 +5782,47 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   }
 
   /**
-   * The one modal question the new-epoch entry asks, and its answer:
+   * The one modal question a **new context window** asks, and its answer
+   * (`docs/agents/invariants/compress-node.md` §1):
    *
-   *  - a **context** continuation asks how the previous window is handed over — a written
-   *    summary (one extra request, `handoff: 'summary'`) or the pointer to the previous
-   *    branch, which the new window can read itself (`'continue'`). Neither costs the
-   *    other's work, so this is a real choice.
-   *  - a **setup** change asks whether the history may be re-sent under the new
-   *    configuration. It cannot be silent: the provider has never seen those bytes under
-   *    that card, so the request misses its prefix cache — and the number says how much
-   *    history is about to be re-read.
+   *  - `Simple` — the pointer rollover: the new window is pointed at this window's
+   *    transcript and reads the record itself. Zero extra requests.
+   *  - `Agentic` — a **compression node**: one more turn reads this window and writes the
+   *    handoff the new window starts from. More complete, one turn slower.
+   *
+   * `null` means the user dismissed it: nothing is sent, nothing is killed, and the composer
+   * keeps its text.
+   */
+  private async confirmCompression(): Promise<'simple' | 'agentic' | null> {
+    const simple = vscode.l10n.t('Simple');
+    const agentic = vscode.l10n.t('Agentic');
+    const pick = await vscode.window.showWarningMessage(
+      vscode.l10n.t('Start a new context window?'),
+      {
+        modal: true,
+        detail: vscode.l10n.t(
+          'Simple costs no extra request: the new window is pointed at this window’s transcript and reads the record itself. Agentic runs one more turn — a compression node reads this window and writes the handoff the new window starts from, so the handoff is more complete, one turn slower, and costs that request.',
+        ),
+      },
+      simple,
+      agentic,
+    );
+    if (pick === simple) {
+      return 'simple';
+    }
+    return pick === agentic ? 'agentic' : null;
+  }
+
+  /**
+   * The **setup** half of the new-epoch entry: may the conversation's history be re-sent
+   * under the live configuration? It cannot be silent — the provider has never seen those
+   * bytes under that card, so the request misses its prefix cache — and the number says how
+   * much history is about to be re-read.
    *
    * `null` means the user dismissed it: nothing is sent, nothing is killed, and the
    * composer keeps its text.
    */
-  private async confirmEpochChange(
-    rt: SessionRuntime,
-    trigger: 'context' | 'drift',
-  ): Promise<'summary' | 'continue' | boolean | null> {
-    if (trigger === 'context') {
-      const summaryLabel = vscode.l10n.t('Write a handoff summary');
-      const continueLabel = vscode.l10n.t('Just continue');
-      const pick = await vscode.window.showWarningMessage(
-        vscode.l10n.t('Continue in a new context window?'),
-        {
-          modal: true,
-          detail: vscode.l10n.t(
-            'The agent that takes over continues this conversation in a new window. It can either receive a handoff summary (one extra request) or be pointed at the previous branch and read the record itself.',
-          ),
-        },
-        summaryLabel,
-        continueLabel,
-      );
-      if (pick === summaryLabel) {
-        return 'summary';
-      }
-      return pick === continueLabel ? 'continue' : null;
-    }
+  private async confirmEpochChange(rt: SessionRuntime): Promise<boolean> {
     const continueLabel = vscode.l10n.t('Continue');
     const pick = await vscode.window.showWarningMessage(
       vscode.l10n.t('Continue with the new workspace or model configuration?'),
@@ -5912,6 +5963,13 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         // picks the backend, asks one modal question and re-validates the trigger
         // (`newContextEntry`), so the webview never has to know which case it is in.
         return void this.newContextEntry(rt, String(message.text ?? ''), message.attachments ?? []);
+      case 'compressNow':
+        // The Send button's own right-click (`media/main.js`): the modal is the menu, so the
+        // webview posts the same content a Send would carry and the host asks the question —
+        // the same method the composer's entry uses, so the two entries cannot drift apart.
+        return void this.newContextEntry(rt, String(message.text ?? ''), message.attachments ?? [], {
+          compress: true,
+        });
       case 'continueTurn':
         // The ▶ button on a card whose turn was interrupted / failed: the harness
         // writes the message (see `SessionRuntime.continueFrom`), so the reboot

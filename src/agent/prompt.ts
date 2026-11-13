@@ -124,6 +124,45 @@ export const SUB_AGENT_SYSTEM_PROMPT_TEMPLATE = [
 ].join('\n');
 
 /**
+ * A **compression node's** system prompt (`docs/agents/invariants/compress-node.md`).
+ *
+ * Model-facing, therefore English and never `vscode.l10n.t`: what it produces is a
+ * handoff for an agent that reads English, and a translated instruction is a different
+ * instruction. It is a template of its own — not a variant of the main prompt — because
+ * the job is a different one: a compression node does not continue the work, does not
+ * answer the user, and cannot change anything. Sharing the main template would ship the
+ * whole approval / calling-convention / delegation body to a turn that has no turn to
+ * take, and would tell it to answer in the user's language when the answer must be
+ * English Markdown.
+ *
+ * The read budget is stated because it is the one way this turn can fail expensively: a
+ * compression node that reads a 30 MB transcript dump spends a whole turn on nothing the
+ * handoff can carry.
+ */
+export const COMPRESS_SYSTEM_PROMPT_TEMPLATE = [
+  '{{identity}}',
+  '',
+  '{{environment}}',
+  '',
+  '## What you are',
+  'You are the **compression node** of this conversation, a turn of its own between two context windows. You are not continuing the work and you are not answering the user. What you produce is the memory the next window starts from: everything it will know about the window above you is what you write.',
+  '',
+  '## What you may do',
+  '- Read the previous window\'s transcript on disk, and files in the workspace, to **verify** a fact before you write it down.',
+  '- Call the read-only tools you were given. You have no tool that changes anything, and nothing you write is applied to the workspace.',
+  '',
+  '## What you must not do',
+  '- Do not continue the task, do not take a step the previous window was about to take, and do not ask the user anything. Your whole output is the handoff.',
+  '- Do not invent an observation. A path, a symbol, a command, a value or an error text you did not read is not a fact.',
+  '',
+  '## Reading budget',
+  'Keep your reading to about 40,000 characters. When you need one detail from the transcript, look it up with search_transcripts instead of reading the whole dump; read a file range instead of a 5,000-line file. Reading more than this is how a compression turn spends itself without writing a better handoff.',
+  '',
+  '## What you write',
+  'English Markdown, exactly the sections the instruction names, each heading at the top of its own section, and nothing outside them. No preamble and no closing summary.',
+].join('\n');
+
+/**
  * The identity lines shared by the main and sub-agent prompts.
  *
  * `model` is the **display name of the model card** the agent runs on, not an API
@@ -405,6 +444,26 @@ export function subAgentSystemPrompt(
       ? 'you may read and write files and run commands.'
       : 'you are read-only: you may read files and search content, but you must not modify files or run commands.',
     fanOut,
+  });
+  return text.replace(/\n+$/, '');
+}
+
+/**
+ * A **compression node's** system prompt: the same identity + environment lines as
+ * every other prompt, and the compression body from
+ * {@link COMPRESS_SYSTEM_PROMPT_TEMPLATE}. It takes no AGENTS.md section on purpose —
+ * the instructions of the workspace describe how to *work*, and this turn does not
+ * work; that is also why the drift check compares a compression envelope against an
+ * empty section (`SessionRuntime.setupState`).
+ */
+export function compressSystemPrompt(
+  model = '',
+  effort: ThinkingEffort = 'none',
+  facts: EnvironmentFacts = currentEnvironmentFacts(),
+): string {
+  const text = renderPromptTemplate(COMPRESS_SYSTEM_PROMPT_TEMPLATE, {
+    identity: identityLines(model, effort).join('\n'),
+    environment: environmentSection(facts),
   });
   return text.replace(/\n+$/, '');
 }

@@ -64,6 +64,18 @@ export interface Epoch {
   /** The reply-language **name** the prompt was rendered with. */
   replyLanguage: string;
   /**
+   * Which prompt this envelope was rendered from: the main agent's template
+   * ({@link kind} absent or `'main'`), or the **compression node's** own template
+   * (`'compress'`). Absent on every envelope stored before compression existed, so an
+   * old state loads unchanged.
+   *
+   * It is load-bearing for the drift check (`SessionRuntime.setupState`): a chain whose
+   * envelope is a compression one has to be compared against the compression template,
+   * the compression tool set and no AGENTS.md section — reporting drift there would
+   * claim the harness changed under a chain that is exactly what it froze.
+   */
+  kind?: 'main' | 'compress';
+  /**
    * Endpoint facts at freeze time. They are what the drift check compares against and
    * what a diagnostic line reports; the request itself still resolves its provider,
    * key and base URL through {@link cardId}, so editing a card's endpoint shows up as
@@ -229,24 +241,46 @@ export interface TreeNode {
    */
   epoch?: Epoch;
   /**
-   * The handoff this node's window was opened with (`rolloverContext`), when the user
-   * asked for a specific one instead of the pointer the harness writes itself.
+   * The handoff this node's window was opened with (`rolloverContext` /
+   * `compressAndContinue`), when it was not the plain pointer the harness writes itself.
    *
-   * `'summary'` — the composer's compaction entry: the previous window was handed over as
-   * a **written summary** (one extra request, `src/agent/compaction.ts`) instead of by
-   * being pointed at. The choice is recorded even when the summary itself could not be
-   * written — that case keeps the pointer text and says so in it — and a value this build
-   * does not know is simply ignored (no migration, no repair pass).
+   * `'summary'` — the window was opened from a **compression node's** answer
+   * (`docs/agents/invariants/compress-node.md`): its first message starts with the
+   * handoff a real turn wrote, not with the pointer. Only ever set on a `role:'resume'`
+   * node, whose `handoffSummary` holds the same text. A value this build does not know is
+   * simply ignored (no migration, no repair pass).
    */
   handoff?: 'summary';
   /**
-   * The **handoff summary** the chosen handoff produced, verbatim, when one was written
-   * (`rolloverContext`, `docs/agents/invariants/context-rollover.md` §5a). It is the same
-   * text the window's harness block carries — stored here so a reload, and any later
-   * feature, can read the summary as data instead of parsing that block. Absent when the
-   * summary could not be written: the window then carries the pointer text, which says so.
+   * The **handoff** this window was opened with, verbatim, when a compression turn wrote it
+   * (`compressAndContinue`). It is the same text the window's harness block carries —
+   * stored here so a reload, and any later feature, can read the handoff as data instead
+   * of parsing that block. Absent on a `Simple` (pointer) rollover, which carries the
+   * harness' own pointer text instead.
    */
   handoffSummary?: string;
+  /**
+   * What this node is in a **compression chain** (`docs/agents/invariants/compress-node.md`).
+   *
+   * `'compress'` — a compression node C: a real turn node that reads the window above it
+   * (its transcript and the workspace) and answers with the handoff the window below will
+   * start from. It runs on its own frozen envelope (the compression template, the
+   * read-only tool set) and shows no composer.
+   *
+   * `'resume'` — a resume node R: the window that continues from C. It inherits **P's**
+   * envelope (the window being compressed), not C's, and its first message is C's answer.
+   * A resume node is deleted with its compression node, never on its own.
+   *
+   * Validated by value at load: an unknown role is dropped, and an old state — which has
+   * no roles at all — reads as an ordinary turn node. No version bump.
+   */
+  role?: 'compress' | 'resume';
+  /**
+   * `role === 'compress'` only: the id of the window P this node compressed. Kept so a
+   * reload can say what C was about without re-reading the tree, and so a diagnostic
+   * names the pair. A value that names a deleted node is simply a stale label.
+   */
+  compressedFrom?: string;
   /**
    * Image provenance for this node's own `messages`, addressed by position. Persisted
    * beside the messages, never inside a content part (see {@link ImageSource}).
@@ -753,6 +787,28 @@ export function isSidecar(node: TreeNode | undefined): boolean {
   return node?.kind === 'agent' || node?.kind === 'bg';
 }
 
+/** True when this card is a **compression node** — the turn that writes a handoff. */
+export function isCompressNode(node: TreeNode | undefined): boolean {
+  return node?.role === 'compress';
+}
+
+/**
+ * The window a compression node produced, when it has one. A compression node delivers
+ * **once**: from the moment its resume child exists it is sealed — no ▶ Continue, and no
+ * second handoff — because two windows would otherwise claim to continue the same one
+ * (`docs/agents/invariants/compress-node.md` §4).
+ */
+export function resumeChildOf(session: AgentSession, nodeId: string): TreeNode | undefined {
+  const node = session.nodes[nodeId];
+  for (const id of node?.children ?? []) {
+    const child = session.nodes[id];
+    if (child && child.role === 'resume') {
+      return child;
+    }
+  }
+  return undefined;
+}
+
 /**
  * A branch: `nodeId` plus every descendant (sub-agent sidecars included),
  * depth-first. An unknown id yields `[]`; the walk is cycle-safe.
@@ -970,6 +1026,9 @@ function normalizeEpoch(raw: unknown): Epoch | undefined {
     wireModel: typeof e.wireModel === 'string' ? e.wireModel : '',
     vision: e.vision === true,
     visionTransport: e.visionTransport === 'deepseek' ? 'deepseek' : 'openai',
+    // Which template rendered it. Optional and by value: `'compress'` or nothing, so an
+    // envelope stored by a build without compression reads as the main agent's own.
+    kind: e.kind === 'compress' ? 'compress' : undefined,
     agentsMdHash: typeof e.agentsMdHash === 'string' ? e.agentsMdHash : '',
     templateHash: typeof e.templateHash === 'string' ? e.templateHash : '',
     toolsetHash: typeof e.toolsetHash === 'string' ? e.toolsetHash : '',
@@ -1137,6 +1196,11 @@ function normalizeTreeSession(raw: AgentSession & { rootId?: string | null }): A
       // new window was given, and so a later feature can read the summary without parsing
       // the harness block. String-only validation: anything else is dropped, never repaired.
       handoffSummary: typeof node.handoffSummary === 'string' && node.handoffSummary ? node.handoffSummary : undefined,
+      // What this node is in a compression chain — by value, like every other optional
+      // field: an unknown role is dropped, and a state stored before compression existed
+      // (no roles at all) reads as an ordinary turn node.
+      role: node.role === 'compress' || node.role === 'resume' ? node.role : undefined,
+      compressedFrom: typeof node.compressedFrom === 'string' && node.compressedFrom ? node.compressedFrom : undefined,
       imageSources: normalizeImageSources(node.imageSources),
       // The card/level this turn ran with: healed exactly like the other optional
       // strings on a node, so a state stored before them loads unchanged (no version

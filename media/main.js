@@ -5323,29 +5323,38 @@ function addBackgroundNotice(item) {
   }
 
   /**
-   * The `CTX` badge on a card head: this node *starts* a new context window — it
-   * and the dashed edge above it are the whole visual story of a context rollover
-   * (`docs/agents/invariants/context-rollover.md`). A compact dock token,
-   * deliberately untranslated like `SUB` / `BG`; the explanation is the tooltip,
-   * and that one *is* translated. Created lazily, like every other head badge, so
-   * a repaint never accumulates them, and placed the way `SUB` / `Delivered` are:
-   * just before the status chip.
+   * The context badge on a card head: `CTX` for a node that *starts* a new context window,
+   * `CMP` for a **compression node** (which starts a window of its own too, but is a turn
+   * whose whole job is the handoff) — and the dashed edge above it is the rest of the story
+   * (`docs/agents/invariants/context-rollover.md`,
+   * `docs/agents/invariants/compress-node.md` §5). A compact dock token, deliberately
+   * untranslated like `SUB` / `BG`; the explanation is the tooltip, and that one *is*
+   * translated. Created lazily, like every other head badge, so a repaint never accumulates
+   * them, and placed the way `SUB` / `Delivered` are: just before the status chip.
    */
   function syncCtxBadge(card, meta) {
     if (!card) return;
     // Self-equality is the contract's own validity test (`tree.ts contextBase()`): a
     // stored marker that does not name this node opens no window at all, so the card
     // must not claim one either.
-    const wanted = !!(meta && meta.contextBaseId && meta.contextBaseId === meta.id);
+    const windowStart = !!(meta && meta.contextBaseId && meta.contextBaseId === meta.id);
+    const token = meta && meta.role === 'compress' ? 'CMP' : 'CTX';
     let badge = byClass(card, 'node-ctx-badge');
-    if (wanted && !badge) {
-      badge = el('span', 'node-ctx-badge', 'CTX');
-      badge.title = tr('This node starts a new context window; the branch above it is not sent to the model any more');
+    if (windowStart && !badge) {
+      badge = el('span', 'node-ctx-badge', token);
+      badge.title =
+        token === 'CMP'
+          ? tr('This node compresses the window above it; the window below it starts from the handoff it writes')
+          : tr('This node starts a new context window; the branch above it is not sent to the model any more');
       const head = card.querySelector('.node-head');
       const status = head.querySelector('.node-status');
       if (status) head.insertBefore(badge, status); else head.appendChild(badge);
-    } else if (!wanted && badge) {
+    } else if (!windowStart && badge) {
       badge.remove();
+    } else if (badge && badge.textContent !== token) {
+      // A card is created once, but the token is derived from the node's role: keep them in
+      // step in case the badge arrived before the role did.
+      badge.textContent = token;
     }
   }
 
@@ -5388,13 +5397,19 @@ function addBackgroundNotice(item) {
     // Delete-branch button: hover-revealed (see .node-del), so a destructive
     // action is not one stray click away. The host asks for a modal confirmation
     // before it removes anything (history + transcript dumps).
-    const del = el('button', 'node-del', '🗑');
-    del.title = tr('Delete this branch — this turn and everything below it');
-    del.addEventListener('click', (ev) => {
-      ev.stopPropagation();
-      vscode.postMessage({ type: 'deleteBranch', id });
-    });
-    head.appendChild(del);
+    //
+    // A **resume** window has none: its branch is the compression chain's, and the host
+    // refuses to delete it on its own (`docs/agents/invariants/compress-node.md` §5). The
+    // compression node above it keeps its 🗑, and deleting it takes this window with it.
+    if (!meta || meta.role !== 'resume') {
+      const del = el('button', 'node-del', '🗑');
+      del.title = tr('Delete this branch — this turn and everything below it');
+      del.addEventListener('click', (ev) => {
+        ev.stopPropagation();
+        vscode.postMessage({ type: 'deleteBranch', id });
+      });
+      head.appendChild(del);
+    }
     card.appendChild(head);
     // A window-starting node carries the `CTX` marker from the moment its card
     // exists (it is created once, here, and never rebuilt).
@@ -6146,8 +6161,12 @@ function addBackgroundNotice(item) {
     // no card to inline it in — in both cases the pane is hidden entirely.
     const node = id ? treeNodes[id] : null;
     // A sidecar (sub-agent window / background job card) never hosts the composer:
-    // it is driven by the agent, and a job card has no conversation at all.
-    const hostCard = card && !(node && isSidecarKind(node.kind)) ? card : null;
+    // it is driven by the agent, and a job card has no conversation at all. A
+    // **compression node** is the third case: it has no request to type — its one turn
+    // was written by the harness — so its card keeps its own ⏹ Stop / ▶ Continue and no
+    // input box (`docs/agents/invariants/compress-node.md` §2).
+    const hostCard =
+      card && !(node && isSidecarKind(node.kind)) && !(node && node.role === 'compress') ? card : null;
     // Un-hide before mounting so autoGrow() measures a rendered input.
     setComposerVisible(!!hostCard);
     mountComposer(hostCard);
@@ -6187,44 +6206,80 @@ function addBackgroundNotice(item) {
   }
 
   /**
-   * The ▶ Continue / ↻ Retry entries on a card whose turn ended without an answer:
-   * interrupted by the user, or failed — an API error that outlived the client's
-   * transparent retries. Clicking one asks the harness to run a turn from that node
-   * with a message the harness writes itself, so the user never has to type
-   * "continue".
+   * The ▶ Continue / ↻ Retry / ⏹ Stop entries on a card:
    *
-   * One element, one meaning, and the *variant* follows the node's status:
    *  - `error` (any failure) → `↻ Retry`, in place;
-   *  - `interrupted` → `▶ Continue`, in place.
-   * A new *context window* is not offered here any more: every new-epoch transition —
-   * a full window, a near-full one, and a setup that moved away from the frozen one —
-   * is the composer's single `#new-context-btn` (`updateNewContextButton`), so a card
-   * never carries a second, differently-worded entry for the same act.
+   *  - `interrupted` → `▶ Continue`, in place;
+   *  - a **running** compression node → `⏹ Stop`, because that card has no composer and
+   *    therefore no other way to end its turn (a compression that reads too much would
+   *    otherwise be uncancellable). One element, one meaning: it posts the same `stop` a
+   *    composer's Stop does, and the host's union kill is what answers it.
    *
-   * Shown only where continuing makes sense: a conversational turn node (never a
-   * sidecar — a sub-agent window or job card has no conversation of its own here),
-   * not currently running, and a *tip* of its branch (a node that already has a
-   * turn child has been continued; the new failure, if any, shows on that child).
-   * The element is created once; a sync fixes its text, title and `dataset.action`,
-   * and the click handler reads the action at click time.
+   * A new *context window* is not offered here: every new-epoch transition is the composer's
+   * single `#new-context-btn` (`updateNewContextButton`), so a card never carries a second,
+   * differently-worded entry for the same act.
+   *
+   * Shown only where it makes sense: a conversational turn node (never a sidecar — a
+   * sub-agent window or job card has no conversation of its own here), and for ▶/↻ also a
+   * *tip* of its branch (a node that already has a turn child has been continued; the new
+   * failure, if any, shows on that child). A **compression node that already delivered its
+   * window** shows neither: it is sealed, and ▶ would open a second window claiming to
+   * continue the same one (`docs/agents/invariants/compress-node.md` §4).
    */
   function syncContinueButton(card, meta) {
     const id = meta && meta.id;
     // `byClass`, not `querySelector`: a miss must be observable (the offline
     // webview checker's DOM stub answers a plain-class miss with a shared stub).
     const btn = byClass(card, 'node-continue');
+    const stop = byClass(card, 'node-stop');
+    const positionButton = (button) => {
+      const head = byClass(card, 'node-head');
+      // Keep the delete button at the far right of the head.
+      const del = head ? byClass(head, 'node-del') : null;
+      if (!head) {
+        card.appendChild(button);
+      } else if (del && head.insertBefore) {
+        head.insertBefore(button, del);
+      } else {
+        head.appendChild(button);
+      }
+    };
+    const isCompress = !!meta && meta.role === 'compress';
     const terminal = !!meta && (meta.status === 'interrupted' || meta.status === 'error');
     const hasTurnChild = !!meta && (meta.children || []).some((c) => {
       const child = treeNodes[c];
       return child && !isSidecarKind(child.kind);
     });
+    // A compression node's turn is over the moment the window below it exists: the answer
+    // has been delivered, and a second ▶ would produce a second window for the same source.
+    const delivered = isCompress && (meta.children || []).some((c) => {
+      const child = treeNodes[c];
+      return child && child.role === 'resume';
+    });
+    // ⏹ Stop: only a compression node, and only while it streams — every other card's Stop
+    // is its composer's (this card has none).
+    const wantStop = isCompress && runningNodes.has(id);
+    if (wantStop) {
+      if (!stop) {
+        const button = el('button', 'node-stop', '⏹');
+        button.title = tr('Stop this compression turn');
+        button.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          setStatus(tr('Stopping…'));
+          vscode.postMessage({ type: 'stop', nodeId: id });
+        });
+        positionButton(button);
+      }
+    } else if (stop) {
+      stop.remove();
+    }
     const failed = !!meta && meta.status === 'error';
     const label = failed ? tr('↻ Retry') : tr('▶ Continue');
     const title = failed
       ? tr('Ask the harness to retry this turn (it sends the message for you)')
       : tr('Ask the harness to continue from here (it sends the message for you)');
     const action = failed ? 'retry' : 'continue';
-    const show = !!id && terminal && !hasTurnChild && !isSidecarKind(meta.kind) && !runningNodes.has(id);
+    const show = !!id && terminal && !hasTurnChild && !delivered && !isSidecarKind(meta.kind) && !runningNodes.has(id);
     if (!show) {
       if (btn) btn.remove();
       return;
@@ -6248,16 +6303,7 @@ function addBackgroundNotice(item) {
       // status changes, so a captured action would post the wrong request.
       vscode.postMessage({ type: 'continueTurn', id });
     });
-    const head = byClass(card, 'node-head');
-    // Keep the delete button at the far right of the head.
-    const del = head ? byClass(head, 'node-del') : null;
-    if (!head) {
-      card.appendChild(button);
-    } else if (del && head.insertBefore) {
-      head.insertBefore(button, del);
-    } else {
-      head.appendChild(button);
-    }
+    positionButton(button);
   }
 
   // Composer banner + readonly: when the checked-out node already has children,
@@ -9324,6 +9370,23 @@ function addBackgroundNotice(item) {
 
   // ---- Input handlers ----
   sendBtn.addEventListener('click', send);
+  /**
+   * The Send button's **own right-click** is the second entry to a new context window —
+   * the deliberate one (`compressNow`, `docs/agents/invariants/compress-node.md` §1). The
+   * modal *is* the menu: nothing is drawn here, the same content a Send would carry is
+   * posted, and the host asks Simple or Agentic. It is refused exactly where a window could
+   * not be opened at all — a running node, a read-only window, a sub-agent branch — and
+   * **not** on an empty box: a compression needs the conversation, not a message.
+   */
+  sendBtn.addEventListener('contextmenu', (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (readOnly || focusIsRunning() || focusIsLocked() || focusIsAgent()) {
+      return;
+    }
+    setFollow(true);
+    vscode.postMessage({ type: 'compressNow', text: inputEl.value.trim(), attachments: pendingAttachments });
+  });
   newContextBtn.addEventListener('click', newContextTurn);
   stopBtn.addEventListener('click', () => {
     setStatus(tr('Stopping…'));
