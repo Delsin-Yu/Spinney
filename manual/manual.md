@@ -46,8 +46,8 @@ The tree holds one card per turn. A new turn goes below the turn it answers. The
 |---|---|
 | Input box | Holds your message. `Enter` sends, `Shift+Enter` adds a line. |
 | **Send** | Sends the message and starts a turn. The button is disabled in four cases: the input box is empty, the context window is full (section 10.3), this window is read-only, or the checked-out node is a sub-agent branch. `Enter` sends only through this button, so it does nothing while the button is disabled. |
-| **Compress…** | Starts a new context window at any fill level (section 10.4). A click asks two questions: **Simple** (a pointer handoff, no extra request) or **Agentic** (a compression turn), then which setup the new window uses. The button is disabled in a read-only window and on a sub-agent branch, and it hides while **Stop** shows. The tooltip is `Move this conversation into a new context window: a pointer (Simple) or a compression turn (Agentic). The harness asks which, and which setup the new window uses.` |
-| **New setup…** | Shown only when the setup the composer shows differs from the frozen one (section 3.4). A click continues this conversation under the live setup and forks the tree, so the old tree keeps its own bytes. The tooltip is `Continue this conversation under the setup the composer shows now. The tree forks, so the old one keeps its own bytes.` |
+| **Compress** | Starts a new context window at any fill level (section 10.4). It does not show on the first card of a tree, because there is nothing above it to hand over. A click asks two questions: **Simple** (a pointer handoff, no extra request) or **Agentic** (a compression turn), then which setup the new window uses. The button is disabled in a read-only window and on a sub-agent branch, and it hides while **Stop** shows. The tooltip is `Move this conversation into a new context window: a pointer (Simple) or a compression turn (Agentic). The harness asks which, and which setup the new window uses.` |
+| **New setup** | Shown only when the setup the composer shows differs from the frozen one (section 3.4). A click continues this conversation under the live setup and forks the tree, so the old tree keeps its own bytes. The tooltip is `Continue this conversation under the setup the composer shows now. The tree forks, so the old one keeps its own bytes.` |
 | **Stop** | Ends the turn at the checked-out node. It kills the background terminals and the sub-agents of that node too. Nothing continues. The tooltip is `Stop this turn` or `Stop this node: kill its background tasks and sub-agents (nothing is sent to the model)`. |
 | Prompt snippets | Opens a menu of pre-written instructions. A click inserts the text into the input box. Nothing is sent. Spinney ships `Plan` and `Implement Parallel`. Add your own rows with `spinney.promptSections` (section 11). |
 | **Attach image** | Opens a file picker. You can also paste an image into the input box. See section 9. |
@@ -55,7 +55,7 @@ The tree holds one card per turn. A new turn goes below the turn it answers. The
 | Gear button | Opens the model-cards page. The tooltip is `Manage model cards…`. |
 | Thinking-effort dropdown | Picks the thinking level. The list is the list of the active card. |
 
-**Send** and **Stop** are one button with two meanings. The button shows **Stop** while the checked-out node runs a turn, or while that node still owns unfinished work. **Stop** replaces every other button, so **Send**, **Compress…** and **New setup…** go away while it shows.
+**Send** and **Stop** are one button with two meanings. The button shows **Stop** while the checked-out node runs a turn, or while that node still owns unfinished work. **Stop** replaces every other button, so **Send**, **Compress** and **New setup** go away while it shows.
 
 A node owns unfinished work while a background terminal or a sub-agent batch runs, or while a completion notice waits for it. You cannot send into such a node. There is no queue. Press **Stop** first, or send from another node.
 
@@ -140,11 +140,11 @@ The value holds the card, the thinking level, and the reply language. Example: `
 
 Spinney does not ask this question on a plain send. A plain send always uses the frozen setup. The two identity lines say so, and the frozen setup keeps the prompt cache of the provider.
 
-Two entries sit beside Send, and each answers one question. **Compress…** moves this conversation into a new context window at any fill level: it asks which handoff (section 10.4) and then which setup the new window uses. **New setup…** shows only when the setup the composer shows differs from the frozen one: it continues the conversation under the live setup, and forks the tree so the old one keeps its own bytes.
+Two entries sit beside Send, and each answers one question. **Compress** moves this conversation into a new context window at any fill level: it asks which handoff (section 10.4) and then which setup the new window uses. **New setup** shows only when the setup the composer shows differs from the frozen one: it continues the conversation under the live setup, and forks the tree so the old one keeps its own bytes.
 
-A click on **New setup…** asks `Continue with the new workspace or model configuration?` The text names the size of the history in tokens. The answer is **Continue**. Spinney copies this tree into a new tree, and the copy starts under the latest configuration. The old tree keeps its own configuration and its own bytes.
+A click on **New setup** asks `Continue with the new workspace or model configuration?` The text names the size of the history in tokens. The answer is **Continue**. Spinney copies this tree into a new tree, and the copy starts under the latest configuration. The old tree keeps its own configuration and its own bytes.
 
-A click on **Compress…** asks `Start a new context window?` with **Simple** and **Agentic** (section 10.4). When the two setups differ, a second question follows: `Which setup does the new window continue on?` with **Keep this window’s setup** and **Use the latest setup**.nd the new tree starts with the latest setup. The old tree keeps its own setup and its prompt cache.
+A click on **Compress** asks `Start a new context window?` with **Simple** and **Agentic** (section 10.4). When the two setups differ, a second question follows: `Which setup does the new window continue on?` with **Keep this window’s setup** and **Use the latest setup**.nd the new tree starts with the latest setup. The old tree keeps its own setup and its prompt cache.
 Press `Escape`, or click the close button, to dismiss the question. A dismissed question sends nothing, kills nothing, and Spinney keeps your text in the input box. Spinney checks the state again before it acts, so a change during the question sends nothing and shows a message.
 
 
@@ -493,11 +493,11 @@ A button carries the work. You do not type the instruction yourself. A **Stop** 
 
 ### 10.3 A full context window
 
-A context window is full when the provider answers with a context-length error. A request also carries its images as uploaded bytes, and the provider caps these bytes at 200 MB for one request. A refusal for that reason is also a full window. For example, the message reads `Total image size exceeds the limit: max 200 MB per request, got 203 MB`. Spinney does not guess a limit from the `ctx` readout. The card shows a **⚠️** message. The composer shows **Compress…**, and **Send** is disabled.
+A context window is full when the provider answers with a context-length error. A request also carries its images as uploaded bytes, and the provider caps these bytes at 200 MB for one request. A refusal for that reason is also a full window. For example, the message reads `Total image size exceeds the limit: max 200 MB per request, got 203 MB`. Spinney does not guess a limit from the `ctx` readout. The card shows a **⚠️** message. The composer shows **Compress**, and **Send** is disabled.
 
 Spinney offers this button before a failure too. The button shows from about 90% of the `contextWindow` of the card. Nothing failed there, so the click is your own decision. A plain send at that point is still a normal send. A right-click on **Send** opens the same question at any time, at any fill level.
 
-1. Click **Compress…**. The composer sends your message into the new window. If the node still owns running work, a modal asks first. It names the work that will stop.
+1. Click **Compress**. The composer sends your message into the new window. If the node still owns running work, a modal asks first. It names the work that will stop.
 2. Answer the question `Start a new context window?` with `Simple` or `Agentic`. Section 10.4 describes both answers. A dismissed question sends nothing, and the input box keeps your text.
 3. Spinney opens a new card below that node. The edge is dashed, the title is `Context window {0}`, and the badge is `CTX`. A window that a compression node produced has a dotted edge.
 

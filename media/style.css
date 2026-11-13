@@ -201,6 +201,21 @@ body.vscode-high-contrast-light {
   display: flex;
   align-items: center;
   gap: 8px;
+  /* The action row wraps onto a line of its own (`#actions` is `flex: 0 0 100%`): three
+     buttons on the same line as four dropdowns and two icons left the model select too narrow
+     to read, and the row is the natural place for the primary actions to end. */
+  flex-wrap: wrap;
+}
+
+/* The composer's buttons — Stop, New setup…, Compress…, Send — on their own line under the
+   controls, right-aligned. It costs one row of height and gives the model dropdown its width
+   back. */
+#actions {
+  flex: 0 0 100%;
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 6px;
 }
 
 #composer-controls #attach-btn,

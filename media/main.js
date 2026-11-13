@@ -8191,16 +8191,22 @@ function addBackgroundNotice(item) {
 
   /**
    * The composer's **new-window** entry (`#compress-btn`, immediately left of Send). Always on
-   * screen while the composer is, because "move this conversation into a new context window" is
-   * a normal thing to want at any fill level — the two answers are the compression node
-   * (`Agentic`) and the free pointer (`Simple`), and the harness asks which. It is hidden while
-   * Stop shows (one owner of the row) and disabled where no window can start, with the reason in
-   * its tooltip; the host re-checks every precondition and answers a stale click with a notice.
+   * screen while the composer is — unless the checked-out node is the **first** one of its tree,
+   * where a window would have nothing to hand over — because "move this conversation into a new
+   * context window" is a normal thing to want at any fill level. The two answers are the
+   * compression node (`Agentic`) and the free pointer (`Simple`), and the harness asks which. It
+   * is hidden while Stop shows (one owner of the row) and disabled where no window can start,
+   * with the reason in its tooltip; the host re-checks every precondition and answers a stale
+   * click with a notice.
    */
   function updateCompressButton() {
     const reason = newContextBlockedReason();
-    const show = !focusIsRunning() && !focusIsLocked();
-    compressBtn.textContent = tr('Compress…');
+    const node = treeActiveId ? treeNodes[treeActiveId] : null;
+    // A first card has no conversation to hand over: the window would be one turn long. The
+    // right-click on Send is still there for anyone who really means it.
+    const hasSomethingToCarry = !!node && !!node.parentId;
+    const show = hasSomethingToCarry && !focusIsRunning() && !focusIsLocked();
+    compressBtn.textContent = tr('Compress');
     compressBtn.classList.toggle('hidden', !show);
     compressBtn.disabled = !!reason;
     compressBtn.title = reason
@@ -8219,7 +8225,7 @@ function addBackgroundNotice(item) {
   function updateNewContextButton() {
     const drift = !!(SETUP && SETUP.drift);
     const reason = newContextBlockedReason();
-    newContextBtn.textContent = tr('New setup…');
+    newContextBtn.textContent = tr('New setup');
     newContextBtn.classList.toggle('hidden', !drift || focusIsRunning() || focusIsLocked());
     newContextBtn.disabled = !!reason;
     newContextBtn.title = reason

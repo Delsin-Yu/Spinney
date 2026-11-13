@@ -1132,7 +1132,7 @@ if (contextLabel !== 'ctx 50%') {
         if (!/Compress/.test(String(elementById('compress-btn').textContent || ''))) {
           problems.push(
             `choosing a snippet leaves the compress button reading ${JSON.stringify(elementById('compress-btn').textContent)}, ` +
-              'expected "Compress…"',
+              'expected "Compress"',
           );
         }
       }
@@ -1185,7 +1185,7 @@ if (contextLabel !== 'ctx 50%') {
     if (!/Compress/.test(String(elementById('compress-btn').textContent || ''))) {
       problems.push(
         `after \`composerClear\` the compress button reads ${JSON.stringify(elementById('compress-btn').textContent)}, ` +
-          'expected "Compress…" (its label does not follow the box)',
+          'expected "Compress" (its label does not follow the box)',
       );
     }
   }
@@ -1347,10 +1347,14 @@ if (contextLabel !== 'ctx 50%') {
 //       Enter clears it, so a refused send cannot eat the user's text.
 {
   const R = 'setup-root';
-  const treeNode = { id: R, parentId: null, children: [], title: R, status: 'done', createdAt: 0, preview: R, usage: null, size: null };
+  // One turn above the checked-out one: the compress button needs a conversation to hand over
+  // (a first card hides it), so the fixture is a real two-turn tree.
+  const FIRST = 'setup-first';
+  const firstNode = { id: FIRST, parentId: null, children: [R], title: FIRST, status: 'done', createdAt: 0, preview: FIRST, usage: null, size: null };
+  const treeNode = { id: R, parentId: FIRST, children: [], title: R, status: 'done', createdAt: 0, preview: R, usage: null, size: null };
   dispatch({ type: 'reset' });
-  dispatch({ type: 'tree', viewId: R, activeId: null, rootId: R, rootIds: [R], nodes: [treeNode] });
-  dispatch({ type: 'path', ids: [R], nodes: [{ id: R, status: 'done', items: [] }] });
+  dispatch({ type: 'tree', viewId: R, activeId: null, rootId: FIRST, rootIds: [FIRST], nodes: [firstNode, treeNode] });
+  dispatch({ type: 'path', ids: [FIRST, R], nodes: [{ id: FIRST, status: 'done', items: [] }, { id: R, status: 'done', items: [] }] });
 
   const base = { ...TURN_MESSAGES.find((m) => m.type === 'config'), model: 'card-text', thinkingEffort: 'medium' };
   const input = elementById('input');
@@ -1514,7 +1518,7 @@ if (contextLabel !== 'ctx 50%') {
   }
   if (!/New setup/.test(String(newContextBtn.textContent || ''))) {
     problems.push(
-      `the setup entry reads ${JSON.stringify(newContextBtn.textContent)}, expected "New setup…"`,
+      `the setup entry reads ${JSON.stringify(newContextBtn.textContent)}, expected "New setup"`,
     );
   }
   if (!newContextBtn.title) {
@@ -1575,6 +1579,7 @@ if (contextLabel !== 'ctx 50%') {
 {
   const R = 'epoch-root';
   const AGENT = 'epoch-agent';
+  const ROOT = 'epoch-first';
   const node = (id, parentId, children, extra) =>
     Object.assign(
       { id, parentId, children, title: id, status: 'done', createdAt: 0, preview: id, usage: null, size: null },
@@ -1596,9 +1601,13 @@ if (contextLabel !== 'ctx 50%') {
       type: 'tree',
       viewId: focus,
       activeId: null,
-      rootId: R,
-      rootIds: [R],
-      nodes: nodes || [node(R, null, [AGENT], extra), node(AGENT, R, [], { kind: 'agent', status: 'done' })],
+      rootId: ROOT,
+      rootIds: [ROOT],
+      // A real conversation has a turn above the checked-out one, which is what the compress
+      // button needs (a first card has nothing to hand over).
+      nodes:
+        nodes ||
+        [node(ROOT, null, [R]), node(R, ROOT, [AGENT], extra), node(AGENT, R, [], { kind: 'agent', status: 'done' })],
     });
     dispatch({ type: 'path', ids: [focus], nodes: [{ id: focus, status: 'done', items: [] }] });
   };
@@ -1618,7 +1627,7 @@ if (contextLabel !== 'ctx 50%') {
     problems.push('the compress button is disabled with no drift and a window that has room left');
   }
   if (!/Compress/.test(String(compressBtn.textContent || ''))) {
-    problems.push(`the compress button reads ${JSON.stringify(compressBtn.textContent)}, expected "Compress…"`);
+    problems.push(`the compress button reads ${JSON.stringify(compressBtn.textContent)}, expected "Compress"`);
   }
 
   // 2. The context is `near`: the same button, still enabled, and no second entry appears —
@@ -1703,6 +1712,15 @@ if (contextLabel !== 'ctx 50%') {
   }
   if (!sendBtn.disabled) {
     problems.push('a sub-agent branch leaves Send enabled');
+  }
+
+  // 6. A **first** card has no conversation above it to hand over: the window entry is not
+  //    offered there. (The right-click on Send still is — an explicit escape hatch the host
+  //    honours.)
+  tree(ROOT, {}, [node(ROOT, null, [R]), node(R, ROOT, [])]);
+  dispatch({ ...base, setup: { node: null, live: null, drift: false, reasons: [] } });
+  if (!hidden(compressBtn)) {
+    problems.push('a first card offers the compress button (there is no conversation to hand over)');
   }
 
   // 5. The removed affordances: no card carries a rollover element any more, and the
