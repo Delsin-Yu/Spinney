@@ -146,6 +146,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Every tag a card wears is a word, and it is translated.** The head badges were Latin
+  initials (`SUB`, `CTX`, `CMP`, `global`), and the status pill wrote the raw protocol value, so
+  a Chinese window still read `Running` and `Done` on every card. The badges now say
+  `Sub-agent` / `Research sub-agent` (the read-only worker is a different worker, so it is a
+  different word), `New context`, `Context compression` and `Global job`, each with a translated
+  tooltip — and the two places that described a detached job now share one sentence instead of
+  two slightly different ones. The pill goes through one `statusLabel()` table and keeps
+  `data-status`, the value the CSS colours itself from, so nothing about the protocol moved.
+  `Delivered` and `pending delivery` are one vocabulary now (`已交付` / `等待交付`), and the
+  pending chip finally has a rule of its own: a darker green than the `Delivered` pill, because
+  the work is done but the agent has not seen the result yet. A sub-agent card restored from a
+  stored tree wears its badge too, which it did not before: the badge is derived from the node
+  (`kind` + `agentWrite`), not from the event that started it.
 - **A compression node's answer has a box of its own.** That answer is the handoff, and it can
   run to tens of thousands of characters; on that card (and only that card) the answer scrolls
   inside a 320 px box, so the log still shows the steps above it and the next turn below. A
@@ -164,10 +177,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   line is dropped from the box (the label is that line, translated) but kept in the stored
   bytes, because `detectPriorHandoffSummary` reads it to know a window already starts from a
   handoff. The card's text is never cut, and a second click closes it.
-- **The compression node is a card of its own.** It wears `CMP` instead of `CTX`, has no
-  composer, and carries its own ⏹ Stop while it runs (there is no input dock to host the
-  composer's). Once it has produced its window it is sealed: no ▶ Continue, and the host
-  refuses one with a sentence.
+- **The compression node is a card of its own.** It wears the `Context compression` badge
+  instead of `New context`, has no composer, and carries its own ⏹ Stop while it runs (there is
+  no input dock to host the composer's). Once it has produced its window it is sealed: no
+  ▶ Continue, and the host refuses one with a sentence.
 - **The window a compression produced has no delete button of its own.** It is removed
   together with its compression node, and the delete confirmation says so.
 - **`run_type` is `foreground`, `background` or `global`** — the values name the lifecycle a
@@ -177,7 +190,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   long is moved to the background by itself and nothing is lost.
 - **The window-global dock lists `global` jobs only.** A `background` job is a node job and
   lives on the card beside its node; the dock is where a session-wide, never-notifying job
-  can be seen and killed. The `shared` badge is now `global`, on the card and in the dock.
+  can be seen and killed. The `shared` badge now says `Global job`, on the card and in the dock.
 - **Tool row verbs read as one phrase per kind of action**, and a tool's arguments are shown
   as one line of plain words instead of JSON. The three file-writing tools share one verb
   (`Edited` / `编辑文件`): to the reader they are one thing — the file was edited.

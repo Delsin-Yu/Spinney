@@ -5032,6 +5032,28 @@ function addBackgroundNotice(item) {
     return kill;
   }
 
+  /**
+   * One **turn status** as a card's pill shows it. `TurnStatus` is a `src/chat/tree.ts`
+   * value (`pending` / `running` / `done` / `interrupted` / `error`), so the pill keeps it
+   * in `data-status` — the CSS colours itself from that attribute — and only the *text*
+   * goes through `tr()`. Writing the raw value was the one place a Chinese window still
+   * read English on every card (`docs/agents/invariants/i18n.md`, "Protocol values that
+   * are also UI strings"). The table asks `tr()` at load, so `check:l10n` sees every key.
+   */
+  const STATUS_LABELS = {
+    pending: tr('pending'),
+    running: tr('running'),
+    done: tr('done'),
+    interrupted: tr('interrupted'),
+    error: tr('error'),
+  };
+
+  /** The pill's text for a turn status; an unknown value keeps its own word. */
+  function statusLabel(status) {
+    const label = STATUS_LABELS[status];
+    return label ? label : String(status || '');
+  }
+
   function statusTextFor(task, meta) {
     if (task && task.status === 'running') return tr('running');
     if (task && task.pendingDelivery) return tr('pending delivery');
@@ -5040,7 +5062,7 @@ function addBackgroundNotice(item) {
     // No live snapshot: the job is over (its card is a record now).
     if (meta && meta.bgKilled) return tr('killed');
     if (meta && meta.bgExitCode != null) return tr('exit {0}', meta.bgExitCode);
-    return meta && meta.status ? meta.status : tr('finished');
+    return meta && meta.status ? statusLabel(meta.status) : tr('finished');
   }
 
   /** Output tail: the live snapshot when the job runs, else the stored terminal one. */
@@ -5254,11 +5276,10 @@ function addBackgroundNotice(item) {
     const head = el('div', 'term-dock-row-head');
     head.appendChild(el('span', 'term-dock-session', job.sessionTitle || ''));
     if (job.detached === true) {
-      // The same untranslated `global` token the card wears, with the same sentence: it
+      // The same translated `Global job` badge the card wears, with the same sentence: it
       // says the job's lifecycle is bound to this window, not to a node.
-      const badge = el('span', 'node-shared-badge', 'global');
-      badge.title =
-        'This job is bound to this VS Code window: it does not block the composer and will not notify the agent; read its result with check_command.';
+      const badge = el('span', 'node-shared-badge', tr('Global job'));
+      badge.title = globalJobTitle();
       head.appendChild(badge);
     }
     if (job.delivered === true) {
@@ -5415,38 +5436,31 @@ function addBackgroundNotice(item) {
   }
 
   /**
-   * The `shared` badge: this job is **detached** — fire-and-forget. The card is still
-   * owned by the node that started it and keeps updating (it is the only place the job
-   * is visible at all), but the job locks no node and never notifies: the composer never
-   * turns into Stop for it, and no completion notice will ever reach the agent, which
-   * reads the outcome with `check_command` or `wait_for_command` if it wants it.
+   * The `Global job` badge: this job is **detached** — fire-and-forget, bound to this
+   * **VS Code window** rather than to the node that started it. The card is still owned by
+   * the node that started it and keeps updating (it is the only place the job is visible
+   * at all), but the job locks no node (no Stop in the composer) and never notifies: no
+   * completion notice will ever reach the agent, which reads the outcome with
+   * `check_command` or `wait_for_command` if it wants it.
    *
-   * A compact 9px dock token like `CTX` / `SUB` / `BG`, placed the way they are (just
-   * before the status chip) and created/removed lazily, so a repaint can never stack
-   * two of them. Both the token and the tooltip are English literals on purpose: a new
-   * `tr()` key would leave every shipped catalog without an entry and fail
-   * `npm run check:l10n`, and the sentence names a model-facing tool, not a UI concept.
+   * Both the word and the sentence are translated — a badge is a word a reader has to act
+   * on, not a Latin initial (`docs/agents/invariants/i18n.md`). Placed just before the
+   * status chip and created/removed lazily, so a repaint can never stack two of them. The
+   * badge is a property of the *job*, so it is synced wherever a job card is rendered —
+   * the snapshot, a `tree`, a `path` — and not only while the job is in the snapshot.
+   * (It used to say `global`, which described nothing the reader could place.)
    *
    * `meta.bgDetached` is the host's judgement (`treeMessage` reads it off the live
    * task), never re-derived here — and it is absent for a card restored after a
    * restart, because that card has no live job to be detached from.
-   */
-  /**
-   * The `global` badge marks a job whose lifecycle is bound to this **VS Code window**
-   * rather than to the node that started it: it blocks no composer, notifies nobody, and
-   * is read with `check_command`. (It used to say `shared`, which described how it felt
-   * rather than what it is.) The badge is a property of the job, so it is synced wherever
-   * a job card is rendered — the snapshot, a `tree`, a `path` — and not only while the job
-   * is in the snapshot.
    */
   function syncSharedBadge(card, meta) {
     if (!card) return;
     const wanted = !!(meta && meta.kind === 'bg' && meta.bgDetached === true);
     let badge = byClass(card, 'node-shared-badge');
     if (wanted && !badge) {
-      badge = el('span', 'node-shared-badge', 'global');
-      badge.title =
-        'This job is bound to this VS Code window: it does not block the composer and will not notify the agent; read its result with check_command or wait_for_command.';
+      badge = el('span', 'node-shared-badge', tr('Global job'));
+      badge.title = globalJobTitle();
       const head = card.querySelector('.node-head');
       const status = head.querySelector('.node-status');
       if (status) head.insertBefore(badge, status); else head.appendChild(badge);
@@ -5456,14 +5470,54 @@ function addBackgroundNotice(item) {
   }
 
   /**
-   * The context badge on a card head: `CTX` for a node that *starts* a new context window,
-   * `CMP` for a **compression node** (which starts a window of its own too, but is a turn
-   * whose whole job is the handoff) — and the dashed edge above it is the rest of the story
-   * (`docs/agents/invariants/context-rollover.md`,
-   * `docs/agents/invariants/compress-node.md` §5). A compact dock token, deliberately
-   * untranslated like `SUB` / `BG`; the explanation is the tooltip, and that one *is*
-   * translated. Created lazily, like every other head badge, so a repaint never accumulates
-   * them, and placed the way `SUB` / `Delivered` are: just before the status chip.
+   * The one sentence the `Global job` badge wears, whichever view renders it: the card
+   * head and the window dock used to say it two slightly different ways, and one of them
+   * forgot `wait_for_command`.
+   */
+  function globalJobTitle() {
+    return tr('This job is bound to this VS Code window: it does not block the composer and will not notify the agent; read its result with check_command or wait_for_command.');
+  }
+
+  /**
+   * The sub-agent badge: `Sub-agent` for a worker that may write, `Research sub-agent`
+   * for the read-only one. Both are translated — a 9px pill of Latin initials said
+   * nothing to a reader of Chinese — and the two kinds are deliberately different words,
+   * because "it can change my files" is the one fact a reader wants off this head.
+   *
+   * The badge is derived from the node (`kind: 'agent'` + `agentWrite`), not from a live
+   * event, so a card restored from a stored tree wears it too; a card created for a run
+   * that just started carries the flag in the event, and `syncAgentBadge` is the one
+   * place either shape lands.
+   */
+  function syncAgentBadge(card, meta) {
+    if (!card || !meta || meta.kind !== 'agent') return;
+    const head = card.querySelector('.node-head');
+    if (!head) return;
+    const write = meta.agentWrite === true;
+    const label = write ? tr('Sub-agent') : tr('Research sub-agent');
+    let badge = byClass(card, 'node-agent-badge');
+    if (!badge) {
+      badge = el('span', 'node-agent-badge', label);
+      const status = head.querySelector('.node-status');
+      if (status) head.insertBefore(badge, status); else head.appendChild(badge);
+    } else if (badge.textContent !== label) {
+      badge.textContent = label;
+    }
+    badge.title = write
+      ? tr('Sub-agent: it runs its own conversation in parallel and can change files')
+      : tr('Research sub-agent: it runs its own conversation in parallel and only reads');
+  }
+
+  /**
+   * The context badge on a card head: `New context` for a node that *starts* a context
+   * window, `Context compression` for a **compression node** (which starts a window of its
+   * own too, but is a turn whose whole job is the handoff) — and the dashed edge above it
+   * is the rest of the story (`docs/agents/invariants/context-rollover.md`,
+   * `docs/agents/invariants/compress-node.md` §5). Both words are translated: neither the
+   * rollover nor the compression has a shorthand a Chinese reader already knows, and
+   * `CTX` / `CMP` were two more Latin initials on a card that is otherwise in Chinese.
+   * Created lazily, like every other head badge, so a repaint never accumulates them, and
+   * placed the way `SUB` / `Delivered` are: just before the status chip.
    */
   function syncCtxBadge(card, meta) {
     if (!card) return;
@@ -5471,23 +5525,23 @@ function addBackgroundNotice(item) {
     // stored marker that does not name this node opens no window at all, so the card
     // must not claim one either.
     const windowStart = !!(meta && meta.contextBaseId && meta.contextBaseId === meta.id);
-    const token = meta && meta.role === 'compress' ? 'CMP' : 'CTX';
+    const compress = !!meta && meta.role === 'compress';
+    const label = compress ? tr('Context compression') : tr('New context');
     let badge = byClass(card, 'node-ctx-badge');
     if (windowStart && !badge) {
-      badge = el('span', 'node-ctx-badge', token);
-      badge.title =
-        token === 'CMP'
-          ? tr('This node compresses the window above it; the window below it starts from the handoff it writes')
-          : tr('This node starts a new context window; the branch above it is not sent to the model any more');
+      badge = el('span', 'node-ctx-badge', label);
+      badge.title = compress
+        ? tr('This node compresses the window above it; the window below it starts from the handoff it writes')
+        : tr('This node starts a new context window; the branch above it is not sent to the model any more');
       const head = card.querySelector('.node-head');
       const status = head.querySelector('.node-status');
       if (status) head.insertBefore(badge, status); else head.appendChild(badge);
     } else if (!windowStart && badge) {
       badge.remove();
-    } else if (badge && badge.textContent !== token) {
-      // A card is created once, but the token is derived from the node's role: keep them in
+    } else if (badge && badge.textContent !== label) {
+      // A card is created once, but the label is derived from the node's role: keep them in
       // step in case the badge arrived before the role did.
-      badge.textContent = token;
+      badge.textContent = label;
     }
   }
 
@@ -5513,7 +5567,7 @@ function addBackgroundNotice(item) {
     }
     const head = el('div', 'node-head');
     const title = el('span', 'node-title', meta.title || tr('(no title)'));
-    const status = el('span', 'node-status', meta.status || '');
+    const status = el('span', 'node-status', statusLabel(meta.status));
     status.dataset.role = 'status';
     head.appendChild(title);
     head.appendChild(status);
@@ -5544,9 +5598,12 @@ function addBackgroundNotice(item) {
       head.appendChild(del);
     }
     card.appendChild(head);
-    // A window-starting node carries the `CTX` marker from the moment its card
-    // exists (it is created once, here, and never rebuilt).
+    // A window-starting node carries its context marker from the moment its card
+    // exists (it is created once, here, and never rebuilt), and so does a sub-agent
+    // card its `Sub-agent` / `Research sub-agent` badge — a card restored from a
+    // stored tree must wear the same head a live one does.
     syncCtxBadge(card, meta);
+    syncAgentBadge(card, meta);
 
     // The pinned user ask (sticky at the top of an expanded card).
     const ask = el('div', 'node-ask');
@@ -6319,7 +6376,7 @@ function addBackgroundNotice(item) {
     if (card) {
       const statusEl = card.querySelector('.node-status');
       if (statusEl && msg.status) {
-        statusEl.textContent = msg.status;
+        statusEl.textContent = statusLabel(msg.status);
         statusEl.dataset.status = msg.status;
       }
     }
@@ -6624,11 +6681,7 @@ function addBackgroundNotice(item) {
     showWorkLog(card);
     setCardScrollLock(card, true);
     const head = card.querySelector('.node-head');
-    let badge = card.querySelector('.node-agent-badge');
-    if (!badge) {
-      badge = el('span', 'node-agent-badge', 'SUB');
-      head.insertBefore(badge, head.querySelector('.node-status'));
-    }
+    syncAgentBadge(card, { kind: 'agent', agentWrite: msg.write });
     let info = card.querySelector('.node-agent-info');
     if (!info) {
       info = el('span', 'node-agent-info', '');
@@ -6673,8 +6726,11 @@ function addBackgroundNotice(item) {
       routeTo(msg.id, () => finalizeStreamingAnswer());
       const statusEl = card.querySelector('.node-status');
       if (statusEl) {
-        statusEl.textContent = msg.status === 'done' ? tr('done') : msg.status === 'error' ? tr('error') : tr('interrupted');
-        statusEl.dataset.status = msg.status === 'done' ? 'done' : msg.status === 'error' ? 'error' : 'interrupted';
+        // A run that was neither clean nor an error (`killed`) reads as interrupted,
+        // exactly as it did before the label went through `statusLabel`.
+        const shown = msg.status === 'done' || msg.status === 'error' ? msg.status : 'interrupted';
+        statusEl.textContent = statusLabel(shown);
+        statusEl.dataset.status = shown;
       }
       const kill = card.querySelector('.node-kill');
       if (kill) kill.remove();
@@ -7049,16 +7105,17 @@ function addBackgroundNotice(item) {
       const n = treeNodes[id];
       if (card) {
         const statusEl = card.querySelector('.node-status');
-        if (statusEl) statusEl.textContent = n.status || '';
+        if (statusEl) statusEl.textContent = statusLabel(n.status);
         syncContinueButton(card, n);
         // A repaint never leaves an editor (or a stale textarea) behind, and the
         // pencil's own gates — running / locked — come from this same description.
         cancelAskEdit(card);
         syncAskEdit(card);
         // A card `renderPath` created from a node the `tree` had not described yet
-        // still has to pick the `CTX` marker up here (never in a streaming patch:
-        // the head exists once).
+        // still has to pick its context marker and its sub-agent badge up here (never
+        // in a streaming patch: the head exists once).
         syncCtxBadge(card, n);
+        syncAgentBadge(card, n);
       }
     }
     for (const id in nodeEls) {
@@ -7096,10 +7153,11 @@ function addBackgroundNotice(item) {
         collapsedCard(id, meta);
       }
       applyDeliveredBadge(nodeEls[id], meta);
-      // Same reason as in `renderTree`: the `CTX` marker belongs to the card's
-      // whole life, not to one repaint, and this pass may have created the card
-      // before the node's own `tree` entry described it.
+      // Same reason as in `renderTree`: the context marker and the sub-agent badge
+      // belong to the card's whole life, not to one repaint, and this pass may have
+      // created the card before the node's own `tree` entry described it.
       syncCtxBadge(nodeEls[id], meta);
+      syncAgentBadge(nodeEls[id], meta);
       // A job card has no conversation: its body mirrors the live job.
       if (meta.kind === 'bg') {
         renderBgBody(nodeEls[id], meta);
@@ -7210,9 +7268,11 @@ function addBackgroundNotice(item) {
         collapsedCard(id, meta);
       }
       applyDeliveredBadge(nodeEls[id], meta);
-      // Same story as in `renderTree`: the `CTX` marker belongs to the card, not to
-      // one repaint — and this pass can be the one that creates the card.
+      // Same story as in `renderTree`: the context marker and the sub-agent badge
+      // belong to the card, not to one repaint — and this pass can be the one that
+      // creates the card.
       syncCtxBadge(nodeEls[id], meta);
+      syncAgentBadge(nodeEls[id], meta);
       syncAskEdit(nodeEls[id]);
       // A job card has no conversation: its body mirrors the live job.
       if (meta.kind === 'bg') {

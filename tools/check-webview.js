@@ -3746,11 +3746,11 @@ if (contextLabel !== 'ctx 50%') {
   // descendant of a window-starting node is an ordinary turn again.
   const winCard = cards.get(WIN);
   const winBadge = winCard ? findByClass(winCard, 'node-ctx-badge') : null;
-  if (!winBadge || winBadge.textContent !== 'CTX') {
-    problems.push('a node carrying contextBaseId shows no CTX badge on its card');
+  if (!winBadge || winBadge.textContent !== 'New context') {
+    problems.push('a node carrying contextBaseId shows no New context badge on its card');
   }
   if (cards.get(WIN2) && findByClass(cards.get(WIN2), 'node-ctx-badge')) {
-    problems.push('a CTX badge appeared on a descendant of the window-starting node (only the node that starts a window is badged)');
+    problems.push('a context badge appeared on a descendant of the window-starting node (only the node that starts a window is badged)');
   }
   // `drawEdges()` writes the SVG as one markup string (`treeEdges.innerHTML = …`),
   // so the paths are read back out of it instead of the stub holding elements. A
@@ -3847,11 +3847,11 @@ if (contextLabel !== 'ctx 50%') {
   const stopOf = (id) => findByClass(cards.get(id), 'node-stop');
   const delOf = (id) => findByClass(cards.get(id), 'node-del');
 
-  if (!badge(C) || badge(C).textContent !== 'CMP') {
-    problems.push('a compression node does not wear the CMP badge');
+  if (!badge(C) || badge(C).textContent !== 'Context compression') {
+    problems.push('a compression node does not wear the Context compression badge');
   }
-  if (!badge(RPROD) || badge(RPROD).textContent !== 'CTX') {
-    problems.push('the window a compression produced is not marked CTX');
+  if (!badge(RPROD) || badge(RPROD).textContent !== 'New context') {
+    problems.push('the window a compression produced is not marked New context');
   }
   if (!stopOf(C)) {
     problems.push('a running compression node shows no Stop of its own (it has no composer to host one)');
@@ -3982,7 +3982,7 @@ if (contextLabel !== 'ctx 50%') {
     }
     input.value = '';
   }
-  notes.push('compression: CMP badge, no 🗑 on the produced window, its own Stop, no composer, and the Send right-click');
+  notes.push('compression: Context compression badge, no 🗑 on the produced window, its own Stop, no composer, and the Send right-click');
 }
 
 // --- A node-scoped notice updates ONE block, and belongs to its node -----------

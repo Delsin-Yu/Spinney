@@ -1970,6 +1970,18 @@ button.icon-btn {
   color: var(--text-dim);
 }
 
+/* A finished job whose completion signal has not reached the agent yet (`等待交付` /
+   `pending delivery`): the work is done, so the word is green, but the green sits on a
+   darker chip than the `Delivered` pill — the reader still has to know the result is not
+   in the agent's hands. The `pending` class was in the DOM with no rule behind it, which
+   is why this state used to read like every other plain status word. */
+.bg-status.pending {
+  color: var(--success);
+  background: #1d3a2a;
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
 .bg-card-cmd {
   margin-top: 4px;
   color: var(--text-dim);
@@ -2036,18 +2048,21 @@ button.icon-btn {
   white-space: nowrap;
 }
 
-/* `Delivered` badge (D1): this sidecar's completion signal already reached the
-   agent — a background notice was injected, or a sub-agent's result came back as a
-   tool result. Both sidecar kinds show it. */
+/* `Delivered` badge (D1): this sidecar's completion signal already reached the agent — a
+   background notice was injected, or a sub-agent's result came back as a tool result.
+   Both sidecar kinds show it, and it wears the **`done` status pill's own style**
+   (`.node-status[data-status="done"]`: dark green on the card surface, not a filled
+   badge): the completion is one fact, so it reads the same colour whichever chip says it,
+   and a bright `--success` fill was shouting across the head. */
 .node-delivered-badge {
-  font-size: 9px;
-  font-weight: 600;
-  letter-spacing: 0.03em;
-  padding: 1px 5px;
-  border-radius: 4px;
-  background: var(--success);
-  color: var(--bg1);
+  font-size: 10px;
+  font-weight: 400;
+  padding: 1px 6px;
+  border-radius: 8px;
+  background: #1d3a2a;
+  color: var(--success);
   flex: 0 0 auto;
+  white-space: nowrap;
 }
 
 .bgnotify-badge.bg {
@@ -3281,30 +3296,34 @@ button.icon-btn {
   background: #2d2d30; /* fallback for engines without color-mix */
   background: color-mix(in srgb, var(--text) 20%, var(--bg));
 }
+/* The sub-agent badge: `Sub-agent` / `Research sub-agent`, translated like the rest of the
+   head — a 9px `SUB` said nothing, and the read-only kind is a different worker, so it is a
+   different word. Filled, unlike `New context` / `Global job`, because a sub-agent card is
+   a live worker of its own. */
 .node-agent-badge {
   flex: 0 0 auto;
-  font-size: 9px;
-  font-weight: 700;
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
   padding: 1px 5px;
   border-radius: 6px;
   background: var(--accent);
   color: #fff;
-  letter-spacing: 0.03em;
 }
 
-/* `CTX` badge (P4): this node starts a new context window — the dashed edge above
-   it and this token are together the marker of a rollover. A compact dock token
-   like `SUB` / `BG`, hence the same 9px/Consolas box, and deliberately
-   untranslated (the tooltip carries the sentence); dim rather than filled, because
-   it labels a boundary instead of a state the user has to act on. */
+/* `Context compression` / `New context` badge (P4): this node starts a context window —
+   the dashed edge above it and this word are together the marker of a rollover. It labels
+   a boundary instead of a state the user has to act on, so it is dim rather than filled.
+   The word is translated like every other head badge (`docs/agents/invariants/i18n.md`):
+   a 9px `CTX` said nothing to a reader of Chinese. No monospace family — this is a word
+   now, not a token — and 10px, because CJK glyphs stop being legible below that. */
 .node-ctx-badge {
   flex: 0 0 auto;
   padding: 1px 5px;
   border-radius: 4px;
-  font-family: "Consolas", monospace;
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.03em;
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
   color: var(--text-dim);
   background: var(--bg3);
   border: 1px solid var(--border);
@@ -3327,20 +3346,19 @@ button.icon-btn {
   white-space: nowrap;
 }
 
-/* `shared` badge: this `kind:'bg'` job is **detached** — fire-and-forget. Its card is
+/* `Global job` badge: this `kind:'bg'` job is **detached** — fire-and-forget. Its card is
    still here and keeps updating, but the job locks no node (no Stop in the composer) and
-   it never sends a completion notice, so this token is the only thing on screen that says
-   so; the tooltip carries the sentence. Same compact 9px box as `CTX` / `Delivered`, dim
-   rather than filled because it labels how a job reports, not a state the user must act
-   on — and deliberately untranslated, exactly like `CTX` / `SUB` / `BG`. */
+   it never sends a completion notice, so this badge is the only thing on screen that says
+   so; the tooltip carries the sentence, and both are translated. Dim rather than filled
+   because it labels how a job reports, not a state the user must act on — and the same
+   box as `New context` / `Delivered`, in the same word shape. */
 .node-shared-badge {
   flex: 0 0 auto;
   padding: 1px 5px;
   border-radius: 4px;
-  font-family: "Consolas", monospace;
-  font-size: 9px;
-  font-weight: 700;
-  letter-spacing: 0.03em;
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
   color: var(--text-dim);
   background: var(--bg3);
   border: 1px dashed var(--border);

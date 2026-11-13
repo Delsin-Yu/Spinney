@@ -125,7 +125,7 @@ A `HARNESS` block holds the exact text that the harness sent to the model. The `
 
 A reply can hold a link to a file. The link opens that file in an editor tab. The tab selects the lines of the link and shows them in the centre of the editor. A link can name one line, or a range of lines. The path of the link is relative to the workspace root. A link with no line opens the file at the top. Example: `src/extension.ts:12-20` opens that file and selects lines 12 to 20.
 
-Codes that stay in English on purpose: `SUB`, `BG`, `CTX`, `HARNESS`, `Delivered`.
+The readouts `ctx`, `bal` and `tok/s` stay in English on purpose. A badge on a card is a translated word: `Sub-agent`, `Research sub-agent`, `New context`, `Context compression`, `Global job` or `Delivered`. The tooltip of a badge is also translated.
 
 ### 3.4 The frozen setup and the trees
 
@@ -316,7 +316,7 @@ Spinney never sends a level that the card does not declare. A level that the car
 
 ### 8.1 Sub-agents
 
-The agent starts a sub-agent with the `spawn_agents` tool. Each sub-agent runs its own conversation in parallel. Its card sits beside the parent card, with a `SUB` badge.
+The agent starts a sub-agent with the `spawn_agents` tool. Each sub-agent runs its own conversation in parallel. Its card sits beside the parent card, with a `Sub-agent` badge. A read-only sub-agent has a `Research sub-agent` badge.
 
 | Fact | Detail |
 |---|---|
@@ -325,7 +325,7 @@ The agent starts a sub-agent with the `spawn_agents` tool. Each sub-agent runs i
 | Second level | Each sub-agent starts at most `spinney.maxLevel2Subagents` children (default 2). |
 | Mode | A writable sub-agent can change files and run commands. A read-only sub-agent can only read. |
 | Card | The badge line shows the depth, the model, and `write` or `ro`. The **✕** button kills it. The card also shows how long the run takes. The number ticks while the sub-agent runs, and it stays on the card after the run ends. |
-| Result | When the sub-agent finishes, Spinney delivers a notice to the parent. The notice carries the duration of the run. The card shows `Delivered`. |
+| Result | When the sub-agent finishes, Spinney delivers a notice to the parent. The notice carries the duration of the run. The card shows the `Delivered` badge. |
 | Report | Spinney delivers the notice at the next tool boundary of the parent turn. While the parent is idle, Spinney injects the notice into the parent node. It never makes a new node. |
 
 A sub-agent batch waits at most `spinney.subAgentSyncSeconds` (300 seconds by default) as well. When the batch still runs at that time, `spawn_agents` in `sync` mode (the default) and `send_agent_message` return the agent ids. Every summary then arrives later as one batch notice.
@@ -499,13 +499,13 @@ Spinney offers this button before a failure too. The button shows from about 90%
 
 1. Click **Compress**. The composer sends your message into the new window. If the node still owns running work, a modal asks first. It names the work that will stop.
 2. Answer the question `Start a new context window?` with `Simple` or `Agentic`. Section 10.4 describes both answers. A dismissed question sends nothing, and the input box keeps your text.
-3. Spinney opens a new card below that node. The edge is dashed, the title is `Context window {0}`, and the badge is `CTX`. A window that a compression node produced has a dotted edge.
+3. Spinney opens a new card below that node. The edge is dashed, the title is `Context window {0}`, and the badge is `New context`. A window that a compression node produced has a dotted edge.
 
 The new window starts with the system prompt, one harness message, and your message. The harness message names the transcript file of the previous window, the work that stopped, and the size of the previous window. With `Simple`, it also holds the first request of the previous window, your last request, the files that the window changed, and the last answer, in a shortened form. With `Agentic`, it starts with the handoff written by the compression node, and your last request in your own words follows it. Attachments cannot cross, so the message names them instead.
 
 The old branch stays usable. You can send into it again, or press **▶ Continue** there, until it overflows again.
 
-The `CTX` tooltip is `This node starts a new context window; the branch above it is not sent to the model any more`.
+The `New context` tooltip is `This node starts a new context window; the branch above it is not sent to the model any more`.
 
 Two details that are not faults:
 
@@ -517,13 +517,13 @@ Two details that are not faults:
 The question has two answers.
 
 - **Simple** costs no extra request. The new window is pointed at the record of the old window, and the agent reads that record when it needs a detail. The list of the handoff holds the first request of the old window, your last request, the files that the window changed, and the work that was stopped.
-- **Agentic** runs one more turn first. A **compression node** (`CMP`) reads the window that ends. It reads the transcript on disk, the workspace, and the files that the window changed. It writes one short brief: the objective, your standing instructions, the facts, the changes, the checks, the dead ends, and the remaining plan. The new window starts from that brief.
+- **Agentic** runs one more turn first. A **compression node**, with the badge `Context compression`, reads the window that ends. It reads the transcript on disk, the workspace, and the files that the window changed. It writes one short brief: the objective, your standing instructions, the facts, the changes, the checks, the dead ends, and the remaining plan. The new window starts from that brief.
 
 A compression node cannot change anything. It can read files, list folders, search files and search transcripts. Its card has no input box. While it runs, its card carries its own Stop. When the two setups differ, a second question asks which setup the new window continues on. `Keep this window’s setup` inherits the frozen setup of the conversation, which the provider has already cached. `Use the latest setup` freezes the current model and thinking level instead, so its first request misses the cache. With the same setup on both sides, Spinney does not ask.
 
 You can start several windows from the same card. Each attempt is a new branch below it, so you can keep both and compare them: one `Simple` and one `Agentic`, for example. While an attempt still runs, wait for it to finish, then start the next one.
 
-The new window starts below the compression node. The window keeps the frozen setup of the window it continues, not the setup of the compression turn. Its badge is `CTX`, and its edge is dotted.
+The new window starts below the compression node. The window keeps the frozen setup of the window it continues, not the setup of the compression turn. Its badge is `New context`, and its edge is dotted.
 
 You can stop a compression node. If you stop it, or it writes nothing, no new window opens, and the card keeps its Continue button. Once the new window exists, the compression is finished. To do it again, start again from the window above it.
 
