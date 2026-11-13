@@ -4004,6 +4004,44 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   }
 
   /**
+   * `Spinney: Show Request Payload` — the complete JSON body the next request from the
+   * checked-out node would send, in an untitled editor tab (`spinney.showRequestPayload`).
+   *
+   * The bytes come from `SessionRuntime.requestPayload()`, which calls the **same**
+   * constructor the client does (`buildChatRequestBody`) and normalises the result the
+   * same way (`wellFormedDeep`), so this tab is what the provider would receive — not a
+   * second rendering of it (`docs/agents/invariants/request-payload.md`). The `[payload]`
+   * line in the output channel says where it goes and what it carries; no credential is
+   * part of it, because the key travels in a header and the body never holds one.
+   */
+  async showRequestPayload(): Promise<void> {
+    const session = this.getActiveSession();
+    // A session with no runtime yet (never opened in this window) gets one here: the
+    // payload is built from its stored tree, exactly like the tab it would open.
+    const rt = session ? (this.runtimes.get(session.id) ?? this.runtimeFor(session)) : undefined;
+    const payload = rt?.requestPayload();
+    if (!payload) {
+      void vscode.window.showInformationMessage(
+        vscode.l10n.t(
+          'Spinney: no request payload to show. Check out a turn node of a conversation to see what it would send.',
+        ),
+      );
+      return;
+    }
+    const m = payload.meta;
+    this.outputLog(
+      `[payload] session=${m.sessionId} node=${m.nodeId} card=${m.cardId} provider=${m.providerId} ` +
+        `url=${m.url} messages=${m.messages} images=${m.images} bytes=${m.bytes}` +
+        (m.sessionHeader ? ` ${m.sessionHeader.name}=${m.sessionHeader.value}` : ''),
+    );
+    const doc = await vscode.workspace.openTextDocument({
+      content: JSON.stringify(payload.body, null, 2),
+      language: 'json',
+    });
+    await vscode.window.showTextDocument(doc, { preview: false });
+  }
+
+  /**
    * `Spinney: Reload Chat Webview` — rebuild the **active** session's tab from scratch. This is
    * the user's own escalation after a stall: the host deliberately leaves a broken screen
    * visible instead of repairing it behind the user's back (see `onStallReport`), so the one

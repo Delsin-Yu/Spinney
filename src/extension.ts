@@ -207,6 +207,11 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand('spinney.showSystemPrompt', () => {
       void chatProvider?.showSystemPrompt();
     }),
+    // The exact JSON body the next request would send (the same constructor the client
+    // calls — see docs/agents/invariants/request-payload.md).
+    vscode.commands.registerCommand('spinney.showRequestPayload', () => {
+      void chatProvider?.showRequestPayload();
+    }),
     // The one AGENTS.md a user writes once and wants everywhere: this command creates
     // it if it is missing and opens the real file (an edit lands in the next window —
     // the snapshot rule applies to it exactly like the workspace file).
