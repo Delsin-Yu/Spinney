@@ -222,7 +222,7 @@ One session owns exactly one tab. Opening a session focuses its tab. It never op
 | Delete many sessions | `Ctrl`-click or `Shift`-click the rows, then click **🗑** on any selected row. Spinney deletes the whole selection behind one confirmation. |
 | Clear a conversation | Run `Spinney: Clear Conversation`. |
 
-With `spinney.autoSessionTitles` on, Spinney names a session from its conversation after the first turn, and again as the conversation grows. The wait between two names is at least two minutes. A rename stops the automatic naming.
+With `spinney.autoSessionTitles` on, Spinney names a session once, from its conversation, after the first turn. It does not change the name again when the conversation grows. A rename stops the automatic naming. If the model call fails, the title falls back to the first prompt, and Spinney tries again on a later turn.
 
 A session keeps its history in the session data folder of the extension, as plain files: one folder per session, one file per node.
 
@@ -533,7 +533,7 @@ All keys start with `spinney.`. Open the Settings UI, or edit `settings.json`.
 | `spinney.streamAnimation` | `true` | Animate the text and the rows of a live turn. New characters fade in, and new rows fade in and move up. Turn it off to draw every character and every row at once. The reduced-motion setting of the operating system also turns the animation off. |
 | `spinney.maxConcurrentSubagents` | `15` | How many level-1 sub-agents can run at once. Extra tasks wait. |
 | `spinney.maxLevel2Subagents` | `2` | How many children one sub-agent can start. |
-| `spinney.autoSessionTitles` | `true` | Name sessions from their conversation. |
+| `spinney.autoSessionTitles` | `true` | Name a session once from its conversation, after the first turn. |
 | `spinney.saveSessionTranscripts` | `true` | Write each finished turn to disk as JSONL. |
 | `spinney.saveSubAgentTranscripts` | `true` | Write each finished sub-agent conversation to disk as JSONL. |
 | `spinney.subAgentTranscriptDir` | `""` | The folder for the transcript files, relative to the agent root. Empty means the extension storage. |

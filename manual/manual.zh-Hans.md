@@ -221,7 +221,7 @@ Spinney 在两种情况下拒绝删除：
 | 删除多个会话 | 用 `Ctrl`-点击或 `Shift`-点击选中这些行，然后点击任一选中行上的 **🗑**。Spinney 在一次确认之后删除整个选择。 |
 | 清空对话 | 运行 `Spinney: 清除对话`。 |
 
-打开 `spinney.autoSessionTitles` 时，Spinney 在第一个回合之后根据对话为会话命名，之后对话增长时再次命名。两次命名之间的等待至少为两分钟。重命名会停止自动命名。
+打开 `spinney.autoSessionTitles` 时，Spinney 在第一个回合之后根据对话为会话命名一次。之后对话继续增长也不会再改名。重命名会停止自动命名。如果模型调用失败，标题退回为第一段提示词，Spinney 会在之后某一轮再试一次。
 
 会话历史存放在扩展的会话数据文件夹中，是普通文件：每个会话一个文件夹，每个节点一个文件。
 
@@ -532,7 +532,7 @@ Spinney 再次发送请求期间，卡片会显示一行标记，例如 `⟳ 静
 | `spinney.streamAnimation` | `true` | 为进行中回合的文字和行加上动画。新字符淡入，新行淡入并向上移动。关闭后每个字符和每一行都立即绘制。操作系统的减少动态效果设置也会关闭动画。 |
 | `spinney.maxConcurrentSubagents` | `15` | 同时可以运行多少个第 1 层子智能体。多出的任务等待。 |
 | `spinney.maxLevel2Subagents` | `2` | 一个子智能体可以启动多少个子节点。 |
-| `spinney.autoSessionTitles` | `true` | 根据对话为会话命名。 |
+| `spinney.autoSessionTitles` | `true` | 在第一个回合之后根据对话为会话命名一次。 |
 | `spinney.saveSessionTranscripts` | `true` | 把每个已结束的回合以 JSONL 写入磁盘。 |
 | `spinney.saveSubAgentTranscripts` | `true` | 把每个已结束的子智能体对话以 JSONL 写入磁盘。 |
 | `spinney.subAgentTranscriptDir` | `""` | 转写文件的文件夹，相对于智能体根目录。为空表示扩展存储。 |

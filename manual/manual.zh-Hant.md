@@ -221,7 +221,7 @@ Spinney 會在兩種情況下拒絕刪除：
 | 刪除多個工作階段 | 按住 `Ctrl` 或 `Shift` 點選這些列，然後在任何已選取的列上點選 **🗑**。Spinney 會在一個確認之後刪除整個選取範圍。 |
 | 清除對話 | 執行 `Spinney: 清除對話`。 |
 
-開啟 `spinney.autoSessionTitles` 後，Spinney 會在第一次回合之後依對話為工作階段命名，並在對話增長時再次命名。兩次命名之間至少間隔兩分鐘。手動重新命名會停止自動命名。
+開啟 `spinney.autoSessionTitles` 後，Spinney 會在第一次回合之後依對話為工作階段命名一次。之後對話繼續增長也不會再改名。手動重新命名會停止自動命名。如果模型呼叫失敗，標題會退回第一條提示詞，Spinney 會在之後某一輪再試一次。
 
 工作階段歷史存放在擴充功能的工作階段資料資料夾中，是一般檔案：每個工作階段一個資料夾，每個節點一個檔案。
 
@@ -532,7 +532,7 @@ Spinney 再次傳送要求期間，卡片會顯示一行標記，例如 `⟳ 靜
 | `spinney.streamAnimation` | `true` | 為進行中回合的文字和列加上動畫。新字元淡入，新列淡入並向上移動。關閉後每個字元和每一列都立即繪製。作業系統的減少動態效果設定也會關閉動畫。 |
 | `spinney.maxConcurrentSubagents` | `15` | 同時可以執行多少個第 1 層子代理。多出的工作會等待。 |
 | `spinney.maxLevel2Subagents` | `2` | 一個子代理可以啟動多少個子項。 |
-| `spinney.autoSessionTitles` | `true` | 依對話為工作階段命名。 |
+| `spinney.autoSessionTitles` | `true` | 在第一次回合之後依對話為工作階段命名一次。 |
 | `spinney.saveSessionTranscripts` | `true` | 把每個已結束的回合以 JSONL 寫入磁碟。 |
 | `spinney.saveSubAgentTranscripts` | `true` | 把每個已結束的子代理對話以 JSONL 寫入磁碟。 |
 | `spinney.subAgentTranscriptDir` | `""` | 逐字稿檔案的資料夾，相對於代理根目錄。留空表示使用擴充功能儲存區。 |
