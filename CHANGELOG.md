@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A compression node between two context windows.** The composer's new-epoch entry (and the
+  Send button's own right-click) now asks one question with two answers: `Simple` is the
+  pointer rollover, unchanged and free; `Agentic` runs a real turn — a **compression node** —
+  that reads the window about to end (the transcript on disk, the workspace, the files it
+  changed) and writes the handoff the next window starts from. The new window inherits the
+  ending window's frozen system prompt, never the compression turn's, and its first message is
+  that handoff. The chain is drawn with dotted edges: P -> C -> R is not a conversation and
+  not a rollover, and the tree says so.
+- **The compression turn can only read.** Its registry holds `read_file`, `list_dir`,
+  `search_files` and `search_transcripts`, and every write tool, the shell and the four job
+  tools are blocked there. The restriction is the tool registry, not a sentence in the prompt.
+- **The free handoff no longer loses the task.** A `Simple` rollover now also carries the
+  window's **first** user request verbatim and the files the window changed (marked `re-read
+  one before editing it`), both derived on the host at no request cost.
 - **The request body can be read before it is sent.** `Spinney: Show Request Payload` opens
   the complete JSON body of the next request from the checked-out node in an untitled editor
   tab, and writes one `[payload]` line to the output channel (session, node, card, provider,
@@ -108,6 +122,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The compression node is a card of its own.** It wears `CMP` instead of `CTX`, has no
+  composer, and carries its own ⏹ Stop while it runs (there is no input dock to host the
+  composer's). Once it has produced its window it is sealed: no ▶ Continue, and the host
+  refuses one with a sentence.
+- **The window a compression produced has no delete button of its own.** It is removed
+  together with its compression node, and the delete confirmation says so.
 - **`run_type` is `foreground`, `background` or `global`** — the values name the lifecycle a
   job is bound to, which is the reason `detached` went away (it described how the call felt).
   The schema now says when to use each, including the one rule that matters most: when you
@@ -136,6 +156,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- **The one-shot handoff summary.** `Write a handoff summary` is gone, together with its extra
+  non-streaming request, its one validation retry and its 30 s deadline. The compression node
+  replaces it: the handoff is now a card you can read, stop, continue and delete, and the free
+  answer (`Simple`) is the same pointer it always was.
 - **The `hvsc` supervisor.** `tools/hyper-vscode/` (`hvsc.mjs`, `serve.ps1`, its README
   and the daemon state) is gone, and the control plane is the whole story: the window now
   defers its own reload (`POST /reload-window {idle:true}`) instead of needing an external

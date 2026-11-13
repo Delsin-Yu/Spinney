@@ -93,26 +93,31 @@ regression fails *packaging* instead of the user's session:
   real window fills up — a wrong cut silently sends the entire dead history, or nothing
   at all — so they are pinned here. Like `check:signals` it is pure node against `out/`,
   and therefore also runs after `compile` in `vscode:prepublish`.
-- `npm run check:compaction` (`tools/check-compaction.js`) — the **handoff summary** of a
-  context rollover (`invariants/context-rollover.md` §6a), the composer's `Write a handoff
-  summary` answer. It drives the compiled `out/agent/compaction.js` and pins the rules that
-  are invisible until a real, enormous window runs them: the source is **one window** (the
+- `npm run check:compaction` (`tools/check-compaction.js`) — the **handoff** of a context
+  window (`invariants/context-rollover.md` §6a, `invariants/compress-node.md`), in both
+  deliveries. It drives the compiled `out/agent/compaction.js` and pins the rules that are
+  invisible until a real, enormous window runs them: the source is **one window** (the
   context base down to the node — harness notices are not user requests, so they are not
   counted), the first user message is kept **verbatim** while every user message is clipped
   to 500 chars with the count in the header, only the last 8 assistant texts are kept, a
   tool call reads `name -> brief -> first line of the result` with a 200-char result line
   (and its second line never leaks in), a window over **60,000 chars** keeps its head and
   its tail, drops the middle and announces the clip with a character count, a window that
-  already starts from a handoff summary is marked as one (and the plain pointer title is
-  not), the prompt carries the eleven-section schema while only the **nine** real sections
-  are required (tolerant of heading level and casing, prose rejected), the fallback
-  decision (`timeout` / `error` / `empty` / `invalid` — and a non-string answer never
-  throws), and the request itself (one user message, no tools, `max_tokens` 1500, a cold
-  temperature, a 30 s constant) plus the `outcome=summary` / `outcome=fallback:<reason>`
-  spelling of the diagnostics line. Pure node against `out/`, so like `check:signals` it
-  runs after `compile` in `vscode:prepublish` (`npm run check:compaction`). What it can
-  **not** see: the request itself, the 30 s abort and the one validation retry live in
-  `SessionRuntime.writeHandoffSummary`, which no guard drives.
+  already starts from a handoff is marked as one (and the plain pointer title is not), the
+  **eight** sections of the paper with **seven** required (tolerant of heading level and
+  casing, prose rejected), the decision (`empty` / `invalid` / usable — and a non-string
+  answer never throws), the compression instruction (the facts, then the fixed ask
+  verbatim, a missing transcript degrading instead of pointing at nothing), the pointer text
+  (the original task and the changed files included; the compressed shape claiming no
+  refusal), `editedFilesFromItems` (only the writing tools, in order, no duplicates), the
+  `outcome=summary` / `outcome=fallback:<reason>` spelling of the diagnostics line, and that
+  the retired one-shot summariser's exports (`buildCompactionRequest`,
+  `buildCompactionRetryMessages`, `COMPACTION_TIMEOUT_MS`) are **gone** from the module.
+  Pure node against `out/`, so like `check:signals` it runs after `compile` in
+  `vscode:prepublish` (`npm run check:compaction`). What it can **not** see: the compression
+  **turn** — the settle wait, the outcome table and the window below it live in
+  `SessionRuntime.compressAndContinue` / `deliverCompression`, which
+  `tools/rollover-acceptance.js` drives against a real runtime.
 - `npm run check:continue` (`tools/check-continue.js`, 86 checks) — the **transparent
   re-issue / resume contract** (`invariants/api-retries.md`): the half of a failed turn that
   used to be narrated to the model. It stubs `vscode` and drives the compiled `Agent` against
@@ -411,15 +416,18 @@ alone, the kill notice lands in that node's history *and* in its re-dumped
 transcript, the harness message carries the user's last request and the last answer
 verbatim **and** names and counts the killed background terminal, the window is
 numbered per branch, and a node that is not context-full falls back to the in-place
-continue. It drives the **handoff summary** too: with a scripted answer the harness text
-starts with the summary (its title, the summary, the user's last request verbatim, the
-transcript pointer, the killed-work list, the size line), the node stores that text
-(`handoffSummary`), the one request carries the capped / cold / no-tools shape, an answer
-missing a required heading is asked for exactly once more, and an unreachable provider
-leaves the pointer text plus the sentence saying the summary was unavailable — the
-rollover still succeeds. `node tools/rollover-acceptance.js` after `npm run compile`,
-passing the checkout as its argument (its default is another checkout's `out/`); it reads
-a few private fields, so a refactor may break the script while the product stays fine.
+continue. It drives the **compression chain** (P -> C -> R) too, with a scripted assistant
+turn: C's first request is `[compression envelope, harness instruction]`, carries no ancestor
+or sibling message and advertises exactly the four read-only tools, C freezes an envelope of
+`kind: compress`, R is a `resume` node whose system message is **P's** bytes (never C's),
+whose first message starts with the handoff and is followed by the pointer facts and the
+composer's text as its own user message, and which records `handoff` / `handoffSummary`. A
+Stop on C leaves the card interrupted with no window below it, an empty answer opens no
+window, a missing section opens it anyway with a notice on the card, `continueFrom(C)` is
+refused once its window exists, and `branchDeletionBlocked` refuses the resume window while
+allowing the compression node. `node tools/rollover-acceptance.js` after `npm run compile`
+(its checkout defaults to its own `out/`); it reads a few private fields, so a refactor may
+break the script while the product stays fine.
 
 `tools/modeltree-acceptance.js` is the second of the four, the same shape for the
 Model Card Tree page's host half — dev-only, **not** in `vscode:prepublish`, no

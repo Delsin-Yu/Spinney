@@ -3599,6 +3599,195 @@ if (contextLabel !== 'ctx 50%') {
   }
 }
 
+// --- the compression chain: CMP badge, no 🗑 on the window it produced, its own Stop ---
+// `docs/agents/invariants/compress-node.md` §1/§2/§4/§5. Three marks no ordinary card has:
+//
+//  - the node that compresses a window wears `CMP` (not `CTX`) and starts a window of its
+//    own between two others, so its connector is **dotted** (`edge-compress`) rather than
+//    dashed like an ordinary window break;
+//  - it has **no composer** — its one turn was written by the harness — so its card's own ⏹
+//    Stop is the only way to end a running compression turn, and once it has produced its
+//    window it shows no ▶ Continue at all (a second handoff from the same source would be a
+//    second window claiming to continue the same one);
+//  - the window it produced (the **resume** node) is an ordinary `CTX` card **without** a 🗑:
+//    deleting it alone would leave a compression node holding a handoff nobody can read, so
+//    it is removed with its compression node.
+{
+  const ROOT = 'cmp-root';
+  const P = 'cmp-p';
+  const C = 'cmp-c';         // compress, streaming now
+  const CINT = 'cmp-cint';   // compress, interrupted, no window yet → ▶ Continue
+  const CPROD = 'cmp-cprod'; // compress, done, with its window → sealed
+  const RPROD = 'cmp-rprod'; // the window it produced → CTX, no 🗑, no ▶
+  const node = (id, parentId, children, status, extra) =>
+    Object.assign(
+      {
+        id,
+        parentId,
+        children,
+        title: id,
+        status,
+        createdAt: 0,
+        preview: id,
+        usage: null,
+        size: null,
+        context: 'ok',
+        contextPct: 0,
+      },
+      extra || {},
+    );
+  const tree = {
+    type: 'tree',
+    viewId: P,
+    activeId: null,
+    rootId: ROOT,
+    rootIds: [ROOT],
+    nodes: [
+      node(ROOT, null, [P], 'done'),
+      node(P, ROOT, [C, CINT, CPROD], 'done'),
+      node(C, P, [], 'running', { role: 'compress', compressedFrom: P, contextBaseId: C }),
+      node(CINT, P, [], 'interrupted', { role: 'compress', compressedFrom: P, contextBaseId: CINT }),
+      node(CPROD, P, [RPROD], 'done', { role: 'compress', compressedFrom: P, contextBaseId: CPROD }),
+      node(RPROD, CPROD, [], 'done', { role: 'resume', contextBaseId: RPROD }),
+    ],
+  };
+  dispatch({ type: 'state', busy: true, status: '', sessionId: 'smoke-session', runningNodes: [C] });
+  dispatch(tree);
+  const cards = new Map();
+  for (const child of elementById('tree-canvas').children) {
+    if (child.dataset && child.dataset.id) cards.set(child.dataset.id, child);
+  }
+  const badge = (id) => findByClass(cards.get(id), 'node-ctx-badge');
+  const cont = (id) => findByClass(cards.get(id), 'node-continue');
+  const stopOf = (id) => findByClass(cards.get(id), 'node-stop');
+  const delOf = (id) => findByClass(cards.get(id), 'node-del');
+
+  if (!badge(C) || badge(C).textContent !== 'CMP') {
+    problems.push('a compression node does not wear the CMP badge');
+  }
+  if (!badge(RPROD) || badge(RPROD).textContent !== 'CTX') {
+    problems.push('the window a compression produced is not marked CTX');
+  }
+  if (!stopOf(C)) {
+    problems.push('a running compression node shows no Stop of its own (it has no composer to host one)');
+  }
+  if (cont(C)) {
+    problems.push('a running compression node shows a Continue button');
+  }
+  if (!delOf(C)) {
+    problems.push('a compression node lost its delete button');
+  }
+  const stopClick = stopOf(C) && stopOf(C)._listeners && stopOf(C)._listeners.click;
+  if (typeof stopClick !== 'function') {
+    problems.push("the compression card's Stop has no click handler");
+  } else {
+    posted.length = 0;
+    stopClick({ stopPropagation() {} });
+    const sent = posted.find((m) => m && m.type === 'stop');
+    if (!sent || sent.nodeId !== C) {
+      problems.push(
+        `the compression card's Stop posted ${JSON.stringify(posted)}, expected { type: 'stop', nodeId: '${C}' }`,
+      );
+    }
+  }
+  if (!cont(CINT) || cont(CINT).textContent !== '▶ Continue') {
+    problems.push('an interrupted compression node without a window lost its ▶ Continue');
+  }
+  if (cont(CPROD)) {
+    problems.push('a compression node that already delivered its window still shows a continue button');
+  }
+  if (delOf(RPROD)) {
+    problems.push('the window a compression produced carries its own delete button (it is removed with the compression node)');
+  }
+  if (!delOf(CPROD)) {
+    problems.push('a compression node lost its delete button');
+  }
+  // Both halves of the chain carry the dotted connector (`edge-compress`): the compression
+  // turn is not part of the conversation above it and the window below it is not a rollover
+  // of the compression turn, so neither edge may read as an ordinary window break. Read out
+  // of the SVG markup the way the context-window block does: the path that ends at the
+  // child's own top-left corner is that child's connector.
+  {
+    const edgeOf = (id) => {
+      const card = cards.get(id);
+      if (!card) return null;
+      const endX = parseFloat(card.style.left);
+      const endY = parseFloat(card.style.top);
+      const markup = String(elementById('tree-edges').innerHTML || '');
+      return (
+        (markup.match(/<path[^>]*>/g) || []).find((tag) => {
+          const end = /([-\d.]+) ([-\d.]+)"\s*\/>$/.exec(tag);
+          return end && parseFloat(end[1]) === endX && parseFloat(end[2]) === endY;
+        }) || null
+      );
+    };
+    for (const id of [C, RPROD]) {
+      const edge = edgeOf(id);
+      if (!edge) {
+        problems.push(`no connector path could be found for ${id} (the compression chain's edges are not drawn)`);
+      } else if (!/\bclass="edge-compress"/.test(edge)) {
+        problems.push(`the compression chain's connector into ${id} is not dotted: ${edge}`);
+      }
+    }
+  }
+
+  // The composer: a compression node has no request to type, so the pane hides; its window
+  // has one again.
+  const composerHidden = () => elementById('composer').classList.contains('hidden');
+  dispatch(Object.assign({}, tree, { viewId: C }));
+  if (!composerHidden()) {
+    problems.push('a checked-out compression node still shows the composer (its turn was written by the harness)');
+  }
+  dispatch(Object.assign({}, tree, { viewId: RPROD }));
+  if (composerHidden()) {
+    problems.push('the window a compression produced does not show the composer');
+  }
+  dispatch(Object.assign({}, tree, { viewId: P }));
+  if (composerHidden()) {
+    problems.push('an ordinary turn node hides the composer');
+  }
+
+  // The Send button's own right-click is the deliberate compression entry
+  // (`compressNow`, §1): the modal is the menu, so nothing is drawn — the same content a
+  // Send would carry is posted, and the input keeps its text (only the host clears it).
+  {
+    const input = elementById('input');
+    const send = elementById('send-btn');
+    input.value = 'compress this, then continue';
+    const ctx = send._listeners && send._listeners.contextmenu;
+    if (typeof ctx !== 'function') {
+      problems.push('the Send button has no contextmenu handler (the right-click is the compression entry)');
+    } else {
+      let prevented = false;
+      posted.length = 0;
+      ctx({ preventDefault() { prevented = true; }, stopPropagation() {} });
+      if (!prevented) {
+        problems.push("the Send button's right-click did not preventDefault (VS Code's own menu would open)");
+      }
+      const sent = posted.find((m) => m && m.type === 'compressNow');
+      if (!sent) {
+        problems.push(`the Send button's right-click posted ${JSON.stringify(posted)}, expected a compressNow`);
+      } else {
+        if (sent.text !== 'compress this, then continue') {
+          problems.push(`compressNow carried ${JSON.stringify(sent.text)}, expected the box's text`);
+        }
+        if (!Array.isArray(sent.attachments)) {
+          problems.push('the compressNow message carries no attachments array');
+        }
+      }
+      if (input.value !== 'compress this, then continue') {
+        problems.push('posting compressNow cleared the input (only the host clears it)');
+      }
+      const others = posted.filter((m) => m && m.type !== 'compressNow');
+      if (others.length > 0) {
+        problems.push(`the right-click also posted ${JSON.stringify(others)}`);
+      }
+    }
+    input.value = '';
+  }
+  notes.push('compression: CMP badge, no 🗑 on the produced window, its own Stop, no composer, and the Send right-click');
+}
+
 // --- A node-scoped notice updates ONE block, and belongs to its node -----------
 // A run that keeps saying the same thing while its state advances — the silent-retry
 // marker the host posts per re-issue — must not grow one block per message. So a notice

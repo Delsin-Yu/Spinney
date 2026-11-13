@@ -500,15 +500,13 @@ A button carries the work. You do not type the instruction yourself. A **Stop** 
 
 A context window is full when the provider answers with a context-length error. A request also carries its images as uploaded bytes, and the provider caps these bytes at 200 MB for one request. A refusal for that reason is also a full window. For example, the message reads `Total image size exceeds the limit: max 200 MB per request, got 203 MB`. Spinney does not guess a limit from the `ctx` readout. The card shows a **⚠️** message. The composer shows **Continue with new context**, and **Send** is disabled.
 
-Spinney offers this button before a failure too. The button shows from about 90% of the `contextWindow` of the card. Nothing failed there, so the click is your own decision. A plain send at that point is still a normal send.
+Spinney offers this button before a failure too. The button shows from about 90% of the `contextWindow` of the card. Nothing failed there, so the click is your own decision. A plain send at that point is still a normal send. A right-click on **Send** opens the same question at any time, at any fill level.
 
 1. Click **Continue with new context**. The composer sends your message into the new window. If the node still owns running work, a modal asks first. It names the work that will stop.
-2. Answer the question `Continue in a new context window?`:
-   - `Write a handoff summary`. Spinney sends one extra request to the same model card. The request reads only the messages of the previous window, up to 60000 characters. The new agent receives the summary first. The summary holds the requests, the files and the code sections, the errors, the pending tasks, and the current work. It also holds the record path, the key file paths, and the stopped jobs. Every code section is marked `re-read before editing`, because your workspace can change. The summary is English, whatever the display language. The composer shows `Preparing the handoff summary…` during the request. If the request fails, or the answer has no required headings, Spinney continues like `Just continue`. The harness message then says that the summary is not available. The rollover does not fail.
-   - `Just continue`. Spinney points the new agent at the previous branch. The agent reads the transcript on disk when it needs a detail.
-3. Spinney opens a new card below that node. The edge is dashed, the title is `Context window {0}`, and the badge is `CTX`.
+2. Answer the question `Start a new context window?` with `Simple` or `Agentic`. Section 10.4 describes both answers. A dismissed question sends nothing, and the input box keeps your text.
+3. Spinney opens a new card below that node. The edge is dashed, the title is `Context window {0}`, and the badge is `CTX`. A window that a compression node produced has a dotted edge.
 
-The new window starts with the system prompt, one harness message, and your message. The harness message names the transcript file of the previous window, the work that stopped, and the size of the previous window. With `Just continue`, it also holds your last request and the last answer, in a shortened form. With `Write a handoff summary`, it starts with the summary, and your last request in your own words follows it. Attachments cannot cross, so the message names them instead.
+The new window starts with the system prompt, one harness message, and your message. The harness message names the transcript file of the previous window, the work that stopped, and the size of the previous window. With `Simple`, it also holds the first request of the previous window, your last request, the files that the window changed, and the last answer, in a shortened form. With `Agentic`, it starts with the handoff written by the compression node, and your last request in your own words follows it. Attachments cannot cross, so the message names them instead.
 
 The old branch stays usable. You can send into it again, or press **▶ Continue** there, until it overflows again.
 
@@ -518,6 +516,23 @@ Two details that are not faults:
 
 - The pinned user message of the new card is your message.
 - The harness text is English, whatever the display language.
+
+### 10.4 The two handoffs
+
+The question has two answers.
+
+- **Simple** costs no extra request. The new window is pointed at the record of the old window, and the agent reads that record when it needs a detail. The list of the handoff holds the first request of the old window, your last request, the files that the window changed, and the work that was stopped.
+- **Agentic** runs one more turn first. A **compression node** (`CMP`) reads the window that ends. It reads the transcript on disk, the workspace, and the files that the window changed. It writes one short brief: the objective, your standing instructions, the facts, the changes, the checks, the dead ends, and the remaining plan. The new window starts from that brief.
+
+A compression node cannot change anything. It can read files, list folders, search files and search transcripts. Its card has no input box. While it runs, its card carries its own Stop.
+
+The new window starts below the compression node. The window keeps the frozen setup of the window it continues, not the setup of the compression turn. Its badge is `CTX`, and its edge is dotted.
+
+You can stop a compression node. If you stop it, or it writes nothing, no new window opens, and the card keeps its Continue button. Once the new window exists, the compression is finished. To do it again, start again from the window above it.
+
+The window that a compression produced has no delete button. Delete the compression node instead. That removes the compression turn, the window that it produced, and everything below that window.
+
+The compression node is a normal card in the tree. Click it to read what it did. It shows its own tool lines.
 
 ## 11. Settings reference
 

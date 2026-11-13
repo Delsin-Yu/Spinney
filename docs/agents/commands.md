@@ -13,7 +13,7 @@ npm run check:modeltree                      # guard: media/modeltree.js still u
 npm run check:signals                        # guard: the completion-signal persistence contract
 npm run check:l10n                           # guard: the UI catalogs drifting from the code
 npm run check:rollover                       # guard: the context-rollover contract
-npm run check:compaction                     # guard: the rollover's handoff summary (source bound, schema, fallback)
+npm run check:compaction                     # guard: the window handoff (source bound, instruction, heading schema)
 npm run check:grid                           # guard: the Chat Tree sidecar lattice (media/tree.js)
 npm run check:docs                           # guard: the shipped user manual (manual/**) vs the manifest
 npm run check:cwd                            # guard: the working-directory / path-base contract (compiled tools)

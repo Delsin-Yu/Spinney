@@ -33,7 +33,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { Agent, ImageAccounting } from '../agent/agent';
-import { DEFAULT_REPLY_LANGUAGE, SYSTEM_PROMPT_TEMPLATE, AgentsMdSources, agentsMdSection, systemPrompt } from '../agent/prompt';
+import { DEFAULT_REPLY_LANGUAGE, SYSTEM_PROMPT_TEMPLATE, AgentsMdSources, COMPRESS_SYSTEM_PROMPT_TEMPLATE, agentsMdSection, compressSystemPrompt, systemPrompt } from '../agent/prompt';
 import { Balance, emptyBalance } from '../agent/balance';
 import { buildChatRequestBody, chatCompletionsUrl } from '../agent/apiClient';
 import { ClientRegistry } from '../agent/clients';
@@ -70,18 +70,21 @@ import {
 // The transform the image budget is built on (`docs/agents/plans/image-budget.md`): what
 // actually leaves for the provider, so the bytes a request carries are the small ones.
 import { IMAGE_TARGET_MAX_SIDE, ImageTransformRecord, transformImage } from '../agent/imageTransform';
-// The **handoff summary** of a rollover: the pure half of §6 of the rollover contract (the
-// input selection, its bound, the prompt, the heading validation, the fallback decision).
+// The **handoff** of a context window: the pure half of the rollover contract
+// (`docs/agents/invariants/context-rollover.md` §6, `docs/agents/invariants/compress-node.md`) —
+// the input selection and its bound, the pointer text, the compression instruction, the
+// heading validation and the fallback decision.
 import {
-  CompactionFailure,
   CompactionSource,
-  COMPACTION_HARNESS_TITLE,
-  COMPACTION_TIMEOUT_MS,
-  buildCompactionRequest,
-  buildCompactionRetryMessages,
+  KilledAgentLine,
+  KilledJobLine,
+  buildCompressInstruction,
+  buildContextRolloverMessage,
   classifyCompactionAnswer,
   compactionDiagLine,
+  editedFilesFromItems,
   extractCompactionSource,
+  firstUserRequest,
   missingCompactionSections,
 } from '../agent/compaction';
 import {
@@ -99,11 +102,13 @@ import {
   attachNode,
   createNode,
   isSidecar,
+  isCompressNode,
   messageText,
   newId,
   nodeUsage,
   pathIds,
   pathMessages,
+  resumeChildOf,
   sessionModelPick,
   titleFromPrompt,
 } from './tree';
@@ -260,19 +265,34 @@ function nodeContextFull(node: TreeNode): boolean {
 }
 
 /**
- * The caps on the tail a rollover carries over (§6). Carrying it is deliberate — both
- * messages are already in memory, so it costs no extra API call — but a 200 k-char
- * request would eat the new, empty window on its first request, so it is clipped and
- * the clip is announced.
- */
-const ROLLOVER_REQUEST_CAP = 2000;
-const ROLLOVER_ANSWER_CAP = 1000;
-/**
  * How long a rollover waits for the sub-agents its union kill aborted (their finish
  * handler writes the dump the message points at). Long enough for a `persistNow` and a
  * JSONL write, short enough that a stuck job cannot hold the button.
  */
 const ROLLOVER_SETTLE_TIMEOUT_MS = 2000;
+
+/**
+ * The tools a **compression node** may use: reading a file, listing a directory, searching
+ * the workspace, searching the transcript dumps. Nothing else — a compression turn that
+ * could write would change the workspace from inside a window nobody is watching.
+ */
+const COMPRESS_READONLY_TOOLS = ['read_file', 'list_dir', 'search_files', 'search_transcripts'];
+
+/**
+ * The tools a compression node's registry **denies** even though the registry it is built
+ * from holds them. `subset` already keeps them out of the advertised set; blocking them is
+ * defence in depth, so a hallucinated call lands on an explicit denial instead of an
+ * "unknown tool" answer (`ToolRegistry.withBlocked`).
+ */
+const COMPRESS_BLOCKED_TOOLS = [
+  'write_file',
+  'append_file',
+  'replace_in_file',
+  'exec_command',
+  'check_command',
+  'wait_for_command',
+  'kill_command',
+];
 
 /**
  * Fallback when `spinney.subAgentSyncSeconds` is absent or not a positive number: the
@@ -329,6 +349,19 @@ function delay(ms: number): Promise<void> {
 }
 
 /**
+ * A promise plus the one call that settles it — a run's {@link TurnRun.settled} pair.
+ * The resolver is idempotent (`Promise` resolution is), so a `finishTurn` and a
+ * `dispose` both calling it is harmless.
+ */
+function settlePair(): { settled: Promise<void>; resolveSettled: () => void } {
+  let resolveSettled: () => void = () => undefined;
+  const settled = new Promise<void>((resolve) => {
+    resolveSettled = resolve;
+  });
+  return { settled, resolveSettled };
+}
+
+/**
  * What a tool call that ran out of budget says instead of the summaries (the exact
  * text the escape result carries as `note`). One sentence of fact plus one
  * instruction: a model handed nothing but ids would otherwise keep waiting for the
@@ -339,239 +372,6 @@ function batchEscapeNote(limitMs: number): string {
     `The batch is still running after ${limitMs / 1000} s; it is now delivered as a batch notice. ` +
     'End your turn: the notice carries every summary when the last one finishes.'
   );
-}
-
-/**
- * The resume text of a rollover: the single `role:'user'` message the new window
- * stores, i.e. everything it sends besides the synthesized system prompt
- * (§5/§6 of `docs/agents/invariants/context-rollover.md`).
- *
- * Model-facing, therefore deliberately **English** and built by plain string
- * concatenation, never through `vscode.l10n.t` — it is an instruction to the
- * model, and a translated instruction is a different instruction. The user does
- * see this text (the card renders it verbatim in a `HARNESS` block), but that is
- * a readout of what the model was told, not a message to the user.
- *
- * The shape, including its three degradations, is fixed by the contract: no
- * transcript on disk (the pointer is replaced by "rely on what was carried over"), a
- * clipped request (announced with its total size) and attachments (counted, never
- * carried — a `file_id`'s validity across windows is not guaranteed). The
- * killed-work list at the end is composed from what §7 actually stopped.
- */
-function buildContextRolloverMessage(input: {
-  sessionId: string;
-  previousNodeId: string;
-  /**
-   * Why a new node was opened: `full` is the provider's refusal of the **tokens** (the only
-   * authoritative statement of a full window), `images` is its refusal of the **bytes**
-   * (`Total image size exceeds the limit`, `docs/agents/plans/image-budget.md` §2.3), and
-   * `near` is the user taking the 90% entry before the request is refused. The model is told
-   * which one, because "it was refused" would be a lie in the last case — and because the
-   * images have to be named as what was refused when that is what happened.
-   */
-  reason: 'full' | 'near' | 'images';
-  /** Absolute path of the previous window's dump — the pointer the model is given. */
-  transcriptPath: string;
-  /** False when that file is not on disk (dump disabled / never written): the pointer degrades. */
-  transcriptExists: boolean;
-  /** The user's last request, raw: clipped here, and the clip is announced. */
-  request: string;
-  /** How many `image_url` / `file` parts that request carried (they cannot come along). */
-  attachments: number;
-  /** The last answer the previous window produced, raw (clipped here). */
-  answer: string;
-  /**
-   * How much of the model's context the previous window had used, when both numbers are
-   * known: this is what makes the reset auditable instead of mysterious ("it worked
-   * yesterday"). `undefined` when no request has reported usage yet, or the card declares
-   * no window — a fact the harness cannot state is not stated.
-   */
-  usage?: { used: number; window: number; pct: number };
-  /** One entry per background terminal the rollover killed (id, clipped command, final state). */
-  killedBackground: Array<{ id: number; command: string; state: string }>;
-  /** One entry per sub-agent node it killed: its dump path once its finish handler wrote it. */
-  killedSubAgents: Array<{ nodeId: string; transcript?: string }>;
-  /**
-   * The handoff summary written by one extra request (`docs/agents/invariants/context-rollover.md`
-   * §5a/§6). When it is here the new window is a **summarized** rollover: the summary replaces the
-   * pointer's own paragraphs (`summaryFailure` is then absent), and its order is fixed — the
-   * summary, the user's last request verbatim, the transcript pointer, the killed-work list, and
-   * the size of the window that ended.
-   */
-  summary?: string;
-  /**
-   * Why no summary could be written — `'timeout'`, `'error'`, `'empty'` or `'invalid'`. The
-   * pointer text is then used **and** the model is told the summary was unavailable, so a
-   * question about the missing summary has an answer in the window itself.
-   */
-  summaryFailure?: CompactionFailure;
-}): string {
-  const paragraphs: string[] = [];
-  // The display path is not cut (the tree stays connected), so "previous window"
-  // names the overflowing node the new one hangs below — not its whole chain.
-  const previousLine = `Previous window: node ${input.previousNodeId} of session ${input.sessionId}.`;
-  // The size of the window that just ended, in the provider's own terms. Stated as a
-  // fact and never as advice: a model that reads "the window was full" without the
-  // numbers tends to try the same oversized request again from the new window.
-  const usageLine = (() => {
-    if (!input.usage) {
-      return '';
-    }
-    const tail =
-      input.reason === 'near'
-        ? "which is past the harness's 90% rollover threshold; nothing was refused yet."
-        : input.reason === 'images'
-          ? 'the refusal was about the bytes of that request, not about these tokens.'
-          : 'which is at or past the limit this provider accepts for one request.';
-    return (
-      `The previous window used ${input.usage.used} of this model's ${input.usage.window}-token context ` +
-      `(${input.usage.pct}%), ${tail}`
-    );
-  })();
-  const transcriptLine = input.transcriptExists
-    ? 'Its full transcript — every message, tool call and result — is on disk:\n' +
-      `  ${input.transcriptPath}\n` +
-      'Read it when you need a detail: read_file on that path, or search_transcripts with sessionId=' +
-      `${input.sessionId} (line 1 is the meta record). Earlier windows of this session have their own files ` +
-      'in the same folder.'
-    : "The previous window's transcript is not available on disk; rely on the carried-over text and ask the " +
-      'user when a detail is missing.';
-  const request =
-    input.request.length > ROLLOVER_REQUEST_CAP ? sliceText(input.request, ROLLOVER_REQUEST_CAP) : input.request;
-  const answer =
-    input.answer.length > ROLLOVER_ANSWER_CAP ? sliceText(input.answer, ROLLOVER_ANSWER_CAP) : input.answer;
-  const notes = [
-    // Clipping is announced: a model that reads a truncated request as the whole
-    // request would silently redo only part of the work.
-    input.request.length > ROLLOVER_REQUEST_CAP
-      ? `(truncated: ${input.request.length} chars total, the full text is in the transcript)`
-      : '',
-    input.attachments > 0 ? `(the original request had ${input.attachments} attachment(s))` : '',
-  ].filter(Boolean);
-  // The user's own words for the last request. In the summarized shape this line is the
-  // whole "quote the original" half of the handoff: the summary is a model's account of
-  // the window, and it must never be the only copy of what the user actually asked.
-  const requestLine =
-    `The user's last request, verbatim: ${request || '(none found)'}` +
-    (notes.length > 0 ? ` ${notes.join(' ')}` : '');
-  // The leftover list is composed from what §7 actually stopped.
-  const stillRunningLine =
-    `Still running from the previous window: none — ${input.killedBackground.length} background terminal(s) and ` +
-    `${input.killedSubAgents.length} sub-agent(s) were stopped when this window was opened, because their ` +
-    "results could not be delivered into a full window. They are recorded in the previous window's transcript, " +
-    "including each job's command, final state and output tail; a sub-agent has its own file (kind=subagent). " +
-    'Read those records before redoing any of that work.';
-  const killedLine =
-    input.killedBackground.length > 0 || input.killedSubAgents.length > 0
-      ? 'Stopped when this window was opened:\n' +
-        [
-          ...input.killedBackground.map((job) => `- background terminal #${job.id} \`${job.command}\` — ${job.state}`),
-          ...input.killedSubAgents.map(
-            (agent) =>
-              `- sub-agent node ${agent.nodeId}${agent.transcript ? ` — transcript: ${agent.transcript}` : ''}`,
-          ),
-        ].join('\n')
-      : '';
-  const redoLine =
-    "Redo the user's last request here. If it depends on earlier work, fetch that from the transcript first — do " +
-    'not guess.';
-
-  // ---- A summarized rollover: the summary *is* the handoff --------------------------------
-  //
-  // Same window, same pointer, one extra request (§5a): the summary is what the next agent
-  // reads first, and the four facts that cannot be summarised away follow it in a fixed
-  // order — the user's last request verbatim, the transcript pointer, the killed-work list,
-  // and the size of the window that ended. The refusal paragraph of the pointer shape is
-  // deliberately absent: the summary was written *because* the window ended, and repeating
-  // its size sentence at the top would push the handoff down for no fact.
-  if (input.summary) {
-    return [
-      COMPACTION_HARNESS_TITLE,
-      input.summary,
-      previousLine,
-      requestLine,
-      transcriptLine,
-      stillRunningLine,
-      killedLine,
-      usageLine,
-      redoLine,
-    ]
-      .filter(Boolean)
-      .join('\n\n');
-  }
-
-  // ---- The pointer shape (§6), with the unavailable-summary note when it was asked for -
-
-  // What was refused (or nearly was) is stated *first*, in the provider's own terms: the two
-  // refusals are different statements, and a model told the wrong one redoes the wrong thing
-  // — under `images` especially, where the fix is "do not re-attach these bytes", not "send
-  // less text".
-  const refused =
-    input.reason === 'full'
-      ? 'The previous conversation could not be sent to the model any more (the provider refused it: the context window was full)'
-      : input.reason === 'images'
-        ? 'The previous conversation could not be sent to the model any more: the provider refused the request because of its images (the attachments it carried were over its per-request image size limit)'
-        : 'The previous conversation was stopped before the provider had to refuse it (the context window was nearly used up)';
-  // The fallback is stated, not hidden: the user picked `Write a handoff summary` and got the
-  // pointer, so the window says so — otherwise the next turn would ask for a summary that
-  // was never written.
-  const unavailable = input.summaryFailure
-    ? ` A handoff summary was asked for but could not be written (${summaryFailureText(input.summaryFailure)}), ` +
-      'so this window is pointed at the previous one instead.'
-    : '';
-  paragraphs.push(
-    '[Harness: context window reset]\n' +
-      `${refused}, so this turn continues in a new, empty window of the same session. ` +
-      // The tail below already counts the attachments; this says what that count means for
-      // the images themselves, because a new window genuinely starts without them (the
-      // rollover carries text only — a `file_id`'s validity across windows is not
-      // guaranteed). A model that assumed its images were still here would answer about
-      // nothing.
-      (input.reason === 'images'
-        ? 'Those images are exactly what the provider refused, and a new window does not carry attachments: ' +
-          'none of them came along, and attaching them again would cost the same bytes again — have them looked ' +
-          'at by a sub-agent and report back in text. '
-        : '') +
-      'Nothing above was carried over: do not claim to remember it.' +
-      unavailable,
-  );
-  paragraphs.push(previousLine);
-  if (usageLine) {
-    paragraphs.push(usageLine);
-  }
-  paragraphs.push(transcriptLine);
-  // The tail is what stops the pointer from being useless: a model that does not know
-  // what it does not know never looks anything up.
-  paragraphs.push(
-    'Carried over verbatim:\n' +
-      `- the user's last request: ${request || '(none found)'}${notes.length > 0 ? ` ${notes.join(' ')}` : ''}\n` +
-      `- the last answer you gave: ${answer || '(none)'}`,
-  );
-  paragraphs.push(stillRunningLine);
-  if (killedLine) {
-    paragraphs.push(killedLine);
-  }
-  paragraphs.push(redoLine);
-  return paragraphs.join('\n\n');
-}
-
-/**
- * Why a handoff summary is not in front of the model, in one model-facing clause
- * (`[Harness: context window reset]` says it when the user asked for a summary and the
- * rollover fell back). English, like the rest of the harness text — a translated
- * instruction is a different instruction.
- */
-function summaryFailureText(reason: CompactionFailure): string {
-  switch (reason) {
-    case 'timeout':
-      return 'the summary request timed out';
-    case 'error':
-      return 'the summary request failed';
-    case 'empty':
-      return 'the model returned nothing';
-    default:
-      return 'the answer did not carry the required sections';
-  }
 }
 
 /**
@@ -819,6 +619,19 @@ export interface TurnRun {
    * behind while this run's own copy of it sits in `items`.
    */
   markerId?: string;
+  /**
+   * Resolves when {@link finishTurn} closed this run — the one fact an orchestrator needs.
+   *
+   * `compressAndContinue` starts a compression turn and must wait for its **real** end
+   * before it can read the answer and open the window below it; a timer would race the
+   * model, and the agent's own events are delivered into a handler that knows nothing
+   * about a caller. `finishTurn` resolves it exactly once, whatever the turn's status
+   * (done / interrupted / error), so a Stop is a normal outcome here — the chain simply
+   * stops.
+   */
+  settled: Promise<void>;
+  /** The resolver behind {@link settled}; called once, by `finishTurn` (or `dispose`). */
+  resolveSettled: () => void;
 }
 
 /**
@@ -1058,6 +871,29 @@ export interface RequestPayloadMeta {
    * is why it can only be reported here. Opaque, not secret.
    */
   sessionHeader?: { name: string; value: string };
+}
+
+/**
+ * Everything a handoff captures from the window that is ending, in the order
+ * `docs/agents/invariants/context-rollover.md` §7 requires — read **before** the union kill,
+ * so no kill notice can be mistaken for something the user wrote
+ * (`SessionRuntime.prepareHandoff`).
+ */
+interface HandoffFacts {
+  /** The node the window ends on (P). */
+  previous: TreeNode;
+  /** The tail: the user's last real request and the last answer. */
+  carry: { request: string; answer: string; attachments: number };
+  /** The window's first real user request — the original task, quoted verbatim. */
+  firstRequest: string;
+  /** Files the window changed, in the order it touched them. */
+  files: string[];
+  /** The window's own bounded messages — the compression node's input. */
+  source: CompactionSource;
+  /** How full the window was, when both numbers are known. */
+  usage?: { used: number; window: number; pct: number };
+  killedBackground: KilledJobLine[];
+  killedSubAgents: KilledAgentLine[];
 }
 
 export class SessionRuntime {
@@ -1545,54 +1381,68 @@ export class SessionRuntime {
   private workerFor(node: TreeNode): { agent: Agent; tools: ToolRegistry } {
     let worker = this.nodeWorkers.get(node.id);
     if (!worker) {
-      const tools = new ToolRegistry();
-      // `search_transcripts` reads the harness's own transcript dumps; the roots
-      // depend on config + global storage, so hand it a live resolver.
-      tools.setTranscriptRoots(() => [this.host.transcriptRoot()]);
-      // One access object per node: registries live per (session, node) inside the
-      // hub, so a job belongs to the branch whose turn spawned it and a task id
-      // stays session-local.
-      tools.setBackgroundAccess({
-        currentOwner: () => ({ sessionId: this.sessionId, nodeId: node.id }),
-        hub: this.hub,
-        // The identity every child process of this node is born with: which node asked
-        // (so a command can name the exact conversation it belongs to) plus the window's
-        // control plane. Recomputed per spawn, so a plane that is enabled later, or
-        // rebound to another port by `restart()`, is never stale.
-        spawnEnv: (owner) => ({
-          ...(owner ? { SPINNEY_SESSION_ID: owner.sessionId, SPINNEY_NODE_ID: owner.nodeId } : {}),
-          ...this.host.controlEnv(),
-        }),
-      });
-      // The two web tools read `searchProvider` off **this node's** card: the paid tier
-      // is the card's declaration, and the token it needs is that card's provider's —
-      // resolved live, so an edit in the Model Cards page applies to the next call.
-      tools.setWebCard(() => this.cardForNode(node));
+      // A **compression** node gets the read-only four and no orchestrator at all
+      // (`docs/agents/invariants/compress-node.md` §2): the restriction is the registry it
+      // is built with and the capabilities below, not a sentence in its prompt.
+      const compress = node.role === 'compress';
+      const tools = compress ? this.compressTools() : new ToolRegistry();
+      if (!compress) {
+        // `search_transcripts` reads the harness's own transcript dumps; the roots
+        // depend on config + global storage, so hand it a live resolver.
+        tools.setTranscriptRoots(() => [this.host.transcriptRoot()]);
+        // One access object per node: registries live per (session, node) inside the
+        // hub, so a job belongs to the branch whose turn spawned it and a task id
+        // stays session-local.
+        tools.setBackgroundAccess({
+          currentOwner: () => ({ sessionId: this.sessionId, nodeId: node.id }),
+          hub: this.hub,
+          // The identity every child process of this node is born with: which node asked
+          // (so a command can name the exact conversation it belongs to) plus the window's
+          // control plane. Recomputed per spawn, so a plane that is enabled later, or
+          // rebound to another port by `restart()`, is never stale.
+          spawnEnv: (owner) => ({
+            ...(owner ? { SPINNEY_SESSION_ID: owner.sessionId, SPINNEY_NODE_ID: owner.nodeId } : {}),
+            ...this.host.controlEnv(),
+          }),
+        });
+        // The two web tools read `searchProvider` off **this node's** card: the paid tier
+        // is the card's declaration, and the token it needs is that card's provider's —
+        // resolved live, so an edit in the Model Cards page applies to the next call.
+        tools.setWebCard(() => this.cardForNode(node));
+      }
       const agent = new Agent(this.clients, tools, (event) => this.handleAgentEventFor(node, event));
       agent.setCard(this.cardForNode(node));
       agent.setThinkingEffort(this.effortForNode(node));
       agent.setReplyLanguage(this.replyLanguage, this.replyLanguageTag);
-      // This agent can spawn sub-agents: hand it this runtime's orchestrator,
-      // bound to the same node.
-      agent.setSpawnHandler((args, signal) => this.handleSpawnAgents(node, args, signal));
-      // And it can resume a finished sub-agent with a follow-up message.
-      agent.setSendMessageHandler((args, signal) => this.handleSendAgentMessage(node, args, signal));
-      // The session surface: start a fresh session, prompt one, wait for it, end what
-      // it started, and read the window's sessions / a session's tree. Main agent
-      // only — a sub-agent reports to its dispatcher, not into another conversation.
-      agent.setCanSessions(true);
-      agent.setCreateSessionHandler((args) => this.handleCreateSession(node, args));
-      agent.setSendSessionPromptHandler((args) => this.handleSendSessionPrompt(node, args));
-      agent.setWaitForSessionIdleHandler((args, signal) => this.handleWaitForSessionIdle(args, signal));
-      agent.setInterruptSessionHandler((args) => this.handleInterruptSession(args));
-      agent.setListSessionsHandler((args) => Promise.resolve(this.handleListSessions(args)));
-      agent.setListNodeHandler((args) => Promise.resolve(this.handleListNodes(node, args)));
-      // Completion signals (a finished background terminal or an async sub-agent)
-      // are injected into this node's *running* turn at its next tool boundary.
-      agent.setSignalHandler(() => this.takeSignalsFor(node));
-      // And it can rename the session (an explicit rename locks the title, so the
-      // automatic namer leaves it alone).
-      agent.setRenameSessionHandler((args) => Promise.resolve(this.host.handleRenameSession(args, this.sessionId)));
+      if (!compress) {
+        // This agent can spawn sub-agents: hand it this runtime's orchestrator,
+        // bound to the same node.
+        agent.setSpawnHandler((args, signal) => this.handleSpawnAgents(node, args, signal));
+        // And it can resume a finished sub-agent with a follow-up message.
+        agent.setSendMessageHandler((args, signal) => this.handleSendAgentMessage(node, args, signal));
+        // The session surface: start a fresh session, prompt one, wait for it, end what
+        // it started, and read the window's sessions / a session's tree. Main agent
+        // only — a sub-agent reports to its dispatcher, not into another conversation.
+        agent.setCanSessions(true);
+        agent.setCreateSessionHandler((args) => this.handleCreateSession(node, args));
+        agent.setSendSessionPromptHandler((args) => this.handleSendSessionPrompt(node, args));
+        agent.setWaitForSessionIdleHandler((args, signal) => this.handleWaitForSessionIdle(args, signal));
+        agent.setInterruptSessionHandler((args) => this.handleInterruptSession(args));
+        agent.setListSessionsHandler((args) => Promise.resolve(this.handleListSessions(args)));
+        agent.setListNodeHandler((args) => Promise.resolve(this.handleListNodes(node, args)));
+        // Completion signals (a finished background terminal or an async sub-agent)
+        // are injected into this node's *running* turn at its next tool boundary.
+        agent.setSignalHandler(() => this.takeSignalsFor(node));
+        // And it can rename the session (an explicit rename locks the title, so the
+        // automatic namer leaves it alone).
+        agent.setRenameSessionHandler((args) => Promise.resolve(this.host.handleRenameSession(args, this.sessionId)));
+      } else {
+        // Belt and braces beside the all-off capability set: a compression turn is a
+        // read-only observer, so it has nothing to spawn and no conversation to address.
+        agent.setCanSpawn(false);
+        agent.setCanSpawnReadOnly(false);
+        agent.setCanSessions(false);
+      }
       worker = { agent, tools };
       this.nodeWorkers.set(node.id, worker);
     }
@@ -1890,6 +1740,12 @@ export class SessionRuntime {
    * card of that branch, not the dropdown's current value.
    */
   private systemPromptFor(node: TreeNode | undefined): string {
+    // A chain with no envelope still renders as it always did, and a **compression** node
+    // renders its own template — the live render must never disagree with what a freeze of
+    // the same node would produce (`freezeEpoch`).
+    if (node?.role === 'compress') {
+      return compressSystemPrompt(cardDisplayName(this.cardForNode(node)), this.effortForNode(node));
+    }
     return systemPrompt(
       cardDisplayName(this.cardForNode(node)),
       this.effortForNode(node),
@@ -1910,8 +1766,18 @@ export class SessionRuntime {
    * names the reply language — rendered here through the same helper an agent uses
    * (`withToolTitleLanguage`), with the same name + tag, so a frozen envelope and the
    * drift hash over it are computed from identical bytes.
+   *
+   * `role` decides *which* set: a compression node advertises the read-only four and no
+   * intercepted tool at all (`compressToolSchemas`), because its capabilities are all off.
    */
-  private liveToolSchemas(card: ModelCard, sidecar: boolean): ToolDefinition[] {
+  private liveToolSchemas(
+    card: ModelCard,
+    sidecar: boolean,
+    role?: 'compress' | 'resume',
+  ): ToolDefinition[] {
+    if (role === 'compress') {
+      return this.compressToolSchemas();
+    }
     const registry = new ToolRegistry();
     const capabilities: ToolCapabilities = {
       vision: isVisionCard(card),
@@ -1921,6 +1787,40 @@ export class SessionRuntime {
     };
     return withToolTitleLanguage(
       [...registry.definitions, ...interceptedDefinitions(capabilities)],
+      this.replyLanguage,
+      this.replyLanguageTag,
+    );
+  }
+
+  /**
+   * The compression node's tool **registry**: the four read tools, built from the full one
+   * so the write surface is explicitly denied rather than merely absent
+   * (`docs/agents/invariants/compress-node.md` §2).
+   *
+   * The denial is defence in depth and it is the whole capability: a compression turn has
+   * no way to change the workspace, and that is a fact of the registry the agent was built
+   * with — not a sentence in its prompt that a model could decide to ignore.
+   */
+  private compressTools(): ToolRegistry {
+    const registry = new ToolRegistry();
+    // `search_transcripts` resolves its roots live, and `setTranscriptRoots` rebuilds the
+    // registry — so it is set **before** the subset is taken (a rebuild after it would put
+    // every tool back).
+    registry.setTranscriptRoots(() => [this.host.transcriptRoot()]);
+    registry.withBlocked(COMPRESS_BLOCKED_TOOLS);
+    return registry.subset(COMPRESS_READONLY_TOOLS);
+  }
+
+  /** Those schemas, in the one shape a frozen envelope records. */
+  private compressToolSchemas(): ToolDefinition[] {
+    const capabilities: ToolCapabilities = {
+      vision: false,
+      canSpawn: false,
+      canSpawnReadOnly: false,
+      canSessions: false,
+    };
+    return withToolTitleLanguage(
+      [...this.compressTools().definitions, ...interceptedDefinitions(capabilities)],
       this.replyLanguage,
       this.replyLanguageTag,
     );
@@ -1940,6 +1840,10 @@ export class SessionRuntime {
     const card = this.cardForCardId(cardId);
     const level = normalizeEffort(card, effort);
     const provider = providerById(card.providerId);
+    // A **compression** node freezes its own envelope: its own template, its own tool set,
+    // and no AGENTS.md section (the workspace's instructions describe how to work, and this
+    // turn does not work). `kind` is what the drift check reads to compare like with like.
+    const compress = node.role === 'compress';
     // Seed any existing worker with this card, but never *create* one here: a fork freezes
     // an envelope per copied node, and building an agent (plus its tool registry) for a node
     // that may never run would be pure overhead. `beginTurn` builds the one that matters.
@@ -1952,26 +1856,31 @@ export class SessionRuntime {
     // an earlier epoch left on that worker: the envelope has to describe what this build
     // would send, or a re-frozen chain would inherit a tool set that belongs to the epoch
     // before it.
-    const tools = this.liveToolSchemas(card, isSidecar(node));
+    const tools = this.liveToolSchemas(card, isSidecar(node), node.role);
     // The instructions are read **at use** (`agentsMd.ts`, through the host): an edit made
     // while VS Code was closed, or during this session, is what the next epoch freezes —
     // and the hash below is taken from the same bytes, so the drift check that guards this
     // envelope can never disagree with what its prompt says.
-    const agentsMd = this.host.agentsMdSources();
+    const agentsMd: AgentsMdSources = compress
+      ? { global: null, workspace: null }
+      : this.host.agentsMdSources();
     return {
       id: newId(),
-      prompt: systemPrompt(cardDisplayName(card), level, this.replyLanguage, undefined, agentsMd),
+      prompt: compress
+        ? compressSystemPrompt(cardDisplayName(card), level)
+        : systemPrompt(cardDisplayName(card), level, this.replyLanguage, undefined, agentsMd),
       tools,
       cardId: card.id,
       effort: level,
       replyLanguage: this.replyLanguage,
+      kind: compress ? 'compress' : undefined,
       providerId: card.providerId,
       baseUrl: provider?.baseUrl ?? '',
       wireModel: card.oaiModel,
       vision: isVisionCard(card),
       visionTransport: card.vision.transport === 'deepseek' ? 'deepseek' : 'openai',
       agentsMdHash: contentHash(agentsMdSection(agentsMd)),
-      templateHash: contentHash(SYSTEM_PROMPT_TEMPLATE),
+      templateHash: contentHash(compress ? COMPRESS_SYSTEM_PROMPT_TEMPLATE : SYSTEM_PROMPT_TEMPLATE),
       toolsetHash: contentHash(JSON.stringify(tools)),
       frozenAt: Date.now(),
     };
@@ -2100,13 +2009,23 @@ export class SessionRuntime {
     // The harness side: the shipped prompt, the workspace's AGENTS.md, the tool set and
     // the endpoint. All four are content hashes, never version numbers, so a release that
     // changes none of them is not a change.
-    if (contentHash(SYSTEM_PROMPT_TEMPLATE) !== epoch.templateHash) {
+    //
+    // **Which** prompt and which tool set is the epoch's own question: a chain whose
+    // envelope was frozen from the compression template is compared against that template
+    // and the compression tool set, and against no AGENTS.md section at all. Comparing it
+    // against the main ones would report drift on every check — a compression chain would
+    // spend its life claiming the harness changed under it.
+    const compress = epoch.kind === 'compress';
+    if (contentHash(compress ? COMPRESS_SYSTEM_PROMPT_TEMPLATE : SYSTEM_PROMPT_TEMPLATE) !== epoch.templateHash) {
       reasons.push('prompt');
     }
-    if (contentHash(agentsMdSection(this.host.agentsMdSources())) !== epoch.agentsMdHash) {
+    if (contentHash(agentsMdSection(compress ? { global: null, workspace: null } : this.host.agentsMdSources())) !== epoch.agentsMdHash) {
       reasons.push('agents.md');
     }
-    if (contentHash(JSON.stringify(this.liveToolSchemas(liveCard, view?.kind === 'agent'))) !== epoch.toolsetHash) {
+    if (
+      contentHash(JSON.stringify(this.liveToolSchemas(liveCard, view?.kind === 'agent', compress ? 'compress' : undefined))) !==
+      epoch.toolsetHash
+    ) {
       reasons.push('tools');
     }
     const provider = providerById(liveCard.providerId);
@@ -2144,6 +2063,9 @@ export class SessionRuntime {
         clearTimeout(run.flushTimer);
         run.flushTimer = null;
       }
+      // A run that never reaches `finishTurn` (the host is going away) must not leave an
+      // orchestrator awaiting it forever: release it now, and the caller then sees `dead`.
+      run.resolveSettled();
     }
     // Kill and forget every job this session owns (registries are per node).
     this.hub.removeSession(this.sessionId, { kill: true });
@@ -2600,6 +2522,11 @@ export class SessionRuntime {
       epochId: node.epoch ? node.epoch.id : undefined,
       size: node.customSize ?? null,
       kind: node.kind,
+      // What this node is in a compression chain: the card draws `CMP` for a compression
+      // node, hides its 🗑 for a resume window, and hides ▶ once a compression has been
+      // delivered (`docs/agents/invariants/compress-node.md` §4/§5).
+      role: node.role,
+      compressedFrom: node.compressedFrom,
       delivered: node.delivered === true,
       agentDepth: node.agentDepth,
       agentStatus: node.agentStatus,
@@ -3071,10 +2998,29 @@ export class SessionRuntime {
    * context base, so the API prefix of this run (and of everything below it) contains
    * no ancestor message at all — the rollover's whole point. It also drops the parent's
    * pending interruption notice (see below).
+   *
+   * `opts.epochFrom` overrides where the run's **envelope** comes from, and it is the one
+   * option a compression chain cannot do without (`docs/agents/invariants/compress-node.md`
+   * §3): a string names the node whose frozen bytes this node inherits — a **copy** is
+   * planted on the new node, so `epochForNode` for its own descendants never walks up past
+   * it into the compression envelope above — while `null` means "freeze a fresh one from
+   * the live setup", which is what the compression node itself does. Absent (the default)
+   * keeps the ordinary rule: inherit the parent's, freeze when there is none.
    */
   private beginTurn(
     title: string,
-    opts?: { parentId?: string | null; pan?: boolean; freshContext?: boolean; freshEpoch?: boolean },
+    opts?: {
+      parentId?: string | null;
+      pan?: boolean;
+      freshContext?: boolean;
+      freshEpoch?: boolean;
+      /** `null` = freeze a fresh envelope; a node id = plant a copy of that node's. */
+      epochFrom?: string | null;
+      /** A compression node / the window it produced (`TreeNode.role`). */
+      role?: 'compress' | 'resume';
+      /** A compression node's own record of the window it compresses. */
+      compressedFrom?: string;
+    },
   ): TurnRun | null {
     const session = this.session;
     if (this.host.isHeld()) {
@@ -3121,11 +3067,41 @@ export class SessionRuntime {
     // `freshEpoch` is the "Continue with Latest setup" answer: this node must freeze the
     // live configuration instead of inheriting the parent's. A rollover can afford it —
     // its new context has no cached prefix to lose.
-    const inherited = opts?.freshEpoch ? undefined : epochForNode(session, parentId ?? null);
-    const cardId = opts?.freshEpoch ? this.card.id : inherited ? inherited.cardId : this.requestCardId(basis);
-    const effort = opts?.freshEpoch ? this.thinkingEffort : inherited ? inherited.effort : this.requestEffort(basis);
+    //
+    // `epochFrom` is the compression chain's override (`docs/agents/invariants/compress-node.md`
+    // §3). A **node id** plants a *copy* of that node's envelope on this one — the resume
+    // window inherits the compressed window's bytes, never the compression turn's, because
+    // the compression node has an envelope of its own between them and `epochForNode` only
+    // ever walks up. `null` means the opposite: freeze a fresh envelope from the live setup
+    // (a compression node is its own epoch, in its own template and its own tool set).
+    // Absent keeps the ordinary inheritance rule.
+    const hasEpochFrom = !!opts && 'epochFrom' in opts;
+    let inherited: Epoch | undefined;
+    let plantInherited = false;
+    if (hasEpochFrom) {
+      const from = opts!.epochFrom ? epochForNode(session, opts!.epochFrom) : undefined;
+      if (from) {
+        // Same bytes, new identity: `frozenAt` and every hash still describe when and
+        // what was frozen, while the epoch id names the run that now carries them.
+        inherited = { ...from, id: newId() };
+        plantInherited = true;
+      }
+    } else {
+      inherited = opts?.freshEpoch ? undefined : epochForNode(session, parentId ?? null);
+    }
+    const freezeLive = !inherited;
+    const cardId = freezeLive && opts?.freshEpoch ? this.card.id : inherited ? inherited.cardId : this.requestCardId(basis);
+    const effort = freezeLive && opts?.freshEpoch ? this.thinkingEffort : inherited ? inherited.effort : this.requestEffort(basis);
     node.model = cardId;
     node.effort = effort;
+    // What this node is in a compression chain. Both roles also start a window (below), so
+    // the card draws its dashed edge for them like for any rollover.
+    if (opts?.role) {
+      node.role = opts.role;
+    }
+    if (opts?.compressedFrom) {
+      node.compressedFrom = opts.compressedFrom;
+    }
     // A new context window: this node is its own basis, so the run's prefix — built
     // by `buildPath` a few lines below — contains no ancestor message at all. The
     // order is load-bearing: the marker has to be in place *before* `buildPath` reads
@@ -3151,9 +3127,15 @@ export class SessionRuntime {
     worker.agent.setThinkingEffort(effort);
     // Freeze the envelope this node starts, or pin the worker to the one it inherits: a
     // chain keeps the tools its own instructions were written against, so a tool added or
-    // removed by a later build cannot change a prefix that is already in the cache.
+    // removed by a later build cannot change a prefix that is already in the cache. A
+    // **planted** envelope is also stored on this node — that is what makes it a boundary:
+    // the compression node above it has an envelope of its own, and without the copy every
+    // descendant of a resume window would inherit the compression prompt.
     if (inherited) {
       worker.agent.setToolSchemas(inherited.tools);
+      if (plantInherited) {
+        node.epoch = inherited;
+      }
     } else {
       node.epoch = this.freezeEpoch(node, cardId, effort);
       worker.agent.setToolSchemas(node.epoch.tools);
@@ -3197,6 +3179,7 @@ export class SessionRuntime {
       pendingThinking: '',
       pendingTools: new Map(),
       flushTimer: null,
+      ...settlePair(),
     };
     this.runs.set(node.id, run);
     this.postTree();
@@ -3273,6 +3256,7 @@ export class SessionRuntime {
       pendingThinking: '',
       pendingTools: new Map(),
       flushTimer: null,
+      ...settlePair(),
     };
     this.runs.set(node.id, run);
     return run;
@@ -3335,6 +3319,9 @@ export class SessionRuntime {
     if (node && session.nodes[node.id]) {
       this.post({ type: 'nodeUpdate', ...this.nodeStatePatch(node) });
     }
+    // The run is closed: whatever was awaiting it (a compression chain, whose next step is
+    // the window below it) may look at `node.status` now.
+    run.resolveSettled();
   }
 
   // ---- User input / stop / image picker ----
@@ -3440,6 +3427,23 @@ export class SessionRuntime {
     const quiet = opts?.quiet === true;
     const basis =
       opts && 'basisNodeId' in opts ? opts.basisNodeId ?? null : this.session.activeNodeId;
+    // A compression node hands over **once**: from the moment its window exists, no message of
+    // its own may start a second line under it (`docs/agents/invariants/compress-node.md` §4).
+    // The composer cannot reach this (a compression node has no input dock) and ▶ is refused in
+    // `continueFrom`; this closes the one entry left — an inter-session prompt addressed at a
+    // checked-out compression node, which would otherwise grow a normal child under it.
+    const basisNode = basis ? this.session.nodes[basis] : undefined;
+    if (basisNode && isCompressNode(basisNode) && resumeChildOf(this.session, basisNode.id)) {
+      if (!quiet) {
+        this.postNotice(
+          'warning',
+          vscode.l10n.t(
+            'This compression has already been delivered to the window below it. To redo it, start again from the window above.',
+          ),
+        );
+      }
+      return { ok: false, code: 'refused', nodeId: basis };
+    }
     // The card this send runs on **and** the card the image path below must use are
     // the ones of the node the send came from (its own, else an ancestor's, else the
     // session seed), plus a pending pick made on it. Both are read here, once, before
@@ -3717,6 +3721,19 @@ export class SessionRuntime {
     if (!node || isSidecar(node)) {
       return false;
     }
+    // A compression node delivers **once**: from the moment its window exists it is sealed,
+    // and a second handoff from the same window would leave two windows claiming to continue
+    // the same one (`docs/agents/invariants/compress-node.md` §4). The card's ▶ hides for the
+    // same reason; this is the host's half of the rule.
+    if (isCompressNode(node) && resumeChildOf(this.session, node.id)) {
+      this.postNotice(
+        'info',
+        vscode.l10n.t(
+          'This compression has already been delivered to the window below it. To redo it, start again from the window above.',
+        ),
+      );
+      return false;
+    }
     if (this.runs.has(nodeId)) {
       return false;
     }
@@ -3794,24 +3811,48 @@ export class SessionRuntime {
   }
 
   /**
-   * True when this node offers a context continuation: a conversational node that is not
-   * streaming and whose chain is at least **near** full (`contextState`, so the provider's
-   * refusal and the 90% threshold both qualify). It is the same predicate the composer's
-   * new-epoch entry uses to pick its backend, and it is public so `ChatViewProvider` can
-   * decide whether the kill-confirmation is needed *before* anything has changed.
+   * The structural preconditions of starting a **new context window** from this node: a
+   * conversational node (not a sub-agent window / job card), not streaming, and with **no
+   * conversational child** — a node that already has one has been rolled over (or the user
+   * went on from it), and a second window must not start from the same card, or a replayed
+   * click would open a sibling window beside the one it already opened.
+   *
+   * It says nothing about how full the window is: that is `canRollover`'s question, and a
+   * deliberate entry (the composer's right-click, `compressNow`) may open a window from a
+   * window that still has room.
    */
-  canRollover(nodeId: string): boolean {
+  private canWindowStart(nodeId: string): boolean {
     const node = this.session.nodes[nodeId];
     if (!node || isSidecar(node) || this.runs.has(nodeId)) {
       return false;
     }
-    // A node that already has a conversational child has been rolled over (or the
-    // user went on from it): a second window must not start from the same card, or a
-    // replayed click would open a sibling window beside the one it already opened.
-    if (node.children.some((id) => !isSidecar(this.session.nodes[id]))) {
-      return false;
-    }
-    return this.contextState(node) !== 'ok';
+    return !node.children.some((id) => !isSidecar(this.session.nodes[id]));
+  }
+
+  /**
+   * True when this node offers a **context** continuation: a window that can be started
+   * *and* whose chain is at least near full (`contextState`, so the provider's refusal and
+   * the 90% threshold both qualify). It is the same predicate the composer's new-epoch entry
+   * uses to pick its backend, and it is public so `ChatViewProvider` can decide whether the
+   * kill-confirmation is needed *before* anything has changed.
+   */
+  canRollover(nodeId: string): boolean {
+    const node = this.session.nodes[nodeId];
+    return this.canWindowStart(nodeId) && !!node && this.contextState(node) !== 'ok';
+  }
+
+  /**
+   * True when a **window can be opened from this node right now**, whatever its fill level —
+   * the precondition of both handoff answers (`docs/agents/invariants/compress-node.md` §1):
+   * the Simple pointer rollover and the Agentic compression node.
+   *
+   * It is `canWindowStart` and nothing else on purpose. The user's own click is the trigger
+   * here: a right-click on Send (or the composer's new-epoch entry) says "move this
+   * conversation into a new window", and a window that still has room is a legitimate moment
+   * to say it — `canRollover` keeps the *suggestion* at 90%.
+   */
+  canCompress(nodeId: string): boolean {
+    return this.canWindowStart(nodeId);
   }
 
   /**
@@ -3849,16 +3890,17 @@ export class SessionRuntime {
   }
 
   /**
-   * Continue the conversation in a **new, empty context window** — the `⧉` button on
-   * a card whose request the provider refused as too big. See
+   * Continue the conversation in a **new, empty context window**, handed over by the
+   * **pointer** — the Simple answer of the composer's new-epoch entry. See
    * `docs/agents/invariants/context-rollover.md`; in short:
    *
    *  - the new node is an ordinary child of this one (`freshContext`), so the tree
    *    stays connected and a dashed edge marks the window break — only the *message
    *    prefix* is cut, which is exactly what `contextBaseId` does;
    *  - the message is harness-written and carries a pointer to this node's on-disk
-   *    transcript plus the last request and answer verbatim, so nothing has to be
-   *    summarised and nothing is lost when a detail is needed;
+   *    transcript, the original task and the last request verbatim, the files the window
+   *    changed, and the killed-work list — so nothing has to be summarised and nothing is
+   *    lost when a detail is needed;
    *  - this node is **also** union-killed first (the composer's Stop path): its
    *    background terminals and its whole sub-agent subtree cannot deliver into a
    *    full window, and their results would never reach the new one, so leaving them
@@ -3866,18 +3908,21 @@ export class SessionRuntime {
    *    this node (the existing mechanism) and the transcript is re-dumped, so the new
    *    window really can read what happened.
    *
-   * A node that is *not* a context-window failure is continued **in place** instead
-   * (`continueFrom`): one behaviour, no new failure mode, so a stale card can never
-   * dead-end the button.
+   * A node that cannot start a window (or — without `force` — one whose chain is not near
+   * full) is continued **in place** instead (`continueFrom`): one behaviour, so a stale
+   * card can never dead-end the button. `force` is the deliberate entry's rule: the user
+   * asked for a new window explicitly (`compressNow`, the composer's right-click), and a
+   * window that still has room is a legitimate moment to move on.
    *
    * When it returns true the new node is checked out and running, and this node keeps
    * its full history on its stopped line.
    *
    * `opts.text` is the composer's own text: it is sent as a **real user message** in the
-   * new window, right after the harness message. That is the difference from the first
-   * shape of this method, where the harness text merely *quoted* the previous request and
-   * the user's new one was lost — the user asked for this turn, so the model has to
-   * receive it as the turn's request.
+   * new window, right after the harness message — the user asked for this turn, so the
+   * model has to receive it as the turn's request.
+   *
+   * The **Agentic** answer is not this method: it is `compressAndContinue` below, which
+   * needs a whole turn between the two windows (`docs/agents/invariants/compress-node.md`).
    */
   async rolloverContext(
     nodeId: string,
@@ -3885,20 +3930,15 @@ export class SessionRuntime {
     opts?: {
       /** The composer's text, sent as the new window's own user message (may be empty). */
       text?: string;
-      /**
-       * How the previous window hands over: `'summary'` is the composer's compaction entry
-       * (a handoff summary written by one extra request), `'continue'`/absent is the
-       * pointer shape this method implements. `'summary'` is **recorded on the node** and
-       * currently behaves exactly like `'continue'` — see the `TODO(compaction)` below.
-       */
-      handoff?: 'summary' | 'continue';
+      /** Open a window even though this chain is not near full (a deliberate entry). */
+      force?: boolean;
     },
   ): Promise<boolean> {
     const node = this.session.nodes[nodeId];
     if (!node || isSidecar(node)) {
       return false;
     }
-    if (!this.canRollover(nodeId)) {
+    if (opts?.force ? !this.canWindowStart(nodeId) : !this.canRollover(nodeId)) {
       return this.continueFrom(nodeId);
     }
     if (this.host.isHeld()) {
@@ -3908,66 +3948,31 @@ export class SessionRuntime {
       );
       return false;
     }
-    // Capture the tail the message carries BEFORE the kill: the kill appends its
-    // notices to this node as `role:'user'` messages, and one of those must never be
-    // mistaken for the request the user actually made.
-    const carry = this.carriedOver(node);
-    // The summary's input is selected from the window **as the model saw it** — the
-    // context base down to this node — and therefore also before the kill: the union kill
-    // appends its own `role:'user'` notices to this node, the user wrote none of them, and
-    // a summary built from them would report the harness' notes as user requests. It is
-    // bounded and it never walks the chain above the base (§6 of the rollover contract).
-    const handoffSource =
-      opts?.handoff === 'summary' ? extractCompactionSource(pathMessages(this.session, nodeId)) : undefined;
-    // Leftover work: the same union kill the composer's Stop uses, so "nothing
-    // continues" holds for the old line while the conversation moves on. The tasks
-    // are captured first because the hub forgets the *running* snapshot once they are
-    // settled — and their final state is what the new window's message has to name.
-    const killedJobs = this.hub.listForNode(this.sessionId, nodeId).filter((task) => task.status === 'running');
-    const killedAgents = this.subAgentSubtree(nodeId);
-    this.stopNode(nodeId);
-    await this.settleSubAgents();
-    // `flushWritebacks` appends the kill notices to this node's history but never
-    // dumps it (only `finishTurn` does), and a `kind:'bg'` card has no dump of its
-    // own. Without this explicit re-dump, the record of the killed work — the only
-    // durable copy of what those terminals produced — would never reach the file the
-    // new window is told to read.
-    this.flushWritebacks();
-    this.host.dumpSessionTranscript(node, this.session, node.status);
+    // The facts both handoff shapes carry — captured **before** the union kill, because the
+    // kill appends its notices to this node as `role:'user'` messages, and none of those is
+    // the request the user actually made. The window's source is selected the same way, from
+    // the context base down (`docs/agents/invariants/context-rollover.md` §7).
+    const handoff = await this.prepareHandoff(node);
     // Windows are numbered per branch: the session's first window is window 1, and
     // every window below it adds one, so the first rollover of a session is 2.
     const windows = pathIds(this.session, nodeId).filter(
       (id) => this.session.nodes[id]?.contextBaseId === id,
     ).length;
     const windowNo = windows + 2;
-    // The one extra request the user's answer already paid for: written **before** the new
-    // window exists, so the window's first message carries the summary and not a second
-    // kind of handoff. A failure here is never a failed rollover — the pointer text covers
-    // it and says so (§6).
-    const handoff = handoffSource ? await this.writeHandoffSummary(node, handoffSource) : undefined;
     const message = buildContextRolloverMessage({
       reason: this.rolloverReason(node),
       sessionId: this.sessionId,
       previousNodeId: node.id,
       transcriptPath: this.rolloverTranscriptPath(node.id),
       transcriptExists: this.rolloverTranscriptOnDisk(node.id),
-      request: carry.request,
-      attachments: carry.attachments,
-      answer: carry.answer,
-      summary: handoff?.text,
-      summaryFailure: handoff?.failure,
-      killedBackground: killedJobs.map((task) => ({
-        id: task.id,
-        command: clipText(task.command, 80),
-        state: task.killed
-          ? 'stopped by the rollover'
-          : `finished with exit code ${task.exitCode ?? 'unknown'}`,
-      })),
-      killedSubAgents: killedAgents.map((id) => ({
-        nodeId: id,
-        transcript: this.session.nodes[id]?.agentTranscript,
-      })),
-      usage: this.rolloverUsage(node),
+      request: handoff.carry.request,
+      attachments: handoff.carry.attachments,
+      answer: handoff.carry.answer,
+      firstRequest: handoff.firstRequest,
+      files: handoff.files,
+      killedBackground: handoff.killedBackground,
+      killedSubAgents: handoff.killedSubAgents,
+      usage: handoff.usage,
     });
     const run = this.beginTurn(vscode.l10n.t('Context window {0}', windowNo), {
       parentId: nodeId,
@@ -3989,16 +3994,6 @@ export class SessionRuntime {
     this.stoppedLines.add(nodeId);
     run.items.push({ kind: 'harness', text: message });
     this.post({ type: 'harnessNote', nodeId: run.node.id, text: message });
-    // The handoff the user asked for is recorded on the node that starts the window: the
-    // choice (`handoff`) and, when it could be written, the text itself (`handoffSummary`).
-    // Both are persisted with the node, so a reload shows the same harness block and later
-    // features can tell a summarized window from a pointed one without re-reading the text.
-    if (opts?.handoff === 'summary') {
-      run.node.handoff = 'summary';
-      if (handoff?.text) {
-        run.node.handoffSummary = handoff.text;
-      }
-    }
     // The composer's own text: a REAL user message of this window, after the harness
     // message — one request carrying both, never a quotation of somebody else's turn. The
     // card shows it as the user bubble it is, and nothing is cleared here (the host does
@@ -4017,90 +4012,343 @@ export class SessionRuntime {
   }
 
   /**
-   * Write the **handoff summary** of one window — the composer's `Write a handoff summary`
-   * answer (§5a/§6 of `docs/agents/invariants/context-rollover.md`).
-   *
-   * One request, on the card this chain sends with, and nothing else:
-   *
-   *  - **no tools** and non-streaming (the completion path, like a session title);
-   *  - a low temperature and a capped output (`buildCompactionRequest`);
-   *  - a **hard** {@link COMPACTION_TIMEOUT_MS} deadline covering the request *and* its one
-   *    validation retry, because the bound is the user's wait and not the attempt count;
-   *  - the fixed eleven-section schema, validated by heading: a missing one is retried
-   *    **once**, and no other failure is retried at all.
-   *
-   * It never throws and never decides the rollover: the caller either gets the text or the
-   * reason it could not be written, and the new window opens either way (with the pointer
-   * text, which says in one sentence that the summary was unavailable). The user already
-   * confirmed the rollover, so the composer shows the busy state and the localized status
-   * line for the duration.
+   * The window number `n` of "Context window {0}": the session's first window is 1, and
+   * every window-starting node on this branch adds one, so the first rollover of a session
+   * is window 2. Read off the **display** path (a new child must not count itself).
    */
-  private async writeHandoffSummary(
-    node: TreeNode,
-    source: CompactionSource,
-  ): Promise<{ text?: string; failure?: CompactionFailure }> {
-    const card = this.chainCard(node);
-    this.lastStatus = vscode.l10n.t('Preparing the handoff summary…');
-    this.post({ type: 'status', text: this.lastStatus });
-    this.setBusy(true);
-    const started = Date.now();
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), COMPACTION_TIMEOUT_MS);
-    let text = '';
-    let outputTokens = 0;
-    let failure: CompactionFailure | undefined;
-    try {
-      const request = buildCompactionRequest(source);
-      const first = await this.clients.complete(card, {
-        messages: request.messages,
-        maxTokens: request.maxTokens,
-        temperature: request.temperature,
-        signal: controller.signal,
-      });
-      text = first.text;
-      outputTokens += first.usage?.completion_tokens ?? 0;
-      let verdict = classifyCompactionAnswer({ text });
-      if (!verdict.ok && verdict.reason === 'invalid') {
-        // One retry, and only for the schema: a timeout, an error or an empty answer is not
-        // a formatting problem, and asking again would only spend a second request on it.
-        const missing = missingCompactionSections(text);
-        const second = await this.clients.complete(card, {
-          messages: buildCompactionRetryMessages(source, text, missing),
-          maxTokens: request.maxTokens,
-          temperature: request.temperature,
-          signal: controller.signal,
-        });
-        text = second.text;
-        outputTokens += second.usage?.completion_tokens ?? 0;
-        verdict = classifyCompactionAnswer({ text });
+  private windowNumber(node: TreeNode): number {
+    const windows = pathIds(this.session, node.id).filter(
+      (id) => this.session.nodes[id]?.contextBaseId === id,
+    ).length;
+    return windows + 2;
+  }
+
+  /**
+   * Every display item of one **window** — its context base down to the node, in order.
+   * The same slice `pathMessages` sends, which is what makes "the files this window
+   * changed" mean the window and not the branch above it.
+   */
+  private windowDisplayItems(node: TreeNode): DisplayItem[] {
+    const ids = pathIds(this.session, node.id);
+    const base = contextBase(this.session, node.id);
+    const from = base ? ids.indexOf(base) : 0;
+    const items: DisplayItem[] = [];
+    for (const id of ids.slice(from)) {
+      const current = this.session.nodes[id];
+      if (current) {
+        items.push(...current.displayItems);
       }
-      if (verdict.ok) {
-        text = verdict.summary;
-      } else {
-        failure = verdict.reason;
-      }
-    } catch (err) {
-      // The abort is this method's own deadline (no Stop can reach it: a rollover starts on
-      // a node with no live turn). Everything else is the provider's or the transport's.
-      text = '';
-      failure = controller.signal.aborted ? 'timeout' : 'error';
-      this.host.output.appendLine(
-        `[compaction] summary request failed for ${node.id}: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    } finally {
-      clearTimeout(timer);
     }
-    // One line per attempt — in, out, how long, and what came out of it — because "the
-    // rolling summary is on" is otherwise unverifiable in a real window.
+    return items;
+  }
+
+  /**
+   * Everything both handoff answers need from the window that is ending, in the order
+   * `docs/agents/invariants/context-rollover.md` §7 requires:
+   *
+   *  1. **capture first** — the carried-over tail, the first request, the changed files and
+   *     the compression source, all read *before* the kill, because the union kill appends
+   *     its own `role:'user'` notices to this node and none of them is a user request;
+   *  2. **the union kill** (`stopNode`, the composer's Stop path) with its settle wait:
+   *     a killed sub-agent writes its dump in its `finish` handler, so the list would
+   *     otherwise be a guess;
+   *  3. `flushWritebacks()` and an explicit **re-dump** — the kill's record is the only
+   *     durable copy of what those terminals produced, and `finishTurn` is not the one
+   *     writing it here.
+   */
+  private async prepareHandoff(node: TreeNode): Promise<HandoffFacts> {
+    const window = pathMessages(this.session, node.id);
+    const carry = this.carriedOver(node);
+    const firstRequest = firstUserRequest(window);
+    const files = editedFilesFromItems(this.windowDisplayItems(node));
+    const source = extractCompactionSource(window);
+    const usage = this.rolloverUsage(node);
+    // The tasks are captured before the kill: the hub forgets the *running* snapshot once
+    // they are settled, and their final state is what the new window's message names.
+    const killedJobs = this.hub.listForNode(this.sessionId, node.id).filter((task) => task.status === 'running');
+    const killedAgents = this.subAgentSubtree(node.id);
+    this.stopNode(node.id);
+    await this.settleSubAgents();
+    this.flushWritebacks();
+    this.host.dumpSessionTranscript(node, this.session, node.status);
+    return {
+      previous: node,
+      carry,
+      firstRequest,
+      files,
+      source,
+      usage,
+      killedBackground: killedJobs.map((task) => ({
+        id: task.id,
+        command: clipText(task.command, 80),
+        state: task.killed ? 'stopped by the rollover' : `finished with exit code ${task.exitCode ?? 'unknown'}`,
+      })),
+      killedSubAgents: killedAgents.map((id) => ({
+        nodeId: id,
+        transcript: this.session.nodes[id]?.agentTranscript,
+      })),
+    };
+  }
+
+  /**
+   * A notice that belongs to **one card** rather than to the view focus: it is stored in
+   * that node's own transcript (so a reload still shows it) and routed by id. Used for the
+   * compression chain's own reports, which are about a card the user may not be standing on
+   * when the chain ends.
+   */
+  private postNoticeTo(nodeId: string, kind: 'warning' | 'info', text: string): void {
+    const node = this.session.nodes[nodeId];
+    if (!node) {
+      return;
+    }
+    node.displayItems.push({ kind: 'notice', noticeKind: kind, text });
+    this.post({ type: 'notice', nodeId, kind, text });
+    this.persistTurn();
+  }
+
+  /**
+   * Continue the conversation in a window whose handoff a **turn** wrote — the Agentic
+   * answer (`docs/agents/invariants/compress-node.md`).
+   *
+   * Three nodes, in this order:
+   *
+   *   P (the window being compressed) ──> C (the compression node) ──> R (the new window)
+   *
+   * C is a real turn node: its own context base, its own frozen envelope (the compression
+   * template, the read-only tool set), its own agent and no composer. It reads P's
+   * transcript and the workspace and answers with the handoff. R inherits **P's** envelope —
+   * never C's — so the window that continues the conversation sends the bytes the
+   * conversation was written in, and its first message is C's answer.
+   *
+   * It returns once the chain has reached its end: `true` when R was started (the handoff
+   * was delivered), `false` when nothing started, when C was stopped, or when C answered
+   * nothing.
+   */
+  async compressAndContinue(nodeId: string, opts?: { text?: string }): Promise<boolean> {
+    const node = this.session.nodes[nodeId];
+    if (!node || isSidecar(node)) {
+      return false;
+    }
+    if (!this.canWindowStart(nodeId)) {
+      return false;
+    }
+    if (this.host.isHeld()) {
+      this.postNotice(
+        'warning',
+        vscode.l10n.t('An external controller is rebooting the window; please wait a moment.'),
+      );
+      return false;
+    }
+    const handoff = await this.prepareHandoff(node);
+    // The number of the window that **ends** (window 1 for a session's first turn), and the
+    // number the new window will carry. The compression node is titled after the window it
+    // compresses; the window below it is the next one.
+    const nextWindow = this.windowNumber(node);
+    const instruction = buildCompressInstruction({
+      sessionId: this.sessionId,
+      previousNodeId: node.id,
+      transcriptPath: this.rolloverTranscriptPath(node.id),
+      transcriptExists: this.rolloverTranscriptOnDisk(node.id),
+      source: handoff.source,
+      files: handoff.files,
+      usage: handoff.usage,
+      killedBackground: handoff.killedBackground,
+      killedSubAgents: handoff.killedSubAgents,
+    });
+    // The compression node: its own window, its own envelope (a fresh freeze — `epochFrom:
+    // null`), its own role. `pan` keeps the view on the node the user just caused.
+    const run = this.beginTurn(vscode.l10n.t('Compression of window {0}', nextWindow - 1), {
+      parentId: nodeId,
+      freshContext: true,
+      epochFrom: null,
+      role: 'compress',
+      compressedFrom: nodeId,
+    });
+    if (!run) {
+      this.setBusy(this.runs.size > 0);
+      return false;
+    }
+    // `beginTurn` treats the basis node as "the user is continuing this line"; here the
+    // conversation continues in the window below, so the old line stays killed.
+    this.stoppedLines.add(nodeId);
+    run.items.push({ kind: 'harness', text: instruction });
+    this.post({ type: 'harnessNote', nodeId: run.node.id, text: instruction });
+    this.setBusy(true);
+    this.lastStatus = vscode.l10n.t('Thinking…');
+    this.post({ type: 'status', text: this.lastStatus });
+    this.post({ type: 'nodeUpdate', ...this.nodeStatePatch(run.node) });
+    const startedAt = Date.now();
+    void run.agent.sendUserMessage(instruction);
+    // The turn's **real** end, not a timer: `finishTurn` resolves this whatever the status,
+    // so a Stop is an ordinary outcome here and the chain simply stops.
+    await run.settled;
+    return this.deliverCompression(run, handoff, nextWindow, startedAt, opts?.text ?? '');
+  }
+
+  /**
+   * The second half of `compressAndContinue`: read what C produced, report on its card, and
+   * open the window below it.
+   *
+   * The four outcomes are all normal:
+   *
+   *  - **stopped / interrupted** — nothing continues. The card stays as the record of a
+   *    stopped turn, ▶ Continue is still its way to try again, and the chain does not go on.
+   *  - **empty answer** — one notice on the card, and no window: a window opened on nothing
+   *    would be a window whose first message says nothing.
+   *  - **missing required sections** — one notice naming them and one `[compression]` line,
+   *    and the window is opened anyway: the answer is still the only handoff that exists.
+   *  - **a usable handoff** — R is opened from it.
+   */
+  private deliverCompression(
+    run: TurnRun,
+    handoff: HandoffFacts,
+    windowNo: number,
+    startedAt: number,
+    text: string,
+  ): boolean {
+    const node = run.node;
+    if (this.dead || !this.session.nodes[node.id]) {
+      return false;
+    }
+    // A compression delivers **once** (`docs/agents/invariants/compress-node.md` §4): if its
+    // window somehow already exists (a replayed chain, a reloaded state), this one has nothing
+    // left to deliver and must not open a second one beside it.
+    if (resumeChildOf(this.session, node.id)) {
+      return false;
+    }
+    const answered = node.status === 'done' ? this.compressionAnswer(node) : '';
+    const verdict =
+      node.status === 'done' ? classifyCompactionAnswer({ text: answered }) : classifyCompactionAnswer({ failed: 'error' });
+    // One line per compression: in, out, how long, and what came out of it — "the handoff
+    // was written by a turn" is otherwise unverifiable in a real window.
     perf(
       compactionDiagLine({
-        inputChars: source.chars,
-        outputTokens,
-        ms: Date.now() - started,
-        outcome: failure ?? 'summary',
+        inputChars: handoff.source.chars,
+        outputTokens: nodeUsage(node)?.completion_tokens ?? 0,
+        ms: Date.now() - startedAt,
+        outcome: verdict.ok ? 'summary' : verdict.reason,
       }),
     );
-    return failure ? { failure } : { text };
+    if (node.status !== 'done') {
+      this.postNoticeTo(
+        node.id,
+        'info',
+        vscode.l10n.t('Compression stopped, so no new window was opened. Continue this card to run it again.'),
+      );
+      return false;
+    }
+    if (!verdict.ok && verdict.reason === 'empty') {
+      this.postNoticeTo(
+        node.id,
+        'warning',
+        vscode.l10n.t(
+          'The compression returned no answer, so no new window was opened. Continue this card to run it again.',
+        ),
+      );
+      return false;
+    }
+    const summary = verdict.ok ? verdict.summary : answered.trim();
+    if (!verdict.ok) {
+      const missing = missingCompactionSections(summary);
+      this.host.output.appendLine(
+        `[compression] ${node.id} is missing ${missing.length} required section(s): ${missing.join(', ')}`,
+      );
+      this.postNoticeTo(
+        node.id,
+        'warning',
+        vscode.l10n.t(
+          'The compression is missing {0} required section(s): {1}. The new window was opened anyway — this answer is what it carries.',
+          missing.length,
+          missing.join(', '),
+        ),
+      );
+    }
+    const previous = handoff.previous;
+    const message = buildContextRolloverMessage({
+      // The window ended because it was **compressed**, which is neither a refusal nor the
+      // 90% entry: the size line states the number without claiming why.
+      reason: 'compress',
+      sessionId: this.sessionId,
+      previousNodeId: previous.id,
+      transcriptPath: this.rolloverTranscriptPath(previous.id),
+      transcriptExists: this.rolloverTranscriptOnDisk(previous.id),
+      request: handoff.carry.request,
+      attachments: handoff.carry.attachments,
+      answer: handoff.carry.answer,
+      firstRequest: handoff.firstRequest,
+      files: handoff.files,
+      killedBackground: handoff.killedBackground,
+      killedSubAgents: handoff.killedSubAgents,
+      usage: handoff.usage,
+      summary,
+    });
+    // The window below: P's **frozen envelope**, planted on the new node (`epochFrom`), so
+    // nothing of the compression turn's own envelope travels into the conversation.
+    const resume = this.beginTurn(vscode.l10n.t('Context window {0}', windowNo), {
+      parentId: node.id,
+      freshContext: true,
+      role: 'resume',
+      epochFrom: previous.id,
+    });
+    if (!resume) {
+      this.setBusy(this.runs.size > 0);
+      this.postNoticeTo(
+        node.id,
+        'warning',
+        vscode.l10n.t('Could not open the new context window here — try again.'),
+      );
+      return false;
+    }
+    // A diagnostic, not a safety net: the envelope is planted above, and this line says which
+    // bytes the window really sends, so a log can prove the chain inherited P and not C.
+    const fromEpoch = epochForNode(this.session, previous.id);
+    this.host.output.appendLine(
+      `[compression] ${previous.id} -> ${node.id} -> ${resume.node.id} ` +
+        `(window ${windowNo}, envelope ${resume.node.epoch?.kind ?? 'main'}` +
+        `${fromEpoch ? `, inherited ${fromEpoch.kind ?? 'main'} from ${previous.id}` : ', frozen live'})`,
+    );
+    resume.node.handoff = 'summary';
+    resume.node.handoffSummary = summary;
+    resume.items.push({ kind: 'harness', text: message });
+    this.post({ type: 'harnessNote', nodeId: resume.node.id, text: message });
+    // The composer's own text: a real user message of the new window, after the handoff —
+    // the request that made the user cross the window in the first place.
+    const typed = text.trim();
+    if (typed) {
+      resume.items.push({ kind: 'user', text: typed });
+      this.post({ type: 'user', text: typed, attachments: [] });
+    }
+    this.setBusy(true);
+    this.lastStatus = vscode.l10n.t('Thinking…');
+    this.post({ type: 'status', text: this.lastStatus });
+    this.post({ type: 'nodeUpdate', ...this.nodeStatePatch(resume.node) });
+    void resume.agent.sendUserMessage(message, typed || undefined);
+    this.persistTurn();
+    return true;
+  }
+
+  /**
+   * The handoff a compression node produced: its last assistant **text**, from the messages
+   * it stored (the API truth), falling back to its transcript item when the turn's slice
+   * was not stored. An empty string means it said nothing usable.
+   */
+  private compressionAnswer(node: TreeNode): string {
+    for (let i = node.messages.length - 1; i >= 0; i--) {
+      const message = node.messages[i];
+      if (message.role === 'assistant') {
+        const text = messageText(message.content).trim();
+        if (text) {
+          return text;
+        }
+      }
+    }
+    for (let i = node.displayItems.length - 1; i >= 0; i--) {
+      const item = node.displayItems[i];
+      if (item.kind === 'assistant' && item.text && item.text.trim()) {
+        return item.text.trim();
+      }
+    }
+    return '';
   }
 
   /**

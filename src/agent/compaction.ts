@@ -1,43 +1,47 @@
 /**
- * The **handoff summary** of a context rollover — the pure half
- * (`docs/agents/invariants/context-rollover.md` §6).
+ * The pure half of **handing a context window over** — the two shapes of it
+ * (`docs/agents/invariants/context-rollover.md`, `docs/agents/invariants/compress-node.md`).
  *
- * A rollover normally hands the new window a *pointer*: the previous window's
- * transcript path plus a clipped tail. The composer's `Write a handoff summary`
- * answer instead spends **one** extra request on the current card to write a summary
- * of the previous window, and that summary is what the new window carries.
+ * A window ends, and the conversation continues in a new one. There are exactly two
+ * deliveries, and this module owns the text of both:
  *
- * Everything here is deliberately `vscode`-free and side-effect-free — the input
- * selection, its bound, the previous-summary marking, the prompt, the heading
- * validation and the fallback decision — so `tools/check-compaction.js`
- * (`npm run check:compaction`) can drive the compiled module from plain node:
- * `src/chat/runtime.ts` owns the request, the timeout and the busy state, and this
- * module owns every rule that can be wrong without a window.
+ *  - **the pointer** (`buildContextRolloverMessage` without `summary`) — the Simple
+ *    answer: the new window is pointed at the old one's transcript and reads it itself.
+ *    Zero extra requests, and everything it needs is already in memory.
+ *  - **the compression** (`buildCompressInstruction`, then
+ *    `buildContextRolloverMessage` with the compression node's `summary`) — the Agentic
+ *    answer: a real turn reads the previous window and writes a brief, and the new window
+ *    starts from that brief.
  *
- * Three rules shape the whole file:
+ * The whole selection rule is here, `vscode`-free and side-effect-free, so
+ * `tools/check-compaction.js` (`npm run check:compaction`) can drive the compiled module
+ * from plain node. `src/chat/runtime.ts` owns the tree, the turns and the transcript
+ * dumps; this module owns every sentence that gets written into a window.
  *
- *  - **The input is bounded, and never the whole chain.** The summariser is asked
- *    about *one window* (`contextBase` → node), never the branch above it, and the
- *    selection is capped at {@link COMPACTION_INPUT_MAX_CHARS}, keeping the head and
- *    the tail when a window is too large to include whole (the first request and the
- *    most recent work are what a handoff cannot lose).
- *  - **The answer is validated by heading, not by trust.** A model that answers with
- *    prose has written nothing a next agent can navigate, so a missing heading is a
- *    retry — exactly one — and then the pointer fallback.
- *  - **Every failure is a fallback, never a failed rollover.** A timeout, an error,
- *    an empty or invalid answer all mean "the summary was unavailable": the window
- *    opens anyway with the ordinary pointer text, which is why nothing here throws.
+ * Four rules shape the whole file:
+ *
+ *  - **The input is one bounded window, never the whole chain.** The selection walks the
+ *    window's own messages (`contextBase` → node, i.e. the API prefix without the system
+ *    prompt) and is capped at {@link COMPACTION_INPUT_MAX_CHARS}, keeping the head and the
+ *    tail when it is too large to include whole — the first request and the most recent
+ *    work are what a handoff cannot lose.
+ *  - **The original request is quoted, never paraphrased.** It is the one thing a summary
+ *    must never be the only copy of.
+ *  - **The answer is validated by heading, not by trust.** A compression that answers with
+ *    prose has written nothing the next agent can navigate, so the missing headings are
+ *    named — and the window still opens (`missingCompactionSections`).
+ *  - **Nothing here throws, and nothing here decides.** Every judgement is data the caller
+ *    acts on, so a bad handoff degrades a window instead of failing a turn.
  */
 
 import { ChatMessage } from './types';
 import { clipText, sliceText, wellFormed } from '../text';
 
 /**
- * The cap on the **input** text handed to the summariser, in characters. It is a
- * bound on the prompt we build, not a token budget: one window can hold hundreds of
- * messages, and the summary is a second, extra request on a card whose window the
- * conversation has already outgrown — so the source is selected, clipped and
- * head+tail-trimmed instead of passed through.
+ * The cap on the **input** text handed to a compression node, in characters. It is a
+ * bound on what has to be read into one turn, not a token budget: one window can hold
+ * hundreds of messages, and the node that reads it has a whole window of its own to fit
+ * them in.
  */
 export const COMPACTION_INPUT_MAX_CHARS = 60_000;
 
@@ -56,40 +60,31 @@ export const COMPACTION_TOOL_BRIEF_CLIP = 120;
 /** How much of a tool call's result — its **first line** — one entry keeps. */
 export const COMPACTION_TOOL_RESULT_CLIP = 200;
 
-/**
- * The output cap of the summary request (`max_tokens`). A summary that has to be read
- * by the next agent on every request must stay short; 1500 tokens is the size the
- * eleven sections fit in.
- */
-export const COMPACTION_MAX_OUTPUT_TOKENS = 1_500;
+/** How much of the user's last request the pointer / handoff quotes verbatim. */
+export const ROLLOVER_REQUEST_CAP = 2_000;
+
+/** How much of the previous window's last answer the pointer keeps. */
+export const ROLLOVER_ANSWER_CAP = 1_000;
+
+/** The tools whose arguments name a file the turn **changed** (`editedFilesFromItems`). */
+export const EDITING_TOOLS = ['write_file', 'replace_in_file', 'append_file'] as const;
 
 /**
- * The **hard** wall-clock bound on the whole summary (the request plus its one
- * validation retry). The user already confirmed the rollover and is looking at a
- * busy composer, so a slow or wedged provider must degrade to the pointer instead of
- * holding the new window forever.
- */
-export const COMPACTION_TIMEOUT_MS = 30_000;
-
-/** Sampling temperature: a handoff is a report, not a creative act. */
-export const COMPACTION_TEMPERATURE = 0.2;
-
-/**
- * The title line a summarized rollover writes as the first message of its window.
- * It is also *how* the next rollover recognises an earlier handoff summary
- * ({@link detectPriorHandoffSummary}): the summary's own headings are ordinary
+ * The title line a compressed window writes as the first message of its harness block.
+ * It is also *how* the next compression recognises a window that already starts from a
+ * handoff ({@link detectPriorHandoffSummary}): the handoff's own headings are ordinary
  * Markdown, so the marker has to be the harness line above them.
  */
 export const COMPACTION_HARNESS_TITLE = '[Harness: context window reset — handoff summary]';
 
-/** The marker of an *unsummarized* rollover (the pointer shape of the same feature). */
+/** The marker of a **pointer** rollover (the Simple answer, which carries no summary). */
 export const ROLLOVER_HARNESS_TITLE = '[Harness: context window reset]';
 
 /**
  * The openings of the harness' own `role:'user'` texts — the pointer / resume notes
  * (`[Harness…`), an interruption notice (`[Interruption notice]`) and a background job's
  * completion writeback (`Background command …`). The user wrote none of them, so none of
- * them is a user request in the summary's input (they stay in the transcript, which the
+ * them is a user request in the selection's input (they stay in the transcript, which the
  * window is pointed at).
  */
 export const HARNESS_USER_PREFIXES = ['[Harness', '[Interruption notice]', 'Background command '] as const;
@@ -101,48 +96,103 @@ export function isHarnessAuthored(text: string): boolean {
 }
 
 /**
- * The eleven sections the prompt asks for, in order. The first nine are
- * {@link COMPACTION_REQUIRED_SECTIONS}; the last two are this harness' local extras
- * (they name what a file-reading agent needs and how it must treat the summary).
+ * The eight sections a compression answer is asked for, in order — rewritten from
+ * *You don't need long context* (arXiv:2611.05306v1, Appendix A): a compression is not a
+ * summary of what happened, it is the brief the remaining work needs.
  */
-export const COMPACTION_SECTIONS = [
-  'Primary Request and Intent',
-  'Key Technical Concepts',
-  'Files and Code Sections',
-  'Errors and Fixes',
-  'Problem Solving',
-  'All User Messages',
-  'Pending Tasks',
-  'Current Work',
-  'Optional Next Step',
-  'Durable References',
-  'Handoff Contract',
+export const COMPRESS_SECTIONS = [
+  'Objective',
+  'Standing instructions and preferences',
+  'Established facts',
+  'Applied changes',
+  'Verification',
+  'Dead ends',
+  'Remaining plan',
+  'Durable references',
 ] as const;
 
 /**
- * The nine headings a summary **must** carry. A missing one is the one case worth a
- * retry: an answer without them is a narrative, and the next agent cannot navigate a
- * narrative. The two local extras are asked for and not required, so a model that
- * folds them into its prose still produces a usable handoff.
+ * The seven headings a compression answer **must** carry. Matching is deliberately
+ * forgiving (any heading level, any casing, a trailing colon or period) because the
+ * *sections* are the contract, not the spelling.
+ *
+ * `Durable references` is the one asked for and not required: an answer that folds the
+ * transcript path and the re-read list into its prose still produced a usable brief,
+ * while an answer that skips `Objective` has lost the task.
  */
-export const COMPACTION_REQUIRED_SECTIONS = [
-  'Primary Request and Intent',
-  'Key Technical Concepts',
-  'Files and Code Sections',
-  'Errors and Fixes',
-  'Problem Solving',
-  'All User Messages',
-  'Pending Tasks',
-  'Current Work',
-  'Optional Next Step',
+export const COMPRESS_REQUIRED_SECTIONS = [
+  'Objective',
+  'Standing instructions and preferences',
+  'Established facts',
+  'Applied changes',
+  'Verification',
+  'Dead ends',
+  'Remaining plan',
 ] as const;
 
-/** Why a summary request produced no usable summary — the `fallback:<reason>` half. */
+/**
+ * The compression node's fixed instruction — the body of its first (and only) user
+ * message, after the facts the harness adds. Verbatim from the paper's Appendix A, with
+ * one harness sentence in front, and deliberately English: the agent that reads the
+ * handoff was given an English contract, so a translated instruction is a different
+ * instruction.
+ */
+export const COMPRESS_INSTRUCTION = [
+  'Stop and write the handoff now. Nothing continues from the previous window: this',
+  'answer is the only memory the next window will have.',
+  '',
+  'It is not a record of what happened. It is a brief for the work that still has to',
+  'be done. A narrative of the past is worthless to the agent who reads it; a picked',
+  'list of facts, intentions, artifacts and next steps is what keeps this task alive.',
+  '',
+  'Write exactly these sections, each heading at the top of its own section, and',
+  'write nothing outside them:',
+  '',
+  '## Objective',
+  "The task in the user's own words, quoted verbatim, plus one line naming the result",
+  'that counts as done.',
+  '',
+  '## Standing instructions and preferences',
+  'Every rule, constraint and preference the user stated that still applies, with',
+  'their exact words where the wording matters. Do not paraphrase a constraint.',
+  '',
+  '## Established facts',
+  'Exact paths, symbols, commands, observed values, error texts. Separate what you',
+  'observed from what you merely believe: mark an unverified idea as unverified.',
+  '',
+  '## Applied changes',
+  'Each file created or edited, what changed in it, and whether the change was',
+  'verified.',
+  '',
+  '## Verification',
+  'The checks that were run, their outcomes, the failures and the workarounds.',
+  '',
+  '## Dead ends',
+  'Approaches that failed, and why they must not be repeated.',
+  '',
+  '## Remaining plan',
+  'The outstanding subgoals in execution order; the immediate next command or edit;',
+  'the condition that ends the task.',
+  '',
+  '## Durable references',
+  "The previous window's transcript path, the files that must be re-read before",
+  'editing, and how to retrieve anything you had to leave out.',
+  '',
+  'Rules:',
+  '- Quote the original task verbatim. Never replace it with your own summary of it.',
+  '- Never invent an observation. If you did not read it, say so.',
+  '- If a result was too large to carry, name the exact narrow command or file and',
+  '  line range that retrieves it instead of quoting it.',
+  '- Do not repeat the whole task or the whole document manifest back at the reader.',
+  '- Write English Markdown. No preamble, no closing summary.',
+].join('\n');
+
+/** Why a compression produced no usable handoff — the `fallback:<reason>` half. */
 export type CompactionFailure = 'timeout' | 'error' | 'empty' | 'invalid';
 
 /** What {@link extractCompactionSource} produced, and the numbers the diagnostics report. */
 export interface CompactionSource {
-  /** The text handed to the summariser; at most {@link COMPACTION_INPUT_MAX_CHARS}. */
+  /** The text handed to the compression node; at most {@link COMPACTION_INPUT_MAX_CHARS}. */
   text: string;
   /** `text.length` — the `in=` number of the `[perf] compaction` line. */
   chars: number;
@@ -150,10 +200,23 @@ export interface CompactionSource {
   userCount: number;
   /** How many tool calls the selection covers. */
   toolCallCount: number;
-  /** True when the window starts from an earlier handoff summary. */
+  /** True when the window starts from an earlier handoff. */
   priorSummary: boolean;
   /** Characters the head+tail selection dropped (0 when the whole window fitted). */
   omittedChars: number;
+}
+
+/** One leftover job the rollover killed, as the handoff names it. */
+export interface KilledJobLine {
+  id: number;
+  command: string;
+  state: string;
+}
+
+/** One killed sub-agent, as the handoff names it. */
+export interface KilledAgentLine {
+  nodeId: string;
+  transcript?: string;
 }
 
 /** The text of one message's content, without pulling `chat/tree.ts` in here. */
@@ -177,10 +240,10 @@ function firstLine(text: string): string {
 }
 
 /**
- * True when this window **already starts from a handoff summary**: its first message
- * is the harness title this module writes. A window that begins with the plain
- * pointer title is not one — that pointer was written by the harness, not by a model,
- * and has no unresolved items of its own to carry forward.
+ * True when this window **already starts from a handoff**: its first message is the
+ * harness title a compressed window writes. A window that begins with the plain pointer
+ * title is not one — that pointer was written by the harness, not by a model, and has no
+ * unresolved items of its own to carry forward.
  */
 export function detectPriorHandoffSummary(messages: ChatMessage[]): boolean {
   for (const message of messages) {
@@ -199,18 +262,75 @@ export function detectPriorHandoffSummary(messages: ChatMessage[]): boolean {
 }
 
 /**
- * Select and bound the **input** of the summary request from one window's messages
+ * The **first real user request** of a window, verbatim — the original task, which the
+ * pointer and the compression instruction both quote rather than describe.
+ *
+ * Harness notes are `role:'user'` too, and they are skipped (`isHarnessAuthored`): a
+ * window whose first message is a resume note asked nothing in that message.
+ */
+export function firstUserRequest(messages: ChatMessage[]): string {
+  for (const message of messages) {
+    if (message.role !== 'user') {
+      continue;
+    }
+    const text = textOf(message.content).trim();
+    if (text && !isHarnessAuthored(text)) {
+      return text;
+    }
+  }
+  return '';
+}
+
+/**
+ * The files a window's turns **changed**, in the order they were touched, without
+ * duplicates — read out of the `kind:'tool'` display items' arguments.
+ *
+ * It is deliberately read from the transcript items rather than from a git diff: the
+ * handoff's purpose is "re-read these before editing", and what has to be re-read is what
+ * the conversation itself wrote (a file changed before the window opened is the working
+ * tree's business, not this handoff's). An item whose arguments do not parse is skipped:
+ * a broken display item must not cost the handoff its other facts.
+ */
+export function editedFilesFromItems(items: ReadonlyArray<{ kind?: string; name?: string; args?: string }>): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const item of items) {
+    if (!item || item.kind !== 'tool' || !item.args) {
+      continue;
+    }
+    const name = String(item.name ?? '');
+    if (!(EDITING_TOOLS as readonly string[]).includes(name)) {
+      continue;
+    }
+    let path = '';
+    try {
+      const parsed = JSON.parse(item.args) as { path?: unknown };
+      path = typeof parsed.path === 'string' ? parsed.path : '';
+    } catch {
+      continue;
+    }
+    const trimmed = path.trim();
+    if (trimmed && !seen.has(trimmed)) {
+      seen.add(trimmed);
+      out.push(trimmed);
+    }
+  }
+  return out;
+}
+
+/**
+ * Select and bound the **input** of a compression from one window's messages
  * (`contextBase` → node, i.e. exactly the API prefix minus the system prompt).
  *
  * What it keeps:
  *
- *  - the **first** user message verbatim (a handoff that loses the original request
- *    is a handoff of the wrong task);
- *  - **every** user message, each clipped to {@link COMPACTION_USER_CLIP}, with the
- *    count stated (that list is what `## All User Messages` is written from);
+ *  - the **first** user message verbatim (a handoff that loses the original request is a
+ *    handoff of the wrong task);
+ *  - **every** user message, each clipped to {@link COMPACTION_USER_CLIP}, with the count
+ *    stated;
  *  - the assistant texts of the last {@link COMPACTION_LAST_ASSISTANT} turns, clipped;
  *  - each tool call as `name -> brief -> first line of the result`;
- *  - the marking line when the window already starts from a handoff summary.
+ *  - the marking line when the window already starts from a handoff.
  *
  * When all of that exceeds `maxChars`, the middle is dropped — the head (the first
  * request) and the tail (the most recent work) are kept, and one marker line states how
@@ -400,66 +520,12 @@ function headTailSelect(blocks: string[], maxChars: number): { text: string; omi
 }
 
 /**
- * The prompt of the summary request: **one** user message, no tools, the fixed
- * eleven-section schema, and the handoff contract. Model-facing, therefore English and
- * never `vscode.l10n.t` — a translated instruction is a different instruction.
- */
-export function buildCompactionPrompt(source: CompactionSource): string {
-  const extras = source.priorSummary
-    ? '\nThis window itself started from an earlier handoff summary: carry its unresolved items forward rather than re-inventing them, and say which of them are still open.'
-    : '';
-  return [
-    'You are writing a handoff summary of one context window of a long conversation.',
-    'Another turn of the same agent — the same agent, the same task, the same user — will read only this summary and a pointer to the full transcript. It cannot see the conversation. Write for that agent.',
-    '',
-    'Write English Markdown. Use exactly these eleven headings, in this order, and write nothing outside them:',
-    ...COMPACTION_SECTIONS.map((heading) => `## ${heading}`),
-    '',
-    'Rules:',
-    '- Primary Request and Intent: what the user asked for, in their own terms, and why.',
-    `- Files and Code Sections: full paths plus the key snippets, each one marked "re-read before editing".`,
-    '- All User Messages: every user request in this window, in order, condensed but complete — do not drop one.',
-    '- Optional Next Step: quote the user\'s own words for the step that comes next.',
-    '- Durable References: the transcript path of this window, the key file paths, and the background jobs and sub-agents that were stopped when the window was opened.',
-    '- Handoff Contract: state that you are the same agent continuing the same task; that this summary is your memory of it; that exact file contents must be re-read before editing; and that this summary may be stale against the working tree.',
-    '- Be factual. Never invent a file, a decision, a command or a result. Where the window does not show something, say that it is unknown.',
-    extras,
-    '',
-    'The material below is the whole window, selected and clipped. Where a section says it was clipped, say in the summary what kind of work was in that gap only if the visible text shows it — never guess.',
-    '',
-    '--- BEGIN WINDOW ---',
-    source.text,
-    '--- END WINDOW ---',
-  ]
-    .filter((line) => line !== '')
-    .join('\n');
-}
-
-/** What the summary request is: its messages, its output cap and its temperature. */
-export interface CompactionRequest {
-  messages: ChatMessage[];
-  maxTokens: number;
-  temperature: number;
-}
-
-/**
- * The one request `SessionRuntime` sends for a summary: no tools, non-streaming (the
- * caller uses the completion path, which never streams), a low temperature and the
- * {@link COMPACTION_MAX_OUTPUT_TOKENS} cap. Kept here so the cap and the prompt cannot
- * drift apart, and so the guard can read them.
- */
-export function buildCompactionRequest(source: CompactionSource): CompactionRequest {
-  return {
-    messages: [{ role: 'user', content: buildCompactionPrompt(source) }],
-    maxTokens: COMPACTION_MAX_OUTPUT_TOKENS,
-    temperature: COMPACTION_TEMPERATURE,
-  };
-}
-
-/**
- * Which of the nine required headings `summary` is missing — empty when the answer is a
+ * Which of the seven required headings `answer` is missing — empty when the answer is a
  * usable handoff. Matching is deliberately forgiving (any heading level, any casing, a
  * trailing colon or period) because the *sections* are the contract, not the spelling.
+ *
+ * A non-empty result is **not** a failure: the window still opens, and the list is
+ * reported on the compression card (`docs/agents/invariants/compress-node.md` §6).
  */
 export function missingCompactionSections(summary: string): string[] {
   const lines = wellFormed(summary).split(/\r?\n/);
@@ -467,7 +533,7 @@ export function missingCompactionSections(summary: string): string[] {
     .map((line) => line.trim().replace(/^#+/, '').trim().replace(/[:.]$/, '').toLowerCase())
     .filter(Boolean);
   const missing: string[] = [];
-  for (const required of COMPACTION_REQUIRED_SECTIONS) {
+  for (const required of COMPRESS_REQUIRED_SECTIONS) {
     if (!headings.includes(required.toLowerCase())) {
       missing.push(required);
     }
@@ -475,18 +541,17 @@ export function missingCompactionSections(summary: string): string[] {
   return missing;
 }
 
-/** The decision after one summary request: the summary, or the reason it fell back. */
+/** The decision a compression answer gets: usable, or why not. */
 export type CompactionResult = { ok: true; summary: string } | { ok: false; reason: CompactionFailure };
 
 /**
- * Decide what a finished summary request produced — the whole fallback rule, in one
- * pure place: a timeout/error is reported by the caller (it knows the failure), an
- * empty answer is `'empty'`, an answer missing a required heading is `'invalid'`.
- * Anything else is the summary, trimmed.
+ * Decide what a finished compression turn produced — the whole rule, in one pure place:
+ * the caller reports the two outcomes it alone can see (`'timeout'` / `'error'`), an empty
+ * answer is `'empty'`, and an answer missing a required heading is `'invalid'`.
  *
- * It never throws and never decides anything about the rollover: every failure is the
- * pointer fallback, so this function's answer can only choose *which* handoff text
- * the new window gets.
+ * The caller treats `'empty'` as "no window was opened" and `'invalid'` as "opened
+ * anyway, with the missing headings named" — this function only says which it is, so the
+ * judgement about a handoff lives in one place instead of two.
  */
 export function classifyCompactionAnswer(input: {
   text?: string;
@@ -506,11 +571,10 @@ export function classifyCompactionAnswer(input: {
 }
 
 /**
- * The one-line diagnostics record of a summary attempt — `perf()` prefixes `[perf] `,
- * so this is the `[perf] compaction …` line of `docs/agents/invariants/context-rollover.md`
- * §6: the input size, the output size, how long it took and what came out of it.
- * `outcome` is `summary` or `fallback:<reason>`, so a log can count how often the
- * pointer had to cover for a provider.
+ * The one-line diagnostics record of a compression — `perf()` prefixes `[perf] `, so this
+ * is the `[perf] compaction …` line: how much was handed in, how much came out, how long
+ * the turn took and what came of it. `outcome` is `summary` or `fallback:<reason>`, so a
+ * log can count how often a handoff had to be delivered anyway.
  */
 export function compactionDiagLine(input: {
   inputChars: number;
@@ -524,27 +588,295 @@ export function compactionDiagLine(input: {
   );
 }
 
+/** Where a window's transcript stands, as both handoff shapes state it. */
+interface PointerFacts {
+  sessionId: string;
+  previousNodeId: string;
+  transcriptPath: string;
+  /** False when that file is not on disk (dumps off / never written): the pointer degrades. */
+  transcriptExists: boolean;
+}
+
 /**
- * The **one** validation retry: the same request, the model's own answer kept as its
- * assistant turn, and a plain statement of which headings are missing. One retry and no
- * more — a model that ignores the schema twice will not produce a navigable summary on
- * the third ask, and the pointer fallback is a working handoff.
+ * The transcript paragraph: the pointer that makes "look it up" a real instruction.
+ * Model-facing English, and it degrades honestly when there is no file to point at.
  */
-export function buildCompactionRetryMessages(
-  source: CompactionSource,
-  answer: string,
-  missing: string[],
-): ChatMessage[] {
-  const request = buildCompactionRequest(source);
-  return [
-    ...request.messages,
-    { role: 'assistant', content: answer },
-    {
-      role: 'user',
-      content:
-        `That summary is missing ${missing.length} required section(s): ` +
-        `${missing.map((heading) => `"## ${heading}"`).join(', ')}. ` +
-        'Rewrite the whole summary with exactly the eleven headings, in order, and nothing outside them.',
-    },
-  ];
+function transcriptParagraph(input: PointerFacts): string {
+  return input.transcriptExists
+    ? 'Its full transcript — every message, tool call and result — is on disk:\n' +
+        `  ${input.transcriptPath}\n` +
+        'Read it when you need a detail: read_file on that path, or search_transcripts with sessionId=' +
+        `${input.sessionId} (line 1 is the meta record). Earlier windows of this session have their own files ` +
+        'in the same folder.'
+    : "The previous window's transcript is not available on disk; rely on the carried-over text and ask the " +
+        'user when a detail is missing.';
+}
+
+/** The killed-work list, composed from what the rollover actually stopped. */
+function killedParagraph(input: { killedBackground?: KilledJobLine[]; killedSubAgents?: KilledAgentLine[] }): string {
+  const jobs = input.killedBackground ?? [];
+  const agents = input.killedSubAgents ?? [];
+  if (jobs.length === 0 && agents.length === 0) {
+    return '';
+  }
+  return (
+    'Stopped when this window was opened:\n' +
+    [
+      ...jobs.map((job) => `- background terminal #${job.id} \`${job.command}\` — ${job.state}`),
+      ...agents.map(
+        (agent) => `- sub-agent node ${agent.nodeId}${agent.transcript ? ` — transcript: ${agent.transcript}` : ''}`,
+      ),
+    ].join('\n')
+  );
+}
+
+/** The size line: how full the window that ended was, in the provider's own terms. */
+function usageParagraph(
+  usage: { used: number; window: number; pct: number } | undefined,
+  reason: 'full' | 'near' | 'images' | 'compress',
+): string {
+  if (!usage) {
+    return '';
+  }
+  const tail =
+    reason === 'near'
+      ? "which is past the harness's 90% rollover threshold; nothing was refused yet."
+      : reason === 'images'
+        ? 'the refusal was about the bytes of that request, not about these tokens.'
+        : reason === 'compress'
+          ? 'the window was compressed to continue the conversation in a shorter one.'
+          : 'which is at or past the limit this provider accepts for one request.';
+  return (
+    `The previous window used ${usage.used} of this model's ${usage.window}-token context ` +
+    `(${usage.pct}%), ${tail}`
+  );
+}
+
+/** The "changed files" paragraph: what must be re-read before it is edited again. */
+function filesParagraph(files: string[]): string {
+  if (files.length === 0) {
+    return '';
+  }
+  return (
+    'Files the previous window changed — re-read one before editing it, it may have moved on:\n' +
+    files.map((file) => `- ${file}`).join('\n')
+  );
+}
+
+/**
+ * The resume text of a **context window**: the one `role:'user'` harness message the new
+ * window stores (`docs/agents/invariants/context-rollover.md` §6).
+ *
+ * Model-facing, therefore deliberately **English** and built by plain string
+ * concatenation, never through `vscode.l10n.t` — it is an instruction to the model, and a
+ * translated instruction is a different instruction. The user does see this text (the card
+ * renders it verbatim in a `HARNESS` block), but that is a readout of what the model was
+ * told, not a message to the user.
+ *
+ * Two shapes, one order of facts:
+ *
+ *  - **the pointer** (`summary` absent) — the Simple answer: the story of why the window
+ *    ended, the pointer, and the tail that makes the pointer usable (the original task, the
+ *    last request, the last answer, the changed files, what was killed).
+ *  - **the handoff** (`summary` present) — the Agentic answer: a compression node's answer
+ *    *is* the handoff, so it comes first and the pointer facts follow it.
+ */
+export function buildContextRolloverMessage(input: PointerFacts & {
+  /**
+   * Why a new window was opened: `full` is the provider's refusal of the **tokens** (the
+   * only authoritative statement of a full window), `images` its refusal of the **bytes**
+   * (`Total image size exceeds the limit`), and `near` the user taking the entry before
+   * anything is refused. It is stated because "it was refused" would be a lie in the last
+   * case, and naming the wrong refusal sends the model after the wrong fix. `'compress'` is
+   * the Agentic answer's own case: the window ended because it was compressed, whatever its
+   * fill level, and the size line then claims no reason.
+   */
+  reason: 'full' | 'near' | 'images' | 'compress';
+  /** The user's last request, raw: clipped here, and the clip is announced. */
+  request: string;
+  /** How many `image_url` / `file` parts that request carried (they cannot come along). */
+  attachments: number;
+  /** The last answer the previous window produced, raw (clipped here). */
+  answer: string;
+  /** The window's **first** user request (the original task), quoted verbatim. */
+  firstRequest?: string;
+  /** Files the previous window changed, in the order it touched them. */
+  files?: string[];
+  /**
+   * How much of the model's context the previous window had used, when both numbers are
+   * known: this is what makes the reset auditable instead of mysterious. `undefined` when
+   * no request has reported usage yet, or the card declares no window — a fact the harness
+   * cannot state is not stated.
+   */
+  usage?: { used: number; window: number; pct: number };
+  /** One entry per background terminal the rollover killed (id, clipped command, final state). */
+  killedBackground: KilledJobLine[];
+  /** One entry per sub-agent node it killed: its dump path once its finish handler wrote it. */
+  killedSubAgents: KilledAgentLine[];
+  /**
+   * A **compression node's** answer (`compressAndContinue`). When it is here the window is a
+   * compressed one: the answer replaces the pointer's own story, and the facts that cannot
+   * be handed over in prose follow it.
+   */
+  summary?: string;
+}): string {
+  const previousLine = `Previous window: node ${input.previousNodeId} of session ${input.sessionId}.`;
+  const usageLine = usageParagraph(input.usage, input.reason);
+  const transcriptLine = transcriptParagraph(input);
+  // A caller may leave the two kill lists out (there was nothing to kill); the paragraph is
+  // the only place that would notice, so the default lives here rather than in every caller.
+  const killedBackground = input.killedBackground ?? [];
+  const killedSubAgents = input.killedSubAgents ?? [];
+  const request =
+    input.request.length > ROLLOVER_REQUEST_CAP ? sliceText(input.request, ROLLOVER_REQUEST_CAP) : input.request;
+  const answer =
+    input.answer.length > ROLLOVER_ANSWER_CAP ? sliceText(input.answer, ROLLOVER_ANSWER_CAP) : input.answer;
+  const notes = [
+    // Clipping is announced: a model that reads a truncated request as the whole
+    // request would silently redo only part of the work.
+    input.request.length > ROLLOVER_REQUEST_CAP
+      ? `(truncated: ${input.request.length} chars total, the full text is in the transcript)`
+      : '',
+    input.attachments > 0 ? `(the original request had ${input.attachments} attachment(s))` : '',
+  ].filter(Boolean);
+  // The user's own words, twice: the task that started the window and the request that
+  // ended it. Both are quoted, never paraphrased — a handoff that loses the original
+  // request is a handoff of the wrong task.
+  const firstRequest = (input.firstRequest ?? '').trim();
+  const originalLine =
+    firstRequest && firstRequest !== request.trim()
+      ? `The user's first request in that window, verbatim: ` +
+        (firstRequest.length > ROLLOVER_REQUEST_CAP ? sliceText(firstRequest, ROLLOVER_REQUEST_CAP) : firstRequest) +
+        (firstRequest.length > ROLLOVER_REQUEST_CAP
+          ? ` (truncated: ${firstRequest.length} chars total, the full text is in the transcript)`
+          : '')
+      : '';
+  const requestLine =
+    `The user's last request, verbatim: ${request || '(none found)'}` +
+    (notes.length > 0 ? ` ${notes.join(' ')}` : '');
+  const killedLine = killedParagraph({ killedBackground, killedSubAgents });
+  const filesLine = filesParagraph(input.files ?? []);
+  const stillRunningLine =
+    `Still running from the previous window: none — ${killedBackground.length} background terminal(s) and ` +
+    `${killedSubAgents.length} sub-agent(s) were stopped when this window was opened, because their ` +
+    "results could not be delivered into a full window. They are recorded in the previous window's transcript, " +
+    "including each job's command, final state and output tail; a sub-agent has its own file (kind=subagent). " +
+    'Read those records before redoing any of that work.';
+  const redoLine =
+    "Redo the user's last request here. If it depends on earlier work, fetch that from the transcript first — do " +
+    'not guess.';
+
+  // ---- A compressed window: a real turn wrote the handoff --------------------------------
+  //
+  // The order is fixed: the handoff first (it is what the window started from), then the
+  // facts that must never exist only inside prose — the user's own words, the pointer, the
+  // killed-work list, the files, and the size of the window that ended.
+  if (input.summary) {
+    return [
+      COMPACTION_HARNESS_TITLE,
+      input.summary,
+      previousLine,
+      originalLine,
+      requestLine,
+      transcriptLine,
+      stillRunningLine,
+      killedLine,
+      filesLine,
+      usageLine,
+      redoLine,
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+  }
+
+  // ---- The pointer shape (the Simple answer) --------------------------------------------
+
+  const refused =
+    input.reason === 'full'
+      ? 'The previous conversation could not be sent to the model any more (the provider refused it: the context window was full)'
+      : input.reason === 'images'
+        ? 'The previous conversation could not be sent to the model any more: the provider refused the request because of its images (the attachments it carried were over its per-request image size limit)'
+        : 'The previous conversation was stopped before the provider had to refuse it (the context window was nearly used up)';
+  const paragraphs: string[] = [];
+  paragraphs.push(
+    `${ROLLOVER_HARNESS_TITLE}\n` +
+      `${refused}, so this turn continues in a new, empty window of the same session. ` +
+      // A new window genuinely starts without the images (the rollover carries text only —
+      // a `file_id`'s validity across windows is not guaranteed), and a model that assumed
+      // its images were still here would answer about nothing.
+      (input.reason === 'images'
+        ? 'Those images are exactly what the provider refused, and a new window does not carry attachments: ' +
+          'none of them came along, and attaching them again would cost the same bytes again — have them looked ' +
+          'at by a sub-agent and report back in text. '
+        : '') +
+      'Nothing above was carried over: do not claim to remember it.',
+  );
+  paragraphs.push(previousLine);
+  if (usageLine) {
+    paragraphs.push(usageLine);
+  }
+  paragraphs.push(transcriptLine);
+  // The tail is what stops the pointer from being useless: a model that does not know
+  // what it does not know never looks anything up.
+  paragraphs.push(
+    'Carried over verbatim:\n' +
+      (originalLine ? `${originalLine}\n` : '') +
+      `- the user's last request: ${request || '(none found)'}${notes.length > 0 ? ` ${notes.join(' ')}` : ''}\n` +
+      `- the last answer you gave: ${answer || '(none)'}`,
+  );
+  if (filesLine) {
+    paragraphs.push(filesLine);
+  }
+  paragraphs.push(stillRunningLine);
+  if (killedLine) {
+    paragraphs.push(killedLine);
+  }
+  paragraphs.push(redoLine);
+  return paragraphs.join('\n\n');
+}
+
+/**
+ * The **first user message** of a compression node: the facts the harness knows, the
+ * window's own bounded source, and then the fixed instruction
+ * ({@link COMPRESS_INSTRUCTION}) — in that order, because a model reads a long prompt from
+ * the top and the instruction must not be buried under a transcript.
+ *
+ * What the facts add over the source: the transcript path (so the model can look something
+ * up rather than guess), the changed files, the size line and the killed work. The source
+ * itself is bounded and clipped, so the "look it up" instruction has something to point at.
+ */
+export function buildCompressInstruction(input: PointerFacts & {
+  source: CompactionSource;
+  files?: string[];
+  usage?: { used: number; window: number; pct: number };
+  killedBackground: KilledJobLine[];
+  killedSubAgents: KilledAgentLine[];
+}): string {
+  const facts = [
+    '[Harness: compression turn]',
+    'You are the compression node between two context windows of one conversation: the window above you ends ' +
+      'here, and the window below you starts from your answer. Everything it will know about the window above ' +
+      'is what you write now.',
+    '',
+    `Previous window: node ${input.previousNodeId} of session ${input.sessionId}.`,
+    // No refusal tail here: this turn was not necessarily started by a refusal, and the
+    // compression node is told the size as a fact, not as a reason.
+    input.usage
+      ? `The previous window used ${input.usage.used} of this model's ${input.usage.window}-token context ` +
+        `(${input.usage.pct}%).`
+      : '',
+    transcriptParagraph(input),
+    filesParagraph(input.files ?? []),
+    killedParagraph(input),
+    '',
+    `The window's own messages, selected and bounded (${input.source.chars} chars; ` +
+      `${input.source.userCount} user message(s), ${input.source.toolCallCount} tool call(s)). ` +
+      'Where this says it was clipped, the transcript above has the rest.',
+    '--- BEGIN WINDOW ---',
+    input.source.text,
+    '--- END WINDOW ---',
+  ]
+    .filter((part) => part !== '')
+    .join('\n\n');
+  return `${facts}\n\n${COMPRESS_INSTRUCTION}`;
 }

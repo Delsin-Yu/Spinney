@@ -47,7 +47,12 @@
   display copy of `args` is clipped to 8 KiB — and it survives every repaint.
   A full context window is continued rather than compressed by `rolloverContext()` (the
   union kill + settle + flush + re-dump, `beginTurn({ freshContext })`, the harness resume
-  text and the `contextFull` flag it ships) — see `invariants/context-rollover.md`.
+  text and the `contextFull` flag it ships) — see `invariants/context-rollover.md`. The
+  **compression node** is the other answer to the same question (`compressAndContinue` →
+  `prepareHandoff` → `deliverCompression`, the P -> C -> R chain; `beginTurn({ role,
+  epochFrom })`; `TurnRun.settled`, the promise the chain awaits; `compressTools`, the
+  read-only registry the compression turn runs on; the compress/`resume` roles that seal a
+  card and block its deletion) — see `invariants/compress-node.md`.
 - `src/chat/SubAgentPool.ts` — `SubAgentPool`: the per-session concurrency limit for
   level-1 sub-agents (`spinney.maxConcurrentSubagents`), a FIFO queue that runs the
   rest as slots free. `setMaxConcurrent` is the live settings path (raising it wakes
@@ -255,15 +260,18 @@
   what triggers a context rollover for either budget (`invariants/context-rollover.md`).
   See `invariants/model-cards.md`. It is the **only** place a model id may
   appear; `tools/check-models.js` enforces that on every package.
-- `src/agent/compaction.ts` — the **handoff summary** of a context rollover, the pure half
-  (`docs/agents/invariants/context-rollover.md` §6a): `extractCompactionSource` (one
+- `src/agent/compaction.ts` — the pure half of a context-window handoff
+  (`docs/agents/invariants/context-rollover.md`, `docs/agents/invariants/compress-node.md`):
+  `extractCompactionSource` (one
   window, the first user message verbatim, every user message clipped to 500 chars with
   the count, the last 8 assistant texts, each tool call as `name -> brief -> first line of
   the result`, the whole source capped at 60,000 chars by a head+tail selection),
-  `detectPriorHandoffSummary`, `buildCompactionPrompt` / `buildCompactionRequest` (one
-  user message, the fixed eleven-section schema, no tools, `max_tokens` 1500, temperature
-  0.2), `COMPACTION_TIMEOUT_MS` (30 s), `missingCompactionSections` (the nine required
-  headings), `classifyCompactionAnswer` (the whole fallback decision) and
+  `detectPriorHandoffSummary`, `firstUserRequest`, `editedFilesFromItems` (the files the
+  window touched, derived from its own tool items), `buildContextRolloverMessage` (both
+  handoff shapes: the pointer text and the one a compression turn front-loads),
+  `buildCompressInstruction` + `COMPRESS_INSTRUCTION` (the compression turn's one user
+  message: eight sections, seven required — the "brief for the work ahead" shape in
+  `compress-node.md` §3), `missingCompactionSections`, `classifyCompactionAnswer` and
   `compactionDiagLine` (the `[perf] compaction …` line). Deliberately `vscode`-free and
   dependent on nothing but `../text`, which is what lets `tools/check-compaction.js` drive
   it from plain node.

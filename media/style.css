@@ -2438,6 +2438,17 @@ button.icon-btn {
   opacity: 0.45;
 }
 
+/* The compression chain's own connectors (`invariants/compress-node.md`): the
+   compression node under the window it reads, and the window it produces under
+   itself. Dotted, not dashed, because it is a different kind of break — a turn that
+   is not the conversation, and a window that is not a rollover of the one above it.
+   Same dim stroke and the same reason for being lighter than a solid line. */
+#tree-edges path.edge-compress {
+  stroke: var(--text-dim);
+  stroke-dasharray: 2 4;
+  opacity: 0.45;
+}
+
 .node {
   position: absolute;
   width: 320px;
@@ -2935,6 +2946,28 @@ button.icon-btn {
 .node-continue:hover {
   background: var(--accent-dim);
   border-color: var(--accent-dim);
+  color: var(--bg);
+}
+
+/* The ⏹ Stop of a **compression** card (`syncContinueButton` in media/main.js): that card
+   has no composer, so this is the only way to end its turn. Same slot and size as
+   `.node-continue`, warned-coloured so it never reads as "continue". */
+.node-stop {
+  flex: 0 0 auto;
+  margin-left: 6px;
+  padding: 1px 6px;
+  font-size: 10px;
+  line-height: 16px;
+  color: var(--text);
+  background: var(--bg3);
+  border: 1px solid var(--warn);
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.node-stop:hover {
+  background: var(--warn);
+  border-color: var(--warn);
   color: var(--bg);
 }
 
