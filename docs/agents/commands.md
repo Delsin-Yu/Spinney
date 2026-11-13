@@ -21,6 +21,7 @@ npm run check:args                           # guard: the tool-argument contract
 npm run check:shell                          # guard: the argv a native child really receives under Git Bash
 npm run check:kill                           # guard: the kill-confirmation contract (exited / no-exit / no-pid)
 npm run check:exec                           # guard: run_type, the foreground promotion, wait_for_command, no deadlines
+npm run check:dock                           # guard: the window-global dock's membership + the read_image answer (ChatViewProvider)
 npm run check:websearch                      # guard: the keyless web_search / web_fetch pair
 npm run check:image                          # guard: the pre-upload image transform (PNG codec, resampler, JPEG decode)
 npm run check:neterror                       # guard: a failed fetch names its cause (out/agent/netError.js)
@@ -34,10 +35,10 @@ powershell -File build-deploy.ps1 -NoInstall # compile + package only           
 
 `npm run package` and `build-deploy.ps1` are the two side-by-side closing paths.
 `npm run package` is the POSIX entry point: it packages the `.vsix`, runs the
-`vscode:prepublish` gate (compile + `sync:l10n` + the **twenty** guards — `check:models`,
+`vscode:prepublish` gate (compile + `sync:l10n` + the **twenty-one** guards — `check:models`,
 `check:webview`, `check:modeltree`, `check:signals`, `check:l10n`, `check:rollover`,
 `check:compaction`, `check:grid`, `check:docs`, `check:cwd`, `check:args`, `check:search`, `check:shell`, `check:kill`, `check:exec`,
-`check:websearch`, `check:image`, `check:neterror`, `check:unicode`,
+`check:dock`, `check:websearch`, `check:image`, `check:neterror`, `check:unicode`,
 `check:continue`) on the way, and takes the generated l10n
 aliases off disk again once it is done.
 `build-deploy.ps1` is the Windows path, and it also installs

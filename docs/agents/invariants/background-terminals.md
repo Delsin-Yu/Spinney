@@ -214,7 +214,10 @@
   failure is visible in the tool's source.
 - **A job's card is a flying `kind:'bg'` node, not a panel.** `SessionRuntime.onBackgroundRegistered`
   creates it under the owning turn node once per job: `bgTaskId` = the session-local id,
-  `bgCommand` = the command, title = the command clipped to 60 chars. It is a **sidecar**
+  `bgCommand` = the command, title = the command clipped to 60 chars, and **`bgDetached`** =
+  `task.detached === true` — how the job started is a fact of the registration, so the record
+  carries it from birth (see the dock bullet: the window's teardown never reaches the terminal
+  snapshot). It is a **sidecar**
   exactly like a sub-agent window: `attachNode` keeps sidecars after the turn spine,
   and `isSidecar` (`kind === 'agent' || kind === 'bg'`) keeps it out of the API path
   (`pathMessages`) and out of the checkout chain (`leafOf`). The create path saves and restores
@@ -268,7 +271,13 @@
   one at once, so a reload never shows an empty dock until the next job happens to change.
   Membership is decided by the **live** task (`task.detached === true`) and, for a job whose
   process is gone, by the durable `bgDetached` flag written onto its record, so a reload draws
-  the same dock. Two traps that are already paid for: a registration must clear a stale
+  the same dock. That flag is written **at registration** (`onBackgroundRegistered`), not only
+  when the job ends: the window's own teardown disposes every runtime (`dispose()` marks it
+  `dead`) and only then kills the jobs, so `onBackgroundFinished` returns before it could
+  snapshot anything, and a global job still running at window close would otherwise lose its
+  dock row — the record, normalized to `interrupted`, would come back invisible. The terminal
+  snapshot writes it again, so a task read at its end cannot settle a record that disagrees.
+  Two traps that are already paid for: a registration must clear a stale
   `bgDismissed` entry for its id (dismissals persist, the id counter does not — it restarts at 1
   after every reload), and the record's `kind` can only say `background`, so a notice's producer
   travels separately (`DisplayItem.producer`) or a repaint draws a sub-agent batch as a terminal.
@@ -289,7 +298,12 @@
   `killBackground {sessionId, id}` (the id travels with its session, so any tab can kill any
   session's job; the owning runtime is created on demand — which is what paints the job's card and
   delivers the kill's notice), `dismissBackground {sessionId, cardNodeId}` and
-  `clearFinishedBackgrounds` (every finished job of the window, every session).
+  `clearFinishedBackgrounds` (every finished job of the window, every session). The membership
+  rule has its own guard: `tools/dock-acceptance.js` (`npm run check:dock`, part of
+  `vscode:prepublish`) drives `globalBackgroundJobs` on a fake `this` — the live flag, the durable
+  record, the dismissal, the stale-dismissal clear on registration, the orphan row and the same id
+  in two sessions — and drives the kill path through a real `SessionRuntime` and hub, because this
+  is the one method that decides what the dock lists and it had no guard at all.
 - **Removing a job from the dock is a field on the record, not a deletion.**
   `TreeNode.bgDockDismissed` (`kind:'bg'` only, `true` or absent) is persisted with the session, so
   a reload keeps the removal without a second store; the provider keeps the in-memory view as a

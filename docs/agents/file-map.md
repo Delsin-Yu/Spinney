@@ -187,7 +187,7 @@
   (`'exited' | 'no-exit' | 'no-pid'`, a real exit confirmed before the deadline,
   `BackgroundRegistry.kill` staying synchronous, an unconfirmed kill flagged *and*
   logged), and the **exec runtime** (`run_type` is `foreground` / `background` /
-  `detached`; a foreground command past `spinney.execForegroundSeconds` is **moved to
+  `global`; a foreground command past `spinney.execForegroundSeconds` is **moved to
   the background** with its id, never killed; a call that still sends `timeout` /
   `timeout_behavior` answers one frozen sentence before anything is spawned; **no job
   has a deadline** — the task carries no `timeoutMs` / `deadlineAt`, the module exports
@@ -196,6 +196,12 @@
   normal result with the notice restored; the Stop abort path; `check_command` is a
   status read and `kill_command` ends the tree; the sub-agent tool set and the prompt).
   See `testing.md`.
+- `tools/dock-acceptance.js` — a windowless driver that *is* a build guard
+  (`npm run check:dock`, part of `vscode:prepublish`): the **window-global dock's
+  membership** (`globalBackgroundJobs`, driven on a fake `this` with a `vscode` stub) and
+  the **`read_image` answer** (`answerImageUrl`), plus the kill path through a real
+  `SessionRuntime` and `BackgroundHub`. See `testing.md` and
+  `invariants/background-terminals.md`.
 - `tools/migrate-state.mjs` — the one migration this repo carries: an install that
   only ever ran Minimal Agent Harness (`minimal-host.minimal-agent-harness`) moves
   to Spinney (`DE-YU.spinney`) — the memento row key keeps the case the manifest
@@ -288,6 +294,7 @@
   `tools/check-modeltree.js` · `tools/check-tree-grid.js` · `tools/check-docs.js` ·
   `tools/exec-cwd-acceptance.js` · `tools/shell-argv-acceptance.js` ·
   `tools/exec-kill-acceptance.js` · `tools/exec-runtime-acceptance.js` ·
+  `tools/dock-acceptance.js` ·
   `tools/search-files-acceptance.js` ·
   `tools/websearch-acceptance.js` ·
   `tools/check-png.js` · `tools/check-resample.js` · `tools/check-image.js` ·
@@ -296,7 +303,7 @@
   the packaging guards
   (`npm run check:models` / `check:webview` / `check:signals` / `check:l10n` /
   `check:rollover` / `check:modeltree` / `check:grid` / `check:docs` / `check:cwd` /
-  `check:shell` / `check:kill` / `check:exec` /
+  `check:shell` / `check:kill` / `check:exec` / `check:dock` /
   `check:search` / `check:websearch` / `check:png` / `check:resample` / `check:image` /
   `check:jpeg` / `check:neterror` / `check:unicode` / `check:continue` /
   `check:compaction`, run

@@ -5724,6 +5724,16 @@ export class SessionRuntime {
    * right-hand grid the sub-agents use. The card is created here (not by the
    * webview) so the tree stays the single source of truth: it is laid out, sized,
    * persisted and deleted like any other node.
+   *
+   * The card is born knowing **how the job started** (`bgDetached`), not told at the
+   * end. It is a durable fact of the registration — and the window-global dock needs it
+   * for a record whose process is gone, so that a reload draws the same dock. Writing it
+   * here means the flag does not depend on which terminal path ran: the window's own
+   * teardown disposes the runtime *before* it kills the jobs (`dispose()` → `dead`), so
+   * `onBackgroundFinished` returns before it could snapshot anything, and a global job
+   * that was still running when the window closed would otherwise lose its flag and its
+   * dock row. `snapshotBackgroundCard` keeps writing it as well, because a task that
+   * carries the flag is what the readers of the terminal state look at.
    */
   onBackgroundRegistered(owner: BackgroundOwner, task: BackgroundTask): void {
     if (this.dead) {
@@ -5740,6 +5750,7 @@ export class SessionRuntime {
     node.kind = 'bg';
     node.bgTaskId = task.id;
     node.bgCommand = task.command;
+    node.bgDetached = task.detached === true ? true : undefined;
     attachNode(this.session, node);
     this.session.activeNodeId = prevActive;
     this.bgNodes.set(task.id, node.id);
@@ -5803,9 +5814,11 @@ export class SessionRuntime {
     const out = task.handle.getOutput().trim();
     node.bgCommand = task.command;
     // A durable fact about **how the job started**, not a lock or notice claim: the
-    // window-global dock leaves detached jobs out, and a record restored after a reload
-    // must still be able to say it was one. (The `shared` badge keeps reading the live
-    // task — `backgroundTaskDetached` — because a lock story cannot be verified later.)
+    // window-global dock lists a record whose process is gone by this flag, so a reload
+    // draws the same dock. It is written at registration already; written again here so a
+    // task read at its terminal end cannot settle a record that disagrees with it. (The
+    // `global` badge keeps reading the live task — `backgroundTaskDetached` — because a
+    // lock story cannot be verified later.)
     node.bgDetached = task.detached === true ? true : undefined;
     node.bgExitCode = task.exitCode;
     node.bgKilled = task.killed === true;

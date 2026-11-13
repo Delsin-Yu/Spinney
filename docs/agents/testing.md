@@ -12,7 +12,7 @@ gitignored, so a leftover is harmless). Before a release, confirm `npm run compi
 `npm run vscode:prepublish` — on a push to `main`, on a `v*` tag, on a pull request and on
 demand, so a red workflow and a red gate are the same thing instead of two lists that drift.
 
-Twenty build-time guards are the exception (`check:image` runs the `check:png` /
+Twenty-one build-time guards are the exception (`check:image` runs the `check:png` /
 `check:resample` / `check:jpeg` scripts with it), all run by `vscode:prepublish` so a
 regression fails *packaging* instead of the user's session:
 
@@ -332,6 +332,32 @@ All four of those need `out/` (`npm run compile` first), for the same reason
 (`check:cwd` is the working directory and path base, `check:shell` the argv the shell
 hands on, `check:kill` the end of a command, `check:exec` what a command *is* while it
 runs: the three run types, the promotion, and the tools that read the id).
+- `npm run check:dock` (`tools/dock-acceptance.js`, **33 checks**) — the **window-global
+  dock's membership** and the **`read_image` answer**, the two `ChatViewProvider` methods
+  the webview depends on and no other guard reached. Both read only `this`
+  (`globalBackgroundJobs` reads `sessions`, `backgroundHub` and `bgDismissed`), so the
+  fixture is a plain object passed to the prototype method: no window, no panel, no
+  provider. It pins, in order: a live task with `detached: true` is listed and one with
+  `detached: false` is not (a node job lives on its card, never here); a `kind:'bg'`
+  record carrying `bgDetached` with no live task **is** listed (the hub is in-memory, so
+  the record is what a reload has) and one without the flag is not; a live job whose card
+  is gone keeps its row with `cardNodeId: null`; the same numeric id in two sessions is
+  two jobs (a task id is session-local); a dismissed `(sessionId, taskId)` is not listed;
+  and after a registration clears that stale dismissal the same id is listed again — the
+  bug this guard exists for, where a job that reused a dismissed id was dropped for good,
+  because dismissals persist while the minting counter restarts at 1 after every reload.
+  It then drives a real `SessionRuntime` + `BackgroundHub` with the provider's own hook,
+  so the **kill path** is a measurement and not a reading: `rt.stop` (the union kill), a
+  natural exit and the window's teardown (`rt.dispose()`, which disposes the runtime
+  *before* it kills the jobs — the reason the flag is written at registration, not only
+  on the terminal path) all leave `bgDetached` on the record, and the dock draws the same
+  row when the hub is empty; a node job goes through the same endings without entering
+  the dock. Its last section is the `imageUrl` answer (`answerImageUrl`): the data URL,
+  the file's own mtime (the viewer compares it with the call's end), the 4 MiB cap, a
+  directory, an empty path and a missing file each answering a reason instead of
+  throwing. What it cannot see is the webview's half — the rows, the `rect` clip, the
+  "the file changed after this call" note — which `check:webview` pins one layer up, with
+  the real clip and the real pixels left to the eye. Needs `out/`.
 - `npm run check:search` (`tools/search-files-acceptance.js`) — `search_files` end to end:
   the vendored-ripgrep probe order, `search.exclude`/`files.exclude` only inside the
   workspace, the always-pruned `SKIP_DIRS`, the 8 MB per-file cap, the cap note, the

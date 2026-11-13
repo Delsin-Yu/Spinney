@@ -68,7 +68,7 @@ A change to anything under `src/`, `media/`, or `package.json` is not finished u
 - The version follows SemVer. We are at `0.x`, which is pre-1.0: a breaking change bumps the minor version only.
 - **The version number is the developer's, never the agent's.** `version` in `package.json` and `package-lock.json`, a `## [X.Y.Z]` CHANGELOG heading, folding `[Unreleased]` into one, and a `vX.Y.Z` tag are written only when the developer's own message names the number. "Ship it", "release it" and "prepare the release" are not a bump: entries keep accumulating under `[Unreleased]` and the agent asks which number it takes. A bump that appeared without that number is **reported, never repaired by a further bump**, and history is never rewritten on the agent's own initiative. The four actions, the report and the repair path: `versioning`.
 - Tag every release as `vX.Y.Z`.
-- `vscode:prepublish` (compile plus the twenty guards) is the release gate: a release does not ship when that script fails.
+- `vscode:prepublish` (compile plus the twenty-one guards) is the release gate: a release does not ship when that script fails.
 - `CHANGELOG.md` uses the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
 
 ## Hard invariants (read before you touch code)

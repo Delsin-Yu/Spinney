@@ -68,7 +68,7 @@ import {
 } from './agentsMd';
 import { defaultSessionTitle, l10nDiagnostics } from '../i18n';
 import { buildChatShell } from './webviewShell';
-import { BackgroundHub } from './backgroundHub';
+import { BackgroundHub, BackgroundOwner } from './backgroundHub';
 import { BackgroundTask } from '../tools/background';
 import { ChatPanel } from './ChatPanel';
 import { PanelManager } from './panels';
@@ -972,15 +972,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     this.backgroundHub.setHooks({
       onUpdated: (owner) => this.runtimes.get(owner.sessionId)?.refreshBackgrounds(),
       onFinish: (owner, task) => this.runtimes.get(owner.sessionId)?.onBackgroundFinished(owner, task),
-      onRegistered: (owner, task) => {
-        // A **new** job can reuse an id: the minting counter lives in the hub, which is
-        // in-memory, so every reload starts again at 1. `bgDismissed` is keyed
-        // `(sessionId, taskId)` and is rebuilt from the durable `bgDockDismissed` records,
-        // so without this line a job dismissed before a reload would silence the next job
-        // that happens to take the same id. A job that has just started is never dismissed.
-        this.bgDismissed.delete(bgDockHandle(owner.sessionId, task.id));
-        this.runtimes.get(owner.sessionId)?.onBackgroundRegistered(owner, task);
-      },
+      onRegistered: (owner, task) => this.onBackgroundRegistered(owner, task),
     });
     // Runtimes are created on demand (`runtimeFor`), NOT for every stored
     // session: a runtime builds its own agent history when it is constructed, and
@@ -4415,16 +4407,24 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    * The answer also carries the file's mtime, because the viewer is about **that call's**
    * image: if the file has been rewritten since, the pixels below are the current file, and
    * the row says so instead of pretending they are what the model saw.
+   *
+   * The path is resolved here, not by the webview: the request carries the argument the
+   * model gave `read_image`, which is usually **workspace-relative**, and a webview has no
+   * root to resolve against while the extension host's own cwd is not the workspace. This is
+   * the same rule `openFile` follows, and it is what the tool itself did when it read the
+   * file — so the viewer shows the file the model was given.
    */
   private async answerImageUrl(sessionId: string, message: any): Promise<void> {
     const requestId = String(message?.requestId ?? '');
-    const filePath = String(message?.path ?? '');
+    const target = String(message?.path ?? '');
     const answer = (payload: Record<string, unknown>) =>
       this.postTo(sessionId, { type: 'imageUrlAnswer', requestId, ...payload });
-    if (!filePath) {
+    // Before the resolve: an empty path would resolve to the agent root, i.e. a directory.
+    if (!target) {
       answer({ error: 'no path' });
       return;
     }
+    const filePath = resolvePath(target);
     try {
       const stat = await fs.promises.stat(filePath);
       if (!stat.isFile()) {
@@ -5514,6 +5514,30 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   }
 
   /**
+   * The hub's `onRegistered`, once per job: two things must happen before the job's first
+   * update arrives, and they belong together because a job that reuses an id needs the one
+   * *and* a card.
+   *
+   * The dismissal: a **new** job can reuse an id, because the minting counter lives in the
+   * hub, which is in-memory and starts again at 1 after every reload, while `bgDismissed`
+   * is keyed `(sessionId, taskId)` and is rebuilt from the durable `bgDockDismissed`
+   * records. Without clearing the stale handle, a job dismissed before a reload would
+   * silence the next job that happens to take the same id, for good. A job that has just
+   * started is never dismissed, so the delete is unconditional.
+   *
+   * The card: the owning session's runtime creates the `kind:'bg'` sidecar that mirrors the
+   * job. A session with no runtime has no view to update (nothing is running there).
+   *
+   * A method rather than a closure so `tools/dock-acceptance.js` can drive it: this is the
+   * half of the dock's membership that a reload is the only real test of, and it was
+   * exactly the half that broke.
+   */
+  private onBackgroundRegistered(owner: BackgroundOwner, task: BackgroundTask): void {
+    this.bgDismissed.delete(bgDockHandle(owner.sessionId, task.id));
+    this.runtimes.get(owner.sessionId)?.onBackgroundRegistered(owner, task);
+  }
+
+  /**
    * Every job the dock lists, in the order it shows them: running first, then
    * finished, newest first inside each group.
    *
@@ -6099,14 +6123,37 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         return;
       }
       case 'openFile': {
-        // A viewer's own click (an image, a diff's path): show the file in an editor tab.
-        // The path comes from a tool call this session ran, and the only thing this does
-        // is open it, so nothing is written and nothing outside this window changes.
+        // A viewer's own click (an image, a search hit, a diff's path): show the file in an
+        // editor tab. The path comes from a tool call this session ran, and the only thing
+        // this does is open it, so nothing is written and nothing outside this window changes.
+        //
+        // The path is resolved against the agent root because `search_files` prints
+        // **workspace-relative** paths (`src/a.ts:12: …`), and `Uri.file` would read one as
+        // relative to the extension host's cwd. `resolvePath` also maps the Git-Bash form
+        // (`/d/Repos/x`) onto the drive path, and leaves an absolute path alone — which is
+        // what a `search_transcripts` hit carries (the dumps live outside the workspace).
         const target = String(message.path ?? '');
         if (!target) {
           return;
         }
-        void vscode.commands.executeCommand('vscode.open', vscode.Uri.file(target));
+        const uri = vscode.Uri.file(resolvePath(target));
+        // A hit names a line; an image click names none. A line this build cannot read is
+        // not a reason to refuse the click: the file still opens.
+        const line = Number(message.line);
+        if (Number.isFinite(line) && line >= 1) {
+          void vscode.window
+            .showTextDocument(uri, {
+              preview: true,
+              selection: new vscode.Range(line - 1, 0, line - 1, 0),
+            })
+            .then(undefined, () => {
+              // The file could not be shown as a text document (deleted, binary, unreadable).
+              // `vscode.open` reports that itself instead of this handler swallowing it.
+              void vscode.commands.executeCommand('vscode.open', uri);
+            });
+          return;
+        }
+        void vscode.commands.executeCommand('vscode.open', uri);
         return;
       }
       case 'imageUrl':

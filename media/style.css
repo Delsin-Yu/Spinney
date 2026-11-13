@@ -883,6 +883,23 @@ button.icon-btn {
   color: var(--text-dim);
 }
 
+/* A path or a row that opens a file: the click posts `openFile` and the host resolves the
+   path (workspace-relative stays workspace-relative; a bare directory name is never one of
+   these). The hover is the only cue, so it must never land on plain text. */
+.jump {
+  cursor: pointer;
+}
+
+.code-path.jump:hover,
+.diff-path.jump:hover {
+  text-decoration: underline;
+  color: var(--text);
+}
+
+.entries-row.jump:hover {
+  background: var(--bg3);
+}
+
 .code-path,
 .entries-path {
   min-width: 0;
@@ -1274,6 +1291,12 @@ button.icon-btn {
   white-space: nowrap;
   user-select: text;
   -webkit-user-select: text;
+  /* A hit is a jump to its file at its line (the click posts `openFile`). */
+  cursor: pointer;
+}
+
+.hits-row:hover {
+  background: var(--bg3);
 }
 
 .hits-row.ctx {
@@ -1469,6 +1492,15 @@ button.icon-btn {
 
 .image-el {
   display: block;
+}
+
+/* No `rect`: the picture is centred in the box instead of hugging its left edge, which left
+   a band of empty background on the right of every screenshot narrower than the card. A
+   clipped image is never centred — there the box **is** the crop and the picture is offset
+   by the region's own origin. */
+.image-box.plain .image-el {
+  margin-left: auto;
+  margin-right: auto;
 }
 
 /* A sub-agent batch: one block per agent — its short id and duration on the top line, its

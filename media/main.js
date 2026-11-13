@@ -2674,7 +2674,15 @@
     if (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
     const view = el('div', 'code-view');
     const head = el('div', 'code-head');
-    if (opts.path) head.appendChild(el('span', 'code-path', opts.path));
+    if (opts.path) {
+      // A jump: the card is showing a file, so its path opens that file. The path travels
+      // as the call wrote it (usually workspace-relative) and the **host** resolves it — the
+      // webview has no root to resolve against. No line: a read carries no "that line".
+      const pathEl = el('span', 'code-path jump', opts.path);
+      pathEl.title = opts.path;
+      pathEl.addEventListener('click', () => vscode.postMessage({ type: 'openFile', path: opts.path }));
+      head.appendChild(pathEl);
+    }
     if (opts.note) head.appendChild(el('span', 'code-note', opts.note));
     head.appendChild(el('span', 'code-count', lines.length === 1 ? tr('1 line') : tr('{0} lines', lines.length)));
     view.appendChild(head);
@@ -2741,27 +2749,47 @@
     return view;
   }
 
-  /** One directory listing: the path and its count, then a row per entry. */
+  /**
+   * One directory listing: the path and its count, then a row per entry. A **file** row is
+   * a jump — the listing names files, so the click opens one (the directory is joined back
+   * on, because the entries are relative to it). A directory row is not: opening a folder
+   * would open a second window, which is not what a click on a line of text means here.
+   */
   function entriesViewer(content) {
     const text = String(content || '');
     const nl = text.indexOf('\n');
     const header = nl < 0 ? text : text.slice(0, nl);
     const body = nl < 0 ? '' : text.slice(nl + 1);
     const parsed = /^Directory: (.*)$/.exec(header);
+    // The tool prints `<resolved dir>` plus ` (recursive)` for a walk; the mark is part of
+    // the head the reader sees, but it is not part of the path anything is joined to.
+    const dir = parsed ? parsed[1].replace(/\s+\(recursive\)$/, '') : '';
     const view = el('div', 'entries-view');
     const head = el('div', 'entries-head');
     if (parsed) head.appendChild(el('span', 'entries-path', parsed[1]));
-    head.appendChild(el('span', 'entries-count', ''));
+    // The count is filled in once the rows are known, so the element is kept rather than
+    // read back off the head (a `lastChild` lookup is a second guess at what was appended).
+    const countEl = el('span', 'entries-count', '');
+    head.appendChild(countEl);
     view.appendChild(head);
     const rows = body.split('\n').filter((line) => line && line !== '(empty)');
     let capped = '';
     if (rows.length && /^…\[listing stopped at/.test(rows[rows.length - 1])) capped = rows.pop();
-    head.lastChild.textContent = rows.length === 1 ? tr('1 entry') : tr('{0} entries', rows.length);
+    countEl.textContent = rows.length === 1 ? tr('1 entry') : tr('{0} entries', rows.length);
     if (!rows.length) view.appendChild(el('div', 'entries-empty', tr('(empty)')));
     const list = el('div', 'entries-list');
     for (const entry of rows) {
-      const row = el('div', 'entries-row' + (entry.endsWith('/') ? ' dir' : ''));
+      const isDir = entry.endsWith('/');
+      const row = el('div', 'entries-row' + (isDir ? ' dir' : ''));
       row.appendChild(el('span', 'entries-name', entry));
+      if (dir && !isDir) {
+        // The entries are slash-separated and relative to the header, so one separator is
+        // all that is missing (a header that already ends in one keeps it as it is).
+        const target = /[\\/]$/.test(dir) ? dir + entry : `${dir}/${entry}`;
+        row.classList.add('jump');
+        row.title = target;
+        row.addEventListener('click', () => vscode.postMessage({ type: 'openFile', path: target }));
+      }
       list.appendChild(row);
     }
     if (rows.length) view.appendChild(list);
@@ -2904,7 +2932,13 @@
     const rows = opts.rows || [];
     const view = el('div', 'diff-view');
     const head = el('div', 'diff-head');
-    if (opts.path) head.appendChild(el('span', 'diff-path', opts.path));
+    if (opts.path) {
+      // A jump, like the code surface: the change is in this file, so its path opens it.
+      const pathEl = el('span', 'diff-path jump', opts.path);
+      pathEl.title = opts.path;
+      pathEl.addEventListener('click', () => vscode.postMessage({ type: 'openFile', path: opts.path }));
+      head.appendChild(pathEl);
+    }
     if (opts.note) head.appendChild(el('span', 'diff-note', opts.note));
     head.appendChild(el('span', 'diff-count-add', '+' + (opts.add || 0)));
     head.appendChild(el('span', 'diff-count-del', '-' + (opts.del || 0)));
@@ -2975,6 +3009,12 @@
    * The hits of `search_files` / `search_transcripts`: the path, the line and the text,
    * with the cap note and the scope echo the tool appends kept underneath. Without hit
    * lines (no matches, a timeout, a spilled answer) the text is shown as it came.
+   *
+   * A row is a jump: a click asks the host to open that file **at that line**
+   * (`openFile { path, line }`), because the line number is the whole reason to click a
+   * hit. The path travels as the tool printed it — workspace-relative for `search_files`,
+   * absolute for a transcript dump — and the host resolves it. A context line (`-12-`) is
+   * a row like any other: the reader clicked it because it is near what they want.
    */
   function hitsViewer(content) {
     const text = String(content || '');
@@ -3009,6 +3049,9 @@
       row.appendChild(path);
       row.appendChild(el('span', 'hits-line', hit.line));
       row.appendChild(el('span', 'hits-text', hit.text));
+      row.addEventListener('click', () => {
+        vscode.postMessage({ type: 'openFile', path: hit.path, line: Number(hit.line) });
+      });
       list.appendChild(row);
     }
     view.appendChild(list);
@@ -3319,6 +3362,9 @@
       if (a.path) vscode.postMessage({ type: 'openFile', path: a.path });
     });
     const rect = a.rect && typeof a.rect === 'object' ? a.rect : null;
+    // The whole image is centred in its box; a **clipped** one never is, because there the box
+    // is the crop and the picture is offset by the region's own origin (see `fit`).
+    if (!rect) box.classList.add('plain');
     /** Clip the box to `rect` and scale the picture so that region fits it. */
     const fit = () => {
       const natural = { w: img.naturalWidth || 0, h: img.naturalHeight || 0 };

@@ -4128,7 +4128,13 @@ if (contextLabel !== 'ctx 50%') {
         }
       }
     }
-    dispatch({ type: 'toolEnd', nodeId: NODE, id: 'rows-tool', content: 'the file contents', ms: 640 });
+    dispatch({
+      type: 'toolEnd',
+      nodeId: NODE,
+      id: 'rows-tool',
+      content: 'File: D:\\repos\\demo\\a\\b.ts (1 lines, LF)\nthe file contents',
+      ms: 640,
+    });
     const done = lastOf('tool');
     if (done && !hasClass(done, 'done')) {
       problems.push('a tool row whose call ended does not carry the `done` class — the row state reads it');
@@ -4149,6 +4155,29 @@ if (contextLabel !== 'ctx 50%') {
       problems.push(`a read_file code surface reads ${JSON.stringify(textOf(codeView))}, expected the file body`);
     } else if (!findByClass(codeView, 'code-no')) {
       problems.push('a read_file code surface has no line-number gutter (.code-no)');
+    }
+    // The head path is a jump: the file the card is showing opens on a click. The path is
+    // the one in the result's own header (the reader sees that path), and it travels back
+    // exactly as the tool printed it — the host is what resolves it. No line: a read names
+    // no "that line".
+    const codePath = codeView ? findByClass(codeView, 'code-path') : null;
+    const openCode = codePath && codePath._listeners && codePath._listeners.click;
+    if (!codePath) {
+      problems.push("a code card has no head path — the result's own header is where the file it shows is named");
+    } else if (!hasClass(codePath, 'jump')) {
+      problems.push("a code card's head path is not marked as a jump — it reads like plain text and opens nothing");
+    } else if (typeof openCode !== 'function') {
+      problems.push("a code card's head path has no click handler — the file it shows cannot be opened");
+    } else {
+      posted.length = 0;
+      openCode({ type: 'click' });
+      const opened = posted.find((m) => m && m.type === 'openFile');
+      if (!opened || opened.path !== 'D:\\repos\\demo\\a\\b.ts' || opened.line !== undefined) {
+        problems.push(
+          `a click on a code card's head path posts ${JSON.stringify(opened)}, expected \`openFile\` for the result's ` +
+            'own path and no line',
+        );
+      }
     }
     // …and a second click folds it again: it is a toggle, not a one-way expand.
     if (done && clickOf(findByClass(done, 'tool-row'), 'a finished tool row')) {
@@ -4248,6 +4277,21 @@ if (contextLabel !== 'ctx 50%') {
         if (numbered) {
           problems.push('an edit diff shows line numbers — its position in the file is not known, so the gutters stay empty');
         }
+        // The head path is a jump like the code card's: the change is in this file.
+        const diffPath = findByClass(view, 'diff-path');
+        const openDiff = diffPath && diffPath._listeners && diffPath._listeners.click;
+        if (!diffPath || !hasClass(diffPath, 'jump')) {
+          problems.push("a diff card's head path is not marked as a jump — the file the change is in opens nothing");
+        } else if (typeof openDiff !== 'function') {
+          problems.push("a diff card's head path has no click handler — the file the change is in cannot be opened");
+        } else {
+          posted.length = 0;
+          openDiff({ type: 'click' });
+          const opened = posted.find((m) => m && m.type === 'openFile');
+          if (!opened || opened.path !== 'a.ts') {
+            problems.push(`a click on a diff card's head path posts ${JSON.stringify(opened)}, expected \`openFile\` for "a.ts"`);
+          }
+        }
       }
     }
     // The text viewers read the tool's own result text, so each sample below is a real
@@ -4282,6 +4326,80 @@ if (contextLabel !== 'ctx 50%') {
       const summary = row ? findByClass(row, 'tool-args-line') : null;
       if (!summary || textOf(summary).indexOf('pattern') < 0) {
         problems.push('a search_files row lost its argument summary — the pattern is what the reader needs');
+      }
+      // A hit is a jump. The click has to carry the **line** as well as the file: a hit that
+      // opens the file at the top is the same as no click at all, and the line is the one
+      // fact the row is about.
+      const hitPath = view ? findByClass(view, 'hits-path') : null;
+      const hitRow = hitPath && hitPath.parentElement;
+      const onHit = hitRow && hitRow._listeners && hitRow._listeners.click;
+      if (typeof onHit !== 'function') {
+        problems.push('a hit row has no click handler — the line the reader clicked cannot be opened');
+      } else {
+        posted.length = 0;
+        onHit({ type: 'click' });
+        const opened = posted.find((m) => m && m.type === 'openFile');
+        if (!opened) {
+          problems.push('a click on a hit row posts no `openFile` — the row is not a jump');
+        } else if (opened.path !== 'src/a.ts' || Number(opened.line) !== 12) {
+          problems.push(
+            `a click on a hit row posts ${JSON.stringify({ path: opened.path, line: opened.line })}, ` +
+              'expected the row\'s own path and line ("src/a.ts", 12)',
+          );
+        }
+      }
+    }
+    {
+      // A directory listing: one row per entry, `/` marks a directory, and the count is in
+      // the head (this kind hides the argument summary, so the head is the only place the
+      // path appears). A **file** row is a jump to `<header dir>/<entry>` — the entries are
+      // relative to the header, and the header's ` (recursive)` mark is not part of the path
+      // — while a directory row is not: opening a folder would open a second window.
+      const row = endRow(
+        10,
+        'rows-dir',
+        'list_dir',
+        '{"path":"d:/repos/demo","recursive":true}',
+        'Directory: D:\\repos\\demo (recursive)\nsub/main.ts\nsrc/',
+      );
+      const view = row ? findByClass(row, 'entries-view') : null;
+      if (!view) {
+        problems.push('a list_dir row renders no .entries-view');
+      } else {
+        const count = findByClass(view, 'entries-count');
+        if (!count || textOf(count) !== '2 entries') {
+          problems.push(`a directory listing's head reads ${JSON.stringify(count && textOf(count))}, expected "2 entries"`);
+        }
+        const list = findByClass(view, 'entries-list');
+        const entryRows = (list && list.children) || [];
+        const fileRow = entryRows[0];
+        const dirRow = entryRows[1];
+        if (entryRows.length !== 2 || !fileRow || !dirRow) {
+          problems.push(`a directory listing rendered ${entryRows.length} row(s), expected 2`);
+        } else {
+          const openEntry = fileRow._listeners && fileRow._listeners.click;
+          if (!hasClass(fileRow, 'jump')) {
+            problems.push('a directory listing\'s file row is not marked as a jump — it opens nothing');
+          } else if (typeof openEntry !== 'function') {
+            problems.push("a directory listing's file row has no click handler");
+          } else {
+            posted.length = 0;
+            openEntry({ type: 'click' });
+            const opened = posted.find((m) => m && m.type === 'openFile');
+            if (!opened || opened.path !== 'D:\\repos\\demo/sub/main.ts') {
+              problems.push(
+                `a click on a listing's file row posts ${JSON.stringify(opened)}, expected the header's directory ` +
+                  'joined onto the entry ("D:\\\\repos\\\\demo/sub/main.ts")',
+              );
+            }
+          }
+          if (!hasClass(dirRow, 'dir') || (dirRow._listeners && dirRow._listeners.click)) {
+            problems.push(
+              'a directory listing\'s directory row carries a click handler (or lost its `dir` class) — opening a `folder` ' +
+                'is not what a click on that line means',
+            );
+          }
+        }
       }
     }
     {
@@ -4340,20 +4458,33 @@ if (contextLabel !== 'ctx 50%') {
     }
     {
       // An image row asks the host for the pixels once, and the answer is what draws them.
-      // The viewer is about that call's image, so the request must name the file, and the
-      // answer's `mtime` is what says whether the file has moved on since.
+      // The viewer is about that call's image, so the request must name the file, the box
+      // must clip to the call's own `rect`, and the answer's `mtime` is what says whether
+      // the file has moved on since.
+      //
+      // What no headless check can see: that `.image-box` really clips (`overflow: hidden`)
+      // and that the picture is the downscale the model received — both are CSS and pixels.
       const before = posted.length;
-      const row = endRow(
-        8,
-        'rows-image',
-        'read_image',
-        '{"path":"a/b.png","rect":{"x":0,"y":0,"w":10,"h":10}}',
-        'Image a/b.png (400x300, rect 0,0 10x10 -> 10x10)',
-      );
+      const startedAt = Date.now() - 5000;
+      const args = { path: 'a/b.png', rect: { x: 20, y: 10, w: 200, h: 150 } };
+      dispatch({ type: 'toolCallDelta', nodeId: NODE, index: 8, id: 'rows-image', name: 'read_image', args: JSON.stringify(args) });
+      dispatch({
+        type: 'toolStart',
+        nodeId: NODE,
+        index: 8,
+        id: 'rows-image',
+        name: 'read_image',
+        args: JSON.stringify(args),
+        startedAt,
+      });
+      dispatch({ type: 'toolEnd', nodeId: NODE, id: 'rows-image', content: 'Image a/b.png (400x300, rect 20,10 200x150 -> 200x150)', ms: 100 });
+      const row = lastOf('tool');
       const view = row ? findByClass(row, 'image-view') : null;
       if (!view) {
         problems.push('a read_image row renders no .image-view');
       }
+      // The call's own end, which is what `mtime` is compared with.
+      const since = startedAt + 100;
       const ask = posted.slice(before).find((m) => m && m.type === 'imageUrl');
       if (!ask) {
         problems.push('a read_image row did not ask the host for the file — the viewer has no pixels to draw');
@@ -4364,13 +4495,93 @@ if (contextLabel !== 'ctx 50%') {
           type: 'imageUrlAnswer',
           requestId: ask.requestId,
           url: 'data:image/png;base64,AAAA',
-          mtime: Date.now(),
+          // Written before the call ended: these pixels are the ones the model was shown.
+          mtime: since - 1000,
         });
         const img = view ? findByClass(view, 'image-el') : null;
         if (!img || !/^data:image\/png/.test(String(img.src || ''))) {
           problems.push(
             `an answered image row's <img> reads ${JSON.stringify(img && img.src)}, expected the data URL the host sent`,
           );
+        }
+        const note = view ? findByClass(view, 'image-note') : null;
+        if (!note || !hasClass(note, 'hidden')) {
+          problems.push(
+            `an image written before the call shows the note ${JSON.stringify(note && note.textContent)} — ` +
+              'the file has not moved on, so nothing may claim it did',
+          );
+        }
+        // The clip: the box is the size of `rect` and the picture is pushed by its origin,
+        // so what shows through the box is exactly the region the call uploaded. A clipped
+        // box is never centred (`plain`): centring it would move the crop off the region.
+        if (img && typeof img._listeners.load === 'function') {
+          img.naturalWidth = 400;
+          img.naturalHeight = 300;
+          img._listeners.load({ type: 'load' });
+          const box = view ? findByClass(view, 'image-box') : null;
+          const geometry = box
+            ? [box.style.width, box.style.height, img.style.marginLeft, img.style.marginTop].join(',')
+            : '';
+          if (geometry !== '200px,150px,-20px,-10px') {
+            problems.push(
+              `an image rect clips to ${JSON.stringify(geometry)}, expected "200px,150px,-20px,-10px" ` +
+                "(the box is rect's size, the picture is offset by rect's origin)",
+            );
+          }
+          if (box && hasClass(box, 'plain')) {
+            problems.push(
+              "a clipped image's box is marked `plain` — a `rect` box is the crop, so the picture must not be centred in it",
+            );
+          }
+        } else if (img) {
+          problems.push('the image element has no `load` listener — the rect clip never runs');
+        }
+      }
+    }
+    {
+      // The other half of the mtime contract: a file rewritten **after** the call means the
+      // pixels below are the current file, not what the model saw, and the row has to say so.
+      const args = { path: 'a/b.png' };
+      const startedAt = Date.now() - 60000;
+      const before = posted.length;
+      dispatch({ type: 'toolCallDelta', nodeId: NODE, index: 9, id: 'rows-image-stale', name: 'read_image', args: JSON.stringify(args) });
+      dispatch({
+        type: 'toolStart',
+        nodeId: NODE,
+        index: 9,
+        id: 'rows-image-stale',
+        name: 'read_image',
+        args: JSON.stringify(args),
+        startedAt,
+      });
+      dispatch({ type: 'toolEnd', nodeId: NODE, id: 'rows-image-stale', content: 'Image a/b.png (400x300)', ms: 100 });
+      const row = lastOf('tool');
+      const view = row ? findByClass(row, 'image-view') : null;
+      const ask = posted.slice(before).find((m) => m && m.type === 'imageUrl');
+      if (!view || !ask) {
+        problems.push('a second read_image row renders no viewer, or asked the host for nothing');
+      } else {
+        dispatch({
+          type: 'imageUrlAnswer',
+          requestId: ask.requestId,
+          url: 'data:image/png;base64,AAAA',
+          // Written after the call ended: the file has moved on.
+          mtime: startedAt + 100 + 5000,
+        });
+        const note = findByClass(view, 'image-note');
+        if (!note || hasClass(note, 'hidden')) {
+          problems.push(
+            'an image rewritten after the call shows no note — the pixels below are the current file, and the row says nothing',
+          );
+        } else if (textOf(note) !== 'the file changed after this call') {
+          problems.push(`the stale-image note reads ${JSON.stringify(textOf(note))}, expected the sentence naming the change`);
+        }
+        // This row has no `rect`, so it is the whole image: its box must be `plain`, which is
+        // what centres the picture instead of leaving it against the left edge. (The CSS is
+        // not in this check's reach; the class is the whole contract it can hold.)
+        const box = findByClass(view, 'image-box');
+        if (!box || !hasClass(box, 'plain')) {
+          problems.push("an unclipped image's box is not marked `plain` — the picture hugs the left edge instead of being centred");
         }
       }
     }

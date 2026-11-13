@@ -18,7 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   edit anchored on text shows no line numbers because its place in the file is not known), a
   terminal (`exec_command` and the three job tools), a directory listing, search hits, web
   results, a fetched page (the one view that wraps), an image clipped to the call's own
-  `rect` with a click that opens the file, a sub-agent batch whose answer is rendered as
+  `rect` with a click that opens the file (a whole image is centred in its box; a clipped one
+  is never moved, because there the box *is* the crop), a sub-agent batch whose answer is
+  rendered as
   Markdown, a node count, or one plain sentence. A tool with no view keeps the raw result as
   a compatibility path. The collapsed chip still reads the tool's own `(+N -M)` sentence.
 - **A step fold now holds the whole process.** A thought is a step: it counts in the group
@@ -31,6 +33,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   above it, stands alone as one accent line (`Sub-agent finished · 2 agents · 44s`), and the
   round it opens gets its own group. Its batch summary is folded behind a click. A notice
   delivered mid-turn keeps the tool-row shape and rides the run, which is what it is.
+- **A file a card names is a jump.** A click on a search hit opens that file at that line, the
+  path at the head of a code or diff card opens the file it is showing, and a row of a directory
+  listing opens that entry. A `list_dir` row is joined back onto the header's directory (its
+  ` (recursive)` mark is not part of the path), and a **folder** row is deliberately not a jump:
+  opening a folder would open a second window, which is not what a click on a line means. The
+  webview never resolves a path — it posts `openFile { path, line? }` and the host resolves it
+  against the agent root, so a workspace-relative hit lands on the right file while a transcript
+  dump, which lives outside the workspace, opens as it is.
 
 ### Changed
 
@@ -52,6 +62,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `(sessionId, taskId)` and survive a reload, while the task id counter lives in memory and
   restarts at 1: a job that reused a dismissed id was dropped from the dock for good. A
   registration now clears the stale dismissal.
+- **A global job that was running when the window closed keeps its dock row.** The record's
+  `bgDetached` flag was written only when a job ended, and the window's own teardown disposes
+  the runtime *before* it kills the jobs — so a job that died with the window never got the
+  flag, and after the restart its record read `interrupted` while the window-global dock no
+  longer listed it. The flag is a fact of the registration now, so every ending keeps it: a
+  kill, a natural exit, and the window going away.
+- **A `read_image` given a relative path shows its pixels.** The image card asks the host for the
+  file the call named, and that name is what the model typed — usually workspace-relative. The
+  answer read it as given, so the extension host's own working directory was searched instead of
+  the workspace: the card said `the file could not be read` for a file the model had just seen.
+  The host resolves the path now, the same rule every jump follows.
 - **A repainted completion notice kept its producer.** The stored item's `kind` can only say
   `background`, so after a reload a sub-agent batch was drawn as a terminal: wrong title, and
   its Markdown report flattened into raw text. The item now carries `producer`, and the dock
