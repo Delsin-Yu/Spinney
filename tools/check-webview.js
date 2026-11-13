@@ -1228,6 +1228,13 @@ if (contextLabel !== 'ctx 50%') {
         `the new-epoch button stays visible ${label} — Stop must hide both other buttons (runningNodes=${JSON.stringify(nodes)})`,
       );
     }
+    // …and a **lone** button keeps the controls row: the action row takes a line of its own
+    // only while two or more buttons are on screen. This fixture is a first card, so Send is
+    // alone here and the row must stay inline.
+    const actions = elementById('actions');
+    if (actions.classList.contains('stacked')) {
+      problems.push(`the action row takes its own line for a lone button ${label}`);
+    }
   };
   expectComposer('while the focused node is streaming', [NODE_ID]);
   expectComposer('while the live run belongs to another branch', ['another-node']);
@@ -1629,6 +1636,10 @@ if (contextLabel !== 'ctx 50%') {
   if (!/Compress/.test(String(compressBtn.textContent || ''))) {
     problems.push(`the compress button reads ${JSON.stringify(compressBtn.textContent)}, expected "Compress"`);
   }
+  // Two buttons on screen (Send + Compress) is where the action row takes its own line.
+  if (!elementById('actions').classList.contains('stacked')) {
+    problems.push('the action row stays inline although Send and Compress are both on screen');
+  }
 
   // 2. The context is `near`: the same button, still enabled, and no second entry appears —
   //    this is the collision the two buttons are split to avoid.
@@ -1721,6 +1732,10 @@ if (contextLabel !== 'ctx 50%') {
   dispatch({ ...base, setup: { node: null, live: null, drift: false, reasons: [] } });
   if (!hidden(compressBtn)) {
     problems.push('a first card offers the compress button (there is no conversation to hand over)');
+  }
+  // One visible button (Send) is not a row: the action line is only for two or more.
+  if (elementById('actions').classList.contains('stacked')) {
+    problems.push('the action row takes its own line for a lone Send');
   }
 
   // 5. The removed affordances: no card carries a rollover element any more, and the

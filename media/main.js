@@ -44,6 +44,9 @@
   // its bytes). Two buttons because they are two questions; the fork one is hidden whenever it
   // would have nothing to say.
   const newContextBtn = document.getElementById('new-context-btn');
+  // The row the buttons live in: it takes a line of its own only while more than one of them
+  // is on screen (`updateComposerButtons`), so a lone Send stays where it always was.
+  const actionsEl = document.getElementById('actions');
   const statusDot = document.getElementById('status-dot');
   const statusText = document.getElementById('status-text');
   const attachmentsEl = document.getElementById('attachments');
@@ -8280,6 +8283,21 @@ function addBackgroundNotice(item) {
     }
     updateNewContextButton();
     updateCompressButton();
+    updateActionRow();
+  }
+
+  /**
+   * How the buttons share the composer's width: a **lone** button — Send on an ordinary
+   * composer, Stop while the node is working — stays at the end of the controls row exactly as
+   * it always did, and **two or more** take a right-aligned line of their own
+   * (`#composer-controls #actions.stacked`). Without the second half, three buttons squeeze the
+   * model dropdown; without the first, an ordinary composer grows a row for one button.
+   */
+  function updateActionRow() {
+    if (!actionsEl) return;
+    const buttons = [stopBtn, newContextBtn, compressBtn, sendBtn];
+    const shown = buttons.filter((button) => button && !button.classList.contains('hidden')).length;
+    actionsEl.classList.toggle('stacked', shown > 1);
   }
 
   /**
@@ -8726,6 +8744,7 @@ function addBackgroundNotice(item) {
     // buttons' visibility and disabled state are re-read here.
     updateNewContextButton();
     updateCompressButton();
+    updateActionRow();
   }
 
   /**
