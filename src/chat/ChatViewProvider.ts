@@ -5853,16 +5853,10 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
 
   /**
    * The sentence a **blocked** new-context entry posts, per reason
-   * (`SessionRuntime.windowStartBlocker`). One sentence used to cover all three, and it only
-   * ever described the running case: a card that already had a window below it told the user to
-   * wait for a turn that had already finished.
+   * (`SessionRuntime.windowStartBlocker`). One sentence used to cover every case, and it only
+   * ever described the running one.
    */
-  private windowStartReason(reason: 'missing' | 'running' | 'continued'): string {
-    if (reason === 'continued') {
-      return vscode.l10n.t(
-        'This card already continues below. Start a new context window from the card at the end of this line.',
-      );
-    }
+  private windowStartReason(reason: 'missing' | 'running'): string {
     if (reason === 'missing') {
       return vscode.l10n.t('This card cannot start a new context window.');
     }

@@ -526,7 +526,7 @@ The question has two answers.
 
 A compression node cannot change anything. It can read files, list folders, search files and search transcripts. Its card has no input box. While it runs, its card carries its own Stop.
 
-A card that already continues below cannot start a second window. Start the new window from the card at the end of the line. A card that runs a turn also cannot: wait for the turn, then click again.
+You can start several windows from the same card. Each attempt is a new branch below it, so you can keep both and compare them: one `Simple` and one `Agentic`, for example. While an attempt still runs, wait for it to finish, then start the next one.
 
 The new window starts below the compression node. The window keeps the frozen setup of the window it continues, not the setup of the compression turn. Its badge is `CTX`, and its edge is dotted.
 

@@ -48,8 +48,13 @@ of commands.
 
 Dismissing it sends nothing, kills nothing and keeps the composer's text.
 
-The entry's precondition is `SessionRuntime.canCompress(nodeId)` — a conversational node, not
-streaming, with no conversational child — and it says **nothing about how full the window is**.
+The entry's precondition is `SessionRuntime.windowStartBlocker(nodeId)` — a conversational node
+whose own turn is not streaming and none of whose windows is still being written — and it says
+**nothing about how full the window is**, and **nothing about a child the card already has**:
+several attempts from one card are the point, since a `Simple` window and an `Agentic` window
+kept side by side are how the user compares the two handoffs, and each attempt is a sibling
+branch below the same card. `canCompress(nodeId)` is that predicate as a boolean (`null` =
+allowed).
 `canRollover` (the composer button's suggestion at 90 %) keeps that condition; a deliberate
 entry may open a window from a window that still has room. The Simple answer is
 `rolloverContext(nodeId, 'current', { text, force: true })`, where `force` is exactly that

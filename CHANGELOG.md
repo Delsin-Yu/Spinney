@@ -188,12 +188,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **A blocked new-context entry says which rule it hit.** Every structural refusal used the
-  sentence written for a streaming turn, so a card that already had a window below it told the
-  reader to wait for a turn that had already finished. `windowStartBlocker` now names the three
-  reasons — no such card (or a sidecar), that card's own turn is running, and the card already
-  continues below — and each posts its own sentence; the `continued` one says where to click
-  instead (the card at the end of the line).
+- **A card may start several windows, so the two handoffs can be compared.** The entry used to
+  refuse a card that already continued below, which made `Simple` against `Agentic` a choice
+  nobody could look at twice. Each attempt is now its own branch under the same card: keep both,
+  compare them, delete the one you do not want. What stays forbidden is two handoffs of the same
+  window running at once — a card whose own turn streams, or whose window is still being
+  written, refuses the click with that sentence (and a sidecar refuses with its own).
 - **A hand-over says nothing it cannot back up.** Two sentences in the harness text were
   written for the full-window case and then said on every trigger: the leftover-work line
   read `none — 0 background terminal(s) and 0 sub-agent(s) were stopped …, because their

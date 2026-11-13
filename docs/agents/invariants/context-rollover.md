@@ -216,7 +216,9 @@ the user changed model / effort / language. All three are gone from `src/` and `
 drawn: the modal *is* the menu, and both entries land in the same host method
 (`ChatViewProvider.newContextEntry`, `opts.compress` marks the right-click). The right-click is
 the **deliberate** entry, so it consults no trigger: `canCompress(nodeId)` is the structural
-precondition only (a conversational node, not streaming, no conversational child), and a window
+precondition only (a conversational node whose own turn is not streaming and whose windows are
+not still being written — a card that already has a continuation below is *not* refused, because
+several attempts are how the two handoffs are compared), and a window
 that still has room is a legitimate moment to move on. `compress-node.md` §1 has the whole
 rule.
 
@@ -231,9 +233,10 @@ The host picks the **backend** from the trigger (`SessionRuntime.newEpochTrigger
 from a choice of the webview:
 
 1. `context` (`contextState(node) !== 'ok'`) → a **new context window**
-   (`rolloverContext`). Its preconditions are `canRollover(nodeId)`: the node exists, is
-   not a sidecar, is not running, and has no conversational child. A failure is a notice
-   and nothing happens — nothing is started and nothing is killed.
+   (`rolloverContext`). Its preconditions are `windowStartBlocker(nodeId) === null`: the node
+   exists, is not a sidecar, is not running, and none of its windows is still being written.
+   A child already below it does not block — another attempt is a sibling branch. A failure is
+   a notice and nothing happens — nothing is started and nothing is killed.
 2. `drift` only (`setupState().drift !== false`, either kind) → a **fork** under the live
    setup (`forkTree`). The old tree keeps the bytes — and the provider cache entry — it
    was built with. The composer's text is then sent into the new tree as an ordinary

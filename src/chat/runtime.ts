@@ -3833,19 +3833,21 @@ export class SessionRuntime {
   }
 
   /**
-   * Why this node cannot start a new context window right now (`null` when it can), named so
-   * the refusal can say the truth: the three structural reasons are different problems with
-   * different fixes, and one sentence that only ever described the running case sent a user
-   * waiting for a turn that had already finished (`compress-node.md` §1).
+   * Why this node cannot start a new context window right now (`null` when it can), named so the
+   * refusal can say the truth instead of one sentence for every case.
    *
    *  - `missing` — no such node, or a sidecar (a sub-agent window or a job card has no
    *    conversation of its own to hand over);
-   *  - `running` — that card's own turn is streaming; wait for it;
-   *  - `continued` — the card **already continues below**. A window starts where a line ends,
-   *    and a second one from the same card would be two continuations of one window (the
-   *    context base cannot be cut twice), so the entry is on the card at the end of the line.
+   *  - `running` — that card's own turn is streaming, or a window it already started is still
+   *    being written (its compression turn, or the window below it).
+   *
+   * **A card that already continues below is not blocked.** Several attempts from one card are
+   * allowed on purpose: the user compares `Simple` against `Agentic` by keeping both windows,
+   * and the second attempt is simply a sibling branch. What the `running` clause prevents is
+   * two handoffs of the same window running at once — one attempt at a time, as many attempts as
+   * the user wants (`docs/agents/invariants/compress-node.md` §1).
    */
-  windowStartBlocker(nodeId: string): 'missing' | 'running' | 'continued' | null {
+  windowStartBlocker(nodeId: string): 'missing' | 'running' | null {
     const node = this.session.nodes[nodeId];
     if (!node || isSidecar(node)) {
       return 'missing';
@@ -3853,8 +3855,8 @@ export class SessionRuntime {
     if (this.runs.has(nodeId)) {
       return 'running';
     }
-    if (node.children.some((id) => !isSidecar(this.session.nodes[id]))) {
-      return 'continued';
+    if (node.children.some((id) => !isSidecar(this.session.nodes[id]) && this.runs.has(id))) {
+      return 'running';
     }
     return null;
   }

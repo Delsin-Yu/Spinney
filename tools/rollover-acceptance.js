@@ -267,11 +267,12 @@ const HANDFF = C.COMPRESS_SECTIONS.map((heading) => `## ${heading}\n- a fact`).j
     // `canCompress` is the structural rule only — no fill condition — but it still refuses a
     // node that already has a conversational child.
     ok('canCompress() is true for the tip of the branch', rt.canCompress('p0') === true);
-    ok('  … and false for a node that already continued', rt.canCompress('root') === false);
-    // The **reason** is what the refusal sentence is built from (`windowStartBlocker`): a
-    // card that already continues below must not tell the reader to wait for a turn.
-    ok('  … and it is named as "continued", not "running"', rt.windowStartBlocker('root') === 'continued');
+    // Several attempts from one card are allowed: a card that already continues below is a
+    // legitimate place to start **another** window (that is how `Simple` and `Agentic` get
+    // compared), so nothing structural refuses it.
+    ok('  … and a card that already continued is NOT refused (attempts are repeatable)', rt.canCompress('root') === true);
     ok('  … the tip has no blocker', rt.windowStartBlocker('p0') === null);
+    ok('  … nor does the card with a window below it', rt.windowStartBlocker('root') === null);
     ok('  … a missing node is "missing"', rt.windowStartBlocker('nope') === 'missing');
     const s2 = makeSession();
     s2.nodes.p0.displayItems[5].text = 'WARN DeepSeek stream stalled: first chunk.';
@@ -481,6 +482,43 @@ const HANDFF = C.COMPRESS_SECTIONS.map((heading) => `## ${heading}\n- a fact`).j
       ok('  … and its branch contains the resume window it produced', T.branchIds(idle, ic.id).includes(ir.id));
       ok('the compression node keeps its 🗑 in the payload (role only)', messages.some((m) => m.type === 'tree' && m.nodes.some((n) => n.id === c.id && n.role === 'compress')));
     }
+  }
+
+  console.log('-- two attempts from the same card: compare the two handoffs --');
+  {
+    answerText = HANDFF;
+    requests.length = 0;
+    const s = makeSession();
+    const { rt: crt } = makeRuntime(s);
+    const first = await crt.compressAndContinue('p0');
+    ok('the first attempt delivers', first === true);
+    // One attempt at a time: a window this card started that is **still being written** refuses
+    // the click. The driver's stub answers instantly, so the run map is seeded rather than
+    // waited on — the predicate under test is `windowStartBlocker`, not the stub's timing.
+    const written = childOf(s, 'p0', 'compress');
+    crt.runs.set(written.id, { nodeId: written.id });
+    ok(
+      '  … a second attempt waits while the first window is still being written',
+      crt.windowStartBlocker('p0') === 'running',
+      String(crt.windowStartBlocker('p0')),
+    );
+    crt.runs.delete(written.id);
+    ok('  … and once it is idle the same card may start another', crt.windowStartBlocker('p0') === null);
+    const second = await crt.compressAndContinue('p0');
+    ok('a second attempt from the same card is allowed', second === true);
+    const compressNodes = Object.values(s.nodes).filter((n) => n.parentId === 'p0' && n.role === 'compress');
+    ok('  … two compression nodes hang below the one card', compressNodes.length === 2, String(compressNodes.length));
+    ok(
+      '  … and each produced its own window',
+      Object.values(s.nodes).filter((n) => n.role === 'resume').length === 2,
+      String(Object.values(s.nodes).filter((n) => n.role === 'resume').length),
+    );
+    ok(
+      '  … both windows start their own context (a base each)',
+      Object.values(s.nodes)
+        .filter((n) => n.role === 'resume')
+        .every((n) => n.contextBaseId === n.id),
+    );
   }
 
   console.log('-- a compression that answers nothing opens no window --');
