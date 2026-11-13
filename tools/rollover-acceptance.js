@@ -443,6 +443,19 @@ const HANDFF = C.COMPRESS_SECTIONS.map((heading) => `## ${heading}\n- a fact`).j
     ok('continueFrom(C) is refused once its window exists', continued === false);
     ok('  ... no node was created', Object.keys(s.nodes).length === before);
     ok('  ... and the refusal is a sentence', messages.some((m) => m.type === 'notice' && /already been delivered/.test(String(m.text))));
+    // The other door into the same node: an inter-session prompt lands on the checked-out
+    // node, so a sealed compression node must refuse a *new turn* under it too, not only a
+    // continue (`onUserMessage`, the one gate every entry shares).
+    const sealedSend = await crt.onUserMessage('a second line under the compression', [], {
+      basisNodeId: c.id,
+      quiet: true,
+    });
+    ok(
+      'a message into a sealed compression node is refused',
+      sealedSend.ok === false && sealedSend.code === 'refused',
+      JSON.stringify(sealedSend),
+    );
+    ok('  ... and it created no node either', Object.keys(s.nodes).length === before);
 
     console.log('-- deletion rules: R is refused, C is allowed --');
     {
