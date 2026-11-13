@@ -102,8 +102,8 @@ export class PanelManager {
     this.wire(created);
     // `createWebviewPanel` can hand back a panel VS Code restored from a previous
     // window *re-entrantly* — during the call above, not after it (a reload with a
-    // chat tab open, while something already asked for this session's tab: the
-    // supervisor's `--continue`, a sidebar click). `adopt` registers that panel, so
+    // chat tab open, while something already asked for this session's tab: a reload's
+    // queued `--continue`, a sidebar click). `adopt` registers that panel, so
     // the freshly created one would silently replace it in the map: two tabs for one
     // session, and the webview left in the map is a brand-new (cold) one whose
     // scripts have to load from scratch. Keep the adopted panel instead.

@@ -92,7 +92,7 @@ import {
   writeSessionTranscript,
   writeSubAgentTranscript,
 } from './transcript';
-import { ControlHost, ControlResult, ControlState, WaitForFinishOptions } from '../http/controlServer';
+import { ControlHost, ControlResult, ControlServer, ControlState, WaitForFinishOptions } from '../http/controlServer';
 import { SessionStore, SessionSummary, defaultDataRoot, looksLikeStoreRoot, workspaceKeyFor } from './sessionStore';
 import { diagnosticsHeader, newestDiagnosticsLog, prepareDiagnosticsLog } from './diagnosticsLog';
 import { nodeDigest } from './persistDigest';
@@ -394,6 +394,15 @@ const HOP_RECEIPT_MAX_WAIT_MS = 30 * 60 * 1000;
 const BACKGROUNDS_GLOBAL_MS = 200;
 
 /**
+ * How often a **deferred** reload (`POST /reload-window {idle:true}`) looks for the
+ * window's idle moment. 250 ms is fast enough that a queued reload feels immediate
+ * once the turn ends, and slow enough that a window waiting hours for a long job
+ * costs four reads of three booleans a second. The wait has no deadline: what ends
+ * it is idleness, a Stop, or the window going away.
+ */
+const DEFERRED_RELOAD_POLL_MS = 250;
+
+/**
  * A job's identity across the window: a task id is **session-local** (the hub mints it
  * from a per-session counter), so the session has to travel with it. The separator is
  * `\0`, which no session id contains.
@@ -651,6 +660,20 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   private persistLastMs = 0;
   /** While `Date.now() < controlHoldUntil` an external controller is rebooting. */
   private controlHoldUntil = 0;
+  /**
+   * The idle poll of a **deferred** reload (`POST /reload-window {idle:true}`), or
+   * `null` when none is queued. Its presence *is* the queue: a second request is
+   * refused while it exists, and every exit path sets it back to `null`.
+   */
+  private controlReloadWait: ReturnType<typeof setInterval> | null = null;
+  /**
+   * The window's control plane, once `extension.ts` has created it. It is the only
+   * thing that knows the instance id and the discovery file, and `controlEnv()` hands
+   * exactly those two to a command's environment (never the token). Not a constructor
+   * argument because the server needs this — already constructed — provider to answer
+   * any route at all.
+   */
+  private controlServer: ControlServer | null = null;
   /** Set when the provider is being torn down; suppresses background notifications. */
   disposed = false;
   /**
@@ -958,8 +981,8 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       onPostFailed: (sessionId, type) => this.onPostFailed(sessionId, type),
     });
     this.loadSessions();
-    // A supervisor's reload may have carried a message for this instance (the daemon
-    // that asked for the reload can die with it): deliver it once the window is idle.
+    // A reload that carried a message for this instance is delivered once the window
+    // is idle (the deferred path writes it at fire time, so a file here is always owed).
     this.schedulePendingContinue();
     // The two context lines come after the sessions are in, so they can name the store
     // root and the workspace key that will hold them: every later line is unreadable
@@ -3987,8 +4010,8 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
 
   /**
    * Mark a session as the active one (sidebar highlight, palette fallbacks, and
-   * the control plane's `sessionId`/`nodeId` readout — `hvsc` carries those into
-   * its `/continue`). Called when a tab gains focus *and* whenever a caller
+   * the control plane's `sessionId`/`nodeId` readout — a controller carries those
+   * into its `/continue`). Called when a tab gains focus *and* whenever a caller
    * explicitly shows a session (`openSession`, `POST /navigate`): a window that is
    * not focused may never deliver `onDidChangeViewState`, and the carry must not
    * depend on it.
@@ -5000,6 +5023,27 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     this.output.appendLine(this.stampLine(line));
   }
 
+  /**
+   * Hand this provider the window's control plane (`extension.ts` owns the creation
+   * order: the server needs the provider to answer any route). Only `controlEnv()`
+   * is read from it here — the identity a command's environment carries.
+   */
+  attachControlServer(server: ControlServer): void {
+    this.controlServer = server;
+  }
+
+  /**
+   * RuntimeHost: the control plane's identity as environment variables
+   * (`SPINNEY_INSTANCE_ID`, `SPINNEY_DISCOVERY_FILE`), or `{}` while it is not
+   * listening. Read at spawn time by `exec_command`, so a plane that is enabled
+   * later — or rebound to another port by `restart()` — is picked up by the next
+   * command instead of needing a reload. Never the token: see
+   * `ControlServer.controlEnv`.
+   */
+  controlEnv(): Record<string, string> {
+    return this.controlServer?.controlEnv() ?? {};
+  }
+
   controlState(): ControlState {
     const session = this.getActiveSession();
     const activeRt = session ? this.runtimes.get(session.id) : undefined;
@@ -5056,8 +5100,8 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    * sub-agent and no background job exists anywhere. The last `persist()` write is
    * awaited before returning so the caller may kill the process immediately
    * after. Never interrupts a turn unless `interrupt` is set. The returned
-   * `sessionId` / `nodeId` are the active session's (`hvsc` carries them into its
-   * `/continue`).
+   * `sessionId` / `nodeId` are the active session's (a controller carries them into
+   * its `/continue`).
    */
   async controlWaitForFinish(opts: WaitForFinishOptions): Promise<ControlResult> {
     const scope = opts.scope === 'all' ? 'all' : 'turn';
@@ -5095,8 +5139,8 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       await new Promise((resolve) => setTimeout(resolve, 150));
     }
     // Hand-off: everything pending must be on disk before the caller (an external
-    // supervisor) may kill or reload this window — the state write *and* the queued
-    // transcript dumps, which reach disk asynchronously now.
+    // controller, or this window's own deferred reload) may kill or reload it — the
+    // state write *and* the queued transcript dumps, which reach disk asynchronously now.
     await this.flushPersist();
     await flushTranscripts();
     const holdMs = Number.isFinite(opts.holdMs) ? Math.max(0, Math.min(opts.holdMs ?? 0, 600000)) : 0;
@@ -5349,13 +5393,22 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    *
    * `opts.continue` is the reload's own message: it is **persisted here, before the
    * reload**, and delivered by the next instance once it is idle (`schedulePendingContinue`),
-   * so a supervisor that dies with the reload cannot lose it — the daemon a harness
-   * starts from inside the window is exactly such a supervisor. The caller gets
+   * so nothing has to survive the reload to relay it. The caller gets
    * `continueQueued: true` and must not post `/continue` itself.
+   *
+   * `opts.idle` is the deferred form, and the only one a command can use: the
+   * caller *is* a live turn, so the two checks below would refuse it by its own
+   * existence (measured: 20 consecutive attempts, every one refused). Nothing is
+   * waited for and no hold is armed at request time either — see
+   * {@link deferReloadWindow}.
    */
   controlReloadWindow(opts?: {
     continue?: { message: string; sessionId?: string; nodeId?: string };
+    idle?: boolean;
   }): ControlResult {
+    if (opts?.idle === true) {
+      return this.deferReloadWindow(opts.continue);
+    }
     if (this.anyRunningTurn()) {
       return { ok: false, error: 'the agent is busy; wait for it to finish first', busy: true };
     }
@@ -5363,6 +5416,90 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       return { ok: false, error: 'sub-agents or background terminals are still running', busy: true };
     }
     const queued = opts?.continue ? this.writePendingContinue(opts.continue) : false;
+    this.scheduleWindowReload();
+    return queued ? { ok: true, continueQueued: true } : { ok: true };
+  }
+
+  /**
+   * The deferred half of `controlReloadWindow`: queue the reload and watch for the
+   * window's own idle moment instead of demanding it now.
+   *
+   * One poll per queued reload, 250 ms apart, checking the same three things the
+   * immediate form demands (`anyRunningTurn` / `anyRunningSubAgents` /
+   * `anyRunningBackground`) — but observed rather than required. There is **no
+   * timeout**: a turn that never ends keeps waiting, and its Stop is what ends it,
+   * so a long job cannot be cut short by a clock that was only ever a convenience.
+   *
+   * The pending continue is deliberately **not** written here. A wait may never
+   * fire (an extension that never goes idle, a reload done by hand, a dispose), and
+   * a file left behind by such a wait would be delivered to the next instance as if
+   * it were owed. Holding the ids in memory until the fire makes "abandoned wait,
+   * no message" the actual state of an abandoned wait.
+   */
+  private deferReloadWindow(carry?: { message: string; sessionId?: string; nodeId?: string }): ControlResult {
+    // The route validates this too; `controlReloadWindow` is a public surface of its
+    // own, and the ids are what make the message land in the right node, so never guess.
+    if (!carry?.message.trim() || !carry.sessionId || !carry.nodeId) {
+      return {
+        ok: false,
+        error:
+          'a deferred reload is bound to the node that requested it: continue.sessionId and ' +
+          'continue.nodeId are both required with idle',
+      };
+    }
+    if (this.controlReloadWait !== null) {
+      // One queue, one message: a second request would silently replace the first
+      // node's message (or reload twice), so it is refused and the first stays owed.
+      return { ok: false, error: 'a reload is already queued', busy: true };
+    }
+    const pending = { message: carry.message, sessionId: carry.sessionId, nodeId: carry.nodeId };
+    this.outputLog(`[http] deferred reload queued (node ${pending.nodeId})`);
+    const wait = setInterval(() => {
+      if (this.disposed) {
+        clearInterval(wait);
+        if (this.controlReloadWait === wait) {
+          this.controlReloadWait = null;
+        }
+        return;
+      }
+      if (this.anyRunningTurn() || this.anyRunningSubAgents() || this.anyRunningBackground()) {
+        return;
+      }
+      clearInterval(wait);
+      if (this.controlReloadWait === wait) {
+        this.controlReloadWait = null;
+      }
+      this.fireDeferredReload(pending);
+    }, DEFERRED_RELOAD_POLL_MS);
+    this.controlReloadWait = wait;
+    // `continueQueued` is honest here: the queue *is* the promise, and the file is
+    // written at the fire, not before it.
+    return { ok: true, deferred: true, continueQueued: true };
+  }
+
+  /**
+   * The idle moment arrived: arm the hold (nothing may start during the reload),
+   * write the owed continue, flush and reload — the immediate path's own three
+   * steps, in its own order, so the next instance reads a settled state.
+   */
+  private fireDeferredReload(carry: { message: string; sessionId: string; nodeId: string }): void {
+    this.controlHoldUntil = Date.now() + 30000;
+    const queued = this.writePendingContinue(carry);
+    this.outputLog(
+      queued
+        ? `[http] deferred reload fired (node ${carry.nodeId})`
+        : `[http] deferred reload fired (node ${carry.nodeId}) — the continue could not be persisted`,
+    );
+    this.scheduleWindowReload();
+  }
+
+  /**
+   * Flush what the reload must not lose, then ask the window to reload. The 400 ms
+   * gap is the hand-off: `workbench.action.reloadWindow` executed inside the same
+   * tick as a write would race the write it is reloading for. A reload kills this
+   * process, so nothing after this call is guaranteed to run.
+   */
+  private scheduleWindowReload(): void {
     // A reload kills this process: flush the coalesced write first, or the reload
     // itself could lose the state it is reloading for.
     void Promise.all([this.flushPersist(), flushTranscripts()]).finally(() => {
@@ -5370,7 +5507,6 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         void vscode.commands.executeCommand('workbench.action.reloadWindow');
       }, 400);
     });
-    return queued ? { ok: true, continueQueued: true } : { ok: true };
   }
 
   /** The file the *next* instance reads for a reload's own message. */
@@ -6235,6 +6371,13 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       this.persistNow();
     }
     this.disposed = true;
+    // A queued (deferred) reload dies with the provider: its poll would otherwise keep
+    // firing into a torn-down window. Whoever asked keeps the message only if the
+    // reload actually fired, which is why the continue file is written at fire time.
+    if (this.controlReloadWait !== null) {
+      clearInterval(this.controlReloadWait);
+      this.controlReloadWait = null;
+    }
     if (this.hopWorkTimer !== null) {
       clearTimeout(this.hopWorkTimer);
       this.hopWorkTimer = null;

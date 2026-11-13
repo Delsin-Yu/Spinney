@@ -1,7 +1,9 @@
-# External control plane & the `hvsc` supervisor
+# External control plane & the deferred reload
 
 The extension cannot reload its own window and report back — it dies with the
-reload. So the reload lifecycle lives **outside** the extension:
+reload. So a reload is **requested** over a local HTTP control plane and carried
+out by the extension itself at its own idle moment; a **deferred** request is how
+a running turn reloads the window it is running in.
 
 - `src/http/controlServer.ts` — an opt-in local HTTP control plane
   (`spinney.httpApi.enabled`, default **off**; loopback only; bearer token
@@ -17,11 +19,15 @@ reload. So the reload lifecycle lives **outside** the extension:
   `SPINNEY_HTTP_TOKEN` replaces the per-process random bearer token, and
   `SPINNEY_INSTANCE_ID` replaces the instance id — and therefore the discovery
   file's name.
-- `tools/hyper-vscode/hvsc.mjs` + `serve.ps1` — a workspace-local supervisor
-  (excluded from the `.vsix` via `.vscodeignore`) that launches/supervises `code`
-  windows and drives the reboot. State lives in `tools/hyper-vscode/.state/`:
-  `daemon.json` (port/token), `instances.json` (re-adopted after a daemon
-  restart), `daemon.log`.
+- `tools/reload-window.mjs` — the one-shot reload script an agent runs as an
+  ordinary `exec_command` (excluded from the `.vsix` via `.vscodeignore`). Every
+  command is born with `SPINNEY_INSTANCE_ID`, `SPINNEY_DISCOVERY_FILE`,
+  `SPINNEY_SESSION_ID` and `SPINNEY_NODE_ID` in its environment
+  (`RuntimeHost.controlEnv()` + `BackgroundAccess.spawnEnv`), and the script
+  refuses to run without them: no discovery scan, no fallback, and no argument
+  that could name another window. It posts one
+  `POST /reload-window { idle: true, continue }` and exits. There is no daemon,
+  no state directory, and nothing that outlives that one call.
 
 Control plane routes (all require `Authorization: Bearer <token>`):
 
@@ -34,7 +40,7 @@ Control plane routes (all require `Authorization: Bearer <token>`):
 | `POST /continue` | send a caller-supplied message (`{sessionId?, nodeId?, message}`) that continues from a node — node-scoped, so a run on another branch does not block it |
 | `POST /stop` | `{sessionId?, nodeId?}` — with `nodeId` a **union kill**: that node's live run, every background terminal it owns and every sub-agent it is still running, and nothing continues (the notices are written back into that node's history, so they ride the next request instead of opening a turn); without `nodeId`, cancel every run of the session (else the active session) and leave background jobs alone. Returns `{ok, sessionId, nodeId, stopped}`. Nothing running is `stopped: 0`; an unknown session is 409. Never touches the reload hold |
 | `POST /session/start` | create a session (`{title?, prompt?}`) or jump to one (`{sessionId, nodeId?, prompt?}`) and send `prompt` as its first turn; `returnTo:true` **requires** `originSessionId` (+ optional `returnNodeId`) and hops back with the answer as a new branch of that origin — when the child session calls its own `finish_hop`, never at a turn end |
-| `POST /reload-window` | 202, then `workbench.action.reloadWindow` (refuses while a turn, sub-agent or background job is live). An optional body `{ continue: { message, sessionId?, nodeId? } }` is **persisted before the reload** and delivered by the next instance once it is idle; the reply then carries `continueQueued: true` and the caller must not post `/continue`. This is what makes a reboot work when the supervisor dies with the reload (a daemon started from inside the window is a child of it) |
+| `POST /reload-window` | 202, then `workbench.action.reloadWindow`. Without `idle` it is the immediate form: it refuses while a turn, sub-agent or background job is live (409), and a caller that is *itself* a turn is refused by its own existence. An optional body `{ continue: { message, sessionId?, nodeId? } }` is **persisted before the reload** and delivered by the next instance once it is idle; the reply then carries `continueQueued: true` and the caller must not post `/continue`. With `idle: true` it is the **deferred** form: 202 `{ok, deferred: true, continueQueued: true}` and the window waits for its own idle moment (see "Deferred reload"); `continue.sessionId` **and** `continue.nodeId` are then both required (400), because the request that queued it is gone by the time it fires |
 
 **Session jump** (`POST /session/start`): the agent can hand a task to a *fresh*
 conversation instead of growing the current one — e.g.
@@ -75,8 +81,10 @@ provider stores `controlHoldUntil = Date.now() + holdMs` and `isHeld()` returns 
 both gate on it, so an injected background / sub-agent notice turn cannot sneak in either.
 `POST /session/start`, `/continue` and the webview's own send funnel through the same gate
 (`dispatchUserMessage`). That is what makes `POST /reload-window` (which itself refuses
-while a turn runs) race-free: the reboot fires only once nothing new can start. Do not
-weaken it.
+while a turn runs) race-free: the reload fires only once nothing new can start. The
+deferred path arms this very hold itself, 30 s, at the moment it fires — a queued reload
+does **not** hold the window while it waits, or a long turn could never end the way its
+own Stop intends. Do not weaken it.
 
 **Hop and hop back** (`returnTo:true` + `originSessionId`, and the agent-facing
 `hop_session` / `finish_hop` / `list_nodes` tools): a hop queues a fresh session and arms a `Hop`
@@ -160,67 +168,66 @@ that touches it (origin or child). The hop bookkeeping itself is in memory only:
 window reload drops in-flight hops, and the child's transcript is then the only trace —
 though the child keeps its `hopOrigin` and with it the (now inert) `finish_hop` tool.
 
-`hvsc` commands: `serve` / `start` / `status` / `adopt` / `rm` / `reboot` / `jobs`.
-The reboot flow is `wait-for-finish` → `reload-window` (shared profile) or kill +
-relaunch (`--isolated`) → poll `/health` → `continue`. The shared-profile reload sends
-its `--continue` **in the reload request** (`POST /reload-window { continue }`): the
-extension persists it and the next instance delivers it, so the daemon may die with the
-reload — which it does whenever it was started from inside the window — without losing
-the message; only when the extension replies without `continueQueued` (an older build)
-does the daemon post `/continue` after the new instance is up. `hvsc start --no-workspace`
-launches a `code` window with no folder open (`workspace: null` is a first-class
-instance identity: matching treats two nulls as a match, so no workspace path is
-required).
+**Deferred reload** (`POST /reload-window { idle: true, continue }`): the form a
+*command* uses, and the only one that works from inside a turn.
+`tools/reload-window.mjs` posts it from the `exec_command` that ran it, gets its
+202 back and exits 0; the agent keeps working. What the host does with it:
 
-**Targets are windows, not records.** A window the daemon never launched (the user
-opened it, or a previous daemon did) has no record, so `hvsc reboot <id>` used to
-be impossible for it. Now an unknown target is *adopted on first use*:
-`hvsc reboot --current --continue "…"` targets the window the command runs inside
-(the harness terminal's process ancestry contains that window's extension-host pid
-= its discovery file), `--workspace <path>` targets the one live window with that
-folder open, and a bare `pid-19940` targets a discovery file directly. `hvsc status`
-lists both records and windows nobody owns; `hvsc adopt …` registers one without
-rebooting. An adopted record is **reload-only** (`isolated: false`, `rm --kill`
-refuses it): its main process is shared with every other window of the user's
-profile, so killing it is never an option. Ambiguous or unknown targets fail with
-the list of live windows instead of reloading the wrong one.
+1. Refuse with **409** when a deferred reload is already queued ("a reload is
+   already queued") — one queue, one message, and a second request can never
+   silently replace the first node's message.
+2. Reply `{ ok: true, deferred: true, continueQueued: true }` **immediately**.
+   `continueQueued` is honest at that moment: the queue *is* the promise, and the
+   file is written when it fires, not before.
+3. Poll every 250 ms (`DEFERRED_RELOAD_POLL_MS`) for `!anyRunningTurn() &&
+   !anyRunningSubAgents() && !anyRunningBackground()` — the same set the immediate
+   form demands, but *observed* instead of demanded. On idle: clear the poll, arm
+   the 30 s hold (`controlHoldUntil`), write the pending continue
+   (`writePendingContinue`), flush persist and transcripts exactly as the
+   immediate path does, and reload 400 ms later
+   (`workbench.action.reloadWindow`).
+4. There is **no timeout**: a turn that never ends keeps waiting, and its Stop is
+   what ends it. The poll is cleared on `dispose()`.
 
-Matching a record to a control plane is ordered (id → same workspace + appeared
-after we launched/reloaded it, newest first → the one live window on that
-workspace), and *all* candidates are probed. That is what survives a reload (new
-extension host, new port, new instance id) and what keeps a lingering discovery
-file of the dying instance from shadowing its replacement.
+The continue file is written **at fire time, never at request time**, so a wait
+that is abandoned (an extension that never went idle, a window reloaded by hand, a
+dispose) leaves nothing behind for the next instance to deliver. The node that
+asked is named inside the request (`continue.nodeId`, taken from the script's
+environment), so "which node gets the message" is decided once, by the process
+that ran the command, and never re-derived from what the window's view happens to
+show half a minute later.
+
+**Targets are windows.** A caller finds a window through its discovery file
+(`<globalStorage>/http/<instanceId>.json`): the file *is* the identity, the port is
+read from it, and a stale file is pruned by its `pid`. `SPINNEY_INSTANCE_ID` is
+what names it, so an instance started by hand is addressable like any other. There
+is no supervisor record and no adoption step any more: a window that is up has a
+discovery file, a window that is gone has none, and nothing else has to be kept in
+step.
 
 Operational rules:
 
-- The daemon must run **outside** VS Code (a standalone terminal, or
-  `Start-Process`): a VS Code task and a harness background terminal both die
-  with the window (the latter via `dispose()` → `killAll()`).
-- Profile **passthrough** is the default (`code -n`, no `--user-data-dir`), so the
-  new window shares the user's `workspaceState`. When `code -n` merely attaches to
-  an already-running main process, its env vars do **not** reach the new window, so
-  the control plane must be enabled in settings (`spinney.httpApi.enabled`,
-  workspace or user scope); `hvsc` therefore also sets `SPINNEY_HTTP=1` and
-  `SPINNEY_INSTANCE_ID` on every `code` it launches itself. `--isolated` keeps a
-  separate profile and allows a hard kill/relaunch.
-- Never pass `--wait` to `hvsc reboot` from inside a turn: the supervisor's
-  `/wait-for-finish` would wait for that very turn (deadlock). Fire it without
-  `--wait` and let the supervisor `/continue` the agent afterwards.
-- **A reload can only be driven from outside the window.** `POST /reload-window`
-  refuses with **409** while any turn is live, and — checked separately — while any
-  sub-agent or **background terminal** is live (`controlReloadWindow`). A harness
+- **The window now defers its own reload**, and that is what replaces "a reload can
+  only be driven from outside the window". `POST /reload-window` without `idle`
+  still refuses with **409** while any turn is live and — checked separately —
+  while any sub-agent or **background terminal** is live (`controlReloadWindow`). A
   background terminal *is* one of those, so a job the hub owns can never reload its
   own window: the driver counts itself as busy (measured: 20 consecutive attempts,
   every one `{"ok":false,"error":"sub-agents or background terminals are still
-  running","busy":true}`). A foreground call from inside a turn is refused by the
-  first check for the same reason. The driver therefore has to be the supervisor
-  (`wait-for-finish` → idle → `reload-window`), a plain terminal issuing those same
-  two requests, or the user's own `Developer: Reload Window`. An agent that promises
-  a self-reload from inside its own turn is promising something the gate forbids;
-  when the supervisor is down, ask the user instead of improvising a driver.
+  running","busy":true}`), and a foreground call from inside a turn is refused by
+  the first check for the same reason. The deferred form does not ask the window to
+  be idle **now** — it asks it to reload when it becomes idle, which the window can
+  observe about itself even while a command of that very turn is still running.
+  The immediate form stays what a terminal (or `tools/harness-test.mjs`) uses on an
+  idle window, and the user's own `Developer: Reload Window` stays the manual
+  escape.
 - `/continue` makes the agent run a caller-supplied instruction — a
   **local-trust RCE boundary**. Keep `spinney.httpApi.enabled` off unless a
   controller needs it, and never log the token. `SPINNEY_HTTP=1` opens the very
   same boundary without the setting, so an env var that reaches a window is just
-  as much a trust decision as the setting is.
+  as much a trust decision as the setting is. The token is never handed to a child
+  process either: a command receives the **path** of the 0600 discovery file
+  (`SPINNEY_DISCOVERY_FILE`) and reads the bearer token from it — which is why
+  `tools/reload-window.mjs` cannot be run from a plain terminal (it has no path)
+  and why a command's environment is not a credential store.
 
