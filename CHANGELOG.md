@@ -122,6 +122,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A compression node's answer has a box of its own.** That answer is the handoff, and it can
+  run to tens of thousands of characters; on that card (and only that card) the answer scrolls
+  inside a 320 px box, so the log still shows the steps above it and the next turn below. A
+  normal turn's answer is never capped. The harness row also takes the full width of the log
+  now: every message is capped at 92 % of it, and that cap is what left a blank column down the
+  right of the opened body.
 - **A `HARNESS` block is one row.** The two blocks of a compression (the instruction the
   compression turn receives and the handoff the window below it starts from) are tens of
   thousands of characters of model-facing text, and both of them used to be printed into the

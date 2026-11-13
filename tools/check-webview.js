@@ -3806,6 +3806,18 @@ if (contextLabel !== 'ctx 50%') {
   if (delOf(RPROD)) {
     problems.push('the window a compression produced carries its own delete button (it is removed with the compression node)');
   }
+  // A compression node's answer is the handoff, tens of thousands of characters, so its log is
+  // marked and CSS caps that one answer in a scroller of its own (§6). The mark is on the log,
+  // per card, so an ordinary turn's answer is never capped.
+  {
+    const workOf = (id) => findByClass(cards.get(id), 'node-work');
+    if (!workOf(C) || !workOf(C).classList.contains('compress-answer')) {
+      problems.push("the compression node's log is not marked for its long answer (it will push the next turn off the card)");
+    }
+    if (workOf(P) && workOf(P).classList.contains('compress-answer')) {
+      problems.push("an ordinary turn's log is marked for a compression answer (its answer would scroll inside itself)");
+    }
+  }
   if (!delOf(CPROD)) {
     problems.push('a compression node lost its delete button');
   }

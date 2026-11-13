@@ -2944,6 +2944,10 @@ button.icon-btn {
    the log that is not the reader's own work, which is what makes the block findable when it is
    closed. */
 .msg.harness-note {
+  /* A row, not a bubble: `.msg` caps every message at 92% of the log so a user bubble does not
+     touch the edges, and that cap is what left a blank column down the right of the harness
+     body's box. This row is a document surface, so it takes the whole width. */
+  max-width: 100%;
   align-self: stretch;
   display: block;
   padding: 0;
@@ -3027,6 +3031,17 @@ button.icon-btn {
 .msg.harness-note .harness-body .answer {
   font-size: 12px;
   line-height: 1.5;
+}
+
+/* The compression node's own answer is the handoff: a full execution brief, and it can run to
+   tens of thousands of characters. On that card, and only there, it is capped to a scroller of
+   its own — the log keeps showing the steps, the answer and the harness row without one
+   unreviewed wall in between. A normal turn's answer is the point of its card and is never
+   capped. */
+.node-work.compress-answer .msg.assistant {
+  max-height: 320px;
+  overflow: auto;
+  scrollbar-gutter: stable;
 }
 
 /* ▶ Continue / ↻ Retry: the per-card "run it again for me" button. Only rendered

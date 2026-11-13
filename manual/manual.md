@@ -532,7 +532,7 @@ You can stop a compression node. If you stop it, or it writes nothing, no new wi
 
 The window that a compression produced has no delete button. Delete the compression node instead. That removes the compression turn, the window that it produced, and everything below that window.
 
-The compression node is a normal card in the tree. Click it to read what it did. It shows its own tool lines.
+The compression node is a normal card in the tree. Click it to read what it did. It shows its own tool lines. The answer of a compression node is long. On that card the answer scrolls inside its own box, so the card keeps showing the steps above it.
 
 A `HARNESS` block is one line: a blue label and the start of the text. Click the line to read the whole message in a small box that scrolls. Click the line again to close it. The box shows the Markdown of the message: the headings, the lists and the code read as such. Spinney renders the text when you open the box. The label names the block: `Compression instruction`, `Handoff summary`, `Context handoff` or `Harness note`.
 

@@ -5537,6 +5537,13 @@ function addBackgroundNotice(item) {
     // which is where a live turn follows its own output.
     const workWrap = el('div', 'node-work-wrap');
     const work = el('div', 'node-work');
+    // A compression node's answer **is** the handoff — a full execution brief, and it can run
+    // to tens of thousands of characters. That card (and only that card) boxes its answer in a
+    // scroller of its own, so the log still reads as a log instead of one wall between the
+    // steps and the next turn (`docs/agents/invariants/compress-node.md` §6).
+    if (meta && meta.role === 'compress') {
+      work.classList.add('compress-answer');
+    }
     workWrap.appendChild(work);
     const excerpt = el('div', 'node-excerpt');
     excerpt.textContent = meta.preview || meta.title || '';
