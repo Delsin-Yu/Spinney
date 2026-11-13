@@ -444,11 +444,12 @@
   the hub's per-`(session, node)` registries), so the control plane — and the `background`
   acceptance suite — can verify ownership survived a view move. The `kind:'bg'` cards are
   display-only and never appear there.
-- **A background terminal cannot drive a window reload.** `POST /reload-window` refuses while any
-  sub-agent or **node** background terminal is live (`controlReloadWindow` →
+- **A background terminal cannot drive an immediate window reload.** `POST /reload-window`
+  refuses while any sub-agent or **node** background terminal is live (`controlReloadWindow` →
   `anyRunningBackground()` → `hasRunningNodeBackground()`; a `detached` job is fire-and-forget and
   deliberately does not block a reload), so a hub-owned job that calls it is refused by its own
-  existence, and a foreground call from inside a turn is refused by the turn check. A reload has
-  to come from outside the window — the `hvsc` supervisor, a terminal issuing `wait-for-finish` +
-  `reload-window`, or the user. This is the one action a job the hub owns can never perform for
-  the window that owns it; see `control-plane.md`.
+  existence, and a foreground call from inside a turn is refused by the turn check. What a command
+  **can** do is ask for a **deferred** reload — `node tools/reload-window.mjs --message "…"`, i.e.
+  `POST /reload-window { idle: true, continue }`: the window reloads itself once this node, its
+  sub-agents and its background terminals are all quiet, and the message is delivered back to the
+  node that asked. See `control-plane.md`.

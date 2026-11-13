@@ -13,6 +13,7 @@ import {
   ToolDefinition,
   Usage,
   detectImageMime,
+  withToolTitleLanguage,
 } from './types';
 import {
   IMAGE_BUDGET_RATIO,
@@ -546,6 +547,13 @@ export class Agent {
   /** Reply language injected as the prompt's `## Language` line. */
   private replyLanguage: string = prompt.DEFAULT_REPLY_LANGUAGE;
   /**
+   * The BCP-47 tag of {@link replyLanguage} ('' when the language is a free-form
+   * name). It travels with the name into the `exec_command` title description only:
+   * the step label has to be written in the language the user reads, and the schema
+   * says so in the language's own name **and** tag.
+   */
+  private replyLanguageTag: string = '';
+  /**
    * The conversation this agent's requests name, when its provider's dialect transmits
    * one ({@link setProviderSession}): the frozen context window of a turn, or a
    * sub-agent's own node. Empty means "nothing to name", and nothing is sent.
@@ -555,18 +563,23 @@ export class Agent {
   private spawnHandler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null = null;
   /** Provider hook that resumes a finished sub-agent for the `send_agent_message` tool. */
   private sendMessageHandler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null = null;
-  /** Provider hook that hands a task to a fresh session for `hop_session`. */
-  private hopHandler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null = null;
+  /** Provider hook that starts a fresh session for the `create_session` tool. */
+  private createSessionHandler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null =
+    null;
   /**
-   * Provider hook for `finish_hop`: the child of a hop hands its report back
-   * itself. Only a session a `return_when_finished` hop started is offered the
-   * tool, so a call that reaches this handler anyway is refused by the provider.
+   * Provider hook that delivers a message to one node of one session for
+   * `send_session_message`: the one channel between conversations, in both
+   * directions. Only the provider can read another session's live state, so the
+   * refusal of a running / busy target node is its answer, not this agent's.
    */
-  private finishHopHandler:
+  private sendSessionMessageHandler:
     | ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>)
     | null = null;
-  /** Provider hook that renders the active session's tree for `list_nodes`. */
-  private listNodesHandler: (() => Promise<string>) | null = null;
+  /** Provider hook that lists the window's sessions for `list_sessions`. */
+  private listSessionsHandler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null =
+    null;
+  /** Provider hook that renders a session's tree for `list_nodes`. */
+  private listNodesHandler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null = null;
   /** Provider hook that renames a session for the `rename_session` tool. */
   private renameSessionHandler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null =
     null;
@@ -585,21 +598,13 @@ export class Agent {
   private canSpawnReadOnly = false;
   /** Whether this agent may spawn sub-agents (a depth-2 sub-agent may not). */
   private canSpawn = true;
-  /** Whether `list_nodes` / `rename_session` are exposed (main agent only). */
-  private canHop = false;
   /**
-   * Whether `hop_session` is exposed. Main agent only, and only while
-   * `spinney.hopSession.enabled` is on — kept apart from `canHop` so the switch
-   * never removes the two read-only session tools.
+   * Whether the session tools are exposed — `create_session`,
+   * `send_session_message`, `list_sessions`, `list_nodes` and `rename_session`.
+   * Main agent only: a sub-agent reports to its dispatcher, and a sidecar card
+   * (sub-agent window / background-job card) is not a conversation of its own.
    */
-  private hopEnabled = false;
-  /**
-   * Whether `finish_hop` is exposed: true only in the main agent of a session a
-   * `return_when_finished` hop started. It is set **before** that session's first
-   * turn, because the epoch's frozen tool schemas are what the model keeps seeing
-   * — and it is the child, not its turn end, that decides when the hop returns.
-   */
-  private canFinishHop = false;
+  private canSessions = false;
   /**
    * The tool schemas of the epoch this agent is sending with, when it has one. Set from
    * the node's frozen envelope at every turn start; `undefined` means "the live set",
@@ -674,8 +679,13 @@ export class Agent {
   }
 
   /** Set the language the agent replies in (the prompt's `## Language` line). */
-  setReplyLanguage(language: string): void {
+  setReplyLanguage(language: string, tag = ''): void {
     this.replyLanguage = language || prompt.DEFAULT_REPLY_LANGUAGE;
+    // The tag is the same language in BCP-47 form; it only appears in the
+    // `exec_command` title description (`withToolTitleLanguage`). A sub-agent never
+    // calls this, so it keeps the English default — it answers the agent that
+    // dispatched it, never the user.
+    this.replyLanguageTag = tag || '';
   }
 
   /** Set a provider hook that runs sub-agents for the `spawn_agents` tool. */
@@ -688,21 +698,34 @@ export class Agent {
     this.sendMessageHandler = handler;
   }
 
-  /** Set a provider hook that hands a task to a fresh session for `hop_session`. */
-  setHopHandler(handler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null): void {
-    this.hopHandler = handler;
+  /** Set a provider hook that starts a fresh session for `create_session`. */
+  setCreateSessionHandler(
+    handler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null,
+  ): void {
+    this.createSessionHandler = handler;
   }
 
   /**
-   * Provider hook for `finish_hop`: a hop's child session hands its report back
-   * itself, and nothing returns to the origin before it does.
+   * Set a provider hook that delivers a message to one node of one session, for
+   * `send_session_message`.
    */
-  setFinishHopHandler(handler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null): void {
-    this.finishHopHandler = handler;
+  setSendSessionMessageHandler(
+    handler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null,
+  ): void {
+    this.sendSessionMessageHandler = handler;
   }
 
-  /** Set a provider hook that renders the active session's tree for `list_nodes`. */
-  setListNodeHandler(handler: (() => Promise<string>) | null): void {
+  /** Set a provider hook that lists the window's sessions for `list_sessions`. */
+  setListSessionsHandler(
+    handler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null,
+  ): void {
+    this.listSessionsHandler = handler;
+  }
+
+  /** Set a provider hook that renders a session's tree for `list_nodes`. */
+  setListNodeHandler(
+    handler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null,
+  ): void {
     this.listNodesHandler = handler;
   }
 
@@ -724,29 +747,13 @@ export class Agent {
     this.signalHandler = handler;
   }
 
-  /** Allow/deny this agent from hopping to a fresh session (main agent only). */
-  setCanHop(v: boolean): void {
-    this.canHop = v;
-  }
-
   /**
-   * Allow/deny `finish_hop` — the hand-back a hopped-to session makes for itself.
-   * Set from the hop that armed this session, before its first turn; every other
-   * agent (a `fire_and_forget` child, a session no hop started, a sub-agent)
-   * keeps it off and never sees the tool.
+   * Allow/deny the session tools (`create_session` / `send_session_message` /
+   * `list_sessions` / `list_nodes` / `rename_session`). Main agent only; every
+   * sub-agent and every sidecar card keeps it off and never sees them.
    */
-  setCanFinishHop(v: boolean): void {
-    this.canFinishHop = v;
-  }
-
-  /**
-   * Allow/deny `hop_session` itself (`spinney.hopSession.enabled`). The runtime
-   * re-applies this at every turn start, so a settings change reaches the next
-   * turn; a chain that already froze the schema keeps advertising it, and this
-   * flag is what refuses the call.
-   */
-  setHopEnabled(v: boolean): void {
-    this.hopEnabled = v;
+  setCanSessions(v: boolean): void {
+    this.canSessions = v;
   }
 
   /** Allow/deny this agent from spawning sub-agents (a depth-2 agent may not). */
@@ -800,9 +807,7 @@ export class Agent {
       vision: isVisionCard(this.card),
       canSpawn: this.canSpawn,
       canSpawnReadOnly: this.canSpawnReadOnly,
-      canHop: this.canHop,
-      hopEnabled: this.canHop && this.hopEnabled,
-      finishHop: this.canFinishHop,
+      canSessions: this.canSessions,
     };
   }
 
@@ -811,9 +816,9 @@ export class Agent {
    * file tools, `exec_command` + the background tools, `search_files`,
    * `search_transcripts`) plus the tools the provider orchestrates and the Agent
    * intercepts: `read_image` (vision models only), the `spawn_*` / `send_*` pair
-   * matching this agent's capabilities, and — main agent only — `hop_session` /
-   * `list_nodes` / `rename_session` (plus `finish_hop` in the session a hop
-   * started). Every tool is advertised with its full
+   * matching this agent's capabilities, and — main agent only — `create_session` /
+   * `send_session_message` / `list_sessions` / `list_nodes` / `rename_session`.
+   * Every tool is advertised with its full
    * schema; there is no folded "gradual reveal" tier. The intercepted set comes
    * from the same capability flags the system prompt's `## Delegation` guidance
    * assumes, so the two can never disagree.
@@ -822,7 +827,15 @@ export class Agent {
     if (this.frozenTools) {
       return this.frozenTools;
     }
-    return [...this.tools.definitions, ...interceptedDefinitions(this.toolCapabilities())];
+    // The one runtime value in an otherwise static set: `exec_command`'s `title`
+    // description names the reply language (`withToolTitleLanguage` is the only place
+    // that substitutes it — `SessionRuntime.liveToolSchemas` renders through the same
+    // call, so a frozen envelope and its drift hash see identical bytes).
+    return withToolTitleLanguage(
+      [...this.tools.definitions, ...interceptedDefinitions(this.toolCapabilities())],
+      this.replyLanguage,
+      this.replyLanguageTag,
+    );
   }
 
   /**
@@ -1426,38 +1439,45 @@ export class Agent {
         : this.sendMessageHandler
           ? await this.sendMessageHandler(args, signal)
           : 'Error: sub-agent messaging is not available in this session.';
-    } else if (call.function.name === 'hop_session') {
-      // Handing the task to a fresh session is the provider's job (it owns the
-      // session list and the hop-back). Delegate; a fixed string is returned as
-      // the tool result.
+    } else if (call.function.name === 'create_session') {
+      // Starting a conversation elsewhere is the provider's job (it owns the
+      // session list, the tab and the persistence). Delegate; a fixed string is
+      // returned as the tool result.
       const args = parseToolArgs(call.function.arguments);
-      result = !this.canHop
-        ? 'Error: only the main agent may hop to another session.'
-        : !this.hopEnabled
-          ? 'Error: session hopping is disabled by the "spinney.hopSession.enabled" setting.'
-          : this.hopHandler
-            ? await this.hopHandler(args, signal)
-            : 'Error: session hopping is not available in this session.';
-    } else if (call.function.name === 'finish_hop') {
-      // The hopped-to session hands its report back itself. The provider owns the
-      // hop record, the landing node and the receipt, so it answers.
+      result = !this.canSessions
+        ? 'Error: only the main agent may create a session.'
+        : this.createSessionHandler
+          ? await this.createSessionHandler(args, signal)
+          : 'Error: session creation is not available in this session.';
+    } else if (call.function.name === 'send_session_message') {
+      // The one channel between conversations, in both directions. The provider
+      // owns both sessions' live state, so it is what refuses a running / busy
+      // target node.
       const args = parseToolArgs(call.function.arguments);
-      result = !this.canFinishHop
-        ? 'Error: only a session started by a hop may hand back a report (this session was not, or the hop is already closed).'
-        : this.finishHopHandler
-          ? await this.finishHopHandler(args, signal)
-          : 'Error: hand-back is not available in this session.';
+      result = !this.canSessions
+        ? 'Error: only the main agent may message another session.'
+        : this.sendSessionMessageHandler
+          ? await this.sendSessionMessageHandler(args, signal)
+          : 'Error: cross-session messaging is not available in this session.';
+    } else if (call.function.name === 'list_sessions') {
+      const args = parseToolArgs(call.function.arguments);
+      result = !this.canSessions
+        ? 'Error: only the main agent may list the window\'s sessions.'
+        : this.listSessionsHandler
+          ? await this.listSessionsHandler(args, signal)
+          : 'Error: the session list is not available in this session.';
     } else if (call.function.name === 'list_nodes') {
-      result = !this.canHop
-        ? 'Error: only the main agent may list the session tree.'
+      const args = parseToolArgs(call.function.arguments);
+      result = !this.canSessions
+        ? 'Error: only the main agent may list a session tree.'
         : this.listNodesHandler
-          ? await this.listNodesHandler()
+          ? await this.listNodesHandler(args, signal)
           : 'Error: the session tree is not available in this session.';
     } else if (call.function.name === 'rename_session') {
       // Renaming a session is the provider's job (it owns the session list and
       // the title bookkeeping). Delegate; the new title is returned.
       const args = parseToolArgs(call.function.arguments);
-      result = !this.canHop
+      result = !this.canSessions
         ? 'Error: only the main agent may rename a session.'
         : this.renameSessionHandler
           ? await this.renameSessionHandler(args, signal)

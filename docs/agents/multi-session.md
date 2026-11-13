@@ -61,8 +61,8 @@
   a session that owns *running* jobs asks for a modal confirmation and then kills them. Task
   ids are **session-local** (a task id is only resolvable inside its own session), which is
   why the dock's actions carry the session with the id.
-- **Control plane**: no back-compat obligation — pick the cleanest shape (`hvsc` + this repo's
-  own tooling are updated together).
+- **Control plane**: no back-compat obligation — pick the cleanest shape (the plane's
+  callers — `tools/reload-window.mjs`, `tools/harness-test.mjs` — are updated together).
 
 ## 2. Architecture
 
@@ -294,7 +294,7 @@ Rules that keep a reboot verifiable (the self-driving loop):
   background/sub-agent notice turns included. `/reload-window` itself refuses while a
   turn runs, so the hold is what closes the race: once idle, nothing new can start.
 - Restore the **focus before** the reboot: `wait-for-finish`'s `{sessionId, nodeId}` is what the
-  daemon carries into `/continue`, so the window must already show the intended session/node.
+  caller carries into `/continue`, so the window must already show the intended session/node.
 - Use **sync** sub-agents only: an async batch may settle across the reload and inject a notice
   turn that races it.
 

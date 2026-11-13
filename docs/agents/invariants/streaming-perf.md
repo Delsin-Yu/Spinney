@@ -24,11 +24,14 @@
   (the upright 13 px paragraph) and collapses to one ellipsised line the moment the
   answer's text takes over or the turn ends (`done` / `interrupted` / `error` →
   `endRun` → `settleRowsFinished`). A click hands *that* row to the user for good
-  (`_userTouched`) and the rule then leaves it exactly where they put it. A tool row
+  (`_userTouched`), and so does the row's own follow light being released — a reader
+  who scrolled the reasoning box up is reading it, so a row the reader released stays
+  open when the turn ends — and the rule then leaves it exactly where they put it. A tool row
   is folded at rest whatever it is doing — its one line already says what the step was —
   and a click opens its detail. The **steps groups** follow the same hand-over rule per
   group: each is open while its run is live, folded when the turn ends, and a click on its
-  own header always wins for that one group. `setThinkingOpen` / `setToolOpen` /
+  own header always wins for that one group — and a group holding a row the reader released
+  stays open, or its fold would hide that row. `setThinkingOpen` / `setToolOpen` /
   `setActiveRow` / `clearActiveRow` / `closeActiveRows` / `setStepsFold` in `media/main.js`;
   `tools/check-webview.js` asserts both halves ("the two rows of a turn") and the per-run
   groups ("steps groups: one per run").
@@ -76,6 +79,29 @@
   one that reaches the diagnostics file also ends with a ` | at=<ISO8601>` stamp, and
   each tool call now writes a `tool-start` line before it runs — see the log section
   below.
+
+**The character / element appear animation never becomes the streaming surface.** The
+plain `Text` node is still what a streaming answer (and a thinking row) is painted
+into, and a delta is still one `appendData` — the text is **complete in the DOM the
+moment it arrives**, so nothing rate-limits the reveal and nothing queues it. What is
+animated is only its appearance: a delta's newest characters sit in a transient
+`<span class="chunk-in">` that fades for ~140 ms, and that span is merged back into the
+same `Text` node on `animationend` (with a 400 ms timer behind it, because an engine
+that never fires the event — the offline guard's stub does not — must still settle).
+**The span never holds more than the newest chunk**: a delta that arrives mid-fade
+merges the previous span first and opens a new one, so at most one span exists per
+answer, per thinking row, with the settled length (`_settled`) keeping the slice exact;
+the merge is idempotent and safe when a repaint or a finalize already removed the
+element, `finalizeStreamingAnswer` settles everything **before** the markdown render,
+and `reset` / `tree` settle the chunks in flight before their cards are replaced. A new
+row (assistant text, tool, thinking, notice) arrives on one `.row-in` fade + 2 px rise
+that is removed again on `animationend`; a live tool row's label is **not** wrapped per
+delta — the same element is rewritten and its `.label-in` class removed and re-added in
+the next frame, so no layout is read in the streaming path. `spinney.streamAnimation`
+(absent ⇒ on, in the `config` message) turns all of it off into exactly the old
+rendering, and `prefers-reduced-motion: reduce` is honoured in the script as well as in
+`media/style.css`; `tools/check-webview.js` pins that a delta is readable at once and
+that the setting off creates no span.
 
 ### One card, one flow: `ask` + one log
 

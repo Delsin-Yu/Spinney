@@ -6299,6 +6299,152 @@ if (contextLabel !== 'ctx 50%') {
   );
 }
 
+// --- A reasoning row the reader unlocked stays open when the turn ends --------
+// The active-row rule has a second piece of evidence besides a click: the row's own follow
+// light. An open thinking row is a 240 px scroller with a dot of its own, and a reader who
+// scrolls *that* box up is inside the reasoning and intends to read it — so the end of the
+// turn (and the answer taking over) must leave the box exactly where they left it, and must
+// mark the row as theirs so a later pass cannot fold it either. The group the row rides in
+// folds with the turn, so a group holding such a row has to stay open as well: folding it
+// would take the row off screen, which is the very thing the rule exists to prevent.
+//
+// The control is the same turn with nobody touching the box: `done` folds that row to its
+// one line (and its group to its header), which is the rule this exception is measured
+// against. Without it, "the row is still open" would be satisfied by a `done` that folds
+// nothing at all.
+{
+  const READER = 'reader-node';
+  const UNTOUCHED = 'untouched-node';
+  const node = (id) => ({
+    id,
+    parentId: null,
+    children: [],
+    title: id,
+    status: 'running',
+    createdAt: 0,
+    preview: id,
+    usage: null,
+    size: null,
+  });
+  const cardOf = (id) => {
+    for (const child of elementById('tree-canvas').children) {
+      if (child.dataset && child.dataset.id === id) return child;
+    }
+    return null;
+  };
+  /** A `scroll` as the engine delivers it: every listener the box registered. */
+  const scrolled = (element) => {
+    for (const handler of handlersOf(element, 'scroll')) handler({ type: 'scroll' });
+  };
+  /** The card's thinking row, one fold deeper when it rides a steps group's body. */
+  const thinkingRowOf = (card) => {
+    const log = card ? findByClass(card, 'node-work') : null;
+    for (const child of (log && log.children) || []) {
+      if (child.dataset && child.dataset.kind === 'thinking') return child;
+      if (child.classList && child.classList.contains('steps')) {
+        const body = findByClass(child, 'steps-body');
+        for (const inner of (body && body.children) || []) {
+          if (inner.dataset && inner.dataset.kind === 'thinking') return inner;
+        }
+      }
+    }
+    return null;
+  };
+  /**
+   * Start one live turn with a thinking delta: the row exists, is open, and its box's light
+   * is engaged — the state every assertion below starts from.
+   */
+  const liveRun = (id) => {
+    dispatch({ type: 'reset' });
+    dispatch({ type: 'tree', viewId: id, activeId: id, rootId: id, rootIds: [id], nodes: [node(id)] });
+    dispatch({ type: 'path', ids: [id], nodes: [{ id, status: 'running', items: [{ kind: 'user', text: 'the ask' }] }] });
+    dispatch({ type: 'thinkingDelta', nodeId: id, text: 'reasoning that runs past its box' });
+    const card = cardOf(id);
+    const row = thinkingRowOf(card);
+    if (!row || !hasClass(row, 'open')) {
+      problems.push(`the "${id}" fixture has no open thinking row — the reader-unlock case below has nothing to check`);
+      return null;
+    }
+    // Geometry a laid-out box would have: 300 px of reasoning in a 186 px box, so "the
+    // bottom" is 114 and the reader's 40 below is a real upward move.
+    const box = row._textEl;
+    box.scrollHeight = 300;
+    box.clientHeight = 186;
+    return { card, row, box };
+  };
+
+  // (a) The reader's row: the box follows its stream, they scroll it up (its own light
+  // goes out), the turn ends — and the row is still open, marked as theirs, and still
+  // inside a group that did not fold over it.
+  const reader = liveRun(READER);
+  if (reader) {
+    dispatch({ type: 'thinkingDelta', nodeId: READER, text: ' and more' });
+    if (reader.box.scrollTop !== 114) {
+      problems.push(
+        `the reader fixture's reasoning box sits at ${reader.box.scrollTop} after a delta, expected 114 — the box has to ` +
+          'be following before an upward scroll can release it',
+      );
+    }
+    reader.box.scrollTop = 40;
+    scrolled(reader.box);
+    const readerLight = findByClass(reader.row, 'scroll-lock-dot');
+    if (!readerLight || readerLight.classList.contains('locked')) {
+      problems.push(
+        'scrolling the reasoning box up did not release its own light — the release is the evidence the end-of-turn ' +
+          'rule reads, so it has to happen before the `done` below',
+      );
+    }
+    dispatch({ type: 'done', nodeId: READER });
+    if (!hasClass(reader.row, 'open') || !reader.row._open) {
+      problems.push(
+        'a thinking row the reader had scrolled (its own follow light released) folded when the turn ended — the box ' +
+          'they were reading is taken off the screen under them',
+      );
+    }
+    if (reader.row._userTouched !== true) {
+      problems.push(
+        'a thinking row the reader unlocked by scrolling was not marked as theirs (`_userTouched`) — the next pass ' +
+          '(a repaint, a second settle) folds it after all',
+      );
+    }
+    const readerGroup = findByClass(reader.card, 'steps');
+    // A group is what the row rides in: if that group folds, the still-open row is hidden
+    // behind its header, so keeping the row open without keeping the group open is no fix.
+    if (readerGroup && hasClass(readerGroup, 'steps-folded')) {
+      problems.push(
+        "a steps group holding a thinking row the reader unlocked folded when the turn ended — folding the group takes " +
+          'the open row off screen',
+      );
+    }
+  }
+
+  // (b) The control: the same turn, nobody touching the box. `done` folds the row (and its
+  // group), so (a) is a statement about the reader's own move and not about a `done` that
+  // stopped folding anything.
+  const untouched = liveRun(UNTOUCHED);
+  if (untouched) {
+    dispatch({ type: 'done', nodeId: UNTOUCHED });
+    if (hasClass(untouched.row, 'open') || untouched.row._open) {
+      problems.push(
+        'a thinking row nobody touched is still open after `done` — a finished thought is one line of the essay, and ' +
+          'this control is what makes the reader-unlock case above mean anything',
+      );
+    }
+    if (untouched.row._userTouched === true) {
+      problems.push('a thinking row nobody touched was marked `_userTouched` by `done`');
+    }
+    const untouchedGroup = findByClass(untouched.card, 'steps');
+    if (untouchedGroup && !hasClass(untouchedGroup, 'steps-folded')) {
+      problems.push('a steps group whose rows nobody touched did not fold when the turn ended');
+    }
+  }
+
+  notes.push(
+    'a thinking row the reader unlocked (its own follow light released) stays open when the turn ends — with its group — ' +
+      'while a row nobody touched still folds to its one line',
+  );
+}
+
 // --- Touch navigation: a finger pans the tree, two fingers pinch it -----------
 // On a touch screen the pan and the zoom above it are both unreachable: `touch-action` is
 // `auto` on the whole subtree, so the browser classifies a one-finger drag as *its* pan and
@@ -6875,14 +7021,15 @@ if (contextLabel !== 'ctx 50%') {
   }
 }
 
-// --- Alt + wheel: the whole tree pans vertically, from anywhere ----------------
+// --- Alt + wheel / Shift + wheel: the whole tree pans, from anywhere ------------
 // The wheel is the gesture that was already fully taken: ctrl/cmd scales the viewport,
 // shift pans sideways, a plain wheel over a native scroll zone belongs to that zone
 // (`.node-work`, `.node-ask`, `.tool-detail`, `#composer`) and a
 // plain wheel anywhere else zooms. Alt + wheel has to cut through all of it and pan the
 // tree up and down whatever the pointer is over — the composer lives *inside* a card,
 // so without it there is no way to move the camera while the cursor sits over a
-// scroller. It is the vertical twin of the shift pan.
+// scroller. Shift + wheel is its horizontal twin and has to clear the *same* zones: none
+// of them scrolls sideways, so behind their bail-out it is a gesture with no effect.
 //
 // The wheel event is dispatched into the real `#tree-wrap` listener and read back off
 // `#tree-canvas`'s `transform`, the same camera the touch block above measures. Each
@@ -6892,12 +7039,14 @@ if (contextLabel !== 'ctx 50%') {
 //   (b) it does so with the pointer over every native scroll zone, and over a card and
 //       one of its rows — the branch sits *before* the zone check, so those zones pan
 //       the camera instead of keeping the wheel for their own scrollbar;
+//   (b2) a shift wheel moves it sideways by the same delta, over those same six targets,
+//       without a vertical move and without touching the scale;
 //   (c) the event is cancelled, so the browser cannot scroll that zone underneath the
 //       pan as well;
-//   (d) the control: the same wheel over the composer *without* alt neither pans nor
-//       zooms nor cancels — it stays the zone's own native scroll — so (b) is a
-//       statement about Alt and not about a wheel that stopped reaching the zones at
-//       all.
+//   (d) the control: the same wheel over the composer *without* alt (or shift) neither
+//       pans, zooms nor cancels — it stays the zone's own native scroll — so (b) is a
+//       statement about the modifier and not about a wheel that stopped reaching the
+//       zones at all.
 {
   const wrap = elementById('tree-wrap');
   const canvas = elementById('tree-canvas');
@@ -7037,6 +7186,47 @@ if (contextLabel !== 'ctx 50%') {
       }
     }
 
+    // (b2) The horizontal twin of (b), over the same six targets: shift + wheel has to
+    // pan the camera sideways from inside every native scroll zone too. Those zones keep
+    // their own vertical wheel and have no horizontal scroll at all, so a shift branch
+    // behind their bail-out is a gesture that can only be swallowed — a card, a work log,
+    // an ask, an expanded step and the composer then answer a shift wheel with nothing at
+    // all. The delta is the x travel, negated, and the scale must not move.
+    for (const zone of ['node', 'node-head', 'node-work', 'node-ask', 'tool-detail', 'composer']) {
+      const zoneBefore = camera();
+      const event = sendWheel(
+        wheelEvent(90, targetIn(zone), { shiftKey: true }),
+        `with shiftKey over .${zone}`,
+      );
+      const zoneAfter = camera();
+      if (!zoneBefore || !zoneAfter) {
+        problems.push(`the camera could not be read around a shift wheel over .${zone} — #tree-canvas carries no \`transform\``);
+        continue;
+      }
+      if (Math.abs(zoneAfter.x - zoneBefore.x + 90) > 0.01) {
+        problems.push(
+          `a shift wheel over .${zone} moved the tree horizontally by ${round(zoneAfter.x - zoneBefore.x)}, expected -90 ` +
+            '(the wheel delta, negated) — shift + wheel has to pan from inside a card, an expanded step and the composer, ' +
+            'not only from the empty canvas',
+        );
+      }
+      if (Math.abs(zoneAfter.y - zoneBefore.y) > 0.01) {
+        problems.push(
+          `a shift wheel over .${zone} moved the tree vertically by ${round(zoneAfter.y - zoneBefore.y)}, expected 0 — ` +
+            'shift is the horizontal pan, alt is the vertical one',
+        );
+      }
+      if (Math.abs(zoneAfter.zoom - zoneBefore.zoom) > 1e-6) {
+        problems.push(`a shift wheel over .${zone} changed the scale — shift + wheel pans, it never zooms`);
+      }
+      if (event.defaultPrevented !== true) {
+        problems.push(
+          `a shift wheel over .${zone} was not \`defaultPrevented\` — the zone then gets the gesture as well, so one ` +
+            'wheel would pan the tree and scroll the log at the same time',
+        );
+      }
+    }
+
     // (d) The control, on the same target form: without alt the composer keeps its
     // wheel. Nothing moves, nothing is cancelled — that is the native scroll the alt
     // branch above is deliberately placed in front of.
@@ -7048,7 +7238,7 @@ if (contextLabel !== 'ctx 50%') {
         problems.push(
           `a plain wheel over #composer panned the tree by (${round(controlAfter.x - controlBefore.x)}, ` +
             `${round(controlAfter.y - controlBefore.y)}) — the composer owns a plain wheel (it is one of the native ` +
-            'scroll zones); only alt pans from inside it',
+            'scroll zones); only alt (and shift) pans from inside it',
         );
       }
       if (Math.abs(controlAfter.zoom - controlBefore.zoom) > 1e-6) {
@@ -7080,11 +7270,158 @@ if (contextLabel !== 'ctx 50%') {
 
     notes.push(
       'alt + wheel: pans the tree one delta per event without touching the scale, from the canvas and from inside a ' +
-        'card, a work log, an ask, an expanded step and the composer (cancelled each time), while a plain ' +
-        'wheel over the composer still scrolls that zone and over the canvas still zooms',
+        'card, a work log, an ask, an expanded step and the composer (cancelled each time), and shift + wheel does the ' +
+        'same horizontally over those same six targets, while a plain wheel over the composer still scrolls that zone ' +
+        'and over the canvas still zooms',
     );
   }
 }
+// --- the appear animation never holds the text --------------------------------
+// The animation of how characters and rows *appear* may never be load-bearing: the text
+// of a delta is **complete in the DOM** the moment it arrives, and only its opacity is
+// animated. Three statements, each of which would be a silent regression in a window:
+//
+//   - a delta is fully readable at once — no rate-limited reveal, no queue, no flush:
+//     the answer reads the concatenation of its deltas straight after they were
+//     dispatched, with no timer and no frame in between;
+//   - the transient `.chunk-in` span holds **only the newest chunk**: the settled prefix
+//     is merged back into the answer's own `Text` node before the next span opens, which
+//     is what keeps the streaming surface one Text node and one `appendData`;
+//   - `streamAnimation: false` in the `config` message renders exactly what the webview
+//     rendered before the animation existed: no span, no class, the same text.
+//
+// This block runs **last** of the synchronous checks (nothing below it reads the UI
+// state), and it puts the flag back to on at the end so a later block cannot inherit
+// "off" from it.
+{
+  const NODE = 'anim-node';
+  const cardEl = () =>
+    Array.from(elementById('tree-canvas').children).find((child) => child.dataset && child.dataset.id === NODE);
+  const logEl = () => {
+    const card = cardEl();
+    return card ? findByClass(card, 'node-work') : null;
+  };
+  /** Every `.chunk-in` span inside an element — the transient form of a delta. */
+  const chunksIn = (root, into) => {
+    const out = into || [];
+    for (const child of (root && root.children) || []) {
+      if (hasClass(child, 'chunk-in')) out.push(child);
+      chunksIn(child, out);
+    }
+    return out;
+  };
+  /**
+   * Everything an element reads as text: the stub's `textContent` is a plain property, so
+   * a live `Text` node and a fading chunk are both read off the subtree — which is also
+   * what a browser shows on screen.
+   */
+  const textOf = (element) => {
+    if (!element) return '';
+    if (element.nodeType === 3) return String(element.data || element.nodeValue || '');
+    let out = element.textContent ? String(element.textContent) : '';
+    for (const child of element.children || []) out += textOf(child);
+    return out;
+  };
+  const boot = () => {
+    dispatch({ type: 'reset' });
+    dispatch({
+      type: 'tree',
+      viewId: NODE,
+      activeId: NODE,
+      rootId: NODE,
+      nodes: [
+        {
+          id: NODE,
+          parentId: null,
+          children: [],
+          title: 'anim',
+          status: 'running',
+          createdAt: 0,
+          preview: 'anim',
+          usage: null,
+          size: null,
+        },
+      ],
+    });
+    dispatch({ type: 'path', ids: [NODE], nodes: [{ id: NODE, status: 'running', items: [] }] });
+    dispatch({ type: 'state', busy: true, status: '', sessionId: 'anim-session', runningNodes: [NODE] });
+  };
+  /** The answer's own bubble — the last row of the log, which is the text in flow. */
+  const answerEl = () => {
+    const log = logEl();
+    const kids = (log && log.children) || [];
+    const last = kids.length ? kids[kids.length - 1] : null;
+    if (!last || (last.dataset || {}).kind !== 'assistant') return null;
+    return findByClass(last, 'answer');
+  };
+
+  // (a) Two deltas, read immediately. Nothing has fired `animationend` and no fallback
+  // timer has run, so this is exactly the state a reader sees mid-fade.
+  boot();
+  dispatch({ type: 'delta', nodeId: NODE, text: 'Hello ' });
+  dispatch({ type: 'delta', nodeId: NODE, text: 'world' });
+  {
+    const answer = answerEl();
+    if (!answer) {
+      problems.push('the appear animation: two deltas rendered no answer bubble — the streaming block is gone');
+    } else {
+      const read = textOf(answer);
+      if (read !== 'Hello world') {
+        problems.push(
+          `the appear animation: a delta's text reads ${JSON.stringify(read)} immediately after the delta, expected ` +
+            '"Hello world" — the text has to be complete in the DOM at once, because only the appearance is animated',
+        );
+      }
+      const spans = chunksIn(answer);
+      if (spans.length > 1) {
+        problems.push(`the appear animation: the answer holds ${spans.length} .chunk-in spans, expected at most one`);
+      } else if (spans.length === 1 && textOf(spans[0]) !== 'world') {
+        problems.push(
+          `the appear animation: the fading span holds ${JSON.stringify(textOf(spans[0]))}, expected only the newest ` +
+            'chunk ("world") — the settled prefix belongs to the answer\'s own Text node',
+        );
+      }
+    }
+  }
+
+  // (b) The setting off: no span, no class, the same complete text.
+  dispatch({ type: 'config', streamAnimation: false });
+  boot();
+  dispatch({ type: 'delta', nodeId: NODE, text: 'no animation' });
+  dispatch({ type: 'delta', nodeId: NODE, text: ' at all' });
+  {
+    const answer = answerEl();
+    if (!answer) {
+      problems.push('the appear animation (`streamAnimation: false`): two deltas rendered no answer bubble');
+    } else {
+      const spans = chunksIn(answer);
+      if (spans.length > 0) {
+        problems.push(
+          `\`streamAnimation: false\` still wrapped ${spans.length} delta(s) in a .chunk-in span — the setting has to ` +
+            'render exactly what the webview rendered before the animation existed',
+        );
+      }
+      const read = textOf(answer);
+      if (read !== 'no animation at all') {
+        problems.push(
+          `\`streamAnimation: false\`: the answer reads ${JSON.stringify(read)}, expected "no animation at all"`,
+        );
+      }
+      const log = logEl();
+      const kids = (log && log.children) || [];
+      const last = kids.length ? kids[kids.length - 1] : null;
+      if (last && last.classList.contains('row-in')) {
+        problems.push('`streamAnimation: false` still marked the appended answer row with `.row-in`');
+      }
+    }
+  }
+  // The flag goes back to on, the setting's own default: the block is the last one, but a
+  // check added below it must not inherit "off" from a fixture.
+  dispatch({ type: 'config', streamAnimation: true });
+
+  notes.push('appear animation: a delta is complete at once, one span holds only the newest chunk, and the setting off renders exactly the old shapes');
+}
+
 // --- the shell document: where the new-epoch button sits, and what is gone -------
 // `media/main.js` cannot assert this: the DOM stub builds an element per id on demand,
 // so the *document* has to be read as text. Two facts matter, both from
@@ -7134,6 +7471,336 @@ if (contextLabel !== 'ctx 50%') {
     problems.push('media/style.css does not set `--node-max-h: 840px` — the card\'s reading height is the sheet\'s, in one place');
   }
   notes.push('shell: #new-context-btn sits before #send-btn, and the retired ids/classes are gone');
+}
+
+// --- file links: a `spinney:` href is a jump inside this window ----------------
+//
+// An assistant reply links the file it read as `[src/a.ts:12-30](spinney:src/a.ts#L12-L30)`,
+// and `media/main.js` turns a click on it into `openFile` — the host opens the file in an
+// editor tab on those lines. It must never be handed to the system browser like a real URL,
+// which is what the same document-level listener does for http/https/mailto.
+//
+// The DOM stub does not parse HTML (a `div.answer` keeps its Markdown as a string), so the
+// anchor is read **out of the rendered Markdown** and clicked through the listener the
+// webview registered: the message is the whole contract with the host, and this pins it.
+{
+  const LINK_NODE = 'file-link-node';
+  const cardNode = (id, parentId, children) => ({
+    id,
+    parentId,
+    children,
+    title: id,
+    status: 'done',
+    createdAt: 0,
+    preview: id,
+    usage: null,
+    size: null,
+  });
+  dispatch({ type: 'reset' });
+  dispatch({
+    type: 'tree',
+    viewId: LINK_NODE,
+    activeId: LINK_NODE,
+    rootId: LINK_NODE,
+    nodes: [cardNode(LINK_NODE, null, [])],
+  });
+  dispatch({
+    type: 'path',
+    ids: [LINK_NODE],
+    nodes: [
+      {
+        id: LINK_NODE,
+        status: 'done',
+        items: [
+          { kind: 'user', text: 'Where is the click handler?' },
+          {
+            kind: 'assistant',
+            text:
+              'The chat handler is in [src/chat/runtime.ts:12-30](spinney:src/chat/runtime.ts#L12-L30), ' +
+              'and the whole file is [src/a.ts](spinney:src/a.ts).',
+          },
+        ],
+      },
+    ],
+  });
+  const card = [...elementById('tree-canvas').children].find(
+    (child) => child.dataset && child.dataset.id === LINK_NODE,
+  );
+  // The `.answer` that carries the links (the user item's own body is one too, and it has
+  // none), read as the HTML the Markdown renderer produced.
+  const bodies = [];
+  const collect = (from) => {
+    for (const child of (from && from.children) || []) {
+      if (hasClass(child, 'answer')) bodies.push(String(child.innerHTML || ''));
+      collect(child);
+    }
+  };
+  collect(card);
+  const html = bodies.find((body) => body.indexOf('spinney:') >= 0) || '';
+  // An `href` is what the real webview gets. The sandbox does not load `markdown-it`, so an
+  // item's body is its escaped Markdown instead of HTML: read the target out of the
+  // `[label](target)` form in that case, so the check still clicks a link.
+  const hrefs = [...html.matchAll(/href="(spinney:[^"]*)"/g)].map((match) => match[1]);
+  if (hrefs.length === 0) {
+    hrefs.push(...[...html.matchAll(/\]\((spinney:[^)\s]+)\)/g)].map((match) => match[1]));
+  }
+  if (hrefs.length !== 2) {
+    problems.push(
+      `an assistant item with two file links rendered ${hrefs.length} \`spinney:\` link(s) ` +
+        `(${JSON.stringify(html.slice(0, 200))}) — the chat cannot turn a file reference into a jump`,
+    );
+  }
+  /**
+   * Click one href through the webview's own document listener: a stub anchor is all the
+   * handler reads (`closest`, `getAttribute`), so the click runs the shipped code path.
+   */
+  const clickHref = (href) => {
+    const anchor = {
+      closest: (selector) => (selector === 'a[href]' ? anchor : null),
+      getAttribute: (name) => (name === 'href' ? href : null),
+    };
+    posted.length = 0;
+    for (const handler of listeners.click || []) {
+      handler({ target: anchor, preventDefault() {} });
+    }
+    return posted.slice();
+  };
+  const postedByRange = clickHref(hrefs[0] || '');
+  const opened = postedByRange.find((message) => message && message.type === 'openFile');
+  if (!opened) {
+    problems.push(
+      `clicking a \`spinney:\` file link posted ${JSON.stringify(postedByRange)}, expected \`{ type: 'openFile' }\``,
+    );
+  } else if (opened.path !== 'src/chat/runtime.ts' || opened.line !== 12 || opened.endLine !== 30) {
+    problems.push(
+      `clicking \`spinney:src/chat/runtime.ts#L12-L30\` posted ${JSON.stringify(opened)}, expected the ` +
+        "relative path and the whole range ({ path: 'src/chat/runtime.ts', line: 12, endLine: 30 })",
+    );
+  }
+  if (postedByRange.some((message) => message && message.type === 'openExternal')) {
+    problems.push('a `spinney:` file link was handed to the browser (`openExternal`) instead of opened in the chat');
+  }
+  const postedByFile = clickHref(hrefs[1] || '');
+  const openedFile = postedByFile.find((message) => message && message.type === 'openFile');
+  if (!openedFile || openedFile.path !== 'src/a.ts' || openedFile.line !== undefined) {
+    problems.push(
+      `clicking a fragmentless file link posted ${JSON.stringify(postedByFile)}, expected the path and no line`,
+    );
+  }
+  // The URL branch resolves a relative href against the page's own address
+  // (`new URL(href, window.location.href)`), which the stub did not model: give it one so
+  // the "a real URL still opens externally" half is a real assertion, not a silent throw.
+  window.location = { href: 'https://webview.local/' };
+  const postedByUrl = clickHref('https://example.com/doc');
+  const external = postedByUrl.find((message) => message && message.type === 'openExternal');
+  if (!external || external.url !== 'https://example.com/doc') {
+    problems.push(
+      `clicking a real URL posted ${JSON.stringify(postedByUrl)}, expected it to keep opening externally`,
+    );
+  }
+  notes.push('file links: a `spinney:` href posts openFile with its line range, real URLs still open externally');
+}
+
+// --- Editing a card's own prompt (the pencil on the pinned ask) ---------------
+// A turn's prompt is the user's own text, so a card offers a small pencil on its
+// pinned ask (`.node-ask-edit`): it swaps the rendered ask for a plain textarea
+// pre-filled with the node's **full prompt text** — the stored text, never the
+// Markdown the ask body shows — plus one hint line. Enter asks the host to branch from
+// the edited node's parent with the edited text (`editUserMessage`; nothing is edited
+// in place, and the composer is not involved at all), Shift+Enter is the textarea's own
+// newline, and Esc puts the rendered ask back. What is pinned here:
+//   - the pencil exists on an idle turn card and on **no** running or sidecar card, and
+//     it follows `state`'s `lockedNodes` without a repaint;
+//   - a click opens an editor holding the raw prompt text, and no Markdown is rendered
+//     into it;
+//   - Enter posts `{ type: 'editUserMessage', nodeId, text }` with that node and that
+//     text — and an empty editor posts nothing; Shift+Enter posts nothing;
+//   - a repaint never leaves a stale textarea behind, and Esc on a fresh edit restores
+//     the ask with the node's original text.
+{
+  const ROOT = 'ask-edit-root';        // finished turn, on the view path → the pencil
+  const RUN = 'ask-edit-running';      // the same card, still streaming → no pencil
+  const SUB = 'ask-edit-sub';          // `kind:'agent'` sidecar → no pencil
+  const ORIGINAL = 'the **original** ask';
+  const row = (id, parentId, children, status, kind, extra) =>
+    Object.assign(
+      { id, parentId, children, title: id, status, createdAt: 0, preview: id, usage: null, size: null },
+      kind ? { kind } : {},
+      extra || {},
+    );
+  // `RUN` is the view focus, so both turn cards are expanded and rendered and the two
+  // halves of the gate are checked in one pass.
+  const treeMsg = {
+    type: 'tree',
+    viewId: RUN,
+    activeId: null,
+    rootId: ROOT,
+    rootIds: [ROOT],
+    nodes: [
+      row(ROOT, null, [RUN, SUB], 'done'),
+      row(RUN, ROOT, [], 'running'),
+      row(SUB, ROOT, [], 'done', 'agent', {
+        items: [{ kind: 'user', text: 'sub-agent instruction' }],
+        summary: true,
+      }),
+    ],
+  };
+  const pathMsg = {
+    type: 'path',
+    ids: [ROOT, RUN],
+    nodes: [
+      { id: ROOT, status: 'done', items: [{ kind: 'user', text: ORIGINAL }] },
+      { id: RUN, status: 'running', items: [{ kind: 'user', text: 'live prompt' }] },
+    ],
+  };
+  const canvas = elementById('tree-canvas');
+  const cardOf = (id) => canvas.children.find((child) => child.dataset && child.dataset.id === id) || null;
+  const askOf = (id) => findByClass(cardOf(id), 'node-ask');
+  const pencilOf = (id) => findByClass(askOf(id), 'node-ask-edit');
+  const editorOf = (id) => findByClass(askOf(id), 'ask-edit-input');
+  const click = (element) => {
+    const handler = element && element._listeners && element._listeners.click;
+    if (typeof handler !== 'function') return false;
+    handler({ stopPropagation() {} });
+    return true;
+  };
+  /** Deliver a `keydown` the way a browser does; returns whether `preventDefault` ran. */
+  const press = (element, key, shiftKey) => {
+    const handler = element && element._listeners && element._listeners.keydown;
+    if (typeof handler !== 'function') return null;
+    let prevented = false;
+    handler({
+      key,
+      shiftKey: !!shiftKey,
+      preventDefault() {
+        prevented = true;
+      },
+      stopPropagation() {},
+    });
+    return prevented;
+  };
+  const editPosts = () => posted.filter((message) => message && message.type === 'editUserMessage');
+
+  dispatch({ type: 'reset' });
+  // `RUN` is live, which is what `state`'s `runningNodes` says — the same authority the
+  // Send/Stop pair reads, and the second half of the pencil's gate.
+  dispatch({ type: 'state', busy: true, status: '', sessionId: 'smoke-session', runningNodes: [RUN], lockedNodes: [] });
+  dispatch(treeMsg);
+  dispatch(pathMsg);
+
+  // (a) Where the pencil may appear.
+  if (!pencilOf(ROOT)) {
+    problems.push('an idle turn card has no edit pencil on its pinned ask');
+  }
+  if (pencilOf(RUN)) {
+    problems.push('a card whose turn is still running offers the edit pencil (the host refuses that edit)');
+  }
+  if (pencilOf(SUB)) {
+    problems.push('a sub-agent card offers the edit pencil (it has no prompt of its own)');
+  }
+  // The host's `state` is the other half of the gate, and it arrives without a repaint.
+  dispatch({ type: 'state', busy: false, status: '', sessionId: 'smoke-session', runningNodes: [], lockedNodes: [ROOT] });
+  if (pencilOf(ROOT)) {
+    problems.push('a node that still owns unfinished work (`lockedNodes`) still offers the edit pencil');
+  }
+  dispatch({ type: 'state', busy: false, status: '', sessionId: 'smoke-session', runningNodes: [], lockedNodes: [] });
+  if (!pencilOf(ROOT)) {
+    problems.push('the edit pencil did not come back once the node stopped being locked');
+  }
+
+  // (b) The editor: the raw text, no Markdown, one hint line.
+  if (!click(pencilOf(ROOT))) {
+    problems.push('the edit pencil has no click handler');
+  } else if (!editorOf(ROOT)) {
+    problems.push('clicking the edit pencil did not put a textarea into the ask');
+  } else {
+    const input = editorOf(ROOT);
+    if (String(input.value) !== ORIGINAL) {
+      problems.push(
+        `the editor is pre-filled with ${JSON.stringify(input.value)}, expected the node's full prompt text ` +
+          `${JSON.stringify(ORIGINAL)}`,
+      );
+    }
+    if (findByClass(askOf(ROOT), 'answer')) {
+      problems.push('the ask still renders Markdown while the editor is open');
+    }
+    if (!findByClass(askOf(ROOT), 'ask-edit-hint')) {
+      problems.push('the prompt editor carries no hint line');
+    }
+
+    // (c) Shift+Enter is a newline; Enter posts that node and that text.
+    posted.length = 0;
+    input.value = 'edited with a newline';
+    if (press(input, 'Enter', true)) {
+      problems.push('Shift+Enter was prevented — the editor could never insert a newline');
+    }
+    if (editPosts().length > 0) {
+      problems.push(`Shift+Enter posted ${JSON.stringify(editPosts())}, expected a newline and nothing else`);
+    }
+    posted.length = 0;
+    input.value = 'edited prompt';
+    press(input, 'Enter', false);
+    const sent = editPosts()[0];
+    if (!sent || sent.nodeId !== ROOT || sent.text !== 'edited prompt') {
+      problems.push(
+        `Enter in the prompt editor posted ${JSON.stringify(posted)}, expected ` +
+          `{ type: 'editUserMessage', nodeId: '${ROOT}', text: 'edited prompt' }`,
+      );
+    }
+    if (posted.some((message) => message && message.type === 'userMessage')) {
+      problems.push('editing a prompt posted a `userMessage` — the composer is not part of this edit');
+    }
+    posted.length = 0;
+    input.value = '   ';
+    press(input, 'Enter', false);
+    if (editPosts().length > 0) {
+      problems.push(`Enter on an empty editor posted ${JSON.stringify(editPosts())} — there is nothing to send`);
+    }
+
+    // (d) A repaint closes the editor and puts the ask back.
+    input.value = 'still typing';
+    dispatch(treeMsg);
+    if (editorOf(ROOT)) {
+      problems.push('a repaint left a stale textarea in the ask');
+    }
+    if (!findByClass(askOf(ROOT), 'answer')) {
+      problems.push('a repaint did not put the rendered ask back');
+    }
+
+    // (e) Esc on a fresh edit: the ask comes back with the original text, and nothing
+    // is sent.
+    posted.length = 0;
+    if (!click(pencilOf(ROOT))) {
+      problems.push('the edit pencil did not open a second editor after a repaint');
+    } else {
+      const second = editorOf(ROOT);
+      if (!second) {
+        problems.push('the pencil opened no editor after the repaint');
+      } else {
+        second.value = 'throw this away';
+        press(second, 'Escape', false);
+        if (editorOf(ROOT)) {
+          problems.push('Esc left the prompt editor open');
+        }
+        const body = findByClass(askOf(ROOT), 'answer');
+        if (!body) {
+          problems.push('Esc did not put the rendered ask back');
+        } else if (String(body.innerHTML).indexOf('original') < 0) {
+          problems.push(
+            `Esc restored ${JSON.stringify(body.innerHTML)}, expected the node's original ask ` +
+              `${JSON.stringify(ORIGINAL)}`,
+          );
+        }
+        if (editPosts().length > 0) {
+          problems.push(`Esc posted ${JSON.stringify(editPosts())} — a cancel sends nothing`);
+        }
+        if (!pencilOf(ROOT)) {
+          problems.push('the edit pencil did not come back with the cancelled ask');
+        }
+      }
+    }
+  }
+  notes.push('prompt edit: the pencil on an idle turn card only, Enter posts the node and the edited text, a repaint leaves no textarea, Esc restores the ask');
 }
 
 // --- report ------------------------------------------------------------------

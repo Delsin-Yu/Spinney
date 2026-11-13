@@ -56,6 +56,19 @@ export interface BackgroundAccess {
   /** The running turn's node, else the view-focus node; `null` = no owner. */
   currentOwner(): BackgroundOwner | null;
   hub: BackgroundHub;
+  /**
+   * The extra environment a spawned command is **born** with: the identity of the
+   * node that started it (`SPINNEY_SESSION_ID` / `SPINNEY_NODE_ID`) plus the
+   * window's control-plane discovery identity (`RuntimeHost.controlEnv`). This is
+   * how `tools/reload-window.mjs` knows which conversation asked for a reload
+   * without being told on the command line — a process cannot lie about its own
+   * parent the way an argument can.
+   *
+   * Optional: a headless or test call can omit it, and a command then inherits the
+   * host's own environment. It carries **ids and a file path only** — the bearer
+   * token stays in the 0600 discovery file (see `ControlServer.controlEnv`).
+   */
+  spawnEnv?(owner: BackgroundOwner | null): Record<string, string>;
 }
 
 /** Task order: ascending id (the mint order). */

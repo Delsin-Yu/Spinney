@@ -76,6 +76,11 @@
   // Session currently rendered, mirrored into vscode.setState so a reloaded
   // window restores this tab bound to the same conversation.
   let persistedSessionId = '';
+  // The character / row appear animation — `streamAnimation` in the host's `config`
+  // message (`spinney.streamAnimation`). `true` until a `config` says otherwise: a
+  // replay shape (and every fixture in `tools/check-webview.js`) may not carry the
+  // field, and the setting's own default is on.
+  let streamAnimation = true;
 
   const NODE_W = 320;
   const H_GAP = 48;
@@ -1530,8 +1535,9 @@
   // Two marks per row carry the state, and both live on the element (the DOM is
   // rebuilt by a repaint, which re-derives the same state from the items):
   //   `_open`        — the row is open right now;
-  //   `_userTouched` — a click handed the row to the user: the live rule below
-  //                    leaves it exactly where they put it.
+  //   `_userTouched` — a click (or a follow light the reader released: `readerHoldsRow`)
+  //                    handed the row to the user: the live rule below leaves it
+  //                    exactly where they put it.
   // The live rows are tracked on the container (`messagesEl`), which `routeTo`
   // swaps per node, so two nodes streaming at once never see each other's rows.
 
@@ -1594,6 +1600,22 @@
   }
 
   /**
+   * Is the reader reading this row? A click is not the only hand-over: releasing the
+   * row's own follow light — scrolling its box up, or clicking its dot — says the reader
+   * is inside that reasoning and has taken the box from the stream. The turn ending then
+   * must not fold it under them, so the same evidence that keeps a live delta from
+   * pinning the box also keeps `clearActiveRow` from closing the row.
+   *
+   * Only the **row's own** light counts: the card log's dot is the whole turn's follow
+   * state, so a reader who scrolled the turn up has not thereby opened its reasoning.
+   */
+  function readerHoldsRow(row) {
+    if (!row) return false;
+    if (row._userTouched) return true;
+    return !!(row._scroll && row._scroll.locked === false);
+  }
+
+  /**
    * This row is live: a thinking row opens (that is what the active turn is doing),
    * a tool row is left folded. A row the user clicked is theirs and never moves.
    */
@@ -1618,9 +1640,19 @@
       if (at >= 0) list.splice(at, 1);
     }
     if (row._userTouched) return;
-    // A finished thinking row is one line; a tool row folds back to its one line.
-    if (row.classList.contains('thinking-row')) setThinkingOpen(row, false);
-    else setToolOpen(row, false);
+    // A finished thinking row is one line; a tool row folds back to its one line. The
+    // exception is a reasoning row the reader unlocked by scrolling its own box: they are
+    // reading it, so the turn ending leaves it open — and it is marked as theirs, or a
+    // later pass (`settleRowsFinished`, a repaint) would fold it after all.
+    if (row.classList.contains('thinking-row')) {
+      if (readerHoldsRow(row)) {
+        row._userTouched = true;
+        return;
+      }
+      setThinkingOpen(row, false);
+    } else {
+      setToolOpen(row, false);
+    }
   }
 
   /**
@@ -1793,26 +1825,42 @@
   }
 
   /**
+   * Does this group's body hold a row the reader is reading (`readerHoldsRow`)? A
+   * group folds behind its own header at the end of the turn, but never over a
+   * reasoning row the reader unlocked — folding the group would take that row off
+   * screen, which is worse than folding the row itself.
+   */
+  function groupHoldsReaderRow(group) {
+    const body = group && group._body;
+    for (const row of (body && body.children) || []) {
+      if (row && row.dataset && row.dataset.kind === 'thinking' && readerHoldsRow(row)) return true;
+    }
+    return false;
+  }
+
+  /**
    * The turn is over: **every** group of the card tucks itself behind its own header —
-   * a group the user opened or closed by hand (`_userTouched`) stays exactly where they
-   * put it, and the others do not move it. No answer leaves a group here, because no
-   * answer ever entered one.
+   * a group the user opened or closed by hand (`_userTouched`), or one holding a row the
+   * reader unlocked, stays exactly where it is — and the others do not move it. No answer
+   * leaves a group here, because no answer ever entered one.
    */
   function settleSteps(card) {
     if (!card) return;
     card._openGroup = null;
     if (openSteps && inSubtree(card, openSteps)) openSteps = null;
     for (const group of card._groups || []) {
-      if (!group._userTouched) setStepsFold(group, true);
+      if (group._userTouched) continue;
+      if (groupHoldsReaderRow(group)) continue;
+      setStepsFold(group, true);
     }
   }
 
   /**
    * The turn is over: every row of the card takes its resting state — a thinking row
-   * collapses to its one line, a tool row folds — except the ones the user opened by
-   * hand (`_userTouched`), which stay exactly where they were put. Read off the card's
-   * own DOM rather than a list, so a card restored from a repaint settles like a live
-   * one.
+   * collapses to its one line, a tool row folds — except a row the reader holds: one they
+   * opened by hand (`_userTouched`) or one whose own follow light they released, which
+   * stays exactly where it is (`readerHoldsRow`). Read off the card's own DOM rather than a
+   * list, so a card restored from a repaint settles like a live one.
    */
   function settleRowsFinished(card) {
     if (!card) return;
@@ -1826,7 +1874,9 @@
   /**
    * Close every live row of the current container, or — with `kind` — only the
    * thinking (`'thinking'`) or the tool (`'tool'`) ones: the answer took over, or
-   * the turn is over. A row of the other kind stays live.
+   * the turn is over. A row of the other kind stays live, and a reasoning row the
+   * reader is reading stays open even here — `clearActiveRow` owns that rule, so the
+   * answer taking over cannot fold a box its reader unlocked.
    */
   function closeActiveRows(kind) {
     const list = messagesEl ? messagesEl._activeRows : null;
@@ -1839,6 +1889,182 @@
     }
   }
 
+  // ---- The appear animation -------------------------------------------------
+  // **The text is complete in the DOM the moment a delta arrives; only its
+  // appearance is animated.** The newest characters of a delta go into a transient
+  // `<span class="chunk-in">` (a ~140 ms fade, CSS), and that span's text is moved
+  // into the answer's own persistent `Text` node on `animationend` — so the streaming
+  // surface is still one `Text` node and one `appendData`, never a per-character DOM,
+  // and nothing on this path reads layout.
+  //
+  // **One chunk per host at a time.** A delta that arrives before the previous
+  // animation ended merges the pending span first and opens a new one, so the span
+  // never holds more than the newest chunk. The bookkeeping is `_settled` — how many
+  // characters of the host's own text are already in its `Text` node — which is what
+  // makes the delta slice exact after a merge. The merge itself is idempotent (a
+  // second call finds nothing to do) and safe when the span was already removed by a
+  // repaint or a finalize.
+  /** An engine that never fires `animationend` (the offline guard's stub) still settles. */
+  const ANIMATION_FALLBACK_MS = 400;
+
+  // The hosts with a chunk in flight, so `reset` / a `tree` repaint can settle them
+  // without walking the DOM (on a 40-card session that walk would be the cost).
+  const pendingChunks = new Set();
+
+  /** Computed once: the media query's answer is fixed for the life of the document. */
+  let reducedMotion;
+
+  /**
+   * The OS' own reduced-motion wish, read in the script as well as in the stylesheet:
+   * with it on, no character is ever wrapped in a span and no row is given a class, so
+   * today's rendering is exactly what a reader gets.
+   */
+  function prefersReducedMotion() {
+    if (reducedMotion === undefined) {
+      try {
+        reducedMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+      } catch (err) {
+        reducedMotion = false;
+      }
+    }
+    return reducedMotion;
+  }
+
+  /**
+   * Is the appear animation on? The setting (`spinney.streamAnimation`, sent in the
+   * `config` message) **and** the OS' own reduced-motion wish — the media query at the
+   * end of `media/style.css` says the same thing for the CSS half, and an element the
+   * script never wrapped stays the plain `Text` node.
+   */
+  function animationsOn() {
+    return streamAnimation && !prefersReducedMotion();
+  }
+
+  /** A chunk's span leaves the document (its text has been merged back, or is moot). */
+  function removeChunkSpan(span) {
+    if (!span) return;
+    if (typeof span.remove === 'function') span.remove();
+    else if (span.parentElement) span.parentElement.removeChild(span);
+  }
+
+  /**
+   * Forget a host's pending chunk **without** merging it: its characters are already in
+   * the host's own source text (`node._text` / the thinking row's own text), so whatever
+   * renders next takes them from there.
+   */
+  function dropChunk(host) {
+    if (!host) return;
+    if (host._chunkTimer) {
+      clearTimeout(host._chunkTimer);
+      host._chunkTimer = null;
+    }
+    const span = host._chunk;
+    host._chunk = null;
+    host._chunkText = '';
+    host._chunkTn = null;
+    pendingChunks.delete(host);
+    removeChunkSpan(span);
+  }
+
+  /**
+   * Merge the pending chunk into the host's persistent `Text` node and remove the span
+   * — the one way a chunk ends. It is **idempotent** (`_chunk` is cleared before
+   * anything else, so a second call is a no-op, which is what makes a late
+   * `animationend` after a finalize harmless) and it survives the span having been
+   * removed already: what is merged is the span's *text*, into the host's current node.
+   */
+  function mergeChunk(host) {
+    if (!host) return;
+    if (host._chunkTimer) {
+      clearTimeout(host._chunkTimer);
+      host._chunkTimer = null;
+    }
+    const span = host._chunk;
+    const text = host._chunkText || '';
+    const tn = host._chunkTn;
+    host._chunk = null;
+    host._chunkText = '';
+    host._chunkTn = null;
+    pendingChunks.delete(host);
+    if (tn && text) {
+      tn.appendData(text);
+      if (typeof host._settled === 'number') host._settled += text.length;
+    }
+    removeChunkSpan(span);
+  }
+
+  /**
+   * Open one fading chunk on `host`, whose settled text lives in `tn`. Any chunk already
+   * in flight is merged first: **at most one span per host**.
+   */
+  function openChunk(host, tn, text) {
+    if (!host || !text) return;
+    mergeChunk(host);
+    const span = el('span', 'chunk-in', text);
+    host._chunk = span;
+    host._chunkText = text;
+    host._chunkTn = tn;
+    pendingChunks.add(host);
+    // The fade is CSS; the merge back is this one event, with a timer behind it for an
+    // engine that never fires it — the merge must never depend on being told.
+    span.addEventListener('animationend', () => {
+      if (host._chunk === span) mergeChunk(host);
+    });
+    host._chunkTimer = setTimeout(() => {
+      if (host._chunk === span) mergeChunk(host);
+    }, ANIMATION_FALLBACK_MS);
+    host.appendChild(span);
+  }
+
+  /**
+   * Settle every chunk in flight. A `reset` or a `tree` repaint is about to replace the
+   * cards those chunks live in, so their text goes back into their `Text` node first.
+   */
+  function flushChunks() {
+    for (const host of Array.from(pendingChunks)) mergeChunk(host);
+  }
+
+  /**
+   * A row that has just been appended arrives with one fade + 2 px rise (`.row-in`).
+   * The class is removed on `animationend` — or by the fallback timer — so no row keeps
+   * a running animation (or a compositing layer) alive after it has arrived.
+   */
+  function animateRow(row) {
+    if (!row || !row.classList || !animationsOn()) return;
+    row.classList.add('row-in');
+    let settled = false;
+    const settle = () => {
+      if (settled) return;
+      settled = true;
+      row.classList.remove('row-in');
+    };
+    row.addEventListener('animationend', (event) => {
+      // A nested fade (the `.chunk-in` span inside an answer) bubbles up here: only the
+      // row's own animation ends the row's.
+      if (event && event.target && event.target !== row) return;
+      settle();
+    });
+    setTimeout(settle, ANIMATION_FALLBACK_MS);
+  }
+
+  /**
+   * Restart the label's short opacity fade. A live tool's label is **rewritten** per
+   * argument delta, so it is deliberately not wrapped in a span: the same element loses
+   * the class and gets it back in the next frame, which is what restarts a CSS animation
+   * on an element that is already on screen — and, unlike the `offsetWidth` trick, it
+   * reads no layout in the streaming path.
+   */
+  function fadeLabel(labelEl) {
+    if (!labelEl || !labelEl.classList || !animationsOn()) return;
+    labelEl.classList.remove('label-in');
+    if (labelEl._labelFade) return;
+    labelEl._labelFade = true;
+    requestAnimationFrame(() => {
+      labelEl._labelFade = false;
+      labelEl.classList.add('label-in');
+    });
+  }
+
   // ---- Message rendering into a container (defaults to the active node) ----
   // Zone 1 of a card: the pinned user ask (`.node-ask`, top of an expanded card).
   // It does not scroll with the work log and does not trigger tree panning, and it
@@ -1847,6 +2073,20 @@
   function addUserPrompt(text, attachments) {
     if (!promptEl) return;
     promptEl.innerHTML = '';
+    // The card's own prompt is remembered here (`_askText` / `_askAtts`), together
+    // with the ask it just rendered: the ask body is *Markdown*, so it is not the text
+    // an editor can be pre-filled with, and a cancel has to put the same ask back
+    // (`beginAskEdit` / `renderAsk`). The ask element survives a repaint (only its
+    // children are replaced), but the card is where the two live, so any card-level
+    // pass can read them back.
+    const card = askCardOf(promptEl);
+    if (card) {
+      card._askText = typeof text === 'string' ? text : '';
+      card._askAtts = attachments || [];
+    }
+    // A render of the ask is the end of any edit that was open on it, whatever the
+    // reason for the render: a repaint must never leave a stale textarea behind.
+    promptEl._askEditing = false;
     const node = el('div', 'msg user prompt');
     node.dataset.kind = 'user';
     if (attachments && attachments.length) {
@@ -1870,7 +2110,151 @@
       node.appendChild(body);
     }
     promptEl.appendChild(node);
+    // The pencil belongs to the ask, so it is put back with it — a render that wiped
+    // the ask's children took the button with them.
+    syncAskEdit(card);
     return node;
+  }
+
+  // ---- Editing a card's own prompt (the pencil on the pinned ask) --------------
+  // A turn's prompt is the user's own text, and re-reading a card often reveals a typo
+  // or a missing detail. The pencil on the ask (`syncAskEdit`) swaps the rendered ask
+  // for a plain editor; pressing Enter asks the host to start a **new turn** from the
+  // edited node's parent with the edited text (`editUserMessage`), which is what makes
+  // the old wording stay in the tree as an ordinary sibling branch. The composer is
+  // not involved anywhere here: this edits *this card's* prompt, it does not compose a
+  // new message, so the composer's text and attachments stay untouched.
+
+  /**
+   * The card an ask belongs to: `.node-ask` is created directly inside the card
+   * (`createNodeCard`) and is a child of it for the card's whole life, so the parent
+   * is the card — and `_nodeId` is what says so, rather than trusting any element.
+   */
+  function askCardOf(ask) {
+    const card = ask && ask.parentElement;
+    return card && card._nodeId ? card : null;
+  }
+
+  /**
+   * The pencil beside a card's pinned ask, created lazily and kept on the card
+   * (`_askEditBtn`) so a repaint puts the **same** element back instead of stacking a
+   * second one. It is offered only where editing can go through: an expanded,
+   * non-sidecar card whose node is not running and does not still own unfinished work
+   * — the same four refusals the host re-checks (`editUserMessage` in
+   * `ChatViewProvider`). The ask's own `hidden` class is what keeps it out of sight on
+   * a collapsed card or a monitor window; there is nothing to edit without a prompt.
+   */
+  function syncAskEdit(card) {
+    if (!card || !card.querySelector) return;
+    const id = card._nodeId;
+    const meta = id ? treeNodes[id] : null;
+    const ask = card.querySelector('.node-ask');
+    if (!ask) return;
+    const want =
+      !!id &&
+      !!card._askText &&
+      !isSidecarKind(meta && meta.kind) &&
+      (!meta || meta.status !== 'running') &&
+      !runningNodes.has(id) &&
+      !lockedNodes.has(id);
+    const btn = card._askEditBtn;
+    if (!want) {
+      if (btn) {
+        btn.remove();
+        card._askEditBtn = null;
+      }
+      return;
+    }
+    // The open editor owns the ask: a pencil inside it would be a second way to
+    // cancel the same edit.
+    if (ask._askEditing) return;
+    if (btn) {
+      ask.appendChild(btn);
+      return;
+    }
+    const button = el('button', 'node-ask-edit', '✎');
+    button.title = tr('Edit this prompt — the answer starts a new branch from the same point');
+    button.dataset.role = 'ask-edit';
+    button.addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      beginAskEdit(card);
+    });
+    card._askEditBtn = button;
+    ask.appendChild(button);
+  }
+
+  /**
+   * Swap the rendered ask for an editor: a textarea pre-filled with the node's **full**
+   * prompt text — the stored text, never the Markdown the ask body shows, because the
+   * editor must not render Markdown — plus one hint line. Esc restores the rendered ask;
+   * Enter asks the host to branch with the edited text and leaves the editor open until
+   * the host answers (a repaint closes it, a refusal does not eat the typing);
+   * Shift+Enter is the textarea's own newline.
+   */
+  function beginAskEdit(card) {
+    const id = card && card._nodeId;
+    const ask = card && card.querySelector ? card.querySelector('.node-ask') : null;
+    if (!id || !ask || ask._askEditing) return;
+    ask._askEditing = true;
+    ask.innerHTML = '';
+    const box = el('div', 'ask-edit');
+    const input = el('textarea', 'ask-edit-input');
+    input.value = typeof card._askText === 'string' ? card._askText : '';
+    const hint = el('div', 'ask-edit-hint', tr('Enter sends, Shift+Enter adds a newline, Esc cancels'));
+    input.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape') {
+        ev.preventDefault();
+        ev.stopPropagation();
+        renderAsk(card);
+        return;
+      }
+      // Shift+Enter is left to the textarea: it inserts a newline and posts nothing.
+      if (ev.key !== 'Enter' || ev.shiftKey) return;
+      ev.preventDefault();
+      const edited = String(input.value || '').trim();
+      // An empty edit is nothing to send; the host refuses it too.
+      if (!edited) return;
+      vscode.postMessage({ type: 'editUserMessage', nodeId: id, text: edited });
+    });
+    box.appendChild(input);
+    box.appendChild(hint);
+    ask.appendChild(box);
+    // The caret goes where the user is about to type. A card that is not on screen
+    // (a hidden ask) cannot take it, and that is fine — the editor is still open.
+    if (typeof input.focus === 'function') input.focus();
+  }
+
+  /**
+   * Put the rendered ask back: the way out of the editor, for Esc and for a repaint.
+   * It renders from the card's stored prompt, so what comes back is exactly what was
+   * there before the edit — Markdown, image attachments and the pencil included.
+   */
+  function renderAsk(card) {
+    const ask = card && card.querySelector ? card.querySelector('.node-ask') : null;
+    if (!ask) return;
+    // A focused editor is going away with the ask's body: hand the caret back first, so
+    // nothing keeps the focus on an element that no longer exists.
+    const open = byClass(ask, 'ask-edit-input');
+    if (open && typeof open.blur === 'function') open.blur();
+    const prevPrompt = promptEl;
+    promptEl = ask;
+    try {
+      addUserPrompt(card._askText, card._askAtts);
+    } finally {
+      promptEl = prevPrompt;
+    }
+  }
+
+  /**
+   * A repaint never leaves a stale editor behind: a card that is (re)described with its
+   * ask already rendered does not go through `addUserPrompt`, so the open editor — a
+   * textarea nobody asked to keep — is closed here first. Cheap when nothing was open.
+   */
+  function cancelAskEdit(card) {
+    const ask = card && card.querySelector ? card.querySelector('.node-ask') : null;
+    if (!ask || !ask._askEditing) return false;
+    renderAsk(card);
+    return true;
   }
 
   function addNotice(kind, text) {
@@ -1878,6 +2262,7 @@
     const node = el('div', 'notice ' + (kind || 'info'), text);
     node.dataset.kind = 'notice';
     logTail().appendChild(node);
+    animateRow(node);
     followActive();
     return node;
   }
@@ -1966,6 +2351,7 @@
   function addThinkingRow(text) {
     const row = makeThinkingRow(text);
     logTail().appendChild(row);
+    animateRow(row);
     return row;
   }
 
@@ -2020,6 +2406,7 @@
     node._thinkingRow = row;
     renderAnswer(node, true);
     messagesEl.appendChild(node);
+    animateRow(node);
     followActive();
     return node;
   }
@@ -2057,6 +2444,9 @@
 
   function ensureStreamText(answer) {
     if (answer._streamText) return answer._streamText;
+    // A rebuild starts from the authoritative text (`node._text`), so a chunk still in
+    // flight is dropped, never merged into a node that is about to go away.
+    dropChunk(answer);
     answer.textContent = '';
     const tn = document.createTextNode('');
     answer.appendChild(tn);
@@ -2071,29 +2461,54 @@
     // item is its row alone), so its visibility follows the text on every write.
     if (answer.classList) answer.classList.toggle('hidden', !String(node._text || '').length && !node.classList.contains('error'));
     if (node.classList.contains('error')) {
+      dropChunk(answer);
       answer._streamText = null;
+      answer._settled = 0;
       answer.textContent = node._text || '';
       return;
     }
     if (finalize) {
       node._streaming = false;
+      // **Merge before the render.** The newest characters of the stream exist only in
+      // the pending span, and `innerHTML` is about to replace the subtree it lives in.
+      mergeChunk(answer);
       answer._streamText = null;
+      answer._settled = 0;
       answer.innerHTML = renderMarkdown(node._text || '');
       return;
     }
+    const full = node._text || '';
     if (!node._streaming) {
       node._streaming = true;
-      ensureStreamText(answer).nodeValue = node._text || '';
+      answer._settled = 0;
+      dropChunk(answer);
+      // `appendData` and not `nodeValue`: it is the streaming surface's one write (and it
+      // is what the offline guard's `Text` stub keeps its `textContent` in step with).
+      // The node `ensureStreamText` hands back here is always a fresh, empty one.
+      ensureStreamText(answer).appendData(full);
+      answer._settled = full.length;
       return;
     }
-    const tn = ensureStreamText(answer);
-    const full = node._text || '';
-    const have = tn.nodeValue.length;
-    if (have < full.length) tn.appendData(full.slice(have));
+    // The delta's new characters: settled characters plus whatever the pending span
+    // still holds is the prefix already on screen, so the slice is exact even when a
+    // delta arrives mid-fade.
+    const have = (answer._settled || 0) + (answer._chunkText ? answer._chunkText.length : 0);
+    if (have >= full.length) return;
+    if (!animationsOn()) {
+      // Exactly today's rendering, with the setting off: one `appendData`, no span.
+      mergeChunk(answer);
+      ensureStreamText(answer).appendData(full.slice(answer._settled || 0));
+      answer._settled = full.length;
+      return;
+    }
+    openChunk(answer, ensureStreamText(answer), full.slice(have));
   }
 
   function finalizeStreamingAnswer() {
     if (!messagesEl) return;
+    // Everything that is still fading is part of the message: settle it before anything
+    // is rendered or moved, so no character is left behind in a span.
+    flushChunks();
     // The message is complete: nothing in it is streaming any more, so its thinking
     // row collapses back to its one line.
     closeActiveRows('thinking');
@@ -2134,7 +2549,17 @@
    */
   function pushThinkingText(row, text) {
     if (!row || !row._textEl) return;
-    textNodeOf(row._textEl).appendData(text);
+    // The reasoning gets the same treatment as an answer's text: the delta's characters
+    // are in the row immediately, the newest chunk fades in, and the span's text is
+    // folded back into the row's own `Text` node within one animation. One span per row
+    // (`openChunk` merges the previous one first).
+    const tn = textNodeOf(row._textEl);
+    if (animationsOn()) {
+      openChunk(row._textEl, tn, text);
+    } else {
+      mergeChunk(row._textEl);
+      tn.appendData(text);
+    }
     // A thought is a step, so a delta that lands in an open run changes that run's count:
     // the header has to be refreshed here, or it keeps the number it had before the thought.
     if (openSteps) updateStepsHead(openSteps);
@@ -3547,6 +3972,7 @@
     const group = ensureStepsGroup();
     logTail().appendChild(node);
     updateStepsHead(group);
+    animateRow(node);
     followActive();
     return node;
   }
@@ -3615,6 +4041,7 @@
     tuckReasoningIntoRun(group);
     logTail().appendChild(node);
     updateStepsHead(group);
+    animateRow(node);
     liveBucket(undefined, true)[index] = node;
     followActive();
     return node;
@@ -3631,14 +4058,18 @@
     if (argsDelta) {
       node._argsRaw = (node._argsRaw || '') + argsDelta;
       // The label is derived from the arguments as they arrive, in place (a rebuild
-      // per delta would throw away the row the reader may have just opened).
+      // per delta would throw away the row the reader may have just opened). The label
+      // is never wrapped: the written text is the whole label, and its element restarts
+      // one short fade (`.label-in`) instead.
       const name = node._verbEl ? node._verbEl.textContent : '';
       const label = toolLabel(name, node._argsRaw);
       if (node._labelEl) {
         node._labelEl.textContent = label;
+        fadeLabel(node._labelEl);
       } else if (label && node._rowEl) {
         node._labelEl = el('span', 'tool-label' + (MONO_LABEL_TOOLS.has(name) ? ' mono' : ''), label);
         node._rowEl.appendChild(node._labelEl);
+        fadeLabel(node._labelEl);
       }
     }
     followActive();
@@ -5553,6 +5984,9 @@
       if (typeof msg.contextPct === 'number') treeNodes[msg.id].contextPct = msg.contextPct;
     }
     if (card) syncContinueButton(card, treeNodes[msg.id] || { id: msg.id, status: msg.status, children: [] });
+    // The pencil on the ask is gated on the node's status too (`syncAskEdit`), and this
+    // patch is how a turn's end reaches its card without a repaint.
+    if (card) syncAskEdit(card);
     // The context state is half of what the composer's own two buttons read (a refused
     // request disables Send and offers the new-epoch entry), and it can arrive *after*
     // the tree was drawn — exactly how a turn dies on a context-length error.
@@ -6224,6 +6658,10 @@
         const statusEl = card.querySelector('.node-status');
         if (statusEl) statusEl.textContent = n.status || '';
         syncContinueButton(card, n);
+        // A repaint never leaves an editor (or a stale textarea) behind, and the
+        // pencil's own gates — running / locked — come from this same description.
+        cancelAskEdit(card);
+        syncAskEdit(card);
         // A card `renderPath` created from a node the `tree` had not described yet
         // still has to pick the `CTX` marker up here (never in a streaming patch:
         // the head exists once).
@@ -6362,6 +6800,11 @@
     }
     for (const id in nodeEls) {
       const meta = treeNodes[id] || { title: '', status: 'done', preview: '' };
+      // A repaint never leaves an editor (or a stale textarea) behind: the rendered ask
+      // goes back **before** this pass re-describes the card, and the pencil is re-read
+      // after it (its gates are the node's status and the two sets `state` fills). Same
+      // rule as the first pass in `renderTree`.
+      cancelAskEdit(nodeEls[id]);
       const onPath = activePathSet.has(id) || agentExpanded(id);
       // Same rule as in `renderTree`: a sidecar is a monitor unless it is the focused
       // node, which is the one card that still renders as the ordinary expanded card.
@@ -6377,6 +6820,7 @@
       // Same story as in `renderTree`: the `CTX` marker belongs to the card, not to
       // one repaint — and this pass can be the one that creates the card.
       syncCtxBadge(nodeEls[id], meta);
+      syncAskEdit(nodeEls[id]);
       // A job card has no conversation: its body mirrors the live job.
       if (meta.kind === 'bg') {
         renderBgBody(nodeEls[id], meta);
@@ -7030,15 +7474,24 @@
       setFollow(false);
       return;
     }
-    // alt + wheel pans the whole tree vertically, and it does so *whatever* is under
-    // the pointer — that is why it sits before the native-scroll-zone check below: a
-    // card, its work log / answer / ask, a thinking block and the composer all pan the
-    // camera instead of scrolling themselves. It is the vertical twin of the shift +
-    // wheel pan further down, and the one gesture that moves the tree from inside a
-    // scroller (where a plain wheel is the zone's own).
+    // alt + wheel pans the whole tree vertically and shift + wheel pans it
+    // horizontally, and both do so *whatever* is under the pointer — that is why the
+    // pair sits before the native-scroll-zone check below: a card, its work log / ask,
+    // a thinking block, an expanded step and the composer all pan the camera instead of
+    // scrolling themselves. Shift belongs here rather than with the plain wheel for a
+    // second reason: those zones have no horizontal scroll at all, so a shift branch
+    // behind their `return` is a gesture that can only be swallowed. Both are the way
+    // to move the tree from inside a scroller, where a plain wheel is the zone's own.
     if (e.altKey) {
       e.preventDefault();
       pan.y -= e.deltaY;
+      applyTransform();
+      setFollow(false);
+      return;
+    }
+    if (e.shiftKey) {
+      e.preventDefault();
+      pan.x -= e.deltaY;
       applyTransform();
       setFollow(false);
       return;
@@ -7050,13 +7503,6 @@
       return; // native scroll
     }
     e.preventDefault();
-    if (e.shiftKey) {
-      // Shift + wheel pans horizontally (kept as a pan escape hatch).
-      pan.x -= e.deltaY;
-      applyTransform();
-      setFollow(false);
-      return;
-    }
     zoomAt(e.clientX, e.clientY, e.deltaY < 0 ? 1.1 : 0.9);
     setFollow(false);
   }, { passive: false });
@@ -8081,6 +8527,10 @@
   function handleMessage(msg) {
     switch (msg.type) {
       case 'tree':
+        // A repaint replaces the cards any fading answer lives in: settle those chunks
+        // into their `Text` nodes first, so the newest characters are never left in a
+        // span the repaint throws away.
+        flushChunks();
         renderTree(msg);
         break;
       case 'path':
@@ -8120,6 +8570,10 @@
         // exactly the old behaviour.
         SETUP = msg.setup && typeof msg.setup === 'object' ? msg.setup : null;
         renderSetupIdentity();
+        // The character / row appear animation (`spinney.streamAnimation`). A replay
+        // shape that predates the field sends nothing — then it is on, which is the
+        // setting's own default and what every fixture in `tools/check-webview.js` gets.
+        streamAnimation = msg.streamAnimation !== false;
         break;
       }
       case 'state':
@@ -8137,6 +8591,10 @@
         // refuses every turn there, so the composer says so up front instead of letting a
         // send fail. A host that predates the flag sends nothing: not read-only.
         readOnly = msg.readOnly === true;
+        // The ask's edit pencil is gated on exactly these two sets — a running or locked
+        // node is refused host-side (`editUserMessage`) — so every card re-reads them.
+        // The `tree` did not change, which is why this cannot wait for a repaint.
+        for (const id in nodeEls) syncAskEdit(nodeEls[id]);
         updateComposerButtons();
         setBusy(msg.busy);
         setStatus(msg.status);
@@ -8291,6 +8749,9 @@
         perfOnViewState(msg);
         break;
       case 'reset':
+        // The cards (and the fading chunks inside them) are all going: settle first,
+        // the same way a `tree` repaint does.
+        flushChunks();
         clearLiveTools();
         resetItems();
         for (const id in nodeEls) {
@@ -8748,12 +9209,52 @@
     true,
   );
 
+  /**
+   * Split a `spinney:` file link into the path and the line range it names.
+   *
+   * The shape is `spinney:<path>#L12` or `spinney:<path>#L12-L30`, with no fragment at
+   * all for a file whose lines were not named. The path is kept exactly as written
+   * (only percent-decoded, because Markdown encodes a space in a link target) and is
+   * resolved against the harness root by the host — the webview has no root to resolve
+   * against. A malformed fragment (`#Lx`) names no line rather than a wrong one.
+   */
+  function parseFileLink(href) {
+    const rest = href.slice('spinney:'.length);
+    const hash = rest.indexOf('#');
+    const raw = hash >= 0 ? rest.slice(0, hash) : rest;
+    let filePath = raw;
+    try {
+      filePath = decodeURIComponent(raw);
+    } catch (err) {
+      /* not percent-encoded: keep the path as written */
+    }
+    if (!filePath) return null;
+    const ref = { path: filePath, line: undefined, endLine: undefined };
+    const match = hash >= 0 ? rest.slice(hash + 1).match(/^L(\d+)(?:-L(\d+))?$/) : null;
+    if (match) {
+      ref.line = Number(match[1]) || undefined;
+      const end = Number(match[2]) || 0;
+      if (end > (ref.line || 0)) ref.endLine = end;
+    }
+    return ref;
+  }
+
   document.addEventListener('click', (event) => {
     const target = event.target;
     const anchor = target && target.closest ? target.closest('a[href]') : null;
     if (!anchor) return;
     event.preventDefault();
     const href = anchor.getAttribute('href') || '';
+    // A `[src/a.ts:12-30](spinney:src/a.ts#L12-L30)` link is the chat's own file
+    // reference: the host opens the file in an editor tab on those lines instead of
+    // handing it to the system browser.
+    if (href.indexOf('spinney:') === 0) {
+      const ref = parseFileLink(href);
+      if (ref) {
+        vscode.postMessage({ type: 'openFile', path: ref.path, line: ref.line, endLine: ref.endLine });
+      }
+      return;
+    }
     let url;
     try {
       url = new URL(href, window.location.href);

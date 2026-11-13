@@ -411,7 +411,14 @@ export function makeExecCommandTool(getAccess: () => BackgroundAccess | null): A
       // cannot balloon memory while it holds the turn.
       const killOnTruncate = !canBackground;
       const startedAt = Date.now();
-      const handle = spawnShellCommand(command, cwd, { killOnTruncate });
+      // Every command is born knowing which node started it and how to reach this
+      // window's control plane, so a script can act on its own window without being
+      // told which one (`tools/reload-window.mjs` is the whole use). The ids come
+      // from the owner resolved above — never from an argument, which could name a
+      // different conversation — and the plane contributes only its instance id and
+      // the discovery file's path, never the bearer token.
+      const spawnEnv = access?.spawnEnv?.(owner) ?? {};
+      const handle = spawnShellCommand(command, cwd, { killOnTruncate, env: spawnEnv });
       perf(`exec start ${pidField(handle)} run_type=${runType} cwd=${cwd} cmd=${redactCommand(command)}`);
       // A promoted job is registered under the node whose turn spawned it, so it
       // renders in that node's card and its completion notice returns to that branch

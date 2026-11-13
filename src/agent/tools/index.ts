@@ -1,24 +1,25 @@
 import { ToolDefinition } from '../types';
-import { finishHopTool } from './finishHop';
-import { hopSessionTool } from './hopSession';
+import { createSessionTool } from './createSession';
 import { listNodesTool } from './listNodes';
+import { listSessionsTool } from './listSessions';
 import { readImageTool } from './readImage';
 import { renameSessionTool } from './renameSession';
 import { sendAgentMessageTool } from './sendAgentMessage';
 import { sendReadonlyAgentMessageTool } from './sendReadonlyAgentMessage';
+import { sendSessionMessageTool } from './sendSessionMessage';
 import { spawnAgentsTool } from './spawnAgents';
 import { spawnReadonlyAgentsTool } from './spawnReadonlyAgents';
 
 /**
  * The tools the **provider** orchestrates and `Agent` intercepts (spawning,
- * hopping, reading an image). Their schemas live one-per-file here; their
+ * sessions, reading an image). Their schemas live one-per-file here; their
  * execution stays in `Agent.executeToolCall` (it needs the provider's handlers).
  *
  * Each tool declares the capability it needs (`requires`). `Agent.getTools()`
  * filters this single list by the agent's capabilities, so the tool list the
  * model sees and the capabilities the prompt describes can never drift apart.
  */
-export type ToolRequirement = 'vision' | 'spawn' | 'spawnReadOnly' | 'hop' | 'hopSession' | 'finishHop';
+export type ToolRequirement = 'vision' | 'spawn' | 'spawnReadOnly' | 'sessions';
 
 export interface InterceptedTool {
   definition: ToolDefinition;
@@ -34,20 +35,16 @@ export interface ToolCapabilities {
   canSpawn: boolean;
   /** May spawn / message read-only sub-agents. */
   canSpawnReadOnly: boolean;
-  /** Main agent only: list the tree, rename the session. */
-  canHop: boolean;
   /**
-   * Main agent only, and only while `spinney.hopSession.enabled` is on: hand a
-   * task to a fresh session. Kept apart from `canHop` so switching hopping off
-   * never takes `list_nodes` / `rename_session` away.
+   * Main agent only: the session surface — `create_session`,
+   * `send_session_message`, `list_sessions`, `list_nodes` and `rename_session`.
+   *
+   * One capability for all five, because they are one surface: a caller that may
+   * start a session and message a node also has to be able to name them, and a
+   * sub-agent (or a sidecar card) never may — its report goes up to its
+   * dispatcher, not sideways into another conversation.
    */
-  hopEnabled: boolean;
-  /**
-   * Main agent only, and only in a session a `return_when_finished` hop started:
-   * `finish_hop`, the child's own hand-back. A `fire_and_forget` child, a session
-   * no hop started, and every sub-agent answer `false` here.
-   */
-  finishHop: boolean;
+  canSessions: boolean;
 }
 
 /** Every intercepted tool, in the order it is advertised. */
@@ -57,8 +54,9 @@ export const INTERCEPTED_TOOLS: readonly InterceptedTool[] = [
   sendAgentMessageTool,
   spawnReadonlyAgentsTool,
   sendReadonlyAgentMessageTool,
-  hopSessionTool,
-  finishHopTool,
+  createSessionTool,
+  sendSessionMessageTool,
+  listSessionsTool,
   listNodesTool,
   renameSessionTool,
 ];
@@ -71,12 +69,8 @@ function isAvailable(requires: ToolRequirement, caps: ToolCapabilities): boolean
       return caps.canSpawn;
     case 'spawnReadOnly':
       return caps.canSpawnReadOnly;
-    case 'hop':
-      return caps.canHop;
-    case 'hopSession':
-      return caps.hopEnabled;
-    case 'finishHop':
-      return caps.finishHop;
+    case 'sessions':
+      return caps.canSessions;
   }
 }
 

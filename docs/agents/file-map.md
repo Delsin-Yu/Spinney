@@ -3,8 +3,8 @@
 - `src/extension.ts` — activation; registers the webview provider + commands.
 - `src/chat/ChatViewProvider.ts` — the window coordinator: session/persistence,
   config (including `applyModelCards` / `refreshKeys`),
-  image attachment, titles, transcripts, the global hop bookkeeping, the
-  control-plane host, the HTML shell, the Model Card Tree page controller, and
+  image attachment, titles, transcripts, the session tools’ cross-session reads,
+  the control-plane host, the HTML shell, the Model Card Tree page controller, and
   webview message routing. It owns the
   `runtimes: Map<sessionId, SessionRuntime>` and a `PanelManager` (tabs); the editor
   `WebviewPanel` lifecycle is `restorePanel` (serializer) + `postAllState`.
@@ -123,11 +123,13 @@
   **vscode-free** — the caller passes the paths — which is what makes
   `tools/session-store-acceptance.js` possible. See
   `invariants/session-persistence.md`.
-- `src/chat/sessionTitles.ts` — automatic session titles: the gates
-  (`shouldAutoTitle`: locked / cooldown / growth), the conversation digest, the
-  naming prompts (single + batched), `sanitizeTitle` / `parseBatchTitles`, and the
-  zero-cost `heuristicTitle` fallback. Pure prompt/data helpers — no VS Code APIs,
-  so it is smoke-testable outside the Extension Host.
+- `src/chat/sessionTitles.ts` — automatic session titles: the once-only gate
+  (`shouldAutoTitle`: never twice, never for a locked title; `noteAutoTitle` is the
+  write that closes it, and a heuristic fallback leaves it open), the conversation
+  digest, the naming prompts (single + batched), `sanitizeTitle` /
+  `parseBatchTitles`, and the zero-cost `heuristicTitle` fallback. Pure prompt/data
+  helpers — no VS Code APIs, so it is smoke-testable outside the Extension Host
+  (`tools/check-titles.js`).
 - `src/chat/promptSnippets.ts` — the composer's **prompt snippets**: the two texts
   the extension ships (`SHIPPED_PROMPT_SNIPPETS` — `Plan` / `Implement Parallel`)
   and `resolvePromptSnippets(setting)`, which merges the user's
@@ -146,8 +148,10 @@
   outside the Extension Host).
 - `src/http/controlServer.ts` — the opt-in local HTTP control plane
   (`/health`, `/state`, `/wait-for-finish`, `/navigate`, `/continue`, `/stop`,
-  `/session/start`, `/reload-window`); token + discovery file, loopback only. See
-  "External control plane & the `hvsc` supervisor".
+  `/session/start`, `/reload-window` — immediate, or deferred to the window's own
+  idle moment with `{idle:true}`); token + discovery file, loopback only.
+  `controlEnv()` is what a command receives (instance id + discovery path, never the
+  token). See "External control plane & the deferred reload".
 - `src/manual.ts` — the shipped **user manual**: `manualFileNames()` /
   `canonicalLocale()` (which page a display language picks, through
   `languageTags.ts`) and `showManual()` (`spinney.showManual` reads the page with
@@ -162,8 +166,12 @@
 - `docs/agents/multi-session.md` — the frozen multi-session / multi-branch contract
   (P1–P4): view-focus vs turn-basis, the host⇄webview protocol, the tools-side
   `BackgroundHub` API, and the acceptance evidence.
-- `tools/hyper-vscode/` — the `hvsc` supervisor (CLI + daemon + `serve.ps1`),
-  **not** shipped in the `.vsix`.
+- `tools/reload-window.mjs` — the one-shot **deferred reload** script an agent runs
+  as an ordinary `exec_command` (`node tools/reload-window.mjs --message "…"`): it
+  posts `POST /reload-window {idle:true, continue}` with the node id and session id
+  it read from its own environment and exits; the window reloads itself when idle.
+  No dependencies, no daemon, no state — and no fallback when the environment does
+  not name a window. Dev-only, **not** shipped in the `.vsix`.
 - `tools/harness-test.mjs` — the control-plane acceptance harness for P1–P4 (suites
   `health`, `sessions`, `concurrency`, `navigation`, `background`, `signals`,
   `branch`, `selftest`). Dev tooling: `.vscodeignore` excludes `tools/**`, so it is never shipped.
@@ -212,8 +220,8 @@
   the identity line in place), the completion-signal injection hook
   (`setSignalHandler`; consulted after each whole tool batch, like the `read_image`
   image block) and the interception of the provider-orchestrated tools
-  (`spawn_*` / `send_*` / `hop_session` / `finish_hop` / `list_nodes` / `rename_session` /
-  `read_image`). The prompt text is **not** here — see `prompt.ts`.
+  (`spawn_*` / `send_*` / `create_session` / `send_session_message` / `list_sessions` /
+  `list_nodes` / `rename_session` / `read_image`). The prompt text is **not** here — see `prompt.ts`.
 - `src/agent/prompt.ts` — **the system prompt**: both templates, the
   `{{placeholder}}` renderer (plus the unresolved-placeholder guard) and the two
   `AGENTS.md` snapshots (systemwide + workspace, rendered by `agentsMdSection`). One
@@ -228,7 +236,9 @@
 - `src/agent/languages.ts` — `replyLanguageName(value, vscodeLocale)`: the
   reply-language setting (`auto` or a VS Code language tag) → the language **name**
   the prompt carries, named through `Intl.DisplayNames` so the tag list lives only
-  in the setting's `enum`. That `enum` is ordered by use (`auto`, `en`, `zh-Hans`,
+  in the setting's `enum`; `replyLanguageTag` beside it resolves the same setting to
+  its BCP-47 tag (`''` for a free-form name), which only the `exec_command` title
+  description carries. That `enum` is ordered by use (`auto`, `en`, `zh-Hans`,
   `zh-Hant`, then the rest) and its `enumDescriptions` are these same names, so the
   dropdown reads like the prompt does; `zh-cn`/`zh-tw` stay aliased because
   `vscode.env.language` reports the region tags.
@@ -347,7 +357,8 @@
   resampler and the JPEG decoder — see `testing.md`.
 - `src/agent/tools/` — one file per intercepted tool (`readImage`, `spawnAgents`,
   `spawnReadonlyAgents`, `sendAgentMessage`, `sendReadonlyAgentMessage`,
-  `hopSession`, `finishHop`, `listNodes`, `renameSession`) plus `index.ts`, the barrel that
+  `createSession`, `sendSessionMessage`, `listSessions`, `listNodes`, `renameSession`) plus
+  `index.ts`, the barrel that
   filters them.
   Each declares its `requires` capability tag, so the advertised tools and the
   prompt's capability wording cannot drift apart.
@@ -461,7 +472,13 @@
   background job cards + `.bgnotify` notification blocks, and the window-global
   terminal dock).
   **A turn card is one essay.** `.node-ask` pins the user's prompt and `.node-work` is the
-  card's **only scroller**, holding every row of the turn in order. The process is grouped
+  card's **only scroller**, holding every row of the turn in order. The ask also carries the
+  small `.node-ask-edit` pencil of an idle turn card (`syncAskEdit` / `beginAskEdit`): a click
+  swaps the rendered ask for a textarea holding the node's **raw** prompt text plus one hint
+  line (Enter sends, Shift+Enter adds a newline, Esc cancels), Enter posts
+  `editUserMessage` — which the host turns into a branch from the edited node's **parent**,
+  never an in-place rewrite — and Esc, or any repaint, puts the rendered ask back.
+  The process is grouped
   **per run of tool rows**: a tool row opens a `.steps` group (`data-kind="steps"`) with a
   `Ran N steps` / `Ran 1 step` header over its own `.steps-body`, and the next assistant
   **text** closes it — the prose is appended to `.node-work` itself, never into a group's
@@ -490,7 +507,14 @@
   place — the `> args` line, the result, an error, the usage line, all 11 px `--text-dim`).
   `renderItemInto` (the history repaint) goes through the **same** `addTool` /
   `makeThinkingRow` / `addAssistant` the live path uses and splits the items with the same
-  per-run rule, and `tools/check-webview.js` pins both halves. While a thinking row is
+  per-run rule, and `tools/check-webview.js` pins both halves. The **appear animation**
+  lives here too: a delta's newest characters briefly sit in a transient `.chunk-in` span
+  that the script merges back into the answer's (or the thinking row's) own `Text` node on
+  `animationend`, a new row arrives on `.row-in`, and a live tool row's label restarts
+  `.label-in` in place — all of it off when `spinney.streamAnimation` is false or the OS
+  asks for reduced motion (`animationsOn` in the animation block above the message
+  rendering; the CSS and its `@media (prefers-reduced-motion: reduce)` block are at the
+  end of `media/style.css`). While a thinking row is
   open, its 240 px box carries its own small green **follow** dot (`attachRowLock`), whose
   click `stopPropagation`s the row's click (which opens and closes the row). The log
   carries one green dot (`attachLock`): green means **following** the newest content, an
@@ -513,9 +537,10 @@
   Canvas gestures live in one block near the end: LMB/MMB drag pans by offset,
   RMB-hold autoscroll-pans towards the cursor (browser middle-click semantics,
   with an origin marker and the `all-scroll` cursor), ctrl+wheel zooms,
-  alt+wheel pans vertically — from anywhere in the tree, so a card, a thinking
-  block and the composer pan instead of scrolling themselves — and shift+wheel
-  pans horizontally.
+  alt+wheel pans vertically and shift+wheel pans horizontally — both from
+  anywhere in the tree, including over a native scroller, so a card, a thinking
+  block, a work log, an expanded step and the composer pan instead of scrolling
+  themselves.
   RMB on a **card header** is the exception to that block: a `.node-head` opens the
   webview's own **node menu** (`openNodeMenu` → the host's `copyNodeId` case in
   `ChatViewProvider.handlePanelMessage`), because the header is `user-select: none`

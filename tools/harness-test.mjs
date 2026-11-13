@@ -14,10 +14,10 @@
  * an agent turn, which makes the window busy for as long as the caller runs —
  * blocking on "idle" would deadlock. Every suite polls `GET /state` instead.
  *
- * Discovery mirrors `tools/hyper-vscode/hvsc.mjs`: read
- * `<globalStorage>/http/<instanceId>.json` (port + bearer token + pid +
- * workspace) from the usual VS Code global-storage folders, keep the newest
- * record whose pid answers `process.kill(pid, 0)`.
+ * Discovery mirrors the extension's own file (`writeDiscovery` in
+ * `src/http/controlServer.ts`): read `<globalStorage>/http/<instanceId>.json`
+ * (port + bearer token + pid + workspace) from the usual VS Code global-storage
+ * folders, keep the newest record whose pid answers `process.kill(pid, 0)`.
  *
  * Phasing: the spec is implemented P1→P4, so suites are **phased tolerant**.
  * A suite that needs a `/state` field the host does not expose yet prints
@@ -31,7 +31,7 @@
  * Usage:
  *   node tools/harness-test.mjs <suite...|all> [options]
  *
- *   Suites: health sessions concurrency navigation background signals branch hop selftest
+ *   Suites: health sessions concurrency navigation background signals branch sessionMessage selftest
  *
  *   --instance <pid-NNNN>    target that discovery instance (by id or file stem)
  *   --discovery <file>       target the control plane recorded in that JSON file
@@ -59,7 +59,7 @@ import * as path from 'node:path';
 // ---------------------------------------------------------------------------
 
 const EXT_ID = 'de-yu.spinney';
-const SUITES = ['health', 'sessions', 'concurrency', 'navigation', 'background', 'signals', 'branch', 'hop', 'selftest'];
+const SUITES = ['health', 'sessions', 'concurrency', 'navigation', 'background', 'signals', 'branch', 'sessionMessage', 'selftest'];
 const DEFAULT_TIMEOUT_SEC = 180;
 const DEFAULT_INTERVAL_MS = 250;
 /** How long a suite waits for a turn's transcript dump to appear. */
@@ -101,6 +101,8 @@ Suites:
   signals       a finished job's notice lands INSIDE the owning node: no new node,
                 unchanged node count, backgroundNodes still the turn node
   branch        two nodes of ONE session stream at once; node-scoped POST /stop
+  sessionMessage  POST /session/message into one node: 409 while it runs, 200 when
+                idle, 409 for an unknown session / node
   selftest      pure-logic checks of this script's own helpers (needs no window)
 
 Options:
@@ -377,7 +379,7 @@ function pidAlive(pid) {
   }
 }
 
-/** Where the extension writes its per-process discovery files (mirrors hvsc). */
+/** Where the extension writes its per-process discovery files (mirrors `writeDiscovery`). */
 function globalStorageDirs(env = process.env) {
   const override = (env.HARNESS_GLOBAL_STORAGE || env.HYPER_VSCODE_GLOBAL_STORAGE || '').trim();
   if (override) {
@@ -777,6 +779,7 @@ function makeClient(target) {
     startSession: (payload) => request('POST', '/session/start', payload),
     navigate: (payload) => request('POST', '/navigate', payload),
     continueFrom: (payload) => request('POST', '/continue', payload),
+    sessionMessage: (payload) => request('POST', '/session/message', payload),
     stop: (payload) => request('POST', '/stop', payload),
   };
 }
@@ -993,37 +996,6 @@ function backgroundPrompt(runId) {
   return (
     `HARNESS-TEST ${runId} BG: call the exec_command tool exactly once with ${args}, ` +
     'then reply with the returned background id and nothing else. Do not call any other tool.'
-  );
-}
-
-/**
- * A hop child that ends its **first turn without calling `finish_hop`**, while a
- * background job it just started is still running — the shape that used to return
- * early (the hop return fired on turn end, and the origin resumed while the child
- * still owned the job). The hand-back is a separate, steered turn below.
- */
-function hopBusyChildPrompt(runId) {
-  const args = JSON.stringify({ command: sleepCmd(30000), title: 'A background command for the hop', run_type: 'background' });
-  return (
-    `HARNESS-TEST ${runId} HOP-CHILD: call the exec_command tool exactly once with ${args}, ` +
-    'then reply with the single word "ok" and end your turn immediately. ' +
-    'Do not wait for the command, do not join it, do not check it, and do not call any other tool. ' +
-    'In particular do NOT call finish_hop in this turn.'
-  );
-}
-
-/**
- * The steer that makes the child hand back: a node id the source session does not have
- * (the tool must answer an error naming it), then the dispatch node (accepted, and the
- * same landing node), then one more call (the hand-back is spent).
- */
-function hopFinishPrompt(runId, badNodeId, landingNodeId) {
-  return (
-    `HARNESS-TEST ${runId} HOP-FINISH: call the finish_hop tool three times, in this order, one after another. ` +
-    `1) with ${JSON.stringify({ source_session_node_id: badNodeId })} — read the error it answers. ` +
-    `2) with ${JSON.stringify({ source_session_node_id: landingNodeId })}. ` +
-    '3) once more with no arguments. ' +
-    'Then reply with the single word "HANDED" and end your turn. Do not call any other tool.'
   );
 }
 
@@ -2560,361 +2532,141 @@ async function suiteSelftestAll(cx) {
 
 
 // ---------------------------------------------------------------------------
-// Suite: hop — the answer comes back to the session that dispatched it
+// Suite: sessionMessage — POST /session/message delivers into one exact node
 // ---------------------------------------------------------------------------
 
-const HOP_RECEIPT_MARK = '[session hop receipt]';
-
-/** The session's transcript dumps, each with its meta line (the hop's evidence). */
-function sessionMetas(cx, sessionId) {
-  const out = [];
-  for (const file of sessionTranscriptFiles(cx.transcriptDir(sessionId))) {
-    let parsed;
-    try {
-      parsed = parseTranscriptJsonl(fs.readFileSync(file, 'utf8'));
-    } catch {
-      continue;
-    }
-    out.push({ file, nodeId: path.basename(file, '.jsonl'), meta: parsed.meta });
-  }
-  return out;
-}
-
 /**
- * A hop over the control plane (`POST /session/start {returnTo:true}`), in the shape
- * the **child-decides** contract has: nothing returns until the hopped-to session
- * calls `finish_hop`.
+ * A message to one node of one session (`POST /session/message {sessionId, nodeId,
+ * message}`), in the shape the two session tools give the agent:
  *
- *  - `returnTo` is refused without an explicit `originSessionId`, and with a
- *    `sessionId` (a hop always creates a fresh session);
- *  - the child's id is reported in `/state.hops` as soon as the child session
- *    exists — that id, not a timestamp, is what the return trip matches on;
- *  - the child's first turn ends **while a background job it started still runs**, and
- *    then the session goes idle: **no receipt may land** at either moment, and the hop
- *    must still be armed (`/state.hops`, no `finishRequested`). A turn end is not a
- *    hand-back — that is what makes a hopped session steerable;
- *  - the child is then **steered** to call `finish_hop`: a node id that does not exist
- *    must be refused with an error naming the problem, the dispatch node is accepted,
- *    and a second call answers "no armed hop";
- *  - a **decoy** session created while the hop is in flight, finishing first, must
- *    not steal the receipt: the receipt names the child and contains no trace of
- *    the decoy (this is the regression that made a hop answer land in the wrong
- *    conversation);
- *  - only then does the receipt land, on the hop's return node, saying the child
- *    `called finish_hop and handed back its report` (no `status:` wording), without
- *    focusing the origin's tab, and the hop leaves `/state.hops` with
- *    `pendingReceipts` back to 0.
+ *  - a message into a node that has a **live run** is refused with `409` — a second
+ *    agent on one conversation line is exactly what the node-scoped rule prevents,
+ *    and the caller is expected to wait and retry;
+ *  - the same message into the **same node** once it is idle is `200`, and the
+ *    answer names the new node the turn runs in (so the caller can follow it);
+ *  - an unknown session and an unknown node are refused (`409`), naming the
+ *    problem, instead of silently starting a turn somewhere else.
+ *
+ * The first turn is slow enough to be observed running, and the suite waits for
+ * the session to be idle (no run, no locked node) before the accepted send.
  */
-async function suiteHop(cx) {
+async function suiteSessionMessage(cx) {
   const checks = makeChecks();
-  const name = 'hop';
+  const name = 'sessionMessage';
 
-  const noOrigin = await cx.client.startSession({
-    title: `harness-test ${cx.runId} HOP-NOORIGIN`,
-    prompt: `HARNESS-TEST ${cx.runId} HOP-NOORIGIN: reply with the single word "ok".`,
-    returnTo: true,
-  });
-  checks.check(
-    'returnTo without originSessionId is refused',
-    noOrigin.status === 409 && /originSessionId/.test(String(noOrigin.body?.error ?? '')),
-    `HTTP ${noOrigin.status}: ${noOrigin.body?.error ?? JSON.stringify(noOrigin.body)}`,
-  );
-
-  const withSessionId = await cx.client.startSession({
-    sessionId: 'harness-test-no-such-session',
-    prompt: 'x',
-    returnTo: true,
-    originSessionId: 'harness-test-no-such-session',
-  });
-  checks.check(
-    'returnTo + sessionId is refused (a hop creates its own session)',
-    withSessionId.status === 409 && /fresh session/i.test(String(withSessionId.body?.error ?? '')),
-    `HTTP ${withSessionId.status}: ${withSessionId.body?.error ?? JSON.stringify(withSessionId.body)}`,
-  );
-
-  const origin = await startSession(cx, { label: 'HOP', prompt: longRunPrompt(cx.runId, 'HOP', 20000) });
-  if (origin.fail) {
-    return suiteResult(name, 'FAIL', origin.fail, checks);
+  const started = await startSession(cx, { label: 'MSG', prompt: longRunPrompt(cx.runId, 'MSG', 15000) });
+  if (started.fail) {
+    return suiteResult(name, 'FAIL', started.fail, checks);
   }
-  if (origin.skip) {
-    return suiteResult(name, 'SKIP', origin.skip, checks);
+  if (started.skip) {
+    return suiteResult(name, 'SKIP', started.skip, checks);
+  }
+  const sessionId = started.sessionId;
+  const nodeId = started.nodeId;
+  checks.check(
+    'POST /session/start reports the first node',
+    typeof nodeId === 'string' && nodeId.length > 0,
+    String(nodeId),
+  );
+  if (!nodeId) {
+    return suiteResult(name, 'FAIL', 'the suite has no node to address', checks);
   }
 
-  const armed = await cx.client.startSession({
-    title: `harness-test ${cx.runId} HOP-CHILD`,
-    prompt: hopBusyChildPrompt(cx.runId),
-    returnTo: true,
-    originSessionId: origin.sessionId,
-  });
-  checks.check(
-    'a hop is accepted and queued',
-    armed.status === 202 && armed.body?.queued === true && armed.body?.originSessionId === origin.sessionId,
-    `HTTP ${armed.status}: ${JSON.stringify(armed.body)}`,
-  );
-
-  // The child's id must be in /state.hops before the child's first turn can end.
-  const armedPoll = await pollState(
+  // The refused case: the node is streaming its first turn.
+  const running = await pollState(
     cx,
-    (state) => {
-      const hop = Array.isArray(state.hops)
-        ? state.hops.find((h) => h && h.originSessionId === origin.sessionId)
-        : null;
-      return hop && typeof hop.targetSessionId === 'string' && hop.targetSessionId ? hop : undefined;
-    },
-    120000,
+    (state) => (sessionRunningNodes(state, sessionId).includes(nodeId) ? true : undefined),
+    60000,
   );
-  if (!armedPoll.ok) {
-    return suiteResult(
-      name,
-      'FAIL',
-      `the hop never reported a targetSessionId in /state.hops (${JSON.stringify(armedPoll.state?.hops ?? null)})`,
-      checks,
-    );
-  }
-  const childHop = Array.isArray(armedPoll.state?.hops)
-    ? armedPoll.state.hops.find((h) => h && h.originSessionId === origin.sessionId)
-    : undefined;
-  if (!childHop) {
-    return suiteResult(name, 'FAIL', 'the hop vanished from /state.hops after it was observed', checks);
-  }
-  const childId = childHop.targetSessionId;
-  cx.ctx.created.push({
-    id: childId,
-    nodeId: null,
-    title: `harness-test ${cx.runId} HOP-CHILD`,
-    label: 'HOP-CHILD',
-    suite: cx.currentSuite,
-  });
-  checks.check(
-    'the hop names the node the answer goes back to',
-    typeof childHop.originNodeId === 'string' && childHop.originNodeId.length > 0,
-    String(childHop.originNodeId),
-  );
-  checks.check(
-    'the armed hop carries no finishRequested yet',
-    childHop.finishRequested !== true,
-    JSON.stringify(childHop),
-  );
-
-  // A decoy created *while the hop is in flight*, with a short turn so it finishes
-  // before the child: the old timestamp rule would have reported its answer back.
-  const decoy = await startSession(cx, { label: 'HOP-X', prompt: longRunPrompt(cx.runId, 'HOP-X', 1500) });
-  if (decoy.fail) {
-    checks.check('the decoy session started', false, decoy.fail);
-  }
-  if (decoy.skip) {
-    checks.subskip('the decoy session started', decoy.skip);
-  }
-
-  // The child's first turn must end while its background job is still running: that is
-  // the shape that used to come back early. Watch for the turn's dump together with a
-  // session that still owns work (a running job / a queued notice), and assert no
-  // receipt has landed in the origin at that moment.
-  const endedBusy = await pollUntil(
-    async () => {
-      const dump = sessionMetas(cx, childId).find((d) => d.meta?.status === 'done');
-      if (!dump) {
-        return undefined;
-      }
-      const state = await cx.client.state();
-      const row = sessionMap(state.body).get(childId);
-      const locked = Array.isArray(row?.lockedNodes) ? row.lockedNodes.length : 0;
-      if (!row || row.running || locked === 0) {
-        return undefined;
-      }
-      return { dump, row };
-    },
-    { timeoutMs: 120000, intervalMs: 500 },
-  );
-  if (!endedBusy.ok) {
+  if (!running.ok) {
     checks.subskip(
-      'the child ended its turn while its background job was still running',
-      'the turn-end / job-running window was not observed; the "a turn end is not a hand-back" window was not exercised',
+      'a message into a node with a live run is refused',
+      'the first turn was never observed running on that node, so the busy case was not exercised',
     );
   } else {
+    const busy = await cx.client.sessionMessage({
+      sessionId,
+      nodeId,
+      message: `HARNESS-TEST ${cx.runId} MSG-BUSY: reply with the single word "ok".`,
+    });
     checks.check(
-      'the child ended its turn while it still owned a running job',
-      true,
-      `locked=${JSON.stringify(endedBusy.value.row.lockedNodes)}`,
-    );
-    checks.check(
-      'the child did not call finish_hop in its first turn',
-      !String(endedBusy.value.dump.meta?.prompt ?? '').includes('HOP-FINISH'),
-      'the scripted first turn must not hand back',
-    );
-    const earlyReceipt = sessionMetas(cx, origin.sessionId).find((d) =>
-      String(d.meta?.prompt ?? '').startsWith(HOP_RECEIPT_MARK),
-    );
-    checks.check(
-      'no receipt lands in the origin while the child still owns the job',
-      !earlyReceipt,
-      earlyReceipt ? `receipt ${earlyReceipt.nodeId} already landed` : 'no receipt yet',
+      'a message into a node with a live run is refused (409)',
+      busy.status === 409 && busy.body?.ok !== true,
+      `HTTP ${busy.status}: ${busy.body?.error ?? JSON.stringify(busy.body)}`,
     );
   }
-  const childNodeId = endedBusy.ok ? endedBusy.value.dump.nodeId : null;
 
-  // The child ends its turn **without** finish_hop, then its background job ends and the
-  // session goes idle. Nothing may come back at either moment: a turn end is not a
-  // hand-back, and the hop must still be armed afterwards.
-  const wentIdle = await pollState(
+  // The accepted case: the same node, now idle (no run, no unfinished work).
+  const idle = await pollState(
     cx,
     (state) => {
-      // The child must really have run: a session that has not finished a turn yet is
-      // not "idle after its work", it simply has not started.
-      const finished = sessionMetas(cx, childId).some((d) => d.meta?.status === 'done');
-      if (!finished) {
+      const row = sessionMap(state).get(sessionId);
+      if (!row || row.running === true) {
         return undefined;
       }
-      const row = sessionMap(state).get(childId);
-      const locked = Array.isArray(row?.lockedNodes) ? row.lockedNodes.length : 0;
-      return row && !row.running && locked === 0 ? row : undefined;
+      const runs = Array.isArray(row.runningNodes) ? row.runningNodes : [];
+      const locked = Array.isArray(row.lockedNodes) ? row.lockedNodes : [];
+      return runs.length === 0 && locked.length === 0 ? row : undefined;
     },
     180000,
   );
-  if (!wentIdle.ok) {
-    checks.subskip(
-      'the child session went idle after its background job',
-      `the child never reported idle: ${JSON.stringify(sessionMap(wentIdle.state ?? {}).get(childId) ?? null)}`,
-    );
-  } else {
+  if (!idle.ok) {
     checks.check(
-      'the child session went idle with no hand-back',
-      true,
-      `lockedNodes=${JSON.stringify(wentIdle.value?.lockedNodes ?? null)}`,
+      'the session went idle after its first turn',
+      false,
+      JSON.stringify(sessionMap(idle.state ?? {}).get(sessionId) ?? null),
     );
-    const idleReceipt = sessionMetas(cx, origin.sessionId).find((d) =>
-      String(d.meta?.prompt ?? '').startsWith(HOP_RECEIPT_MARK),
-    );
-    checks.check(
-      'no receipt lands when the child goes idle (a turn end is not a hand-back)',
-      !idleReceipt,
-      idleReceipt ? `receipt ${idleReceipt.nodeId} already landed` : 'no receipt yet',
-    );
-    const stillArmed = Array.isArray(wentIdle.state?.hops)
-      ? wentIdle.state.hops.find((h) => h && h.originSessionId === origin.sessionId)
-      : undefined;
-    checks.check(
-      'the hop is still armed after that turn end',
-      Boolean(stillArmed) && stillArmed.finishRequested !== true,
-      JSON.stringify(stillArmed ?? null),
-    );
-  }
-
-  // The steer: the child itself calls finish_hop — once with a node id that does not
-  // exist (the tool must name the problem), once with the dispatch node (the landing
-  // node), once more (the hand-back is spent).
-  const badNodeId = `harness-test-${cx.runId}-nosuchnode`;
-  const steerReason = !childNodeId
-    ? 'the child turn node was never observed'
-    : !wentIdle.ok
-      ? 'the child session never went idle'
-      : '';
-  if (steerReason) {
-    checks.subskip('the child was steered to call finish_hop', steerReason);
     const bad = checks.failures();
-    return suiteResult(
-      name,
-      bad.length ? 'FAIL' : 'SKIP',
-      bad.length ? `${bad.length} check(s) failed` : steerReason,
-      checks,
-    );
+    return suiteResult(name, bad.length ? 'FAIL' : 'SKIP', 'the session never went idle', checks);
   }
-  const steer = await cx.client.continueFrom({
-    sessionId: childId,
-    nodeId: childNodeId,
-    message: hopFinishPrompt(cx.runId, badNodeId, childHop.originNodeId),
+  const delivered = await cx.client.sessionMessage({
+    sessionId,
+    nodeId,
+    message: `HARNESS-TEST ${cx.runId} MSG-OK: reply with the single word "ok" and end your turn.`,
   });
   checks.check(
-    'the child session accepts a steer while the hop is armed',
-    steer.status === 200 && steer.body?.ok !== false,
-    `HTTP ${steer.status}: ${steer.body?.error ?? JSON.stringify(steer.body)}`,
+    'a message into an idle node is delivered (200)',
+    delivered.status === 200 && delivered.body?.ok === true,
+    `HTTP ${delivered.status}: ${delivered.body?.error ?? JSON.stringify(delivered.body)}`,
+  );
+  checks.check(
+    'the accepted message names the node the turn runs in',
+    typeof delivered.body?.nodeId === 'string' && delivered.body.nodeId.length > 0,
+    String(delivered.body?.nodeId),
+  );
+  checks.check(
+    'the message branched off the node it named',
+    delivered.body?.nodeId !== nodeId,
+    `new=${delivered.body?.nodeId} basis=${nodeId}`,
   );
 
-  const receipt = await pollUntil(
-    () =>
-      sessionMetas(cx, origin.sessionId).find((dump) =>
-        String(dump.meta?.prompt ?? '').startsWith(HOP_RECEIPT_MARK),
-      ),
-    { timeoutMs: 240000, intervalMs: 1000 },
-  );
-  if (!receipt.ok) {
-    return suiteResult(name, 'FAIL', 'no hop receipt landed after the child called finish_hop', checks);
-  }
-  const meta = receipt.value.meta ?? {};
-  const receiptText = String(meta.prompt ?? '');
-  checks.check('the receipt landed in the origin session', meta.sessionId === origin.sessionId, `meta.sessionId=${meta.sessionId}`);
+  // The two refusals a caller can hit by mis-addressing the target.
+  const noSession = await cx.client.sessionMessage({
+    sessionId: `harness-test-${cx.runId}-nosuchsession`,
+    nodeId,
+    message: 'x',
+  });
   checks.check(
-    'the receipt says the child called finish_hop and handed back its report',
-    /called finish_hop and handed back its report/.test(receiptText),
-    receiptText.slice(0, 160),
+    'an unknown session is refused (409)',
+    noSession.status === 409 && /no such session/i.test(String(noSession.body?.error ?? '')),
+    `HTTP ${noSession.status}: ${noSession.body?.error ?? JSON.stringify(noSession.body)}`,
   );
+  const noNode = await cx.client.sessionMessage({
+    sessionId,
+    nodeId: `harness-test-${cx.runId}-nosuchnode`,
+    message: 'x',
+  });
   checks.check(
-    'the receipt carries no "status:" wording any more',
-    !/status:/.test(receiptText),
-    receiptText.slice(0, 200),
-  );
-  checks.check(
-    'the receipt branches off the hop\'s return node',
-    meta.parentId === childHop.originNodeId,
-    `parent=${meta.parentId} dispatch=${childHop.originNodeId}`,
-  );
-  checks.check('the receipt names the child session', receiptText.includes(childId), childId);
-  checks.check(
-    'the receipt carries the search_transcripts pointer',
-    receiptText.includes(`search_transcripts sessionId=${childId}`),
-    receiptText.slice(-120),
-  );
-  // The two refusals the scripted steer asked for are in the child's own dump.
-  const childText = sessionMetas(cx, childId)
-    .map((d) => {
-      try {
-        return transcriptText(parseTranscriptJsonl(fs.readFileSync(d.file, 'utf8')));
-      } catch {
-        return '';
-      }
-    })
-    .join('\n');
-  checks.check(
-    'finish_hop refuses a node id the origin session does not have',
-    childText.includes(`no such node in the source session`) && childText.includes(badNodeId),
-    childText.includes(badNodeId) ? 'the error names the bad node id' : 'no error naming the bad node id',
-  );
-  checks.check(
-    'a second finish_hop answers "no armed hop"',
-    childText.includes('this session has no armed hop (it was already handed back, or none was started)'),
-    'the hand-back is spent',
-  );
-  if (!decoy.fail && !decoy.skip) {
-    checks.check(
-      'the receipt does not name the decoy session',
-      !receiptText.includes(decoy.sessionId),
-      `${decoy.sessionId} in "${receiptText.slice(0, 80)}"`,
-    );
-    checks.check(
-      'the decoy session has no receipt of its own',
-      sessionMetas(cx, decoy.sessionId).every((d) => !String(d.meta?.prompt ?? '').includes(HOP_RECEIPT_MARK)),
-    );
-  }
-
-  const settled = await cx.client.state();
-  const settledMap = sessionMap(settled.body);
-  checks.check(
-    'the hop is no longer in /state',
-    !Array.isArray(settled.body?.hops) || !settled.body.hops.some((h) => h && h.originSessionId === origin.sessionId),
-    JSON.stringify(settled.body?.hops ?? null),
-  );
-  checks.check('no receipt is left pending', Number(settled.body?.pendingReceipts ?? 0) === 0, String(settled.body?.pendingReceipts));
-  checks.check(
-    "the receipt did not focus the origin's tab",
-    settledMap.get(origin.sessionId)?.active === false,
-    `active=${settledMap.get(origin.sessionId)?.active}`,
+    'an unknown node is refused (409)',
+    noNode.status === 409 && /no such node/i.test(String(noNode.body?.error ?? '')),
+    `HTTP ${noNode.status}: ${noNode.body?.error ?? JSON.stringify(noNode.body)}`,
   );
 
   const bad = checks.failures();
   return suiteResult(
     name,
     bad.length ? 'FAIL' : 'PASS',
-    bad.length ? `${bad.length} check(s) failed` : `origin ${origin.sessionId} <- child ${childId}`,
+    bad.length ? `${bad.length} check(s) failed` : `session ${sessionId} node ${nodeId}`,
     checks,
   );
 }
@@ -2932,7 +2684,7 @@ const SUITE_FNS = {
   background: suiteBackground,
   signals: suiteSignals,
   branch: suiteBranch,
-  hop: suiteHop,
+  sessionMessage: suiteSessionMessage,
   selftest: suiteSelftestAll,
 };
 

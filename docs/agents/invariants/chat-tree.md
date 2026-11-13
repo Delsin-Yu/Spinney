@@ -98,6 +98,21 @@
 - Branching: every user message creates a new node under the checked-out node;
   sending on a node that already has children makes a sibling (a new branch).
   A branch switch costs only a prefix cache miss — the shared prefix stays cached.
+- **Editing a prompt is branching from its parent.** The pencil on a card's pinned ask
+  (`editUserMessage`) rewrites nothing: it takes the edited node's own first `kind:'user'`
+  display item's attachments (so editing the words keeps the images) and sends the edited
+  text through the ordinary user-message path with an **explicit** basis —
+  `onUserMessage(…, { basisNodeId: node.parentId })` — which creates a new turn under that
+  parent and leaves the edited node exactly where it was, an ordinary sibling branch
+  holding the old wording. For a **root** node the basis is the explicit `null`, and
+  `onUserMessage` honours it (a `'basisNodeId' in opts` presence test, never a truthiness
+  read), so the replacement starts a **second forest root** instead of silently branching
+  off the current checkout. The old node's `messages`, `displayItems` and prompt stay
+  untouched — a rewrite would change the history the provider's prefix cache and the
+  model's answer were built from — and the new node is focused by the ordinary `beginTurn`
+  / `attachNode` path, with no focus code of its own. A sidecar, an unknown node, an empty
+  text, and a node whose turn is running or which still owns unfinished work are each
+  refused with one sentence.
 - `attachNode` repairs a missing parent by attaching the node to the **root**
   instead of leaving it unreachable (an orphan would still become the checkout
   point and silently blank the history); `leafOf` skips both sidecar kinds via

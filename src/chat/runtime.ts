@@ -19,7 +19,7 @@
  *
  * P3 runs several turns of one session at the same time, one per **node**: every
  * node that has ever run a turn owns a *worker* — its own `Agent` (whose event
- * handler, sub-agent and hop/session hooks all close over that node) plus its own
+ * handler, sub-agent and session hooks all close over that node) plus its own
  * `ToolRegistry` (whose background owner is that node) — see
  * `docs/agents/multi-session.md` §2.3. A run is keyed by its node, so a new turn
  * is refused only when the node it would continue from is itself streaming, and
@@ -27,7 +27,7 @@
  * clobber each other.
  *
  * The runtime reaches the provider through the narrow `RuntimeHost` interface
- * (transcripts, config, persistence, panel routing, the global hop bookkeeping).
+ * (transcripts, config, persistence, panel routing, the session surface).
  */
 import * as fs from 'fs';
 import * as path from 'path';
@@ -36,7 +36,16 @@ import { Agent, ImageAccounting } from '../agent/agent';
 import { DEFAULT_REPLY_LANGUAGE, SYSTEM_PROMPT_TEMPLATE, AgentsMdSources, agentsMdSection, systemPrompt } from '../agent/prompt';
 import { Balance, emptyBalance } from '../agent/balance';
 import { ClientRegistry } from '../agent/clients';
-import { AgentEvent, ChatMessage, ContentPart, ThinkingEffort, ToolDefinition, Usage, detectImageMime } from '../agent/types';
+import {
+  AgentEvent,
+  ChatMessage,
+  ContentPart,
+  ThinkingEffort,
+  ToolDefinition,
+  Usage,
+  detectImageMime,
+  withToolTitleLanguage,
+} from '../agent/types';
 import { ToolCapabilities, interceptedDefinitions } from '../agent/tools';
 import {
   IMAGE_BUDGET_RATIO,
@@ -577,19 +586,19 @@ export interface HarnessConfig {
    * `replyLanguageName`.
    */
   replyLanguage: string;
+  /**
+   * The BCP-47 tag of {@link replyLanguage}, resolved from the same setting by the
+   * same call (`replyLanguageTag`), or `''` for a free-form language name. The pair
+   * travels together: the tag names the language inside `exec_command`'s title
+   * description, so the step row is written in the language the user reads.
+   */
+  replyLanguageTag: string;
   maxConcurrentSubagents: number;
   maxLevel2Subagents: number;
   saveSubAgentTranscripts: boolean;
   saveSessionTranscripts: boolean;
   subAgentTranscriptDir: string;
   autoSessionTitles: boolean;
-  /**
-   * `spinney.hopSession.enabled`: may the main agent hand a task to a fresh
-   * session (`hop_session`)? Read live at every turn start, so a settings change
-   * reaches the next turn; only the hop tool is affected (`list_nodes` /
-   * `rename_session` stay).
-   */
-  hopSessionEnabled: boolean;
   /**
    * The composer's prompt snippets — `spinney.promptSections` merged over the
    * shipped rows (`resolvePromptSnippets` in `src/chat/promptSnippets.ts`), in
@@ -598,6 +607,16 @@ export interface HarnessConfig {
    * sends, so nothing about them reaches the system prompt.
    */
   promptSnippets: PromptSnippet[];
+  /**
+   * `spinney.streamAnimation`: may the webview animate how text and rows appear (a
+   * fading chunk of new characters, a new row's fade + rise, a live tool label's
+   * fade)? It is a **paint-only** flag — the text is in the DOM either way, and the
+   * transcript, the markdown render and the streaming path are identical when it is
+   * off. It is read live into every `config` post, so a settings change reaches the
+   * open tab without a reload, and the webview also honours the OS' own
+   * reduced-motion wish on top of it.
+   */
+  streamAnimation: boolean;
 }
 
 /**
@@ -771,8 +790,8 @@ export interface TurnRun {
 
 /**
  * The provider surface the runtime may use. Kept deliberately narrow: anything
- * about sessions-on-disk, tabs, titles, transcripts, config or the global hop
- * bookkeeping stays on the provider.
+ * about sessions-on-disk, tabs, titles, transcripts, config or the session
+ * surface stays on the provider.
  */
 export interface RuntimeHost {
   readonly output: vscode.OutputChannel;
@@ -843,31 +862,61 @@ export interface RuntimeHost {
    * first usable card.
    */
   resolveModel(candidate: string): string;
-  handleHopSession(rt: SessionRuntime, node: TreeNode, args: Record<string, unknown>): string;
   /**
-   * The hop that armed **this session as its child**, when it was a
-   * `return_when_finished` hop: `{originSessionId, originNodeId}`. This is what
-   * gives the child's main agent `finish_hop` — the tool it hands its report back
-   * with — so it is `null` for a `fire_and_forget` child and for every session no
-   * hop started. It is read at every turn start, so the child's **first** turn
-   * (whose frozen tool schemas decide the rest of the epoch) already has it.
+   * `create_session`: start a fresh session whose first turn is `session_initial_prompt`,
+   * titled with the explicit (locking) `session_name`, and return without waiting.
+   * The provider owns the session list, the tab and the persistence, so the whole
+   * creation is its answer — this runtime only passes its own node along, because
+   * the result tells the caller where a report should come back to.
    */
-  hopTargetFor(sessionId: string): { originSessionId: string; originNodeId: string } | null;
+  handleCreateSession(rt: SessionRuntime, node: TreeNode, args: Record<string, unknown>): Promise<string>;
   /**
-   * `finish_hop` from the hopped-to session: mark the hop as requested, store the
-   * node the user (or the default) chose, and answer the model. Nothing is
-   * delivered here — the receipt is queued when this turn ends and the child is
-   * idle, exactly as before, only no longer before the call.
+   * `send_session_message`: deliver a message to one exact node of one session and
+   * start a turn there. The provider owns every session's live state, so the
+   * refusal while the target node is running or still owns unfinished work — and
+   * the answer that names the new node — is its job.
    */
-  handleFinishHop(rt: SessionRuntime, node: TreeNode, args: Record<string, unknown>): string;
+  handleSendSessionMessage(args: Record<string, unknown>, callerSessionId: string): Promise<string>;
+  /** `list_sessions`: the window's sessions, rendered one line each. */
+  handleListSessions(args: Record<string, unknown>): string;
+  /**
+   * The node ids of **any** session that have a live run right now. `list_nodes`
+   * may name another session, and only the provider holds that session's runtime.
+   */
+  runningNodesIn(sessionId: string): string[];
+  /**
+   * The node ids of **any** session that are not streaming but still own unfinished
+   * work (`lockedNodes()`). A session with no runtime is idle by definition: a turn
+   * only runs inside a runtime, so an absent one has nothing to report.
+   */
+  lockedNodesIn(sessionId: string): string[];
+  /**
+   * A session by id, plus whether it is the one this window is focused on — the
+   * read `list_nodes` needs for a session that is not this runtime's own. `undefined`
+   * when no such session exists.
+   */
+  sessionForTool(sessionId: string): { session: AgentSession; active: boolean } | undefined;
   handleRenameSession(args: Record<string, unknown>, callerSessionId?: string): string;
-  queueHopReturn(rt: SessionRuntime, node: TreeNode | null, status: TurnStatus): void;
   /**
    * True while an external controller is reloading the window (`/wait-for-finish`
    * with a hold). Every turn start — including an injected notice turn — must
    * check it: `/reload-window` refuses to run while a turn does.
    */
   isHeld(): boolean;
+  /**
+   * The control plane's identity as environment variables
+   * (`SPINNEY_INSTANCE_ID`, `SPINNEY_DISCOVERY_FILE`), or `{}` while it is not
+   * listening. It is injected into **every** `exec_command` child
+   * (`BackgroundAccess.spawnEnv`), which is how `node tools/reload-window.mjs
+   * --message "…"` knows which window to ask for its own deferred reload — no
+   * discovery scan, no fallback, and no window named on the command line.
+   *
+   * Never the bearer token: the child is handed the **path** of the 0600 discovery
+   * file and reads the token from it, so a command's environment is not a
+   * credential store — and a plain terminal, which has no path, cannot use the
+   * script at all.
+   */
+  controlEnv(): Record<string, string>;
   /**
    * True when another window owns this workspace's session files. Every turn start is
    * refused, not just the composer's: nothing may be written into a session this window
@@ -1070,6 +1119,14 @@ export class SessionRuntime {
    */
   replyLanguage: string = DEFAULT_REPLY_LANGUAGE;
   /**
+   * The BCP-47 tag of {@link replyLanguage} ('' when the setting is a free-form
+   * language name). The pair is resolved together by the provider's `getConfig()` and
+   * pushed by {@link applyReplyLanguage}; only the `exec_command` title description
+   * carries the tag, and `liveToolSchemas` renders it through the same helper an agent
+   * uses so the frozen envelope and the drift hash agree byte for byte.
+   */
+  replyLanguageTag: string = '';
+  /**
    * The context window last reported by {@link recheckContextWindow}, so a settings
    * change that did not move the window of the node in view does not repaint the
    * indicator (the live value is the {@link contextWindow} getter).
@@ -1103,8 +1160,11 @@ export class SessionRuntime {
     // never names a level the provider never heard of.
     this.seedEffort = normalizeEffort(this.cardForCardId(cardId), thinkingEffort);
     // The reply language is not a per-session pick, so it is read straight from
-    // the setting; a later edit arrives through `applyReplyLanguage`.
+    // the setting; a later edit arrives through `applyReplyLanguage`. The tag rides
+    // beside the name: both are resolved together, and the tag is what the
+    // `exec_command` title schema names.
     this.replyLanguage = host.getConfig().replyLanguage;
+    this.replyLanguageTag = host.getConfig().replyLanguageTag;
     // The readout `recheckContextWindow` compares against, seeded from what the node
     // in view reports (a restored session may already stand on an older node with a
     // card of its own, which is not the constructor's seed).
@@ -1389,7 +1449,7 @@ export class SessionRuntime {
   /**
    * The worker for a node, created on first use (P3, §2.3). Its tools register
    * background jobs under **this** node, and its agent's provider hooks all close
-   * over the same node, so a `spawn_agents` / `send_agent_message` / `hop_session`
+   * over the same node, so a `spawn_agents` / `send_agent_message` / `create_session`
    * call made during node X's turn always acts for X — never for "the active
    * turn", which no longer exists once two branches may run at once. The card and
    * the thinking effort are seeded **from this node** (its own, else an ancestor's,
@@ -1408,6 +1468,14 @@ export class SessionRuntime {
       tools.setBackgroundAccess({
         currentOwner: () => ({ sessionId: this.sessionId, nodeId: node.id }),
         hub: this.hub,
+        // The identity every child process of this node is born with: which node asked
+        // (so a command can name the exact conversation it belongs to) plus the window's
+        // control plane. Recomputed per spawn, so a plane that is enabled later, or
+        // rebound to another port by `restart()`, is never stale.
+        spawnEnv: (owner) => ({
+          ...(owner ? { SPINNEY_SESSION_ID: owner.sessionId, SPINNEY_NODE_ID: owner.nodeId } : {}),
+          ...this.host.controlEnv(),
+        }),
       });
       // The two web tools read `searchProvider` off **this node's** card: the paid tier
       // is the card's declaration, and the token it needs is that card's provider's —
@@ -1416,39 +1484,30 @@ export class SessionRuntime {
       const agent = new Agent(this.clients, tools, (event) => this.handleAgentEventFor(node, event));
       agent.setCard(this.cardForNode(node));
       agent.setThinkingEffort(this.effortForNode(node));
-      agent.setReplyLanguage(this.replyLanguage);
+      agent.setReplyLanguage(this.replyLanguage, this.replyLanguageTag);
       // This agent can spawn sub-agents: hand it this runtime's orchestrator,
       // bound to the same node.
       agent.setSpawnHandler((args, signal) => this.handleSpawnAgents(node, args, signal));
       // And it can resume a finished sub-agent with a follow-up message.
       agent.setSendMessageHandler((args, signal) => this.handleSendAgentMessage(node, args, signal));
-      // And it can hand a self-contained task to a fresh session, which reports
-      // its answer back here (only the main agent may do this; the settings switch
-      // is applied on every call, not once at construction).
-      agent.setCanHop(true);
+      // The session surface: start a fresh session, message one node of one
+      // session, and read the window's sessions / a session's tree. Main agent
+      // only — a sub-agent reports to its dispatcher, not into another
+      // conversation.
+      agent.setCanSessions(true);
+      agent.setCreateSessionHandler((args) => this.handleCreateSession(node, args));
+      agent.setSendSessionMessageHandler((args) => this.handleSendSessionMessage(node, args));
+      agent.setListSessionsHandler((args) => Promise.resolve(this.handleListSessions(args)));
+      agent.setListNodeHandler((args) => Promise.resolve(this.handleListNodes(node, args)));
       // Completion signals (a finished background terminal or an async sub-agent)
       // are injected into this node's *running* turn at its next tool boundary.
       agent.setSignalHandler(() => this.takeSignalsFor(node));
-      agent.setHopHandler((args) => Promise.resolve(this.host.handleHopSession(this, node, args)));
-      // And, when this session is a hop's child, it can hand its own report back:
-      // nothing returns to the caller before it calls `finish_hop`.
-      agent.setFinishHopHandler((args) => Promise.resolve(this.host.handleFinishHop(this, node, args)));
-      agent.setListNodeHandler(() => Promise.resolve(this.handleListNodes(node)));
       // And it can rename the session (an explicit rename locks the title, so the
       // automatic namer leaves it alone).
       agent.setRenameSessionHandler((args) => Promise.resolve(this.host.handleRenameSession(args, this.sessionId)));
       worker = { agent, tools };
       this.nodeWorkers.set(node.id, worker);
     }
-    // `spinney.hopSession.enabled` is read at every turn start: a settings change
-    // must reach the next turn without rebuilding the worker, and a chain that froze
-    // the schema still refuses the call (the handler checks it too).
-    worker.agent.setHopEnabled(this.host.getConfig().hopSessionEnabled);
-    // `finish_hop` is the hopped-to session's own hand-back, and it has to be in the
-    // schemas of that session's **first** turn: an epoch freezes its tools, so a flag
-    // applied any later would leave the child unable to finish. Read here, per turn,
-    // because the hop that armed this session is retired when it hands back.
-    worker.agent.setCanFinishHop(this.host.hopTargetFor(this.sessionId) !== null);
     // The budget accounting `read_image` needs before it may attach anything: which bytes
     // this chain's next request would already carry, and the ceiling its transport has.
     // Installed on **every** call, not only when the worker is built: `workerFor` runs at the
@@ -1562,12 +1621,12 @@ export class SessionRuntime {
   /**
    * True while this session owns a running **node** job — one that locks its node and sends a
    * completion notice. A `start_detached` (fire-and-forget) job deliberately does not count
-   * here, and that is not cosmetic: the idle gates that call this feed `hop_session`'s
-   * dispatch refusal, the session list's `busy` flag, `globallyIdle()` — which the control
-   * plane's `POST /wait-for-finish` (`scope:'all'`) and the reload refusal wait on — and,
-   * through `runningNodes` / `lockedNodes`, the hop return's child-idle gate. Counting a
-   * detached job there would mean a dev server keeps the harness permanently not-idle, so
-   * the supervisor could never reload the window.
+   * here, and that is not cosmetic: the idle gates that call this feed the session list's
+   * `busy` flag, `globallyIdle()` — which the control plane's `POST /wait-for-finish`
+   * (`scope:'all'`) and the reload refusal wait on — and, through `runningNodes` /
+   * `lockedNodes`, what `list_nodes` reports as `busy` and what `send_session_message`
+   * refuses. Counting a detached job there would mean a dev server keeps the harness
+   * permanently not-idle, so the window could never defer a reload.
    *
    * The kill paths still count it: `runningBackgroundCount` is what the delete/clear
    * confirmations read (a reload or a branch deletion really does kill the process), and
@@ -1654,8 +1713,11 @@ export class SessionRuntime {
    * other nodes may be mid-turn, so nothing here may mutate an agent.
    *
    * A bare registry is enough because no tool *schema* depends on the wiring (the access
-   * objects gate execution, not the definitions); the one runtime value in the whole set
-   * is `exec_command`'s shell label, which is a process-wide probe.
+   * objects gate execution, not the definitions); the runtime values in the whole set are
+   * `exec_command`'s shell label (a process-wide probe) and its `title` description, which
+   * names the reply language — rendered here through the same helper an agent uses
+   * (`withToolTitleLanguage`), with the same name + tag, so a frozen envelope and the
+   * drift hash over it are computed from identical bytes.
    */
   private liveToolSchemas(card: ModelCard, sidecar: boolean): ToolDefinition[] {
     const registry = new ToolRegistry();
@@ -1663,14 +1725,13 @@ export class SessionRuntime {
       vision: isVisionCard(card),
       canSpawn: !sidecar,
       canSpawnReadOnly: false,
-      canHop: !sidecar,
-      hopEnabled: !sidecar && this.host.getConfig().hopSessionEnabled,
-      // `finish_hop` belongs to the session a hop started, for that session's whole
-      // life (`AgentSession.hopOrigin`): the frozen tool set must match what the live
-      // read produces, or a handed-back child would read as setup drift.
-      finishHop: !sidecar && this.host.hopTargetFor(this.sessionId) !== null,
+      canSessions: !sidecar,
     };
-    return [...registry.definitions, ...interceptedDefinitions(capabilities)];
+    return withToolTitleLanguage(
+      [...registry.definitions, ...interceptedDefinitions(capabilities)],
+      this.replyLanguage,
+      this.replyLanguageTag,
+    );
   }
 
   /**
@@ -2109,24 +2170,26 @@ export class SessionRuntime {
 
   /**
    * Adopt a changed `spinney.replyLanguage` setting. `language` is the resolved
-   * **name** (`ChatViewProvider.getConfig().replyLanguage`), so the `auto` →
-   * display-language step has already happened: re-picking `auto` on a window that
-   * already follows its own language is a no-op.
+   * **name** and `tag` its BCP-47 tag (`ChatViewProvider.getConfig().replyLanguage` /
+   * `.replyLanguageTag`), so the `auto` → display-language step has already happened:
+   * re-picking `auto` on a window that already follows its own language is a no-op.
    *
    * Nothing already sent is rewritten. Every frozen envelope keeps the language it was
-   * rendered with, and the value below is what the **next new node** will freeze — which
-   * is exactly what the composer reports as the drift between the two setups
+   * rendered with, and the pair below is what the **next new node** will freeze — which is
+   * exactly what the composer reports as the drift between the two setups
    * (`setupState`). The language is part of a prefix, and a prefix is append-only.
    */
-  applyReplyLanguage(language: string): void {
+  applyReplyLanguage(language: string, tag = ''): void {
     if (this.busy) {
       return; // never move a setup under a running request
     }
     const next = (language || '').trim() || DEFAULT_REPLY_LANGUAGE;
-    if (next === this.replyLanguage) {
+    const nextTag = (tag || '').trim();
+    if (next === this.replyLanguage && nextTag === this.replyLanguageTag) {
       return;
     }
     this.replyLanguage = next;
+    this.replyLanguageTag = nextTag;
     this.host.output.appendLine(`[config] replyLanguage=${next} (new nodes; frozen chains keep theirs)`);
     // The two setups may now disagree: repaint the composer's drift marking.
     this.postConfig();
@@ -2638,6 +2701,9 @@ export class SessionRuntime {
       efforts: effortsFor(this.card),
       thinkingEffort: this.thinkingEffort,
       snippets: cfg.promptSnippets,
+      // The appear animation, re-sent with every config: turning it off reaches the open
+      // tab at once, and the webview defaults it to on when the field is absent.
+      streamAnimation: cfg.streamAnimation,
       // The two setups the composer shows, and whether they disagree: the webview marks
       // Send (and offers the new-setup entry) from this alone.
       setup: this.setupState(),
@@ -3040,7 +3106,7 @@ export class SessionRuntime {
       const intact = start > 0 && start <= messages.length && messages[start - 1] === run.prefixTail;
       if (intact) {
         const added = messages.slice(start);
-        // An injected (sub-agent notice / hop answer) turn continues a node that
+        // An injected (sub-agent / background notice) turn continues a node that
         // already holds the turn that spawned it — appending keeps both; a user
         // turn owns the node `beginTurn` just created for it, so it assigns.
         node.messages = run.fresh ? added : [...node.messages, ...added];
@@ -3071,10 +3137,6 @@ export class SessionRuntime {
     if (node && session.nodes[node.id]) {
       this.post({ type: 'nodeUpdate', ...this.nodeStatePatch(node) });
     }
-    // A hopped session's turn just ended: queue the trip back to the session
-    // that dispatched it, carrying this turn's final answer (the provider also
-    // kicks any queued `POST /session/start` once this turn is fully closed).
-    this.host.queueHopReturn(this, node, status);
   }
 
   // ---- User input / stop / image picker ----
@@ -3135,16 +3197,24 @@ export class SessionRuntime {
   async onUserMessage(
     text: string,
     attachments: UserAttachment[] = [],
-    opts?: { basisNodeId?: string },
+    opts?: { basisNodeId?: string | null },
   ): Promise<void> {
     // P3: only the node this turn would continue from must be free — another
     // branch of this session may stream meanwhile. (This mirrors the composer's
     // Stop-not-Send rule; `beginTurn` re-checks the same condition once the basis
-    // is known.) `basisNodeId` is the **explicit** basis a hop receipt comes back to:
-    // the turn branches off that node without moving the session's checkout, which is
-    // what lets a receipt land while the user is reading another branch.
-    const basis = opts?.basisNodeId ?? this.session.activeNodeId;
-    if (opts?.basisNodeId !== undefined && !this.session.nodes[opts.basisNodeId]) {
+    // is known.) `basisNodeId` is the **explicit** basis a cross-session message
+    // comes back to (`send_session_message`): the turn branches off that node
+    // without moving the session's checkout, which is what lets a message land
+    // while the user is reading another branch.
+    //
+    // `'basisNodeId' in opts` — a presence test, never a truthiness read — is what
+    // tells an explicit `null` apart from an absent option. `null` means "no parent":
+    // an edited **root** node's replacement therefore starts a second forest root
+    // instead of silently branching off whatever happens to be checked out
+    // (`editUserMessage` in `ChatViewProvider`).
+    const basis =
+      opts && 'basisNodeId' in opts ? opts.basisNodeId ?? null : this.session.activeNodeId;
+    if (basis && !this.session.nodes[basis]) {
       return;
     }
     // The card this send runs on **and** the card the image path below must use are
@@ -5601,17 +5671,42 @@ export class SessionRuntime {
   }
 
   /**
-   * `list_nodes` tool: render this session's tree (id, status, parent, title) so
-   * the agent can name a node — e.g. as `hop_session`'s `returnNodeId`. Node ids
-   * otherwise live only in the persisted tree. `node` is the caller's own node
-   * (P3 binds the handler per node); the rendered tree is always the whole
-   * session's, exactly as before.
+   * `list_nodes` tool: render one session's tree so the agent can name a node —
+   * e.g. as `send_session_message`'s `session_node_id`. Node ids otherwise live
+   * only in the persisted tree.
+   *
+   * `node` is the caller's own node (P3 binds the handler per node) and decides the
+   * default session; `args.session_id` reads **another** session, whose live state
+   * comes from the provider (`runningNodesIn` / `lockedNodesIn`) because a runtime
+   * only owns its own session.
+   *
+   * Every node line carries its **true** state, never a stored status field:
+   * `running` comes from that session's live runs, `busy` from `lockedNodes()`
+   * (unfinished work that refuses a send), and `checked out` only for the session
+   * this window is focused on — a checkout belongs to the window's view, not to a
+   * conversation. A session with no runtime is idle by definition: a turn only runs
+   * inside a runtime, so there is no run and nothing to report, and reading
+   * `node.status` instead would resurrect a turn that ended before a reload.
    */
-  private handleListNodes(node: TreeNode): string {
-    const session = this.session;
-    const depthOf = (node: TreeNode): number => {
+  private handleListNodes(node: TreeNode, args: Record<string, unknown>): string {
+    const wanted = typeof args.session_id === 'string' ? args.session_id.trim() : '';
+    const target = wanted
+      ? this.host.sessionForTool(wanted)
+      : {
+          session: this.session,
+          active: this.host.sessionForTool(this.sessionId)?.active === true,
+        };
+    if (!target) {
+      return `Error: no such session: ${wanted} (list_sessions lists the session ids).`;
+    }
+    const session = target.session;
+    const own = session.id === this.sessionId;
+    const running = new Set(own ? this.runningNodes() : this.host.runningNodesIn(session.id));
+    const busy = new Set(own ? this.lockedNodes() : this.host.lockedNodesIn(session.id));
+    const query = typeof args.query === 'string' ? args.query.trim().toLowerCase() : '';
+    const depthOf = (n: TreeNode): number => {
       let depth = 0;
-      let parent = node.parentId ? session.nodes[node.parentId] : undefined;
+      let parent = n.parentId ? session.nodes[n.parentId] : undefined;
       while (parent && depth < 64) {
         depth++;
         parent = parent.parentId ? session.nodes[parent.parentId] : undefined;
@@ -5619,23 +5714,53 @@ export class SessionRuntime {
       return depth;
     };
     const ordered = Object.values(session.nodes).sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
-    const lines = ordered.map((node) => {
-      const kindMark = node.kind === 'agent' ? 'agent' : node.kind === 'bg' ? 'bg' : 'turn';
+    const shown = query
+      ? ordered.filter((n) => n.id.toLowerCase().includes(query) || (n.title ?? '').toLowerCase().includes(query))
+      : ordered;
+    const lines = shown.map((n) => {
+      const kindMark = n.kind === 'agent' ? 'agent' : n.kind === 'bg' ? 'bg' : 'turn';
       const marks = [
         kindMark,
-        node.delivered ? 'delivered' : '',
-        node.kind === 'agent' ? node.agentStatus ?? node.status : node.status,
+        running.has(n.id) ? 'running' : '',
+        busy.has(n.id) ? 'busy' : '',
+        n.delivered ? 'delivered' : '',
       ].filter(Boolean);
-      if (node.id === session.activeNodeId) {
+      if (target.active && n.id === session.activeNodeId) {
         marks.push('checked out');
       }
-      const parent = node.parentId ? ` parent=${node.parentId}` : '';
-      return `${'  '.repeat(depthOf(node))}- ${node.id}  [${marks.join(', ')}]${parent}  ${node.title}`;
+      const parent = n.parentId ? ` parent=${n.parentId}` : '';
+      return `${'  '.repeat(depthOf(n))}- ${n.id}  [${marks.join(', ')}]${parent}  ${n.title}`;
     });
-    return [
-      `session ${session.id} "${session.title}" — ${ordered.length} nodes, checked out: ${session.activeNodeId ?? '(none)'}`,
-      ...lines,
-    ].join('\n');
+    const header = [
+      `session ${session.id} "${session.title}" — ${ordered.length} node(s)`,
+      `active: ${session.activeNodeId ?? '(none)'}`,
+      `running: ${running.size}`,
+      `busy: ${busy.size}`,
+      target.active ? 'this window is focused on it' : 'not the focused session, so no node is checked out here',
+      query ? `filter "${query}": ${shown.length} match(es)` : '',
+    ]
+      .filter(Boolean)
+      .join(', ');
+    return [header, ...(lines.length > 0 ? lines : ['  (no node matches the filter)'])].join('\n');
+  }
+
+  /** `list_sessions` tool: the provider owns the session list, so it renders it. */
+  private handleListSessions(args: Record<string, unknown>): string {
+    return this.host.handleListSessions(args);
+  }
+
+  /**
+   * `create_session` tool: the provider owns session creation and persistence.
+   * `node` names the caller, because the answer has to say where a report should
+   * come back to.
+   */
+  private handleCreateSession(node: TreeNode, args: Record<string, unknown>): Promise<string> {
+    return this.host.handleCreateSession(this, node, args);
+  }
+
+  /** `send_session_message` tool: the provider owns every session's live state. */
+  private handleSendSessionMessage(_node: TreeNode, args: Record<string, unknown>): Promise<string> {
+    return this.host.handleSendSessionMessage(args, this.sessionId);
   }
 
   // ---- Background terminals ----

@@ -25,6 +25,13 @@
   --error-text:   var(--vscode-errorForeground, #ff9e9e);
   --success:      var(--vscode-charts-green, #4caf50);
   --warn:         var(--vscode-charts-yellow, #ffb84d);
+  /* The line-diff chip's two numbers (`+12 -3`) read one step quieter than the success and
+     error colours themselves: at 10 px in a step's head, full saturation is a badge that
+     competes with the label it belongs to. Mixing ~30% `--text-dim` into each keeps green
+     and red legible while taking the shout out — the `.diff-row.add/.del` tints are
+     backgrounds and are deliberately left alone. */
+  --diff-add-text: color-mix(in srgb, var(--success) 70%, var(--text-dim));
+  --diff-del-text: color-mix(in srgb, var(--error-text) 70%, var(--text-dim));
   --radius: 8px;
 }
 
@@ -1852,11 +1859,11 @@ button.icon-btn {
 }
 
 .tool-diff-add {
-  color: var(--success);
+  color: var(--diff-add-text);
 }
 
 .tool-diff-del {
-  color: var(--error-text);
+  color: var(--diff-del-text);
 }
 
 /* `Delivered` badge (D1): this sidecar's completion signal already reached the
@@ -2616,10 +2623,76 @@ button.icon-btn {
      cap generously and scroll instead of clipping. */
   max-height: 260px;
   overflow-y: auto;
+  /* The ask's edit pencil is positioned against this box (`.node-ask-edit`). */
+  position: relative;
+  /* Room for that pencil at the top-right, so a long first line never runs under it. */
+  padding-right: 26px;
 }
 
 .node-ask.hidden {
   display: none;
+}
+
+/* The edit pencil on the pinned ask (`syncAskEdit` in media/main.js): it swaps the ask
+   for an editor of the card's **own** prompt. Hover/focus-revealed like `.node-del`,
+   because it changes the card rather than doing the obvious thing on a stray click.
+   The host decides whether the edit is allowed; this only says where it sits. */
+.node-ask-edit {
+  position: absolute;
+  top: 4px;
+  right: 5px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--text-dim);
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s;
+}
+
+.node:hover .node-ask-edit,
+.node.active .node-ask-edit,
+.node-ask-edit:focus-visible {
+  opacity: 1;
+}
+
+.node-ask-edit:hover {
+  color: var(--text);
+  border-color: var(--accent);
+}
+
+/* The open editor: a plain textarea (never Markdown — the ask body's `.answer` is what
+   the editor replaces) and one hint line about Enter / Shift+Enter / Esc. */
+.ask-edit {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.ask-edit-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 64px;
+  max-height: 220px;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--user-fg);
+  background: var(--user-bg);
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  resize: vertical;
+}
+
+.ask-edit-hint {
+  font-size: 10px;
+  color: var(--text-dim);
 }
 
 .node-ask .msg.user.prompt {
@@ -3103,4 +3176,68 @@ button.icon-btn {
   width: 100%;
   height: 100%;
   fill: currentColor;
+}
+
+/* ---- The appear animation ---------------------------------------------------
+   **The text is complete in the DOM the moment a delta arrives; only its
+   appearance is animated.** There is no rate-limited reveal and no typing loop, and
+   nothing here changes layout: the three keyframes move opacity only (plus the 2 px
+   rise of a new row, which is a transform).
+
+   Three pieces, one vocabulary:
+     .chunk-in   the newest characters of a delta, in a transient span that the script
+                 folds back into the answer's own `Text` node on `animationend`. It sets
+                 no `white-space` of its own: it inherits the host's, so a chunk wraps and
+                 collapses exactly like the text node it is merged into and the merge
+                 itself is invisible;
+     .row-in     a row that has just been appended (assistant text, tool, thinking,
+                 notice): one 120 ms fade + 2 px rise, removed again on `animationend`;
+     .label-in   a live tool row's label, whose text is rewritten per argument delta:
+                 the class is removed and re-added on the same element, which restarts
+                 the fade without wrapping the label in a span.
+
+   The durations are duplicated in media/main.js as the *fallback* timer
+   (`ANIMATION_FALLBACK_MS`, 400 ms): an engine that never fires `animationend` still
+   gets its text merged back. Keep the classes and the media query below in step with
+   `animationsOn()` there — the script honours the same reduced-motion wish. */
+@keyframes chunk-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes row-in {
+  from { opacity: 0; transform: translateY(2px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes label-in {
+  from { opacity: 0.35; }
+  to { opacity: 1; }
+}
+
+.chunk-in {
+  /* An inline span, never a block: it sits inside the answer's own text run, and it
+     deliberately sets no `white-space` — it inherits the host's, so the chunk lays out
+     exactly like the `Text` node it is merged into. */
+  animation: chunk-in 140ms ease-out;
+}
+
+.row-in {
+  animation: row-in 120ms ease-out;
+}
+
+.tool-label.label-in {
+  animation: label-in 160ms ease-out;
+}
+
+/* The OS' own wish wins, and it is also read in the script (`prefersReducedMotion`):
+   with it on, nothing is wrapped in a span at all, so these rules are the second half
+   of one decision — a stale class left over from before the wish changed must not
+   animate either. */
+@media (prefers-reduced-motion: reduce) {
+  .chunk-in,
+  .row-in,
+  .tool-label.label-in {
+    animation: none;
+  }
 }

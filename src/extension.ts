@@ -70,12 +70,16 @@ export function activate(context: vscode.ExtensionContext): void {
     }),
   );
 
-  // Optional local control plane (off by default) for the external supervisor.
+  // Optional local HTTP control plane (off by default): an external controller may
+  // drive this window, and the window's own commands use it to queue their deferred
+  // reload (`tools/reload-window.mjs`). The provider is the plane's host, so the
+  // plane is created after it and handed back for `RuntimeHost.controlEnv`.
   const controlServer = new ControlServer(
     chatProvider,
     context.globalStorageUri,
     (line) => chatProvider?.outputLog(line),
   );
+  chatProvider?.attachControlServer(controlServer);
   void controlServer.start();
 
   // Sidebar lists sessions; it asks the provider for items on every refresh so it
