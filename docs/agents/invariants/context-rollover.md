@@ -22,21 +22,23 @@ hangs **below** the previous one, joined by a **dashed** edge.
   actually needs a detail, and the carried-over tail (§5) is free text we already
   have in memory.
 
-### …so the summary is a chosen handoff, never a pipeline
+### …so a handoff is a *chosen* one, never a pipeline
 
-The composer's context modal offers `Write a handoff summary` beside `Just continue`
-(§4/§5a), and that does not undo any of the above — it is the same rollover with one
-**opt-in** extra request:
+The composer's new-epoch entry offers `Simple` beside `Agentic` (§4), and that does not undo
+any of the above — it is the same rollover, with the handoff chosen by the user:
 
-- it is triggered by the user's click **after** the window ended, never at a
-  percentage. The input is the window's own messages, selected and capped at 60,000
-  chars (§6a), not the branch above it — so it fits even in the window that was just
-  refused, and nothing runs "as the history regrows";
-- the pointer is not lost: the summarized text still carries the transcript path, the
-  killed-work list and the user's last request verbatim, so the reversible half stays
-  reversible;
-- and a failure of that one request is a **fallback to the pointer**, never a failed
-  rollover (§6a). The default stays free.
+- **Simple** is the pointer above, unchanged and still free. It is the default answer, and
+  nothing runs on its own.
+- **Agentic** is a **compression node**: one real turn that reads the previous window and
+  writes the brief the next window starts from (`compress-node.md`). It is triggered by the
+  user's click **after** the window ended, never at a percentage; its input is the window's own
+  messages, selected and capped at 60,000 chars (§6a), not the branch above it — so it fits
+  even in the window that was just refused, and nothing runs "as the history regrows".
+- The pointer is not lost either way: a compressed window still carries the transcript path,
+  the original task, the last request verbatim, the killed-work list and the files the window
+  changed, so the reversible half stays reversible.
+- A compression that fails, runs out of sense or is stopped is a **notice and no window**; the
+  compression card is still there to continue. The default stays free.
 
 ## 1. The one invariant this changes: display path vs API prefix
 
@@ -208,6 +210,16 @@ the user changed model / effort / language. All three are gone from `src/` and `
 | disabled when | the window is read-only, or the focused node is a sub-agent branch (the tooltip says which). An **empty box does not disable it**: there it is the compaction entry, the one click a full window has left |
 | click | posts `{ type: 'newContextTurn', text, attachments }` — the same content a Send would carry |
 
+**Its second entry is the Send button's own right-click.** `media/main.js` listens for
+`contextmenu` on `#send-btn`, calls `preventDefault` and posts
+`{ type: 'compressNow', text, attachments }` — the same content a Send would carry. No menu is
+drawn: the modal *is* the menu, and both entries land in the same host method
+(`ChatViewProvider.newContextEntry`, `opts.compress` marks the right-click). The right-click is
+the **deliberate** entry, so it consults no trigger: `canCompress(nodeId)` is the structural
+precondition only (a conversational node, not streaming, no conversational child), and a window
+that still has room is a legitimate moment to move on. `compress-node.md` §1 has the whole
+rule.
+
 **Send** keeps its own rules and loses the drift mark: it is hidden while Stop shows,
 and it is **disabled** when `!hasContent || context === 'full' || readOnly || isAgent`.
 An empty box is now a disabled state instead of a silent no-op, and `Enter` goes through
@@ -227,26 +239,31 @@ from a choice of the webview:
    was built with. The composer's text is then sent into the new tree as an ordinary
    turn; an empty box forks only.
 
-Then one modal, whose text depends on the backend (`confirmEpochChange`):
+Then one modal, whose text depends on the backend (`confirmCompression` / `confirmEpochChange`):
 
 | backend | title | body | buttons |
 | --- | --- | --- | --- |
-| context | `Continue in a new context window?` | `The agent that takes over continues this conversation in a new window. It can either receive a handoff summary (one extra request) or be pointed at the previous branch and read the record itself.` | `Write a handoff summary`, `Just continue` |
+| context | `Start a new context window?` | `Simple costs no extra request: the new window is pointed at this window’s transcript and reads the record itself. Agentic runs one more turn — a compression node reads this window and writes the handoff the new window starts from, so the handoff is more complete, one turn slower, and costs that request.` | `Simple`, `Agentic` |
 | drift | `Continue with the new workspace or model configuration?` | `The conversation history (about {0} tokens for the current model) will be sent to the provider under the new configuration. This request will miss the provider’s cache.` — `{0}` is `chainPromptTokensLive()` | `Continue` |
 
 VS Code adds its own Cancel. Dismissing sends nothing, kills nothing and keeps the input
-box. After the answer the trigger is **re-validated** (`newEpochTrigger()` again): the
-state may have moved while the modal was open (a turn finished, a dropdown moved, the
-window filled), and acting on an answer given for a different state is exactly the bug
-the check prevents — it posts a notice and stops instead.
+box. The context answer is re-validated after the question (`canCompress(nodeId)` again): a
+turn may have finished, or a child appeared, while the modal was open — and acting on an
+answer given for another state is exactly the bug the check prevents; it posts a notice and
+stops instead. The drift answer re-validates its own trigger (`newEpochTrigger() !== 'drift'`).
 
-The rollover's answer maps to `rolloverContext(nodeId, 'current', { text, handoff })`:
-the new window **inherits** the parent's frozen epoch. The question this entry asks is
+`Simple` maps to `rolloverContext(nodeId, 'current', { text, force: true })` — the pointer
+shape of §6, with `force` relaxing the 90 % condition (the user answered `Simple` for *this*
+node). The new window **inherits** the parent's frozen epoch: the question this entry asks is
 about the *window*, not about the setup, so a window that inherits keeps the bytes the
-conversation was already written in; acting on a drift stays available afterwards, and
-that is what the fork backend is for. **`handoff: 'summary'`** is recorded on the node
-(`TreeNode.handoff`) and spends the one extra request §5a/§6a describe; `'continue'` is the
-pointer shape.
+conversation was already written in; acting on a drift stays available afterwards, and that is
+what the fork backend is for. `Agentic` maps to `compressAndContinue(nodeId, { text })` — the
+compression chain of `compress-node.md`, which records the handoff on the window it produces
+(`TreeNode.handoff = 'summary'`, `TreeNode.handoffSummary`).
+
+Killing running work is asked about **separately** and in both answers
+(`confirmKillBackgrounds`, §7): a rollover stops a node's background terminals and sub-agents,
+and that is a side effect the user did not ask for.
 
 The host's `rolloverTurn` and `forkTurn` message cases and `rolloverWithSetup` /
 `askSetups` / `forkAndSend` are deleted with the three old entries.
@@ -258,7 +275,10 @@ The host's `rolloverTurn` and `forkTurn` message cases and `rolloverWithSetup` /
 conversation reads continuously and the dashed edge marks the window break. What
 changes is only the message prefix.
 
-**Creation:** `beginTurn(title, { parentId: P, freshContext: true, freshEpoch: setup === 'latest' })`.
+**Creation:** `beginTurn(title, { parentId: P, freshContext: true, freshEpoch: setup === 'latest',
+epochFrom })`. `epochFrom` is the compression chain's override — a node id plants a **copy** of
+that node's frozen envelope on the new node, `null` freezes a fresh one, absent keeps the
+ordinary rule (`compress-node.md` §3).
 The `freshContext` option must set `node.contextBaseId = node.id` **after**
 `createNode()` and **before** `buildPath()`, or the run's basis is still the full
 chain. `freshEpoch` decides where the run's **epoch** comes from — the parent's
@@ -298,34 +318,39 @@ not rendered in the card: it lives on the node that starts the epoch, once per e
 by the ordinary `kind:'user'` item when the composer had text. The card's pinned prompt is
 therefore the user's own message, or nothing at all when the box was empty.
 
-## 5a. The handoff answer: the pointer, or a written summary
+## 5a. The handoff: the pointer, or a compression turn
 
-The context modal offers two answers, and both are implemented:
+The new-context modal offers two answers, and both are implemented:
 
-- `Just continue` (and every entry that does not ask, such as a rollover started from a
-  script) → the pointer shape of §6.
-- `Write a handoff summary` → `handoff: 'summary'` on the new node (`TreeNode.handoff`,
-  persisted with the node, validated by value at load so an older build reads it as
-  absent), and `rolloverContext` then spends **one extra request** on the current card to
-  write a summary of the previous window. That summary *is* the handoff: the new window's
-  harness text starts with it (§6).
+- `Simple` (and every entry that does not ask, such as a rollover started from a script) → the
+  **pointer** shape of §6, which costs no request at all. `TreeNode.handoff` is left absent: the
+  harness wrote the text, no model did.
+- `Agentic` → a **compression node** between the two windows (`compress-node.md`): one real
+  turn reads the previous window and writes the handoff, and the window below it starts from
+  that handoff. `TreeNode.handoff = 'summary'` and `TreeNode.handoffSummary` are recorded on the
+  window the compression produced, persisted with the node and validated by value at load, so
+  an older build reads them as absent.
 
-The summary is written **before** the new window exists, so the window's first — and only —
-harness message already carries the right handoff instead of a second kind of one. The
-user already confirmed the rollover, so the composer shows a busy state and the localized
-status line `Preparing the handoff summary…` for the duration.
+The retired shape — `Write a handoff summary`, one `clients.complete` request on the chain's
+card with a fixed eleven-section prompt and a 30 s deadline — is **gone from `src/`**:
+`writeHandoffSummary`, `buildCompactionRequest`, `buildCompactionRetryMessages` and
+`COMPACTION_TIMEOUT_MS` were deleted with it, and `npm run check:compaction` asserts they stay
+gone. The reason is the one this page opens with: a request whose input is the history has to
+fire early, while a compression **turn** is a card the user can read, stop, continue and
+delete.
 
-Nothing else changes shape: the plumbing (`sendUserMessage`'s two user messages) is the
-same, and a summary that cannot be written degrades to the pointer inside the **same**
-rollover — the user's confirmation is never spent twice, and a rollover never fails
-because a summary did (§6).
+Nothing else changes shape: the plumbing (`sendUserMessage`'s two user messages) is the same,
+the pointer's facts are the same, and a compression that fails or is stopped leaves the
+pointer's window one ▶ Continue away (`compress-node.md` §4/§6).
+
 
 ## 6. The harness text
 
 Built by `SessionRuntime` (model-facing, therefore **deliberately English**, like
 the `[Harness]` fact line and the `INTERRUPT_NOTICE` literals, and never through
-`l10n.t`). There are two shapes, and the handoff answer picks one (§5a): the **pointer**
-(below) and the **summarized** one (§6a). Shape:
+`l10n.t`). There are two shapes: the **pointer** (below, the `Simple` answer) and the
+**compressed** one (the `Agentic` answer — the handoff comes first and the pointer facts follow
+it; §6a and `compress-node.md` §7). Pointer shape:
 
 ```
 [Harness: context window reset]
@@ -343,8 +368,12 @@ sessionId=<sessionId> (line 1 is the meta record). Earlier windows of this sessi
 their own files in the same folder.
 
 Carried over verbatim:
+- the user's first request in that window: <verbatim, clipped 2000 chars>
 - the user's last request: <clipped 2000 chars>
 - the last answer you gave: <clipped 1000 chars>
+
+Files the previous window changed — re-read one before editing it, it may have moved on:
+- <path>
 
 Still running from the previous window: none — <N> background terminal(s) and <M>
 sub-agent(s) were stopped when this window was opened, because their results could not
@@ -371,10 +400,13 @@ Rules for building it:
   thing). `usage` is `undefined` when either number is unknown, and the line is then
   omitted: a fact the harness cannot state is not stated.
 - **The reason is named.** `buildContextRolloverMessage({ reason })` receives one of
-  **three** values, read off the same refusal text `nodeContextFull()` reads
+  **four** values, read off the same refusal text `nodeContextFull()` reads
   (`rolloverReason()`, runtime.ts): `'full'` when the provider refused the request over
-  its **tokens**, `'images'` when it refused it over its **bytes** (§3), and `'near'`
-  when the user took the 90 % entry. The first paragraph says which: `… could not be
+  its **tokens**, `'images'` when it refused it over its **bytes** (§3), `'near'`
+  when the user took the 90 % entry, and `'compress'` for the compressed shape, where the
+  size line claims no reason at all (`The previous window used … , the window was
+  compressed to continue the conversation in a shorter one.`) — a compression may be asked
+  for at any fill level, so neither "it was refused" nor "it was nearly full" is a fact. The first paragraph says which: `… could not be
   sent to the model any more (the provider refused it: the context window was full)`;
   `… could not be sent to the model any more: the provider refused the request because
   of its images (the attachments it carried were over its per-request image size
@@ -404,131 +436,57 @@ Rules for building it:
 - **Attachments cannot be carried** (a `file_id`'s validity across windows is not
   guaranteed): say *"the original request had <N> attachment(s)"* instead.
 - The leftover list is composed from what was actually killed in §7.
-- **A failed summary says so here.** When the user asked for a handoff summary and it
-  could not be written (§6a), the pointer text is used *and* the first paragraph gains one
-  sentence: `A handoff summary was asked for but could not be written (<reason>), so this
-  window is pointed at the previous one instead.` The reason is one model-facing clause
-  (`the summary request timed out`, `the summary request failed`, `the model returned
-  nothing`, `the answer did not carry the required sections`). Hiding it would leave a
-  window whose next turn believes a summary exists.
+- **The original task is quoted, not described.** The window's **first** real user message
+  (the request the task started from) is carried verbatim beside the last one, because a
+  handoff that loses it is a handoff of the wrong task. A window whose first request never
+  came from the user (a pointer note) says nothing there.
+- **The changed files are listed.** `editedFilesFromItems` reads the window's `kind:'tool'`
+  display items for the three writing tools and names each path once, in the order it was
+  touched, under "re-read one before editing it, it may have moved on".
+- **There is no "the summary failed" sentence any more.** The pointer shape is the `Simple`
+  answer, which never asked for a summary; a compression that failed or was stopped is a
+  notice on **that card** and no window at all (`compress-node.md` §6).
 
-## 6a. The summarized rollover, and its request
+## 6a. The compression's input, and its outcome
 
-`Write a handoff summary` replaces the pointer with a **written summary** of the previous
-window. The request, the tolerance and the fallbacks all live in
-`src/agent/compaction.ts` (pure, `vscode`-free, driven by `npm run check:compaction`);
-`SessionRuntime.writeHandoffSummary` owns only the card, the deadline and the busy state.
+The input, the bounds, the prompt and the validators live in `src/agent/compaction.ts` (pure,
+`vscode`-free, driven by `npm run check:compaction`). `SessionRuntime.compressAndContinue` owns
+the tree, the turn, the settle wait and the window below it; the outcome table and the
+sealing rule are `compress-node.md` §4/§6.
 
-**The input is one window, bounded, never the whole chain.** `extractCompactionSource`
-selects from `pathMessages(session, P)` — the context base down to the overflowing node,
-i.e. exactly the API prefix without the system prompt — and it does so **before** the
-union kill, because the kill appends harness notices to P as `role:'user'` messages that
-the user never wrote. What it keeps:
+**The input is one window, bounded, never the whole chain.** `extractCompactionSource` selects
+from `pathMessages(session, P)` — the context base down to the overflowing node, i.e. exactly
+the API prefix without the system prompt — and it does so **before** the union kill, because the
+kill appends harness notices to P as `role:'user'` messages that the user never wrote. What it
+keeps:
 
 - the **first** user message **verbatim** (a handoff that loses the original request is a
   handoff of the wrong task);
-- **every** user message, each clipped to **500 chars**, with the count stated in the
-  header (`user messages: <N>`) — that list is what `## All User Messages` is written from;
+- **every** user message, each clipped to **500 chars**, with the count stated in the header
+  (`user messages: <N>`);
 - the assistant texts of the **last 8** turns, each clipped to **1000 chars**;
 - each tool call as `name -> brief -> first line of the result`, the arguments clipped to
-  **120** chars and that first result line to **200** (the whole entry is one block);
-- a marking line when the window already starts from a handoff summary (see below).
-- Harness-authored text is not a user message and is left out of the list — its three
-  openings are the pointer / resume notes (`[Harness…`), an interruption notice
-  (`[Interruption notice]`) and a background job's completion writeback
-  (`Background command …`), matched by `isHarnessAuthored`. They stay in the transcript the
-  window is pointed at.
+  **120** chars and that first result line to **200**;
+- a marking line when the window already starts from a handoff (`COMPACTION_HARNESS_TITLE`), so
+  the second compression carries the first one's unresolved items forward instead of
+  re-inventing them.
 
 The whole source is capped at **60,000 chars**. Over that, the **middle** is dropped —
-head+tail selection keeps the header, the first request and the newest blocks, taking from
-each end in turn — and one marker line says how much was left out and where to read it
-(`…[compaction input clipped: <N> chars from the middle of this window were left out; read
-the transcript for those messages]`). The two anchor blocks survive even if they have to be
-shortened themselves.
+head+tail selection keeps the header, the first request and the newest blocks — and one marker
+line says how much was left out and where to read it. The two anchor blocks survive even if
+they have to be shortened themselves.
 
-**A previous summary is marked, not re-invented.** When the window's first message is the
-harness title `[Harness: context window reset — handoff summary]`
-(`detectPriorHandoffSummary`), the source says the window already starts from a handoff
-summary, and the prompt tells the model to **carry its unresolved items forward** rather
-than re-inventing them. That is the whole point of a rolling summary: the second rollover
-must not lose what the first one already knew.
+**The changed files are read out of the transcript items** (`editedFilesFromItems`): every
+`kind:'tool'` item whose tool is `write_file` / `replace_in_file` / `append_file`, its `path`
+argument, in the order it was touched and without duplicates. Both handoff shapes list them
+under "re-read before editing", because the working tree may have moved on since.
 
-**The request.** One `clients.complete` on the **chain's own card** (`chainCard(P)`), so
-the summary runs where the conversation ran: no `tools`, non-streaming, `temperature 0.2`,
-`max_tokens 1500`, and a **hard 30 s** `AbortController` that covers the request *and* its
-one validation retry (the bound is the user's wait, not the attempt count). The prompt is
-one English `user` message with the fixed eleven-section schema —
-`Primary Request and Intent` / `Key Technical Concepts` / `Files and Code Sections` /
-`Errors and Fixes` / `Problem Solving` / `All User Messages` / `Pending Tasks` /
-`Current Work` / `Optional Next Step` (quote the original) / `Durable References` /
-`Handoff Contract` — plus the rules that make it usable: file paths with the key snippets
-each marked *re-read before editing*; `Durable References` carrying the transcript path,
-the key file paths and the killed background-job / sub-agent list; and `Handoff Contract`
-stating that *you are the same agent continuing the same task; this summary is your
-memory; exact file contents must be re-read; the summary may be stale against the working
-tree*.
+**The answer is validated by heading** (`missingCompactionSections`): the seven required
+sections of `COMPRESS_REQUIRED_SECTIONS` are matched tolerantly (any heading level, casing, or
+a trailing colon/period), and `Durable references` — how to retrieve what was left out — is
+asked for and not required. A missing required heading is **not** a failure: the window opens
+anyway and the card is told which sections are missing (`compress-node.md` §6).
 
-**The validation is by heading.** `missingCompactionSections` accepts any heading level,
-casing, or a trailing colon/period, and requires the **nine** sections
-(`COMPACTION_REQUIRED_SECTIONS`); the two local extras — `Durable References` and
-`Handoff Contract` — are asked for and not required, because a model that folds them into
-its prose still produced a usable handoff. A missing required heading is retried **once**
-(`buildCompactionRetryMessages`: the same request, the model's own answer as its assistant
-turn, and the missing headings named), and the retry is validated the same way.
-
-**Every failure is a fallback, never a failed rollover.** `classifyCompactionAnswer`
-decides in one pure place, and `writeHandoffSummary` never throws:
-
-| what happened | `outcome` | what the new window gets |
-| --- | --- | --- |
-| the nine headings are there | `summary` | the summarized text of §6a |
-| the 30 s deadline fired (first attempt or the retry) | `fallback:timeout` | the pointer text + the unavailable sentence |
-| the request threw (key, network, provider) | `fallback:error` | the same |
-| the answer was empty / whitespace | `fallback:empty` | the same |
-| a required heading is still missing after the retry | `fallback:invalid` | the same |
-
-The rollover then continues exactly as `Just continue` does: same window, same kills, same
-killed-work list. `TreeNode.handoff === 'summary'` is recorded either way (the user's choice
-is a fact), and `TreeNode.handoffSummary` holds the summary text when there is one — the
-same text the harness block carries, stored beside the messages so a reload renders the same
-block and a later feature can read the summary as data.
-
-**Diagnostics.** One line per attempt: `[perf] compaction in=<chars>chars out=<tokens>tok
-ms=<ms> outcome=summary|fallback:<reason>`, built by `compactionDiagLine` and logged through
-`perf()`. A separate `[compaction] summary request failed for …` line goes to the output
-channel with the failure's own message.
-
-**Shape of the summarized harness text** (`buildContextRolloverMessage({ summary })`). The
-order is fixed:
-
-```
-[Harness: context window reset — handoff summary]
-<the summary, verbatim: its eleven sections>
-
-Previous window: node <prevId> of session <sessionId>.
-The user's last request, verbatim: <clipped 2000 chars> (truncated / attachment notes)
-
-<the transcript pointer of §6 — or its degrade sentence>
-Still running from the previous window: none — <N> background terminal(s) and <M> …
-Stopped when this window was opened:
-- <the killed-work list>
-The previous window used <used> of this model's <window>-token context (<pct>%), …
-Redo the user's last request here. If it depends on earlier work, fetch that from the
-transcript first — do not guess.
-```
-
-Rules for this shape, on top of the pointer's:
-
-- **The last user request is still verbatim.** The summary is a model's account of the
-  window; the user's own words are the one thing it must never be the only copy of.
-- **The refusal paragraph is absent.** The summary was written *because* the window ended;
-  repeating the size sentence above the handoff would push it down for no fact. The
-  context-length line still appears, at the end, exactly as in the pointer shape.
-- **The pointer is not dropped, only shortened.** The transcript path, the killed-work list
-  and the "re-read before editing" instruction are what makes a summary safe against a
-  working tree that moved on.
-- The harness title is what the next rollover reads as "this window already starts from a
-  handoff summary" (`COMPACTION_HARNESS_TITLE`), so it may not drift from the detector.
 
 ## 7. Leaving no orphan work behind
 
@@ -574,17 +532,18 @@ Three things the rollover must add on top of `stopNode`:
 | --- | --- |
 | `contextBaseId`, `contextBase()`, `epochForNode()`, `pathMessages()` cut, `normalizeTreeSession`, `TreeNode.handoff` | `src/chat/tree.ts` |
 | `parseContextLengthError()`, `windowFullReason()` | `src/agent/models.ts` |
-| `beginTurn({ freshContext, freshEpoch })`, `rolloverContext()`, `canRollover()`, `newEpochTrigger()`, `contextState()` / `contextPercent()` / `contextStateLive()`, `chainPromptTokensLive()`, `freezeEpoch()`, the harness text + `rolloverUsage()`, `nodeStatePatch()`, the kill + settle + flush + re-dump | `src/chat/runtime.ts` |
-| `newContextTurn` routing, `newContextEntry()`, `confirmEpochChange()`, `forkEntry()`, `forkFor()`, the kill modal, the transcript meta field | `src/chat/ChatViewProvider.ts` |
+| `beginTurn({ freshContext, freshEpoch, epochFrom, role })`, `rolloverContext()`, `canRollover()` / `canCompress()`, `newEpochTrigger()`, `contextState()` / `contextPercent()` / `contextStateLive()`, `chainPromptTokensLive()`, `freezeEpoch()`, the harness text, `rolloverUsage()`, `nodeStatePatch()`, the kill + settle + flush + re-dump (`prepareHandoff`) | `src/chat/runtime.ts` |
+| `newContextTurn` / `compressNow` routing, `newContextEntry()`, `confirmCompression()`, `confirmEpochChange()`, `forkEntry()`, `forkFor()`, the kill modal, the transcript meta field | `src/chat/ChatViewProvider.ts` |
 | `sendUserMessage(content, followUp)` — the harness message and the composer's text as two user messages | `src/agent/agent.ts` |
 | AGENTS.md read-at-use (`liveAgentsMdSources`) | `src/chat/agentsMd.ts` |
 | `#new-context-btn` in `#actions`, the composer's own show/disable rules, `syncContinueButton` (▶ / ↻ only), the `context`/`contextPct` merge in `applyNodeUpdate`, dashed edge, `CTX` badge | `src/chat/webviewShell.ts`, `media/main.js` |
 | `#actions #new-context-btn` (and the removed `#new-setup-btn` / `.node-rollover` / `.node-near` rules), `.edge-context`, `.node-ctx-badge` | `media/style.css` |
-| The handoff summary: the input selection and its 60k bound, the previous-summary marking, the prompt, the heading validation, the fallback decision, the diagnostics line | `src/agent/compaction.ts` |
-| `writeHandoffSummary` (the card, the 30 s deadline, the one validation retry, the busy state), the summarized harness text | `src/chat/runtime.ts` |
+| The handoff texts: the input selection and its 60k bound, the previous-handoff marking, `firstUserRequest`, `editedFilesFromItems`, the pointer text, the compression instruction, the heading validation, the diagnostics line | `src/agent/compaction.ts` |
+| The compression chain: `compressTools`, `compressAndContinue`, `deliverCompression`, `COMPRESS_SYSTEM_PROMPT_TEMPLATE` / `compressSystemPrompt` | `src/chat/runtime.ts`, `src/agent/prompt.ts` (`compress-node.md`) |
 | `TreeNode.handoff` / `TreeNode.handoffSummary` and their load-time validation | `src/chat/tree.ts` |
 | The strings of §9 | `l10n/bundle.l10n.zh-Hans.json`, `l10n/bundle.l10n.zh-Hant.json` |
 | The pure-function guards | `tools/check-context-rollover.js` (`npm run check:rollover`), `tools/check-compaction.js` (`npm run check:compaction`) |
+| The chain's own guards | `tools/check-webview.js` (`npm run check:webview`), `tools/rollover-acceptance.js` |
 
 ## 9. i18n
 
@@ -593,14 +552,12 @@ Translated (both catalogs, the source literals in the code):
 | Where | English source |
 | --- | --- |
 | host | `Context window {0}` |
-| host | `Preparing the handoff summary…` (the composer's status line while the summary request runs) |
 | host | `Work is still running in this window.` |
 | host | `{0} piece(s) of work are still running here (background terminals and sub-agents). Continuing in a new window stops them; what they produced stays in the transcript.` |
 | host | `Continue and stop them` |
-| host | `Continue in a new context window?` |
-| host | `The agent that takes over continues this conversation in a new window. It can either receive a handoff summary (one extra request) or be pointed at the previous branch and read the record itself.` |
-| host | `Write a handoff summary` |
-| host | `Just continue` |
+| host | `Start a new context window?` |
+| host | `Simple` / `Agentic` |
+| host | `Simple costs no extra request: the new window is pointed at this window’s transcript and reads the record itself. Agentic runs one more turn — a compression node reads this window and writes the handoff the new window starts from, so the handoff is more complete, one turn slower, and costs that request.` |
 | host | `Continue with the new workspace or model configuration?` |
 | host | `The conversation history (about {0} tokens for the current model) will be sent to the provider under the new configuration. This request will miss the provider’s cache.` |
 | host | `Continue` |
@@ -629,16 +586,17 @@ sends there)`) and the setup modal (`Continue with current setup`, `Continue wit
 setup`, `Continue with a new setup?`, its two bodies, and `Send will ask before using the
 old setup (the one this node froze)`).
 
-The handoff summary choice is deliberately **setting-free**: it is one answer to the
-modal's question (`Write a handoff summary`), it costs exactly one extra request on the
-card the conversation already uses, and there is no `spinney.*` key to enable it, no
-temperature or length to tune and no separate card to pick. A user who wants the free
-handoff answers `Just continue` instead — that is the only switch the feature needs.
+The handoff choice is deliberately **setting-free**: it is one answer to the modal's
+question (`Simple` / `Agentic`), it runs on the card the conversation already uses, and
+there is no `spinney.*` key to enable it, no temperature or length to tune and no separate
+card to pick. A user who wants the free handoff answers `Simple`. The compression's own
+strings are listed in `compress-node.md` §9.
 
-Deliberately untranslated (the existing rules, see `i18n.md`): the harness resume
-text (the pointer shape **and** the summarized one, whose title line
-`[Harness: context window reset — handoff summary]` is what the next rollover reads) (model-facing and shown verbatim in its block), the `CTX` badge (compact dock
-token), and the `[config]` / `[perf]` diagnostics.
+Deliberately untranslated (the existing rules, see `i18n.md`): the harness resume text (the
+pointer shape **and** the compressed one, whose title line `[Harness: context window reset —
+handoff summary]` is what the next compression reads) (model-facing and shown verbatim in its
+block), the `CTX` / `CMP` badges (compact dock tokens), and the `[config]` / `[perf]` /
+`[compression]` diagnostics.
 
 ## 10. Evidence
 
@@ -657,18 +615,25 @@ token), and the `[config]` / `[perf]` diagnostics.
   that no card carries a `.node-window` / `node-rollover` / `node-near` element any more,
   that `#new-context-btn` sits before `#send-btn` in the shell, that a `nodeUpdate`
   carrying `context: 'full'` disables Send and offers the entry, that the `edge-context`
-  class lands on the child's connector only, and that the `CTX` badge appears on the
-  window-starting card and not on its descendants.
+  class lands on the child's connector only, that the `CTX` badge appears on the
+  window-starting card and not on its descendants, that a compression node wears `CMP`
+  instead and shows its own ⏹ Stop while it runs (it has no composer), that the window it
+  produced carries no 🗑 of its own, that its card is sealed (no ▶ once its window exists),
+  that a checked-out compression node hides the composer, and that the Send button's
+  right-click posts `compressNow` with the box's text and attachments and clears nothing.
 - `npm run check:compaction` — pure node, against the compiled `src/agent/compaction.ts`: the
   source is one window (harness notes are not user requests), the first user message is
   verbatim while every user message is clipped to 500 chars with the count, only the last 8
   assistant texts are kept, a tool call reads `name -> brief -> first line of the result`
   with a 200-char result, a window over 60,000 chars keeps its head and its tail and
-  announces the clip, a window that starts from a summary is marked as one, the eleven
-  sections and the nine required headings (tolerant matching, prose rejected), the fallback
-  decision (`timeout` / `error` / `empty` / `invalid`), and the request itself (one user
-  message, no tools, `max_tokens` 1500, temperature 0.2, a 30 s constant) plus the
-  `outcome=` spelling of the diagnostics line.
+  announces the clip, a window that starts from a handoff is marked as one, the eight
+  sections and the seven required headings (tolerant matching, prose rejected), the decision
+  (`empty` / `invalid` / usable), the compression instruction (the facts, then the fixed ask
+  verbatim, the transcript pointer degrading instead of pointing at nothing), the pointer
+  text (the original task and the changed files included, the size line claiming no refusal
+  in the compressed shape), `editedFilesFromItems` (only the writing tools, in order, no
+  duplicates), the `outcome=` spelling of the diagnostics line, and that the retired
+  one-shot summariser's exports are **gone** from the module.
 - `npm run check:continue` — the retired setup modal (`askSetups` /
   `discardPendingSetup` / `hasUserDrift`) is gone from `src/`.
 - `node tools/rollover-acceptance.js` (dev only, after `npm run compile`) — drives
@@ -678,11 +643,17 @@ token), and the `[config]` / `[perf]` diagnostics.
   node's job is left alone, the kill notice reaches that node's history *and* its
   re-dumped transcript, the message carries the pointer / clipped tail / attachment
   count, and a node that is not context-full falls back to the in-place continue. The
-  summarized handoff is driven too: with a scripted answer the harness text starts with
-  the summary and then the user's last request, the pointer, the killed-work list and the
-  size line, the node carries `handoffSummary`, an answer missing a required heading is
-  asked for exactly once more, and an unreachable provider leaves the pointer text plus
-  the unavailable-summary sentence — the rollover still succeeds. See `testing.md`.
+  **compression chain** is driven the same way, with a scripted assistant turn: C's first
+  request is `[compression envelope, harness instruction]` with no ancestor or sibling
+  message and carries exactly the four read-only tools, C freezes an envelope of `kind:
+  compress`, R is a `resume` node whose system message is **P's** bytes (not C's), whose
+  first message starts with the handoff and is followed by the pointer facts and the
+  composer's text as its own user message, and the node records `handoff` /
+  `handoffSummary`. A Stop on C leaves the card interrupted with no window below it, an
+  empty answer opens no window, a missing section opens the window anyway with a notice on
+  the card, `continueFrom(C)` is refused once the window exists, and
+  `branchDeletionBlocked` refuses the resume window while allowing the compression node.
+  See `testing.md`.
 
 ## 11. Deliberately not done
 
