@@ -77,6 +77,29 @@
   each tool call now writes a `tool-start` line before it runs — see the log section
   below.
 
+**The character / element appear animation never becomes the streaming surface.** The
+plain `Text` node is still what a streaming answer (and a thinking row) is painted
+into, and a delta is still one `appendData` — the text is **complete in the DOM the
+moment it arrives**, so nothing rate-limits the reveal and nothing queues it. What is
+animated is only its appearance: a delta's newest characters sit in a transient
+`<span class="chunk-in">` that fades for ~140 ms, and that span is merged back into the
+same `Text` node on `animationend` (with a 400 ms timer behind it, because an engine
+that never fires the event — the offline guard's stub does not — must still settle).
+**The span never holds more than the newest chunk**: a delta that arrives mid-fade
+merges the previous span first and opens a new one, so at most one span exists per
+answer, per thinking row, with the settled length (`_settled`) keeping the slice exact;
+the merge is idempotent and safe when a repaint or a finalize already removed the
+element, `finalizeStreamingAnswer` settles everything **before** the markdown render,
+and `reset` / `tree` settle the chunks in flight before their cards are replaced. A new
+row (assistant text, tool, thinking, notice) arrives on one `.row-in` fade + 2 px rise
+that is removed again on `animationend`; a live tool row's label is **not** wrapped per
+delta — the same element is rewritten and its `.label-in` class removed and re-added in
+the next frame, so no layout is read in the streaming path. `spinney.streamAnimation`
+(absent ⇒ on, in the `config` message) turns all of it off into exactly the old
+rendering, and `prefers-reduced-motion: reduce` is honoured in the script as well as in
+`media/style.css`; `tools/check-webview.js` pins that a delta is readable at once and
+that the setting off creates no span.
+
 ### One card, one flow: `ask` + one log
 
 A turn card — and a sub-agent sidecar card — reads as **one essay**. There are two

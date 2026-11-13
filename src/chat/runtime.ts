@@ -598,6 +598,16 @@ export interface HarnessConfig {
    * sends, so nothing about them reaches the system prompt.
    */
   promptSnippets: PromptSnippet[];
+  /**
+   * `spinney.streamAnimation`: may the webview animate how text and rows appear (a
+   * fading chunk of new characters, a new row's fade + rise, a live tool label's
+   * fade)? It is a **paint-only** flag — the text is in the DOM either way, and the
+   * transcript, the markdown render and the streaming path are identical when it is
+   * off. It is read live into every `config` post, so a settings change reaches the
+   * open tab without a reload, and the webview also honours the OS' own
+   * reduced-motion wish on top of it.
+   */
+  streamAnimation: boolean;
 }
 
 /**
@@ -2638,6 +2648,9 @@ export class SessionRuntime {
       efforts: effortsFor(this.card),
       thinkingEffort: this.thinkingEffort,
       snippets: cfg.promptSnippets,
+      // The appear animation, re-sent with every config: turning it off reaches the open
+      // tab at once, and the webview defaults it to on when the field is absent.
+      streamAnimation: cfg.streamAnimation,
       // The two setups the composer shows, and whether they disagree: the webview marks
       // Send (and offers the new-setup entry) from this alone.
       setup: this.setupState(),

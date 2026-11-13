@@ -76,6 +76,11 @@
   // Session currently rendered, mirrored into vscode.setState so a reloaded
   // window restores this tab bound to the same conversation.
   let persistedSessionId = '';
+  // The character / row appear animation — `streamAnimation` in the host's `config`
+  // message (`spinney.streamAnimation`). `true` until a `config` says otherwise: a
+  // replay shape (and every fixture in `tools/check-webview.js`) may not carry the
+  // field, and the setting's own default is on.
+  let streamAnimation = true;
 
   const NODE_W = 320;
   const H_GAP = 48;
@@ -1839,6 +1844,182 @@
     }
   }
 
+  // ---- The appear animation -------------------------------------------------
+  // **The text is complete in the DOM the moment a delta arrives; only its
+  // appearance is animated.** The newest characters of a delta go into a transient
+  // `<span class="chunk-in">` (a ~140 ms fade, CSS), and that span's text is moved
+  // into the answer's own persistent `Text` node on `animationend` — so the streaming
+  // surface is still one `Text` node and one `appendData`, never a per-character DOM,
+  // and nothing on this path reads layout.
+  //
+  // **One chunk per host at a time.** A delta that arrives before the previous
+  // animation ended merges the pending span first and opens a new one, so the span
+  // never holds more than the newest chunk. The bookkeeping is `_settled` — how many
+  // characters of the host's own text are already in its `Text` node — which is what
+  // makes the delta slice exact after a merge. The merge itself is idempotent (a
+  // second call finds nothing to do) and safe when the span was already removed by a
+  // repaint or a finalize.
+  /** An engine that never fires `animationend` (the offline guard's stub) still settles. */
+  const ANIMATION_FALLBACK_MS = 400;
+
+  // The hosts with a chunk in flight, so `reset` / a `tree` repaint can settle them
+  // without walking the DOM (on a 40-card session that walk would be the cost).
+  const pendingChunks = new Set();
+
+  /** Computed once: the media query's answer is fixed for the life of the document. */
+  let reducedMotion;
+
+  /**
+   * The OS' own reduced-motion wish, read in the script as well as in the stylesheet:
+   * with it on, no character is ever wrapped in a span and no row is given a class, so
+   * today's rendering is exactly what a reader gets.
+   */
+  function prefersReducedMotion() {
+    if (reducedMotion === undefined) {
+      try {
+        reducedMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
+      } catch (err) {
+        reducedMotion = false;
+      }
+    }
+    return reducedMotion;
+  }
+
+  /**
+   * Is the appear animation on? The setting (`spinney.streamAnimation`, sent in the
+   * `config` message) **and** the OS' own reduced-motion wish — the media query at the
+   * end of `media/style.css` says the same thing for the CSS half, and an element the
+   * script never wrapped stays the plain `Text` node.
+   */
+  function animationsOn() {
+    return streamAnimation && !prefersReducedMotion();
+  }
+
+  /** A chunk's span leaves the document (its text has been merged back, or is moot). */
+  function removeChunkSpan(span) {
+    if (!span) return;
+    if (typeof span.remove === 'function') span.remove();
+    else if (span.parentElement) span.parentElement.removeChild(span);
+  }
+
+  /**
+   * Forget a host's pending chunk **without** merging it: its characters are already in
+   * the host's own source text (`node._text` / the thinking row's own text), so whatever
+   * renders next takes them from there.
+   */
+  function dropChunk(host) {
+    if (!host) return;
+    if (host._chunkTimer) {
+      clearTimeout(host._chunkTimer);
+      host._chunkTimer = null;
+    }
+    const span = host._chunk;
+    host._chunk = null;
+    host._chunkText = '';
+    host._chunkTn = null;
+    pendingChunks.delete(host);
+    removeChunkSpan(span);
+  }
+
+  /**
+   * Merge the pending chunk into the host's persistent `Text` node and remove the span
+   * — the one way a chunk ends. It is **idempotent** (`_chunk` is cleared before
+   * anything else, so a second call is a no-op, which is what makes a late
+   * `animationend` after a finalize harmless) and it survives the span having been
+   * removed already: what is merged is the span's *text*, into the host's current node.
+   */
+  function mergeChunk(host) {
+    if (!host) return;
+    if (host._chunkTimer) {
+      clearTimeout(host._chunkTimer);
+      host._chunkTimer = null;
+    }
+    const span = host._chunk;
+    const text = host._chunkText || '';
+    const tn = host._chunkTn;
+    host._chunk = null;
+    host._chunkText = '';
+    host._chunkTn = null;
+    pendingChunks.delete(host);
+    if (tn && text) {
+      tn.appendData(text);
+      if (typeof host._settled === 'number') host._settled += text.length;
+    }
+    removeChunkSpan(span);
+  }
+
+  /**
+   * Open one fading chunk on `host`, whose settled text lives in `tn`. Any chunk already
+   * in flight is merged first: **at most one span per host**.
+   */
+  function openChunk(host, tn, text) {
+    if (!host || !text) return;
+    mergeChunk(host);
+    const span = el('span', 'chunk-in', text);
+    host._chunk = span;
+    host._chunkText = text;
+    host._chunkTn = tn;
+    pendingChunks.add(host);
+    // The fade is CSS; the merge back is this one event, with a timer behind it for an
+    // engine that never fires it — the merge must never depend on being told.
+    span.addEventListener('animationend', () => {
+      if (host._chunk === span) mergeChunk(host);
+    });
+    host._chunkTimer = setTimeout(() => {
+      if (host._chunk === span) mergeChunk(host);
+    }, ANIMATION_FALLBACK_MS);
+    host.appendChild(span);
+  }
+
+  /**
+   * Settle every chunk in flight. A `reset` or a `tree` repaint is about to replace the
+   * cards those chunks live in, so their text goes back into their `Text` node first.
+   */
+  function flushChunks() {
+    for (const host of Array.from(pendingChunks)) mergeChunk(host);
+  }
+
+  /**
+   * A row that has just been appended arrives with one fade + 2 px rise (`.row-in`).
+   * The class is removed on `animationend` — or by the fallback timer — so no row keeps
+   * a running animation (or a compositing layer) alive after it has arrived.
+   */
+  function animateRow(row) {
+    if (!row || !row.classList || !animationsOn()) return;
+    row.classList.add('row-in');
+    let settled = false;
+    const settle = () => {
+      if (settled) return;
+      settled = true;
+      row.classList.remove('row-in');
+    };
+    row.addEventListener('animationend', (event) => {
+      // A nested fade (the `.chunk-in` span inside an answer) bubbles up here: only the
+      // row's own animation ends the row's.
+      if (event && event.target && event.target !== row) return;
+      settle();
+    });
+    setTimeout(settle, ANIMATION_FALLBACK_MS);
+  }
+
+  /**
+   * Restart the label's short opacity fade. A live tool's label is **rewritten** per
+   * argument delta, so it is deliberately not wrapped in a span: the same element loses
+   * the class and gets it back in the next frame, which is what restarts a CSS animation
+   * on an element that is already on screen — and, unlike the `offsetWidth` trick, it
+   * reads no layout in the streaming path.
+   */
+  function fadeLabel(labelEl) {
+    if (!labelEl || !labelEl.classList || !animationsOn()) return;
+    labelEl.classList.remove('label-in');
+    if (labelEl._labelFade) return;
+    labelEl._labelFade = true;
+    requestAnimationFrame(() => {
+      labelEl._labelFade = false;
+      labelEl.classList.add('label-in');
+    });
+  }
+
   // ---- Message rendering into a container (defaults to the active node) ----
   // Zone 1 of a card: the pinned user ask (`.node-ask`, top of an expanded card).
   // It does not scroll with the work log and does not trigger tree panning, and it
@@ -1878,6 +2059,7 @@
     const node = el('div', 'notice ' + (kind || 'info'), text);
     node.dataset.kind = 'notice';
     logTail().appendChild(node);
+    animateRow(node);
     followActive();
     return node;
   }
@@ -1966,6 +2148,7 @@
   function addThinkingRow(text) {
     const row = makeThinkingRow(text);
     logTail().appendChild(row);
+    animateRow(row);
     return row;
   }
 
@@ -2020,6 +2203,7 @@
     node._thinkingRow = row;
     renderAnswer(node, true);
     messagesEl.appendChild(node);
+    animateRow(node);
     followActive();
     return node;
   }
@@ -2057,6 +2241,9 @@
 
   function ensureStreamText(answer) {
     if (answer._streamText) return answer._streamText;
+    // A rebuild starts from the authoritative text (`node._text`), so a chunk still in
+    // flight is dropped, never merged into a node that is about to go away.
+    dropChunk(answer);
     answer.textContent = '';
     const tn = document.createTextNode('');
     answer.appendChild(tn);
@@ -2071,29 +2258,54 @@
     // item is its row alone), so its visibility follows the text on every write.
     if (answer.classList) answer.classList.toggle('hidden', !String(node._text || '').length && !node.classList.contains('error'));
     if (node.classList.contains('error')) {
+      dropChunk(answer);
       answer._streamText = null;
+      answer._settled = 0;
       answer.textContent = node._text || '';
       return;
     }
     if (finalize) {
       node._streaming = false;
+      // **Merge before the render.** The newest characters of the stream exist only in
+      // the pending span, and `innerHTML` is about to replace the subtree it lives in.
+      mergeChunk(answer);
       answer._streamText = null;
+      answer._settled = 0;
       answer.innerHTML = renderMarkdown(node._text || '');
       return;
     }
+    const full = node._text || '';
     if (!node._streaming) {
       node._streaming = true;
-      ensureStreamText(answer).nodeValue = node._text || '';
+      answer._settled = 0;
+      dropChunk(answer);
+      // `appendData` and not `nodeValue`: it is the streaming surface's one write (and it
+      // is what the offline guard's `Text` stub keeps its `textContent` in step with).
+      // The node `ensureStreamText` hands back here is always a fresh, empty one.
+      ensureStreamText(answer).appendData(full);
+      answer._settled = full.length;
       return;
     }
-    const tn = ensureStreamText(answer);
-    const full = node._text || '';
-    const have = tn.nodeValue.length;
-    if (have < full.length) tn.appendData(full.slice(have));
+    // The delta's new characters: settled characters plus whatever the pending span
+    // still holds is the prefix already on screen, so the slice is exact even when a
+    // delta arrives mid-fade.
+    const have = (answer._settled || 0) + (answer._chunkText ? answer._chunkText.length : 0);
+    if (have >= full.length) return;
+    if (!animationsOn()) {
+      // Exactly today's rendering, with the setting off: one `appendData`, no span.
+      mergeChunk(answer);
+      ensureStreamText(answer).appendData(full.slice(answer._settled || 0));
+      answer._settled = full.length;
+      return;
+    }
+    openChunk(answer, ensureStreamText(answer), full.slice(have));
   }
 
   function finalizeStreamingAnswer() {
     if (!messagesEl) return;
+    // Everything that is still fading is part of the message: settle it before anything
+    // is rendered or moved, so no character is left behind in a span.
+    flushChunks();
     // The message is complete: nothing in it is streaming any more, so its thinking
     // row collapses back to its one line.
     closeActiveRows('thinking');
@@ -2134,7 +2346,17 @@
    */
   function pushThinkingText(row, text) {
     if (!row || !row._textEl) return;
-    textNodeOf(row._textEl).appendData(text);
+    // The reasoning gets the same treatment as an answer's text: the delta's characters
+    // are in the row immediately, the newest chunk fades in, and the span's text is
+    // folded back into the row's own `Text` node within one animation. One span per row
+    // (`openChunk` merges the previous one first).
+    const tn = textNodeOf(row._textEl);
+    if (animationsOn()) {
+      openChunk(row._textEl, tn, text);
+    } else {
+      mergeChunk(row._textEl);
+      tn.appendData(text);
+    }
     // A thought is a step, so a delta that lands in an open run changes that run's count:
     // the header has to be refreshed here, or it keeps the number it had before the thought.
     if (openSteps) updateStepsHead(openSteps);
@@ -3547,6 +3769,7 @@
     const group = ensureStepsGroup();
     logTail().appendChild(node);
     updateStepsHead(group);
+    animateRow(node);
     followActive();
     return node;
   }
@@ -3615,6 +3838,7 @@
     tuckReasoningIntoRun(group);
     logTail().appendChild(node);
     updateStepsHead(group);
+    animateRow(node);
     liveBucket(undefined, true)[index] = node;
     followActive();
     return node;
@@ -3631,14 +3855,18 @@
     if (argsDelta) {
       node._argsRaw = (node._argsRaw || '') + argsDelta;
       // The label is derived from the arguments as they arrive, in place (a rebuild
-      // per delta would throw away the row the reader may have just opened).
+      // per delta would throw away the row the reader may have just opened). The label
+      // is never wrapped: the written text is the whole label, and its element restarts
+      // one short fade (`.label-in`) instead.
       const name = node._verbEl ? node._verbEl.textContent : '';
       const label = toolLabel(name, node._argsRaw);
       if (node._labelEl) {
         node._labelEl.textContent = label;
+        fadeLabel(node._labelEl);
       } else if (label && node._rowEl) {
         node._labelEl = el('span', 'tool-label' + (MONO_LABEL_TOOLS.has(name) ? ' mono' : ''), label);
         node._rowEl.appendChild(node._labelEl);
+        fadeLabel(node._labelEl);
       }
     }
     followActive();
@@ -8081,6 +8309,10 @@
   function handleMessage(msg) {
     switch (msg.type) {
       case 'tree':
+        // A repaint replaces the cards any fading answer lives in: settle those chunks
+        // into their `Text` nodes first, so the newest characters are never left in a
+        // span the repaint throws away.
+        flushChunks();
         renderTree(msg);
         break;
       case 'path':
@@ -8120,6 +8352,10 @@
         // exactly the old behaviour.
         SETUP = msg.setup && typeof msg.setup === 'object' ? msg.setup : null;
         renderSetupIdentity();
+        // The character / row appear animation (`spinney.streamAnimation`). A replay
+        // shape that predates the field sends nothing — then it is on, which is the
+        // setting's own default and what every fixture in `tools/check-webview.js` gets.
+        streamAnimation = msg.streamAnimation !== false;
         break;
       }
       case 'state':
@@ -8291,6 +8527,9 @@
         perfOnViewState(msg);
         break;
       case 'reset':
+        // The cards (and the fading chunks inside them) are all going: settle first,
+        // the same way a `tree` repaint does.
+        flushChunks();
         clearLiveTools();
         resetItems();
         for (const id in nodeEls) {
