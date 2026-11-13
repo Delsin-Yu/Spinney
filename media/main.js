@@ -1530,8 +1530,9 @@
   // Two marks per row carry the state, and both live on the element (the DOM is
   // rebuilt by a repaint, which re-derives the same state from the items):
   //   `_open`        — the row is open right now;
-  //   `_userTouched` — a click handed the row to the user: the live rule below
-  //                    leaves it exactly where they put it.
+  //   `_userTouched` — a click (or a follow light the reader released: `readerHoldsRow`)
+  //                    handed the row to the user: the live rule below leaves it
+  //                    exactly where they put it.
   // The live rows are tracked on the container (`messagesEl`), which `routeTo`
   // swaps per node, so two nodes streaming at once never see each other's rows.
 
@@ -1594,6 +1595,22 @@
   }
 
   /**
+   * Is the reader reading this row? A click is not the only hand-over: releasing the
+   * row's own follow light — scrolling its box up, or clicking its dot — says the reader
+   * is inside that reasoning and has taken the box from the stream. The turn ending then
+   * must not fold it under them, so the same evidence that keeps a live delta from
+   * pinning the box also keeps `clearActiveRow` from closing the row.
+   *
+   * Only the **row's own** light counts: the card log's dot is the whole turn's follow
+   * state, so a reader who scrolled the turn up has not thereby opened its reasoning.
+   */
+  function readerHoldsRow(row) {
+    if (!row) return false;
+    if (row._userTouched) return true;
+    return !!(row._scroll && row._scroll.locked === false);
+  }
+
+  /**
    * This row is live: a thinking row opens (that is what the active turn is doing),
    * a tool row is left folded. A row the user clicked is theirs and never moves.
    */
@@ -1618,9 +1635,19 @@
       if (at >= 0) list.splice(at, 1);
     }
     if (row._userTouched) return;
-    // A finished thinking row is one line; a tool row folds back to its one line.
-    if (row.classList.contains('thinking-row')) setThinkingOpen(row, false);
-    else setToolOpen(row, false);
+    // A finished thinking row is one line; a tool row folds back to its one line. The
+    // exception is a reasoning row the reader unlocked by scrolling its own box: they are
+    // reading it, so the turn ending leaves it open — and it is marked as theirs, or a
+    // later pass (`settleRowsFinished`, a repaint) would fold it after all.
+    if (row.classList.contains('thinking-row')) {
+      if (readerHoldsRow(row)) {
+        row._userTouched = true;
+        return;
+      }
+      setThinkingOpen(row, false);
+    } else {
+      setToolOpen(row, false);
+    }
   }
 
   /**
@@ -1793,26 +1820,42 @@
   }
 
   /**
+   * Does this group's body hold a row the reader is reading (`readerHoldsRow`)? A
+   * group folds behind its own header at the end of the turn, but never over a
+   * reasoning row the reader unlocked — folding the group would take that row off
+   * screen, which is worse than folding the row itself.
+   */
+  function groupHoldsReaderRow(group) {
+    const body = group && group._body;
+    for (const row of (body && body.children) || []) {
+      if (row && row.dataset && row.dataset.kind === 'thinking' && readerHoldsRow(row)) return true;
+    }
+    return false;
+  }
+
+  /**
    * The turn is over: **every** group of the card tucks itself behind its own header —
-   * a group the user opened or closed by hand (`_userTouched`) stays exactly where they
-   * put it, and the others do not move it. No answer leaves a group here, because no
-   * answer ever entered one.
+   * a group the user opened or closed by hand (`_userTouched`), or one holding a row the
+   * reader unlocked, stays exactly where it is — and the others do not move it. No answer
+   * leaves a group here, because no answer ever entered one.
    */
   function settleSteps(card) {
     if (!card) return;
     card._openGroup = null;
     if (openSteps && inSubtree(card, openSteps)) openSteps = null;
     for (const group of card._groups || []) {
-      if (!group._userTouched) setStepsFold(group, true);
+      if (group._userTouched) continue;
+      if (groupHoldsReaderRow(group)) continue;
+      setStepsFold(group, true);
     }
   }
 
   /**
    * The turn is over: every row of the card takes its resting state — a thinking row
-   * collapses to its one line, a tool row folds — except the ones the user opened by
-   * hand (`_userTouched`), which stay exactly where they were put. Read off the card's
-   * own DOM rather than a list, so a card restored from a repaint settles like a live
-   * one.
+   * collapses to its one line, a tool row folds — except a row the reader holds: one they
+   * opened by hand (`_userTouched`) or one whose own follow light they released, which
+   * stays exactly where it is (`readerHoldsRow`). Read off the card's own DOM rather than a
+   * list, so a card restored from a repaint settles like a live one.
    */
   function settleRowsFinished(card) {
     if (!card) return;
@@ -1826,7 +1869,9 @@
   /**
    * Close every live row of the current container, or — with `kind` — only the
    * thinking (`'thinking'`) or the tool (`'tool'`) ones: the answer took over, or
-   * the turn is over. A row of the other kind stays live.
+   * the turn is over. A row of the other kind stays live, and a reasoning row the
+   * reader is reading stays open even here — `clearActiveRow` owns that rule, so the
+   * answer taking over cannot fold a box its reader unlocked.
    */
   function closeActiveRows(kind) {
     const list = messagesEl ? messagesEl._activeRows : null;
@@ -7030,15 +7075,24 @@
       setFollow(false);
       return;
     }
-    // alt + wheel pans the whole tree vertically, and it does so *whatever* is under
-    // the pointer — that is why it sits before the native-scroll-zone check below: a
-    // card, its work log / answer / ask, a thinking block and the composer all pan the
-    // camera instead of scrolling themselves. It is the vertical twin of the shift +
-    // wheel pan further down, and the one gesture that moves the tree from inside a
-    // scroller (where a plain wheel is the zone's own).
+    // alt + wheel pans the whole tree vertically and shift + wheel pans it
+    // horizontally, and both do so *whatever* is under the pointer — that is why the
+    // pair sits before the native-scroll-zone check below: a card, its work log / ask,
+    // a thinking block, an expanded step and the composer all pan the camera instead of
+    // scrolling themselves. Shift belongs here rather than with the plain wheel for a
+    // second reason: those zones have no horizontal scroll at all, so a shift branch
+    // behind their `return` is a gesture that can only be swallowed. Both are the way
+    // to move the tree from inside a scroller, where a plain wheel is the zone's own.
     if (e.altKey) {
       e.preventDefault();
       pan.y -= e.deltaY;
+      applyTransform();
+      setFollow(false);
+      return;
+    }
+    if (e.shiftKey) {
+      e.preventDefault();
+      pan.x -= e.deltaY;
       applyTransform();
       setFollow(false);
       return;
@@ -7050,13 +7104,6 @@
       return; // native scroll
     }
     e.preventDefault();
-    if (e.shiftKey) {
-      // Shift + wheel pans horizontally (kept as a pan escape hatch).
-      pan.x -= e.deltaY;
-      applyTransform();
-      setFollow(false);
-      return;
-    }
     zoomAt(e.clientX, e.clientY, e.deltaY < 0 ? 1.1 : 0.9);
     setFollow(false);
   }, { passive: false });

@@ -25,6 +25,13 @@
   --error-text:   var(--vscode-errorForeground, #ff9e9e);
   --success:      var(--vscode-charts-green, #4caf50);
   --warn:         var(--vscode-charts-yellow, #ffb84d);
+  /* The line-diff chip's two numbers (`+12 -3`) read one step quieter than the success and
+     error colours themselves: at 10 px in a step's head, full saturation is a badge that
+     competes with the label it belongs to. Mixing ~30% `--text-dim` into each keeps green
+     and red legible while taking the shout out — the `.diff-row.add/.del` tints are
+     backgrounds and are deliberately left alone. */
+  --diff-add-text: color-mix(in srgb, var(--success) 70%, var(--text-dim));
+  --diff-del-text: color-mix(in srgb, var(--error-text) 70%, var(--text-dim));
   --radius: 8px;
 }
 
@@ -1852,11 +1859,11 @@ button.icon-btn {
 }
 
 .tool-diff-add {
-  color: var(--success);
+  color: var(--diff-add-text);
 }
 
 .tool-diff-del {
-  color: var(--error-text);
+  color: var(--diff-del-text);
 }
 
 /* `Delivered` badge (D1): this sidecar's completion signal already reached the

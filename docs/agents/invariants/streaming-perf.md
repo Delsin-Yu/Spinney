@@ -24,11 +24,14 @@
   (the upright 13 px paragraph) and collapses to one ellipsised line the moment the
   answer's text takes over or the turn ends (`done` / `interrupted` / `error` →
   `endRun` → `settleRowsFinished`). A click hands *that* row to the user for good
-  (`_userTouched`) and the rule then leaves it exactly where they put it. A tool row
+  (`_userTouched`), and so does the row's own follow light being released — a reader
+  who scrolled the reasoning box up is reading it, so a row the reader released stays
+  open when the turn ends — and the rule then leaves it exactly where they put it. A tool row
   is folded at rest whatever it is doing — its one line already says what the step was —
   and a click opens its detail. The **steps groups** follow the same hand-over rule per
   group: each is open while its run is live, folded when the turn ends, and a click on its
-  own header always wins for that one group. `setThinkingOpen` / `setToolOpen` /
+  own header always wins for that one group — and a group holding a row the reader released
+  stays open, or its fold would hide that row. `setThinkingOpen` / `setToolOpen` /
   `setActiveRow` / `clearActiveRow` / `closeActiveRows` / `setStepsFold` in `media/main.js`;
   `tools/check-webview.js` asserts both halves ("the two rows of a turn") and the per-run
   groups ("steps groups: one per run").
