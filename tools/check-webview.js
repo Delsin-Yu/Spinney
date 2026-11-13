@@ -3493,6 +3493,8 @@ if (contextLabel !== 'ctx 50%') {
             problems.push('opening a harness row built no body (the message is never rendered)');
           } else if (markup.indexOf('cut off and did not finish') < 0) {
             problems.push('the opened body does not hold the message the model received');
+          } else if (markup.indexOf('[Harness]') >= 0) {
+            problems.push("the opened body still starts with the harness title line (the row's label is that line)");
           } else if (!rendered.classList.contains('answer')) {
             problems.push('the opened body is not rendered as markdown content (no `.answer`)');
           }

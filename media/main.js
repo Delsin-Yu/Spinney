@@ -2454,12 +2454,17 @@
     head.appendChild(el('span', 'harness-badge', label));
     head.appendChild(el('span', 'harness-preview', harnessPreviewOf(text, title)));
     const body = el('div', 'harness-body');
+    // The box shows the message **without its own title line**: the row's label is that line,
+    // translated. The stored bytes keep it — `detectPriorHandoffSummary`
+    // (`src/agent/compaction.ts`) reads that first line to know a window already starts from a
+    // handoff — so this is a display rule, never a rewrite of what the model received.
+    const bodyText = title ? String(text).slice(title.length).replace(/^\s+/, '') : String(text);
     let filled = false;
     const fillBody = () => {
       if (filled) return;
       filled = true;
       const rendered = el('div', 'answer harness-text');
-      rendered.innerHTML = renderMarkdown(text);
+      rendered.innerHTML = renderMarkdown(bodyText);
       body.appendChild(rendered);
     };
     node.appendChild(head);

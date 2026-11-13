@@ -136,8 +136,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of the text in italic, and a click that opens the whole message in a 240 px scroller of its
   own. The opened text is **Markdown** (headings, lists, code and quotes read as such), and it
   is rendered on the first open rather than at creation: a repaint must not pay to render tens
-  of thousands of characters nobody has asked to read. The card's text is never cut, and a
-  second click closes it.
+  of thousands of characters nobody has asked to read. The message's own `[Harness: …]` title
+  line is dropped from the box (the label is that line, translated) but kept in the stored
+  bytes, because `detectPriorHandoffSummary` reads it to know a window already starts from a
+  handoff. The card's text is never cut, and a second click closes it.
 - **The compression node is a card of its own.** It wears `CMP` instead of `CTX`, has no
   composer, and carries its own ⏹ Stop while it runs (there is no input dock to host the
   composer's). Once it has produced its window it is sealed: no ▶ Continue, and the host
