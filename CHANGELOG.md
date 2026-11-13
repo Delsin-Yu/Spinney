@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A compress button of its own, beside Send.** Compression used to live behind the composer's
+  one new-epoch entry, which only appeared when there was a setup drift or a nearly full window,
+  so it was invisible exactly when a user wanted to try it. A **Compress…** button now sits
+  immediately left of Send, on screen while the composer is, and opens the two questions (Simple
+  or Agentic, then which setup). The collision with the old entry is resolved by splitting the
+  jobs: `#new-context-btn` is now the **setup** entry (`New setup…`), shown only when the live
+  setup differs from the frozen one, and its click always means a fork — `newContextTurn`
+  carries a `mode` (`compression` | `fork`) so the host no longer has to guess from the trigger.
+  An empty box is fine for both: a window needs no text, and neither does a fork.
 - **The new window is asked which setup it continues on.** The new-epoch entry used to plant the
   frozen envelope of the window being handed over and stop there, so a window whose composer
   showed a different model kept running on the old one — and the composer's new-epoch entry stayed
