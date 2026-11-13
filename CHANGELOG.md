@@ -20,8 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   carries a `mode` (`compression` | `fork`) so the host no longer has to guess from the trigger.
   An empty box is fine for both: a window needs no text, and neither does a fork. On the first
   card of a tree the button is not offered at all — there is nothing above it to hand over —
-  and the buttons sit on a line of their own under the composer controls, right-aligned, so
-  the model dropdown gets its width back.
+  and the buttons take a right-aligned line of their own under the composer controls while
+  more than one of them is on screen. A lone Send — or a lone Stop — stays at the end of the
+  controls row, so an ordinary composer gains no row.
 - **The new window is asked which setup it continues on.** The new-epoch entry used to plant the
   frozen envelope of the window being handed over and stop there, so a window whose composer
   showed a different model kept running on the old one — and the composer's new-epoch entry stayed
