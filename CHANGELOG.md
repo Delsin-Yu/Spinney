@@ -122,11 +122,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **A long `HARNESS` block shows its first four lines.** The two blocks of a compression (the
-  instruction the compression turn receives and the handoff the window below it starts from)
-  are tens of thousands of characters of model-facing text; a reader gets the opening lines and
-  a click, and a `HARNESS` block of four lines or fewer stays open. The fold is CSS — the text
-  the card holds is never cut.
+- **A `HARNESS` block is one row.** The two blocks of a compression (the instruction the
+  compression turn receives and the handoff the window below it starts from) are tens of
+  thousands of characters of model-facing text, and both of them used to be printed into the
+  card. Each is now one line: a blue label taken from the text's own title line
+  (`Compression instruction`, `Handoff summary`, `Context handoff`, `Harness note`), the start
+  of the text in italic, and a click that opens the whole message in a 240 px scroller of its
+  own. The card's text is never cut, and a second click closes it.
 - **The compression node is a card of its own.** It wears `CMP` instead of `CTX`, has no
   composer, and carries its own ⏹ Stop while it runs (there is no input dock to host the
   composer's). Once it has produced its window it is sealed: no ▶ Continue, and the host

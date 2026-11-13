@@ -3437,50 +3437,78 @@ if (contextLabel !== 'ctx 50%') {
   if (findByClass(cards.get(B), 'harness-note')) {
     problems.push('a harness continue message for another node leaked into a different card');
   }
-  // A **long** harness block folds to its opening lines (`HARNESS_FOLD_LINES` in main.js), and
-  // a short one does not: the compression turn's instruction and the handoff a window starts
-  // from are tens of thousands of characters, and the reader must not have to scroll past them
-  // to reach the answer. The fade and the clamp are CSS; what this pins is the two classes and
-  // the one click that opens and folds it again.
+  // A harness note is **one row** with a label, a preview and a body that a click opens in a
+  // small scroller (`addHarnessNote`): the compression turn's instruction and the handoff a
+  // window starts from are tens of thousands of characters, so the card must never render
+  // them inline. What this pins is the row (label from the text's own title line, preview
+  // without that line), the closed-by-default state, and the one click that opens it.
   if (!harnessBlock) {
     // the block was not rendered at all, which the check above already reported
-  } else if (harnessBlock.classList.contains('foldable')) {
-    problems.push('a one-sentence harness fact is folded (it fits in the four lines)');
   } else {
-    const longText =
-      '[Harness: compression turn]\n\nYou are the compression node between two context windows of one conversation: ' +
-      'the window above you ends here, and the window below you starts from your answer. Everything it will know ' +
-      'about the window above is what you write now.\n\nPrevious window: node p0 of session s.\n\n--- BEGIN WINDOW ---\n\n' +
-      'the previous window\'s own messages, selected and bounded: '.repeat(12);
-    dispatch({ type: 'harnessNote', nodeId: A, text: longText });
-    const blocks = [];
-    (function walk(root) {
-      for (const child of (root && root.children) || []) {
-        if (child.classList && child.classList.contains('harness-note')) blocks.push(child);
-        walk(child);
-      }
-    })(cards.get(A));
-    const folded = blocks[blocks.length - 1];
-    if (folded === harnessBlock || !folded) {
-      problems.push('the long harness block was not rendered into the continued node');
-    } else if (!folded.classList.contains('folded') || !folded.classList.contains('foldable')) {
-      problems.push('a long harness block is not folded to its opening lines');
-    } else if (String(findByClass(folded, 'harness-text').textContent) !== longText) {
-      problems.push('a folded harness block lost part of the text (the fold must be CSS, not a cut string)');
+    const head = findByClass(harnessBlock, 'harness-head');
+    const badge = findByClass(harnessBlock, 'harness-badge');
+    const preview = findByClass(harnessBlock, 'harness-preview');
+    const body = findByClass(harnessBlock, 'harness-body');
+    if (!head || !badge || !preview || !body) {
+      problems.push('a harness note is not one row with a label, a preview and a body');
     } else {
-      const foldClick = folded._listeners && folded._listeners.click;
-      if (typeof foldClick !== 'function') {
-        problems.push('a folded harness block has no click handler (there is no way to open it)');
+      if (badge.textContent !== 'Harness note') {
+        problems.push(`a plain harness fact is labelled ${JSON.stringify(badge.textContent)}, expected "Harness note"`);
+      }
+      if (String(preview.textContent).indexOf('[Harness]') === 0) {
+        problems.push('the row\'s preview kept the harness text\'s own title line (the label already says it)');
+      }
+      if (String(preview.textContent).indexOf('cut off and did not finish') < 0) {
+        problems.push(`the row's preview shows ${JSON.stringify(preview.textContent)}, expected the start of the text`);
+      }
+      if (String(findByClass(body, 'harness-text').textContent) !== HARNESS_FACT_TEXT) {
+        problems.push('the opened body does not hold the exact text the model received');
+      }
+      if (harnessBlock.classList.contains('open')) {
+        problems.push('a harness note renders open (it is one row until a click)');
+      }
+      const openClick = head._listeners && head._listeners.click;
+      if (typeof openClick !== 'function') {
+        problems.push('a harness note has no click handler on its row (there is no way to read it)');
       } else {
-        foldClick({ stopPropagation() {} });
-        if (folded.classList.contains('folded')) {
-          problems.push('a click on a folded harness block did not open it');
+        openClick({ stopPropagation() {} });
+        if (!harnessBlock.classList.contains('open')) {
+          problems.push('a click on the harness row did not open it');
         }
-        foldClick({ stopPropagation() {} });
-        if (!folded.classList.contains('folded')) {
-          problems.push('a second click on an opened harness block did not fold it again');
+        openClick({ stopPropagation() {} });
+        if (harnessBlock.classList.contains('open')) {
+          problems.push('a second click on the harness row did not close it again');
         }
       }
+    }
+    // The label comes from the text's own title line: the compression turn's instruction and
+    // the two rollover shapes each get their own, so a reader can tell them apart closed.
+    const labelOf = (text) => {
+      dispatch({ type: 'harnessNote', nodeId: A, text });
+      const blocks = [];
+      (function walk(root) {
+        for (const child of (root && root.children) || []) {
+          if (child.classList && child.classList.contains('harness-note')) blocks.push(child);
+          walk(child);
+        }
+      })(cards.get(A));
+      const last = blocks[blocks.length - 1];
+      const b = last && findByClass(last, 'harness-badge');
+      return b ? b.textContent : '';
+    };
+    const compressionLabel = labelOf('[Harness: compression turn]\n\nthe instruction');
+    if (compressionLabel !== 'Compression instruction') {
+      problems.push(`a compression instruction is labelled ${JSON.stringify(compressionLabel)}`);
+    }
+    const handoffLabel = labelOf(
+      '[Harness: context window reset — handoff summary]\n\n## Objective\n\nthe task',
+    );
+    if (handoffLabel !== 'Handoff summary') {
+      problems.push(`a summarized handoff is labelled ${JSON.stringify(handoffLabel)}`);
+    }
+    const pointerLabel = labelOf('[Harness: context window reset]\n\nthe refusal');
+    if (pointerLabel !== 'Context handoff') {
+      problems.push(`a pointer handoff is labelled ${JSON.stringify(pointerLabel)}`);
     }
   }
 

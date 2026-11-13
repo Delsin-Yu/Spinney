@@ -2381,50 +2381,75 @@
     return node;
   }
 
-  /**
-   * How many lines a **folded** `HARNESS` block shows. The two blocks that carry the
-   * compression chain — the instruction the compression turn receives and the handoff the
-   * window below it starts from — are thousands of characters of model-facing text, so a
-   * reader gets the opening four lines and the answer below them, not a wall to scroll past.
-   */
-  const HARNESS_FOLD_LINES = 4;
+  // ---- A HARNESS block is one row ----------------------------------------------
+  // The harness's own message to the model, and the two a compression writes are tens of
+  // thousands of characters of it. It reads as a **step**, not as a panel: one line with a
+  // label and the start of the text in italic, and a click opens the whole message in a
+  // small scroller (`.harness-body`, `docs/agents/invariants/compress-node.md` §6).
+  //
+  // The label comes from the harness text's own title line. Those titles are constants the
+  // host writes and `detectPriorHandoffSummary` already depends on, so matching their
+  // prefix is the same contract, not a guess; the label itself is localized.
+  const HARNESS_LABELS = [
+    ['[Harness: compression turn]', 'Compression instruction'],
+    ['[Harness: context window reset — handoff summary]', 'Handoff summary'],
+    ['[Harness: context window reset', 'Context handoff'],
+    ['[Harness]', 'Harness note'],
+  ];
+
+  /** The row's label and the title line it replaces, for one harness text. */
+  function harnessLabelOf(text) {
+    const value = String(text || '');
+    for (const [prefix, label] of HARNESS_LABELS) {
+      if (value.startsWith(prefix)) return { label, title: prefix };
+    }
+    return { label: 'Harness note', title: '' };
+  }
 
   /**
-   * Whether a harness text folds. The host wraps its harness text at about a hundred
-   * characters a line, and a text with no newlines wraps on the card's own width, so both
-   * counts are checked: a one-sentence `▶ Continue` fact stays open, and a compression
-   * instruction folds however it happens to arrive.
+   * The line that stands for the block while it is closed: the first text the block actually
+   * carries, with its title line removed (the label already says it) and blank lines skipped.
    */
-  function harnessFolds(text) {
-    const value = String(text || '');
-    return (
-      value.split('\n').length > HARNESS_FOLD_LINES || value.length > HARNESS_FOLD_LINES * 110
-    );
+  function harnessPreviewOf(text, title) {
+    const rest = title ? String(text || '').slice(title.length) : String(text || '');
+    for (const line of rest.split('\n')) {
+      const trimmed = line.trim();
+      if (trimmed) return trimmed;
+    }
+    return '';
   }
 
   /**
    * A message the *harness* wrote inside this node's own transcript — the ▶ Continue turn,
    * which resumes the node in place instead of growing a new card
    * (`SessionRuntime.continueFrom`), and the two blocks of a compression
-   * (`docs/agents/invariants/compress-node.md`). It is an inline block, not a user bubble
-   * (the user did not type it) and not the pinned prompt (that still holds what the user
-   * asked for); it shows the exact text the model received. A long one is folded to
-   * {@link HARNESS_FOLD_LINES} lines and a click opens it.
+   * (`docs/agents/invariants/compress-node.md`). It is a row, not a user bubble (the user
+   * did not type it) and not the pinned prompt (that still holds what the user asked for);
+   * the row and its body show the exact text the model received.
    */
   function addHarnessNote(text) {
     if (!messagesEl) return;
     const node = el('div', 'msg harness-note');
     node.dataset.kind = 'harness';
-    node.appendChild(el('span', 'harness-badge', tr('HARNESS')));
-    node.appendChild(el('span', 'harness-text', text));
-    if (harnessFolds(text)) {
-      node.classList.add('foldable', 'folded');
-      node.title = tr('Click to show the whole message the harness wrote');
-      node.addEventListener('click', () => {
-        markRowTouched(node);
-        node.classList.toggle('folded');
-      });
-    }
+    const { label, title } = harnessLabelOf(text);
+    const head = el('div', 'harness-head');
+    const chev = el('span', 'chev', '▶');
+    head.appendChild(chev);
+    head.appendChild(el('span', 'harness-badge', tr(label)));
+    head.appendChild(el('span', 'harness-preview', harnessPreviewOf(text, title)));
+    const body = el('div', 'harness-body');
+    body.appendChild(el('span', 'harness-text', text));
+    node.appendChild(head);
+    node.appendChild(body);
+    node.title = tr('Click to read the whole message the harness wrote');
+    const setOpen = (open) => {
+      node.classList.toggle('open', open);
+      chev.classList.toggle('open', open);
+    };
+    head.addEventListener('click', () => {
+      markRowTouched(node);
+      setOpen(!node.classList.contains('open'));
+    });
     logTail().appendChild(node);
     followActive();
     return node;
