@@ -35,6 +35,7 @@ import * as vscode from 'vscode';
 import { Agent, ImageAccounting } from '../agent/agent';
 import { DEFAULT_REPLY_LANGUAGE, SYSTEM_PROMPT_TEMPLATE, AgentsMdSources, agentsMdSection, systemPrompt } from '../agent/prompt';
 import { Balance, emptyBalance } from '../agent/balance';
+import { buildChatRequestBody, chatCompletionsUrl } from '../agent/apiClient';
 import { ClientRegistry } from '../agent/clients';
 import {
   AgentEvent,
@@ -115,7 +116,7 @@ import { PromptSnippet } from './promptSnippets';
 import { SubAgentPool } from './SubAgentPool';
 import { hasPendingTranscriptWrite, sumUsage, summarizeTranscript } from './transcript';
 import { opPayload, opTag, perf, startRepaintOp, timedSync } from '../perf';
-import { clipText, sliceText, tailText } from '../text';
+import { clipText, sliceText, tailText, wellFormedDeep } from '../text';
 
 /** Cap tool output stored/shown in the webview so a 16 MiB command dump cannot freeze the UI. */
 export const UI_TOOL_CONTENT_CAP = 32 * 1024;
@@ -1025,6 +1026,34 @@ function balanceKeyOf(provider: ProviderSpec): string {
   return `${provider.id}|${provider.balance}|${provider.baseUrl}`;
 }
 
+/**
+ * The facts `Spinney: Show Request Payload` prints beside the body: where the request
+ * would go, what it carries, and how big it is. Identifiers and counts only — the body
+ * holds no credential (the key is a header), so nothing here can leak one.
+ */
+export interface RequestPayloadMeta {
+  sessionId: string;
+  /** The checked-out node the payload was built from. */
+  nodeId: string;
+  cardId: string;
+  providerId: string;
+  baseUrl: string;
+  /** The full endpoint the request would be posted to. */
+  url: string;
+  /** How many messages the body carries (the system prompt included). */
+  messages: number;
+  /** How many `image_url` / `file` parts those messages carry. */
+  images: number;
+  /** The UTF-8 size of the serialised body — what the provider reads. */
+  bytes: number;
+  /**
+   * The conversation header, for a provider whose row declares one
+   * (`ProviderSpec.sessionHeader`). It travels as a **header, never in the body**, which
+   * is why it can only be reported here. Opaque, not secret.
+   */
+  sessionHeader?: { name: string; value: string };
+}
+
 export class SessionRuntime {
   readonly sessionId: string;
   readonly session: AgentSession;
@@ -1780,6 +1809,72 @@ export class SessionRuntime {
       undefined,
       this.host.agentsMdSources(),
     );
+  }
+
+  /**
+   * Where one payload would go and what it carries (`Spinney: Show Request Payload`).
+   * Counts and identifiers only: the body has no credential in it — the key travels in
+   * the `Authorization` header — and this never reads one.
+   */
+  requestPayload(): { body: Record<string, unknown>; meta: RequestPayloadMeta } | undefined {
+    const node = this.viewNode();
+    // Nothing to send from: an empty session (no node in view), or a sidecar — a
+    // sub-agent's own conversation and a background card's are not this one's history.
+    if (!node || isSidecar(node)) {
+      return undefined;
+    }
+    const session = this.session;
+    const epoch = epochForNode(session, node.id);
+    const card = this.chainCard(node);
+    const provider = providerById(card.providerId);
+    // The same three sources `beginTurn` sends from: the frozen envelope's prompt plus the
+    // window's messages (`buildPath`), the frozen tool schemas (a legacy envelope has none,
+    // so the live set is what a request would carry), and the chain's own level.
+    const messages = this.buildPath(session, node.id);
+    // The frozen set is what a turn really advertises (`Agent.setToolSchemas`); a chain
+    // with no envelope — or a foreign/legacy one whose set is empty, which that same
+    // method treats as "nothing pinned" — falls back to the live capability set.
+    const tools = epoch?.tools && epoch.tools.length > 0 ? epoch.tools : this.liveToolSchemas(card, false);
+    // `wellFormedDeep` is what the client normalises the wire copy with, so the body shown
+    // is the structure the provider parses — not an inline copy that may still hold a lone
+    // surrogate the wire would have repaired.
+    const body = wellFormedDeep(
+      buildChatRequestBody({
+        model: card.oaiModel,
+        messages,
+        tools,
+        thinkingEffort: epoch ? epoch.effort : this.effortForNode(node),
+        stream: true,
+      }),
+    );
+    let images = 0;
+    for (const message of messages) {
+      if (Array.isArray(message.content)) {
+        images += message.content.filter((part) => part.type === 'image_url' || part.type === 'file').length;
+      }
+    }
+    // The conversation header is a **header, never a body field** (`SessionDialect`): the
+    // value is the window this request's prefix belongs to, and it is opaque rather than
+    // secret, so the diagnostic line may carry it.
+    const sessionHeader =
+      provider.sessionHeader === 'opencode'
+        ? { name: 'x-opencode-session', value: `ses_${this.windowStart(session, node.id)}` }
+        : undefined;
+    return {
+      body,
+      meta: {
+        sessionId: session.id,
+        nodeId: node.id,
+        cardId: card.id,
+        providerId: card.providerId,
+        baseUrl: provider.baseUrl,
+        url: chatCompletionsUrl(provider.baseUrl),
+        messages: messages.length,
+        images,
+        bytes: Buffer.byteLength(JSON.stringify(body), 'utf8'),
+        ...(sessionHeader ? { sessionHeader } : {}),
+      },
+    };
   }
 
   /**

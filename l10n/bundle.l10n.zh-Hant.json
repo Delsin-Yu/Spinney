@@ -243,6 +243,7 @@
   "Spinney: no chat tab is open for this window.": "Spinney：此視窗沒有開啟的聊天分頁。",
   "Spinney: no diagnostics log yet. Use the extension for a moment, or turn on spinney.diagnostics.log.": "Spinney：還沒有診斷記錄。先使用擴充功能一會兒，或開啟 spinney.diagnostics.log。",
   "Spinney: no folder is available for the global AGENTS.md.": "Spinney：沒有可存放全域 AGENTS.md 的資料夾。",
+  "Spinney: no request payload to show. Check out a turn node of a conversation to see what it would send.": "Spinney：沒有可顯示的請求載荷。請先切換到一個對話的輪次節點，再看它會傳送什麼。",
   "Spinney: session data exported to {0}": "Spinney：工作階段資料已匯出至 {0}",
   "Spinney: stored API key cleared — still using the DEEPSEEK_API_KEY environment variable.": "Spinney：已清除儲存的 API 金鑰 — 仍在使用 DEEPSEEK_API_KEY 環境變數。",
   "Spinney: that folder does not hold Spinney session data.": "Spinney：該資料夾中沒有 Spinney 工作階段資料。",

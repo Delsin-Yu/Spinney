@@ -167,6 +167,72 @@ export interface ClientOptions {
   userAgent?: string;
 }
 
+/**
+ * The endpoint a chat request goes to: `<baseUrl>/chat/completions`, with one trailing
+ * slash tolerated. Exported because `Spinney: Show Request Payload` reports the URL it
+ * would send (`SessionRuntime.requestPayload`), and a second spelling of the same
+ * endpoint would make that report a lie.
+ */
+export function chatCompletionsUrl(baseUrl: string): string {
+  return `${baseUrl.replace(/\/$/, '')}/chat/completions`;
+}
+
+/** Everything {@link buildChatRequestBody} needs. The model is already resolved. */
+export interface ChatRequestBodyInput {
+  /** The wire model name, resolved by the caller — it becomes `body.model` verbatim. */
+  model: string;
+  messages: ChatMessage[];
+  tools?: ToolDefinition[];
+  /** Omitted when `'none'`: the provider's "think normally" is the absence of the field. */
+  thinkingEffort?: ThinkingEffort;
+  /** `max_tokens`, when the caller gave a positive number. */
+  maxTokens?: number;
+  /** `temperature`, when the caller gave a finite number. */
+  temperature?: number;
+  /** `true` for `stream()`, `false` for `complete()` — the one field the two differ in. */
+  stream: boolean;
+}
+
+/**
+ * The chat-completions request body, built in exactly one place.
+ *
+ * This is **the only** body constructor: `stream()` and `complete()` both call it, and so
+ * does `Spinney: Show Request Payload` (`SessionRuntime.requestPayload()`), which is what
+ * makes "the payload shown" the payload sent instead of a re-rendering of it
+ * (`docs/agents/invariants/request-payload.md`).
+ *
+ * Every rule here is the wire's own, and `tools/check-payload.js` pins each one: a
+ * streaming request always says `stream: true` and `stream_options.include_usage`; `tools`
+ * appears only when it is non-empty; `reasoning_effort` is omitted for `none`; `max_tokens`
+ * and `temperature` appear only when the caller gave a usable number. **Key order is part
+ * of the output** — it is what the provider's prompt cache keys on — so the assignment
+ * order below is load-bearing, and the `stream_options` line has to stay right after
+ * `stream`, where it has always been.
+ */
+export function buildChatRequestBody(input: ChatRequestBodyInput): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    model: input.model,
+    messages: input.messages,
+    stream: input.stream,
+  };
+  if (input.stream) {
+    body.stream_options = { include_usage: true };
+  }
+  if (input.tools && input.tools.length > 0) {
+    body.tools = input.tools;
+  }
+  if (input.thinkingEffort && input.thinkingEffort !== 'none') {
+    body.reasoning_effort = input.thinkingEffort;
+  }
+  if (typeof input.maxTokens === 'number' && input.maxTokens > 0) {
+    body.max_tokens = Math.floor(input.maxTokens);
+  }
+  if (typeof input.temperature === 'number' && Number.isFinite(input.temperature)) {
+    body.temperature = input.temperature;
+  }
+  return body;
+}
+
 export interface CompletionRequest {
   messages: ChatMessage[];
   tools?: ToolDefinition[];
@@ -353,25 +419,18 @@ export class ApiClient {
       );
     }
 
-    const url = `${this.options.baseUrl.replace(/\/$/, '')}/chat/completions`;
-    const body: Record<string, unknown> = {
+    const url = chatCompletionsUrl(this.options.baseUrl);
+    // The body is built by the one constructor (`buildChatRequestBody`) the Show Request
+    // Payload command calls too, so what that command shows is what this sends.
+    const body = buildChatRequestBody({
       model: request.model && request.model.trim() ? request.model : this.options.model,
       messages,
+      tools,
+      thinkingEffort: request.thinkingEffort,
+      maxTokens: request.maxTokens,
+      temperature: request.temperature,
       stream: true,
-      stream_options: { include_usage: true },
-    };
-    if (tools && tools.length > 0) {
-      body.tools = tools;
-    }
-    if (request.thinkingEffort && request.thinkingEffort !== 'none') {
-      body.reasoning_effort = request.thinkingEffort;
-    }
-    if (typeof request.maxTokens === 'number' && request.maxTokens > 0) {
-      body.max_tokens = Math.floor(request.maxTokens);
-    }
-    if (typeof request.temperature === 'number' && Number.isFinite(request.temperature)) {
-      body.temperature = request.temperature;
-    }
+    });
 
     // `wellFormedDeep` on the whole body — messages plus the card-supplied `model`/`reasoning_effort`/`tools`: an
     // unpaired surrogate (a clipped emoji half, a paste into a card field) serialises as `\ud83d` and the provider
@@ -673,24 +732,17 @@ export class ApiClient {
         'No API key configured for this provider. Run the spinney.setApiKey command (or set the DEEPSEEK_API_KEY environment variable for the built-in provider).',
       );
     }
-    const url = `${this.options.baseUrl.replace(/\/$/, '')}/chat/completions`;
-    const body: Record<string, unknown> = {
+    const url = chatCompletionsUrl(this.options.baseUrl);
+    // The same one constructor `stream()` uses — only `stream: false` differs.
+    const body = buildChatRequestBody({
       model: request.model && request.model.trim() ? request.model : this.options.model,
       messages: request.messages,
+      tools: request.tools,
+      thinkingEffort: request.thinkingEffort,
+      maxTokens: request.maxTokens,
+      temperature: request.temperature,
       stream: false,
-    };
-    if (request.tools && request.tools.length > 0) {
-      body.tools = request.tools;
-    }
-    if (request.thinkingEffort && request.thinkingEffort !== 'none') {
-      body.reasoning_effort = request.thinkingEffort;
-    }
-    if (typeof request.maxTokens === 'number' && request.maxTokens > 0) {
-      body.max_tokens = Math.floor(request.maxTokens);
-    }
-    if (typeof request.temperature === 'number' && Number.isFinite(request.temperature)) {
-      body.temperature = request.temperature;
-    }
+    });
 
     // Same transparent retry policy as `stream` (transient failures only) and the
     // same first-byte watchdog. The body read itself is not watched: this path is
