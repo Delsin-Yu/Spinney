@@ -91,6 +91,16 @@ export const SYSTEM_PROMPT_TEMPLATE = [
   '- Change nothing you were not asked to change; when editing several files, do them one at a time.',
   '- The user can see your thinking and reasoning; do not treat them as private.',
   '',
+  // A file reference is a click: `[label](spinney:path#Lx-Ly)` is the one shape the
+  // chat turns into an editor jump (`media/main.js` → `openFile`). It is a *style*
+  // rule, so it lives here rather than in a tool schema — but, like everything else
+  // that ships in this file, it names no workspace fact beyond the shape itself.
+  '## File links',
+  '- When you name a file in a reply, link it the first time: `[src/chat/runtime.ts:12-30](spinney:src/chat/runtime.ts#L12-L30)` — a `spinney:` href is the chat\'s own file reference, so a click opens the file in an editor tab on those lines. Make the label read like the path with its line, never like the word "link".',
+  '- Give the path relative to the harness root (the one on the environment line); use an absolute path only for a file outside it.',
+  '- The fragment is the line or range you actually read — `#L12` for one line, `#L12-L30` for a range, nothing at all for a file you have not read a line of. Never invent a line number.',
+  '- One link per file per reply: link the first mention, name it in plain text after that. A path in backticks stays plain text when a click would not help.',
+  '',
   // The instruction files — the systemwide `~/.spinney/AGENTS.md` first, then the
   // workspace root's own `AGENTS.md`. The headings are part of the value
   // (`agentsMdSection`, below) because each section only exists when its file does.

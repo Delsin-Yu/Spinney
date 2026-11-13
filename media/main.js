@@ -8748,12 +8748,52 @@
     true,
   );
 
+  /**
+   * Split a `spinney:` file link into the path and the line range it names.
+   *
+   * The shape is `spinney:<path>#L12` or `spinney:<path>#L12-L30`, with no fragment at
+   * all for a file whose lines were not named. The path is kept exactly as written
+   * (only percent-decoded, because Markdown encodes a space in a link target) and is
+   * resolved against the harness root by the host — the webview has no root to resolve
+   * against. A malformed fragment (`#Lx`) names no line rather than a wrong one.
+   */
+  function parseFileLink(href) {
+    const rest = href.slice('spinney:'.length);
+    const hash = rest.indexOf('#');
+    const raw = hash >= 0 ? rest.slice(0, hash) : rest;
+    let filePath = raw;
+    try {
+      filePath = decodeURIComponent(raw);
+    } catch (err) {
+      /* not percent-encoded: keep the path as written */
+    }
+    if (!filePath) return null;
+    const ref = { path: filePath, line: undefined, endLine: undefined };
+    const match = hash >= 0 ? rest.slice(hash + 1).match(/^L(\d+)(?:-L(\d+))?$/) : null;
+    if (match) {
+      ref.line = Number(match[1]) || undefined;
+      const end = Number(match[2]) || 0;
+      if (end > (ref.line || 0)) ref.endLine = end;
+    }
+    return ref;
+  }
+
   document.addEventListener('click', (event) => {
     const target = event.target;
     const anchor = target && target.closest ? target.closest('a[href]') : null;
     if (!anchor) return;
     event.preventDefault();
     const href = anchor.getAttribute('href') || '';
+    // A `[src/a.ts:12-30](spinney:src/a.ts#L12-L30)` link is the chat's own file
+    // reference: the host opens the file in an editor tab on those lines instead of
+    // handing it to the system browser.
+    if (href.indexOf('spinney:') === 0) {
+      const ref = parseFileLink(href);
+      if (ref) {
+        vscode.postMessage({ type: 'openFile', path: ref.path, line: ref.line, endLine: ref.endLine });
+      }
+      return;
+    }
     let url;
     try {
       url = new URL(href, window.location.href);

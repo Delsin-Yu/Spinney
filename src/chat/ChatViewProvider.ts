@@ -3,7 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
 import { Agent } from '../agent/agent';
-import { replyLanguageName } from '../agent/languages';
+import { replyLanguageName, replyLanguageTag } from '../agent/languages';
 import { ClientRegistry } from '../agent/clients';
 import { ChatMessage, ThinkingEffort } from '../agent/types';
 import {
@@ -54,10 +54,10 @@ import {
   buildTitleDigest,
   buildTitleMessages,
   heuristicTitle,
+  noteAutoTitle,
   parseBatchTitles,
   sanitizeTitle,
   shouldAutoTitle,
-  turnCount,
 } from './sessionTitles';
 import { agentRootInfo, getWorkspaceRoot, resolvePath } from '../tools';
 import { AgentsMdSources, systemPrompt } from '../agent/prompt';
@@ -993,6 +993,11 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     // against the display language of this window (`replyLanguageName` also maps
     // a tag to its CLDR name and falls back to English for a blank locale).
     const replyLanguage = replyLanguageName(cfg.get<string>('replyLanguage') ?? '', vscode.env.language);
+    // …and the tag of that same language, resolved from the same value in the same
+    // place (`replyLanguageTag`): the pair travels together, because the name fills the
+    // prompt's `## Language` line while the tag names the language inside
+    // `exec_command`'s step-title description.
+    const replyLanguageTagValue = replyLanguageTag(cfg.get<string>('replyLanguage') ?? '', vscode.env.language);
     const maxConcurrentSubagents = cfg.get<number>('maxConcurrentSubagents') ?? 15;
     const maxLevel2Subagents = cfg.get<number>('maxLevel2Subagents') ?? 2;
     const saveSubAgentTranscripts = cfg.get<boolean>('saveSubAgentTranscripts') ?? true;
@@ -1009,7 +1014,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     // the list is live on the next `postConfig` — the same shape every other key
     // follows.
     const promptSnippets = resolvePromptSnippets(cfg.get<unknown>('promptSections'));
-    return { defaultCardId, replyLanguage, maxConcurrentSubagents, maxLevel2Subagents, saveSubAgentTranscripts, saveSessionTranscripts, subAgentTranscriptDir, autoSessionTitles, hopSessionEnabled, promptSnippets };
+    return { defaultCardId, replyLanguage, replyLanguageTag: replyLanguageTagValue, maxConcurrentSubagents, maxLevel2Subagents, saveSubAgentTranscripts, saveSessionTranscripts, subAgentTranscriptDir, autoSessionTitles, hopSessionEnabled, promptSnippets };
   }
 
   // ---- API keys (SecretStorage: one entry per provider) ----
@@ -1398,7 +1403,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         } else {
           // No per-session pick here: the setting is the only source, so it simply
           // replaces the old value (and warns about the prompt-cache miss).
-          rt.applyReplyLanguage(cfg.replyLanguage);
+          rt.applyReplyLanguage(cfg.replyLanguage, cfg.replyLanguageTag);
         }
       }
       // Repaint the dropdowns and the fold defaults (the webview re-applies the
@@ -2782,11 +2787,13 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   /**
    * Apply a title to a session and propagate it everywhere it is shown (sidebar
    * list + editor tab title). `manual` locks the title so the automatic namer
-   * never overwrites it; `auto` records the growth/cooldown bookkeeping. The
-   * session's `updatedAt` is deliberately untouched: renaming must not reorder
-   * the sidebar (which sorts by it).
+   * never overwrites it; `auto` records **whether the name came from the model**
+   * (`noteAutoTitle`), which is what closes the once-only gate — a heuristic
+   * fallback leaves it open so a later turn retries. The session's `updatedAt` is
+   * deliberately untouched: renaming must not reorder the sidebar (which sorts by
+   * it).
    */
-  private applySessionTitle(session: AgentSession, title: string, source: TitleSource): void {
+  private applySessionTitle(session: AgentSession, title: string, source: TitleSource, fromModel = true): void {
     const clean = sanitizeTitle(title, '');
     if (!clean) {
       return;
@@ -2797,14 +2804,13 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     if (source === 'manual') {
       session.titleLocked = true;
       delete session.titleAutoAt;
-      delete session.titleAutoNodes;
     } else if (source === 'auto') {
-      session.titleAutoAt = Date.now();
-      session.titleAutoNodes = turnCount(session);
+      // Only a model-written name closes the gate; the rule lives in `sessionTitles.ts`.
+      noteAutoTitle(session, fromModel);
     }
     this.persist();
     if (!changed) {
-      return; // bookkeeping only (same title, refreshed cooldown)
+      return; // bookkeeping only (a fallback name already on screen)
     }
     this.notifyStateChanged();
     this.panels.setTitle(session.id, this.panelTitle(session.id));
@@ -2889,7 +2895,6 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     }
     session.titleLocked = false;
     delete session.titleAutoAt;
-    delete session.titleAutoNodes;
     this.persist();
     this.outputLog(`[title] ${session.id} unlocked; regenerating`);
     await this.generateSessionTitle(session, 'requested');
@@ -3019,7 +3024,17 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       title = heuristicTitle(session);
       how = 'heuristic';
     }
-    this.applySessionTitle(session, title, 'auto');
+    // The gate is re-checked here, right before the rename, and not only when the job was
+    // queued: two branches finishing together would otherwise both pass the earlier check
+    // and rename the same session twice. The first one closes the gate, so the second sees
+    // a named session and leaves it alone.
+    if (reason === 'auto' && !shouldAutoTitle(session)) {
+      return;
+    }
+    // `fromModel` decides whether this closes the gate: a model-written name does, the
+    // heuristic fallback (no key, an API error, an empty answer) does not — the next turn
+    // then gets one more try instead of the first prompt becoming the title for good.
+    this.applySessionTitle(session, title, 'auto', how === 'model');
     this.outputLog(`[title] ${session.id} -> "${session.title}" (${how}, ${reason}, ${Date.now() - t0}ms)`);
   }
 
@@ -3136,9 +3151,16 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       if (!this.sessions.includes(session) || session.titleLocked) {
         continue;
       }
+      // A turn may have named this session while the batch was in flight: the gate is
+      // once-only, so the batch leaves that name alone (`shouldAutoTitle` is the rule).
+      if (!shouldAutoTitle(session)) {
+        continue;
+      }
       const before = session.title;
-      // A line the model omitted falls back to the heuristic (first prompt).
-      this.applySessionTitle(session, titles[i] ?? heuristicTitle(session), 'auto');
+      // A line the model omitted falls back to the heuristic (first prompt) — and that
+      // leaves the gate open, exactly like a failed single request (`noteAutoTitle`).
+      const named = titles[i] ?? heuristicTitle(session);
+      this.applySessionTitle(session, named, 'auto', !!titles[i]);
       if (session.title !== before) {
         renamed++;
       }
@@ -4828,7 +4850,6 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     rt.clearConversation();
     // ...and its automatic title: the next turn names the fresh conversation.
     delete session.titleAutoAt;
-    delete session.titleAutoNodes;
     if (!session.titleLocked) {
       session.title = defaultSessionTitle();
       session.titleSource = 'provisional';
@@ -4972,7 +4993,6 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       // The whole tree went (the deleted branch was the root): mirror `clear()`
       // so the next turn names the now-empty conversation again.
       delete session.titleAutoAt;
-      delete session.titleAutoNodes;
       if (!session.titleLocked) {
         session.title = defaultSessionTitle();
         session.titleSource = 'provisional';
@@ -6141,16 +6161,28 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         // not a reason to refuse the click: the file still opens.
         const line = Number(message.line);
         if (Number.isFinite(line) && line >= 1) {
+          // A file link may name a range (`#L12-L30`), and then the selection covers every
+          // named line: the second line index is one past the last one, so a range ending on
+          // line 30 ends at index 30 — VS Code clamps a value past the end of the document.
+          const endLine = Number(message.endLine);
+          const last = Number.isFinite(endLine) && endLine >= line ? endLine : line;
+          const selection = new vscode.Range(line - 1, 0, last, 0);
           void vscode.window
-            .showTextDocument(uri, {
-              preview: true,
-              selection: new vscode.Range(line - 1, 0, line - 1, 0),
-            })
-            .then(undefined, () => {
-              // The file could not be shown as a text document (deleted, binary, unreadable).
-              // `vscode.open` reports that itself instead of this handler swallowing it.
-              void vscode.commands.executeCommand('vscode.open', uri);
-            });
+            .showTextDocument(uri, { preview: true, selection })
+            .then(
+              (editor) => {
+                // A link is a jump to a place, not a nudge: centre the named lines instead
+                // of letting the editor pick the scroll position.
+                if (editor) {
+                  editor.revealRange(selection, vscode.TextEditorRevealType.InCenter);
+                }
+              },
+              () => {
+                // The file could not be shown as a text document (deleted, binary, unreadable).
+                // `vscode.open` reports that itself instead of this handler swallowing it.
+                void vscode.commands.executeCommand('vscode.open', uri);
+              },
+            );
           return;
         }
         void vscode.commands.executeCommand('vscode.open', uri);

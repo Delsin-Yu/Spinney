@@ -40,11 +40,17 @@
 
 > **`title` is required on `exec_command` — and on no other tool.** Its schema declares a
 > required `title` (`TOOL_TITLE_DESCRIPTION` in `src/agent/types.ts`): one short human
-> sentence, at most about 60 characters, for the step. The description also says to write
-> it in the language the agent is answering the user in, so the visible step row follows
-> the reply language like the answer does: the prompt itself asks only the answer to
-> follow it, so this schema line is the step title's own requirement. It is a **display**
-> argument — no
+> sentence, at most about 60 characters, for the step. That constant is a **template**: its
+> `{titleLanguage}` slot is filled with the reply language's own name and tag —
+> `Write it in Simplified Chinese (zh-Hans), the language your reply to the user is in.` —
+> by `withToolTitleLanguage(tools, name, tag)`, the one place that substitution happens.
+> `Agent.getTools()` and `SessionRuntime.liveToolSchemas()` both render through it with the
+> same pair (the provider resolves the name and the tag together in `getConfig()`), so a
+> frozen envelope and the drift hash over it are computed from the same bytes; a sub-agent
+> never calls `Agent.setReplyLanguage`, so it keeps the English default. The visible step row
+> therefore follows the reply language like the answer does: the prompt itself asks only the
+> answer to follow it, so this schema line is the step title's own requirement. It is a
+> **display** argument — no
 > tool body reads it — and the host is what makes it matter: `toolTitleFromArgs`
 > (`src/chat/runtime.ts`) reads it out of the call's arguments and stores it on the turn's
 > `DisplayItem` (`title`), so the card's one-line step row shows the model's sentence instead

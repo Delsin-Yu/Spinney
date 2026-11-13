@@ -7136,6 +7136,134 @@ if (contextLabel !== 'ctx 50%') {
   notes.push('shell: #new-context-btn sits before #send-btn, and the retired ids/classes are gone');
 }
 
+// --- file links: a `spinney:` href is a jump inside this window ----------------
+//
+// An assistant reply links the file it read as `[src/a.ts:12-30](spinney:src/a.ts#L12-L30)`,
+// and `media/main.js` turns a click on it into `openFile` — the host opens the file in an
+// editor tab on those lines. It must never be handed to the system browser like a real URL,
+// which is what the same document-level listener does for http/https/mailto.
+//
+// The DOM stub does not parse HTML (a `div.answer` keeps its Markdown as a string), so the
+// anchor is read **out of the rendered Markdown** and clicked through the listener the
+// webview registered: the message is the whole contract with the host, and this pins it.
+{
+  const LINK_NODE = 'file-link-node';
+  const cardNode = (id, parentId, children) => ({
+    id,
+    parentId,
+    children,
+    title: id,
+    status: 'done',
+    createdAt: 0,
+    preview: id,
+    usage: null,
+    size: null,
+  });
+  dispatch({ type: 'reset' });
+  dispatch({
+    type: 'tree',
+    viewId: LINK_NODE,
+    activeId: LINK_NODE,
+    rootId: LINK_NODE,
+    nodes: [cardNode(LINK_NODE, null, [])],
+  });
+  dispatch({
+    type: 'path',
+    ids: [LINK_NODE],
+    nodes: [
+      {
+        id: LINK_NODE,
+        status: 'done',
+        items: [
+          { kind: 'user', text: 'Where is the click handler?' },
+          {
+            kind: 'assistant',
+            text:
+              'The chat handler is in [src/chat/runtime.ts:12-30](spinney:src/chat/runtime.ts#L12-L30), ' +
+              'and the whole file is [src/a.ts](spinney:src/a.ts).',
+          },
+        ],
+      },
+    ],
+  });
+  const card = [...elementById('tree-canvas').children].find(
+    (child) => child.dataset && child.dataset.id === LINK_NODE,
+  );
+  // The `.answer` that carries the links (the user item's own body is one too, and it has
+  // none), read as the HTML the Markdown renderer produced.
+  const bodies = [];
+  const collect = (from) => {
+    for (const child of (from && from.children) || []) {
+      if (hasClass(child, 'answer')) bodies.push(String(child.innerHTML || ''));
+      collect(child);
+    }
+  };
+  collect(card);
+  const html = bodies.find((body) => body.indexOf('spinney:') >= 0) || '';
+  // An `href` is what the real webview gets. The sandbox does not load `markdown-it`, so an
+  // item's body is its escaped Markdown instead of HTML: read the target out of the
+  // `[label](target)` form in that case, so the check still clicks a link.
+  const hrefs = [...html.matchAll(/href="(spinney:[^"]*)"/g)].map((match) => match[1]);
+  if (hrefs.length === 0) {
+    hrefs.push(...[...html.matchAll(/\]\((spinney:[^)\s]+)\)/g)].map((match) => match[1]));
+  }
+  if (hrefs.length !== 2) {
+    problems.push(
+      `an assistant item with two file links rendered ${hrefs.length} \`spinney:\` link(s) ` +
+        `(${JSON.stringify(html.slice(0, 200))}) — the chat cannot turn a file reference into a jump`,
+    );
+  }
+  /**
+   * Click one href through the webview's own document listener: a stub anchor is all the
+   * handler reads (`closest`, `getAttribute`), so the click runs the shipped code path.
+   */
+  const clickHref = (href) => {
+    const anchor = {
+      closest: (selector) => (selector === 'a[href]' ? anchor : null),
+      getAttribute: (name) => (name === 'href' ? href : null),
+    };
+    posted.length = 0;
+    for (const handler of listeners.click || []) {
+      handler({ target: anchor, preventDefault() {} });
+    }
+    return posted.slice();
+  };
+  const postedByRange = clickHref(hrefs[0] || '');
+  const opened = postedByRange.find((message) => message && message.type === 'openFile');
+  if (!opened) {
+    problems.push(
+      `clicking a \`spinney:\` file link posted ${JSON.stringify(postedByRange)}, expected \`{ type: 'openFile' }\``,
+    );
+  } else if (opened.path !== 'src/chat/runtime.ts' || opened.line !== 12 || opened.endLine !== 30) {
+    problems.push(
+      `clicking \`spinney:src/chat/runtime.ts#L12-L30\` posted ${JSON.stringify(opened)}, expected the ` +
+        "relative path and the whole range ({ path: 'src/chat/runtime.ts', line: 12, endLine: 30 })",
+    );
+  }
+  if (postedByRange.some((message) => message && message.type === 'openExternal')) {
+    problems.push('a `spinney:` file link was handed to the browser (`openExternal`) instead of opened in the chat');
+  }
+  const postedByFile = clickHref(hrefs[1] || '');
+  const openedFile = postedByFile.find((message) => message && message.type === 'openFile');
+  if (!openedFile || openedFile.path !== 'src/a.ts' || openedFile.line !== undefined) {
+    problems.push(
+      `clicking a fragmentless file link posted ${JSON.stringify(postedByFile)}, expected the path and no line`,
+    );
+  }
+  // The URL branch resolves a relative href against the page's own address
+  // (`new URL(href, window.location.href)`), which the stub did not model: give it one so
+  // the "a real URL still opens externally" half is a real assertion, not a silent throw.
+  window.location = { href: 'https://webview.local/' };
+  const postedByUrl = clickHref('https://example.com/doc');
+  const external = postedByUrl.find((message) => message && message.type === 'openExternal');
+  if (!external || external.url !== 'https://example.com/doc') {
+    problems.push(
+      `clicking a real URL posted ${JSON.stringify(postedByUrl)}, expected it to keep opening externally`,
+    );
+  }
+  notes.push('file links: a `spinney:` href posts openFile with its line range, real URLs still open externally');
+}
+
 // --- report ------------------------------------------------------------------
 
 /**

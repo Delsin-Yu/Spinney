@@ -22,6 +22,15 @@
   `Implement Parallel` snippets). It is **user-turn** text: the composer inserts it
   into the input box, the user may edit it, and it travels as the message they
   send — so it never reaches the system prompt and is not part of the template.
+  The template also carries a `## File links` section (after `## Style`, before
+  `{{agentsMd}}`): the one instruction that makes a file reference **clickable**, i.e.
+  `[src/a.ts:12-30](spinney:src/a.ts#L12-L30)`, a path relative to the harness root, a
+  fragment naming the lines that were actually read, and a label that reads like the
+  path. It is prompt text rather than a tool schema because it is a habit of the reply,
+  not an argument: `media/main.js` maps a `spinney:` href to the host's `openFile`
+  (`src/chat/ChatViewProvider.ts`), which opens the file on those lines with the whole
+  range selected and centred. `tools/check-webview.js` renders such a link and pins the
+  message it posts.
 - Placeholders: `{{identity}}` (harness name + model + reasoning effort, from
   `identityLines()`), `{{environment}}` (OS / shell / agent root + its kind, from
   `process.platform` + `getShell()` + `agentRootInfo()` — `EnvironmentFacts` is
@@ -32,7 +41,9 @@
   `languageLine(language)` — the value is the language **name** resolved from
   `spinney.replyLanguage` by `replyLanguageName` (`auto` → the VS Code display
   language, a tag → its CLDR name), with `DEFAULT_REPLY_LANGUAGE` ('English') as
-  the floor when nothing resolves), and
+  the floor when nothing resolves; `replyLanguageTag`, beside it, resolves the BCP-47
+  tag of the same setting — `''` for a free-form name — and only the `exec_command`
+  title description uses it), and
   `{{agentsMd}}` (the AGENTS.md sections in force, built by `agentsMdSection` — the
   module-global snapshots `setGlobalAgentsMd` / `setAgentsMd` fixed at activation;
   `prompt.systemPrompt` takes an optional `agentsMd: AgentsMdSources` argument so a
@@ -99,7 +110,10 @@
   a revision after that gave it a bullet of its own, and neither moved the model — a
   chain whose frozen prompt carried either wording still reasoned in English on every
   block, so both were removed (see `CHANGELOG.md`, Unreleased). The `exec_command` step title stays covered, in
-  the tool channel, by that argument's own schema description. Do not add a
+  the tool channel, by that argument's own schema description — which now **names** the
+  language (`withToolTitleLanguage` fills its `{titleLanguage}` slot with the name and
+  its tag, e.g. `Simplified Chinese (zh-Hans)`), rendered from the same pair the
+  `{{language}}` line is built from. Do not add a
   thinking-language line back: the prompt is not where that is decided, and one more
   bullet that the model ignores is worse than none, because it reads as a rule the
   harness can promise. A change is a **setup** change, not a

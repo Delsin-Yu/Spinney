@@ -247,12 +247,70 @@ export type AgentEvent =
  * one-line step row shows that sentence instead of the one derived from the command
  * — which matters because the arguments are clipped for the UI (~8 KiB) and the
  * label must survive a repaint. Every other tool derives its row from the arguments
- * and declares no `title`. The description also asks for the sentence in the language
- * the agent is answering the user in, so the visible step row follows
- * `spinney.replyLanguage` like the answer and the reasoning block do.
+ * and declares no `title`.
+ *
+ * It is a **template**: `{titleLanguage}` is filled by {@link withToolTitleLanguage}
+ * with the sentence naming the reply language, so the visible step row follows
+ * `spinney.replyLanguage` like the answer does — in the language's own name and tag,
+ * substituted into the schema bytes the request actually sends. Nothing else may
+ * substitute it: a description that reached the model with the placeholder still in
+ * it would be an instruction to write a literal `{…}`.
  */
 export const TOOL_TITLE_DESCRIPTION =
-  'Required: the sentence the folded step row shows instead of the command — one short human line, at most about 60 characters (for example "Running the test suite"). Write it in the language you are answering the user in.';
+  'Required: the sentence the folded step row shows instead of the command — one short human line, at most about 60 characters (for example "Running the test suite"). {titleLanguage}';
+
+/** The placeholder {@link withToolTitleLanguage} fills. */
+const TITLE_LANGUAGE_SLOT = '{titleLanguage}';
+
+/**
+ * The one place the `exec_command` title description is rendered for a language, and
+ * the one place it is applied to a tool list.
+ *
+ * `language` is the resolved reply-language **name** (`replyLanguageName`) and `tag`
+ * its BCP-47 tag when one is known (`replyLanguageTag`) — the pair the prompt's
+ * `## Language` line is built from, so the schema and the prompt name the same
+ * language: `Write it in Simplified Chinese (zh-Hans), the language your reply to
+ * the user is in.` A language with no tag renders the name alone.
+ *
+ * Every path that sends tool schemas must go through here — `Agent.getTools()` and
+ * `SessionRuntime.liveToolSchemas()` — so the frozen envelope and the drift check
+ * hash are computed from the same bytes. The returned array shares every tool it does
+ * not touch, and the one it does is **copied**, so a second agent on another language
+ * can never inherit this one's sentence.
+ */
+export function withToolTitleLanguage(
+  tools: ToolDefinition[],
+  language: string,
+  tag?: string,
+): ToolDefinition[] {
+  const name = (language || '').trim() || 'English';
+  const known = (tag || '').trim();
+  const label = known ? `${name} (${known})` : name;
+  const sentence = `Write it in ${label}, the language your reply to the user is in.`;
+  return tools.map((tool) => {
+    if (tool.function.name !== 'exec_command') {
+      return tool;
+    }
+    const properties = tool.function.parameters.properties as Record<string, unknown>;
+    const title = properties.title as { type?: string; description?: string } | undefined;
+    if (!title || typeof title.description !== 'string') {
+      return tool;
+    }
+    return {
+      ...tool,
+      function: {
+        ...tool.function,
+        parameters: {
+          ...tool.function.parameters,
+          properties: {
+            ...tool.function.parameters.properties,
+            title: { ...title, description: title.description.split(TITLE_LANGUAGE_SLOT).join(sentence) },
+          },
+        },
+      },
+    };
+  });
+}
 
 /** A tool that the agent can invoke. */
 export interface AgentTool {

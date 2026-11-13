@@ -2,12 +2,17 @@
  * Automatic session titles — pure prompt/data helpers (no VS Code APIs).
  *
  * A session title used to be the first 40 characters of the first user message
- * and never changed again. Here a title is derived from the *conversation*: a
- * short model-generated name after the first turn, refreshed when the
- * conversation has grown enough, with a zero-cost heuristic fallback (the first
- * prompt) whenever the model call fails or is unavailable. An explicit rename
- * (sidebar command or the `rename_session` tool) locks the title, so the
- * automatic namer never overwrites a name a human or the agent chose.
+ * and never changed again. Here a title is derived from the *conversation*: one
+ * short model-generated name after the first turn, with a zero-cost heuristic
+ * fallback (the first prompt) whenever the model call fails or is unavailable. It
+ * is written **once** per session: the gate (`titleAutoAt`) closes when the model
+ * names the session, and nothing re-titles it afterwards — a conversation that
+ * grows keeps the name it was given. An explicit rename (sidebar command or the
+ * `rename_session` tool) locks the title, so the automatic namer never overwrites
+ * a name a human or the agent chose.
+ *
+ * A title that only fell back to the heuristic does **not** close the gate: it is
+ * the first prompt, not a name, so the next turn may still try once.
  *
  * Kept free of VS Code imports so it can be exercised outside the Extension
  * Host by a plain node script (require the compiled `out/chat/sessionTitles.js`).
@@ -18,10 +23,6 @@ import { AgentSession, TitleSource, TreeNode, isSidecar, messageText } from './t
 
 /** Hard cap on a stored title (the sidebar / panel budget). */
 export const AUTO_TITLE_MAX_CHARS = 40;
-/** Don't re-title a session more often than this. */
-export const AUTO_TITLE_COOLDOWN_MS = 2 * 60 * 1000;
-/** Re-title only after this many further turns landed since the last auto title. */
-export const AUTO_TITLE_GROWTH_NODES = 2;
 /** Completion budget for a single title. */
 export const TITLE_MAX_TOKENS = 40;
 /** Completion budget for one backfill batch (one line per session). */
@@ -57,27 +58,42 @@ export function hasNameableContent(session: AgentSession): boolean {
 }
 
 /**
- * Whether the automatic namer should (re)title this session now: never for a
- * locked title, only once there is something to name, and — for a session it
- * already named — only after the conversation grew by `AUTO_TITLE_GROWTH_NODES`
- * turns and the cooldown elapsed. Sessions from before automatic naming have no
- * `titleAutoAt`, so they are eligible immediately (that is the backfill).
+ * Whether the automatic namer should name this session now: never for a locked
+ * title, never twice, and only once there is something to name.
+ *
+ * The gate is **once per session**: `titleAutoAt` records that the model named it
+ * (see {@link noteAutoTitle}), and from that moment on this answers `false` — a
+ * conversation that grows keeps the name it was given. Sessions from before
+ * automatic naming have no `titleAutoAt`, so they are eligible immediately (that
+ * is the backfill). A gate left open by a failed model call is what retries: the
+ * next turn asks once more.
  */
-export function shouldAutoTitle(session: AgentSession, now = Date.now()): boolean {
+export function shouldAutoTitle(session: AgentSession): boolean {
   if (session.titleLocked) {
     return false;
   }
-  if (!hasNameableContent(session)) {
-    return false;
+  if (session.titleAutoAt) {
+    return false; // already named once — the name is the session's now
   }
-  const lastAt = session.titleAutoAt ?? 0;
-  if (!lastAt) {
-    return true;
+  return hasNameableContent(session);
+}
+
+/**
+ * Record the outcome of one automatic naming pass.
+ *
+ * `fromModel` is the one fact the gate turns on: a name the model produced
+ * **closes** the gate (`titleAutoAt` is stamped, so {@link shouldAutoTitle} is
+ * false from here on), while a title that only fell back to the heuristic — no
+ * key, an API error, an empty answer — leaves it open, so a later turn tries once
+ * more instead of the conversation keeping the first prompt as its name forever.
+ *
+ * This is the only writer of `titleAutoAt`, and `tools/check-titles.js` drives it
+ * to pin the once-only rule outside the Extension Host.
+ */
+export function noteAutoTitle(session: AgentSession, fromModel: boolean, at = Date.now()): void {
+  if (fromModel) {
+    session.titleAutoAt = at;
   }
-  if (turnCount(session) < (session.titleAutoNodes ?? 0) + AUTO_TITLE_GROWTH_NODES) {
-    return false;
-  }
-  return now - lastAt >= AUTO_TITLE_COOLDOWN_MS;
 }
 
 /** First non-empty user text of a turn node ('' when the prompt was image-only). */
