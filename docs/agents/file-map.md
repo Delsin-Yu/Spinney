@@ -3,8 +3,8 @@
 - `src/extension.ts` — activation; registers the webview provider + commands.
 - `src/chat/ChatViewProvider.ts` — the window coordinator: session/persistence,
   config (including `applyModelCards` / `refreshKeys`),
-  image attachment, titles, transcripts, the global hop bookkeeping, the
-  control-plane host, the HTML shell, the Model Card Tree page controller, and
+  image attachment, titles, transcripts, the session tools’ cross-session reads,
+  the control-plane host, the HTML shell, the Model Card Tree page controller, and
   webview message routing. It owns the
   `runtimes: Map<sessionId, SessionRuntime>` and a `PanelManager` (tabs); the editor
   `WebviewPanel` lifecycle is `restorePanel` (serializer) + `postAllState`.
@@ -212,8 +212,8 @@
   the identity line in place), the completion-signal injection hook
   (`setSignalHandler`; consulted after each whole tool batch, like the `read_image`
   image block) and the interception of the provider-orchestrated tools
-  (`spawn_*` / `send_*` / `hop_session` / `finish_hop` / `list_nodes` / `rename_session` /
-  `read_image`). The prompt text is **not** here — see `prompt.ts`.
+  (`spawn_*` / `send_*` / `create_session` / `send_session_message` / `list_sessions` /
+  `list_nodes` / `rename_session` / `read_image`). The prompt text is **not** here — see `prompt.ts`.
 - `src/agent/prompt.ts` — **the system prompt**: both templates, the
   `{{placeholder}}` renderer (plus the unresolved-placeholder guard) and the two
   `AGENTS.md` snapshots (systemwide + workspace, rendered by `agentsMdSection`). One
@@ -347,7 +347,8 @@
   resampler and the JPEG decoder — see `testing.md`.
 - `src/agent/tools/` — one file per intercepted tool (`readImage`, `spawnAgents`,
   `spawnReadonlyAgents`, `sendAgentMessage`, `sendReadonlyAgentMessage`,
-  `hopSession`, `finishHop`, `listNodes`, `renameSession`) plus `index.ts`, the barrel that
+  `createSession`, `sendSessionMessage`, `listSessions`, `listNodes`, `renameSession`) plus
+  `index.ts`, the barrel that
   filters them.
   Each declares its `requires` capability tag, so the advertised tools and the
   prompt's capability wording cannot drift apart.

@@ -6,7 +6,7 @@ import type { InterceptedTool } from './index';
  * automatic namer stops touching it.
  */
 export const renameSessionTool: InterceptedTool = {
-  requires: 'hop',
+  requires: 'sessions',
   definition: {
     type: 'function',
     function: {
