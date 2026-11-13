@@ -3199,6 +3199,18 @@ if (contextLabel !== 'ctx 50%') {
     if (dotsIn(findByClass(longCard, 'node-work-wrap')) !== 1) {
       problems.push('the green .scroll-lock-dot is not in .node-work-wrap (the log is the only scroller that follows a turn)');
     }
+    // The light's horizontal offset is **measured** (the centre of the log's scrollbar
+    // gutter), so with no layout — this stub reports 0 for every box — nothing may be
+    // written at all and the stylesheet's fixed `right` has to stand. That fallback is what
+    // keeps the guard itself honest: a card painted without a gutter must not be handed a
+    // `right: NaNpx` (or a `0px`, which would put the light on the log's right edge).
+    const longDot = findByClass(longCard, 'scroll-lock-dot');
+    if (longDot && longDot.style && longDot.style.right) {
+      problems.push(
+        `a card with no measurable scroll gutter moved its light to ${JSON.stringify(longDot.style.right)} — without a ` +
+          'layout the stylesheet\'s fixed offset has to stand (`.node-work-wrap > .scroll-lock-dot`)',
+      );
+    }
 
     // --- (k) a folded log has no window to extend -------------------------------
     // The steps fold took the job the scroll window existed for: a long turn now keeps
@@ -6462,6 +6474,28 @@ if (contextLabel !== 'ctx 50%') {
         problems.push(
           'a closed reasoning row still carries a .scroll-lock-dot — a one-line row has no scroller, and the closed form ' +
             'carries no light',
+        );
+      }
+      // …and its horizontal offset is **measured**, not a fixed number: the light belongs on
+      // the centre of the box's own scrollbar gutter, so reopening the row measures it. The
+      // stub has no layout, so the numbers are handed to it — a 10px gutter in a 208px box,
+      // the row's 2px right padding under a 212px padding box, and a 6px dot — which put the
+      // centre at `(10 - 6) / 2 + 2 = 4` from the row's padding box.
+      const measure = () => {
+        box.offsetWidth = 208;
+        box.clientWidth = 198;
+        box.offsetLeft = 2;
+        row.clientWidth = 212;
+        rdot.offsetWidth = 6;
+      };
+      measure();
+      clickOf(row, 'the reasoning row, reopened for the offset measurement');
+      if (!hasClass(row, 'open')) {
+        problems.push('reopening the reasoning row for the offset measurement did nothing — the case below checks nothing');
+      } else if (rdot.style.right !== '4px') {
+        problems.push(
+          `the reasoning light's measured offset reads ${JSON.stringify(rdot.style.right)}, expected "4px" — the dot's ` +
+            'centre has to land on the centre of the box\'s scroll gutter, not on a fixed offset',
         );
       }
     }

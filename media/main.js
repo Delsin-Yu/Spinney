@@ -1464,6 +1464,42 @@
   const LOCK_TITLE_ON = tr('Auto-scroll on — click to release');
   const LOCK_TITLE_OFF = tr('Auto-scroll off — click to follow again');
 
+  /**
+   * The `right` that puts the light's centre on the centre of its scrollbar, or `null` when
+   * there is nothing to measure.
+   *
+   * The scroller keeps a gutter down its own right edge (`scrollbar-gutter: stable`), so its
+   * bar sits in a strip that is inside the box while the dot is positioned against the
+   * **host's** padding box — a fixed `right` is therefore half a gutter off the bar. Both
+   * numbers are read, never guessed: the gutter is `offsetWidth - clientWidth`, and the
+   * host's own right padding is what is left of its width beyond the scroller's left edge and
+   * the scroller itself. A box that has no layout yet (a card is appended a few lines after
+   * its dot is created, and the offline guard's DOM has no geometry at all) measures no
+   * gutter, and then nothing is written at all: the stylesheet's fixed offset stands, which
+   * is the fallback `tools/check-webview.js` pins. Nothing is ever cleared either — a box
+   * that loses its gutter (a hidden log) keeps the offset it had.
+   */
+  function lockDotRight(container, host, dot) {
+    const gutter = (container.offsetWidth || 0) - (container.clientWidth || 0);
+    if (gutter <= 0) return null;
+    const pad = Math.max(0, (host.clientWidth || 0) - (container.offsetLeft || 0) - (container.offsetWidth || 0));
+    const right = Math.max(0, (gutter - (dot.offsetWidth || 0)) / 2 + pad);
+    return right + 'px';
+  }
+
+  /** Write one measured offset onto its dot. A `null` value changes nothing. */
+  function applyLockDot(dot, value) {
+    if (!value || !dot || !dot.style || dot.style.right === value) return;
+    dot.style.right = value;
+  }
+
+  /** Measure and apply in one step, for a single dot outside a layout pass. */
+  function syncLockDot(container, host, dot) {
+    const value = lockDotRight(container, host, dot);
+    applyLockDot(dot, value);
+    return value !== null;
+  }
+
   // The green dot lives on the host of a scrollable container, in the strip reserved below
   // it (the container keeps a bottom margin so the dot sits just under the scrollbar).
   // Live turns start following (the dot is green); finished nodes start released. A click
@@ -1474,7 +1510,8 @@
   //
   // The log is a card's only scroller, so it carries the only light a card has — except
   // the open form of a thinking row, which is a 240px scroller of its own
-  // (`attachRowLock`, below).
+  // (`attachRowLock`, below). Both lights are positioned by measurement (`syncLockDot`), so
+  // the vertical offset is the stylesheet's and the horizontal one is the gutter's own.
   function attachLock(container, host, locked) {
     const dot = el('div', 'scroll-lock-dot' + (locked === false ? '' : ' locked'));
     const ctrl = createScrollController(container, (isLocked) => {
@@ -1490,6 +1527,11 @@
       ctrl.toggle();
     });
     host.appendChild(dot);
+    // The dot's offset is the log's own scroll gutter (see `lockDotRight`). It is measured
+    // again on every layout pass (`relayout`), because this call happens before the card is
+    // appended and so measures nothing.
+    ctrl.syncDot = () => syncLockDot(container, host, dot);
+    ctrl.syncDot();
     return ctrl;
   }
 
@@ -1523,6 +1565,10 @@
       ctrl.toggle();
     });
     row._lockDot = dot;
+    // Same measured offset as the log's light (`lockDotRight`): the row is built a task before
+    // it is appended and it only has a scroller while it is open, so `setThinkingOpen`
+    // measures again on the transition that puts the dot in the row.
+    ctrl.syncDot = () => syncLockDot(container, row, dot);
     return ctrl;
   }
 
@@ -1633,6 +1679,9 @@
       // The light belongs to the open form: it goes into the row as the box opens, and
       // opening puts the reader back at the end of the reasoning, following it.
       row.appendChild(row._lockDot);
+      // …and this is the one moment the box has a gutter to measure: the dot's offset is the
+      // scrollbar's own strip, not a fixed number (`lockDotRight`).
+      if (row._scroll.syncDot) row._scroll.syncDot();
       row._scroll.lock();
     } else if (!row._open && row._lockDot.parentElement === row) {
       // A closed row is one ellipsised line: no scroller, no light.
@@ -6540,6 +6589,11 @@ function addBackgroundNotice(item) {
       if (!card) continue;
       heights[id] = card.offsetHeight || 120;
       widths[id] = card.offsetWidth || NODE_W;
+      // …and the log's follow light is placed from the boxes this pass just laid out: its
+      // `right` is the scroll gutter's own centre, never a fixed offset (`lockDotRight`).
+      // The write is a style-only change on an absolutely positioned 8px box, so it changes
+      // no number read here — and a box with no gutter yet (a hidden log) writes nothing.
+      if (card._itemScroll && card._itemScroll.syncDot) card._itemScroll.syncDot();
     }
     // The session is a FOREST (§3): the engine lays out one tree at a time, so each
     // root gets its own pass and the results are placed left to right, in `rootIds`

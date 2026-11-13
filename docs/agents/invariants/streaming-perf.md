@@ -68,7 +68,16 @@
   block manual scrolling (no `overflow` rule).
   The dot sits in the strip the container reserves below its scrollbar
   (`margin-bottom: 20px`), on `.node-work-wrap` — the log's box, which is not itself a
-  scroller. **The reasoning box has its own light**: the open thinking row is a 240 px
+  scroller. **Its horizontal offset is measured, not fixed** (`lockDotRight` /
+  `syncLockDot`): the log keeps a `scrollbar-gutter: stable` strip, so the light is
+  centred on that gutter — `(gutter - dotWidth) / 2` plus the host's own right padding,
+  because `right` is measured against the host's padding box — instead of sitting half a
+  gutter to the left of the bar it belongs to. The card's layout pass (`relayout`) is
+  what measures it (a card is appended a few lines after its dot is built, so the
+  attach-time attempt sees no box), and the stylesheet's `right` is the fallback for a
+  box with no layout at all — the case `tools/check-webview.js` pins, because a guard's
+  DOM reports 0 for every box. **The reasoning box has its own light**: the open thinking
+  row is a 240 px
   scroller of its own, so it carries a small dot in its bottom-right corner
   (`attachRowLock`, `.thinking-row > .scroll-lock-dot`), in the row only while the row is
   open, under the same direction rule; its click releases or re-engages that box and
