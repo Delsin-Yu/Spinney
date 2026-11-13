@@ -27,10 +27,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   carries a small green dot of its own: it follows the newest line, a scroll up releases
   it, and a scroll back to the end engages it again; clicking the dot toggles it, and the
   click does not open or close the row.
-- **The reply language covers the reasoning and the step titles.** The `## Language` line
-  now says the agent's reasoning (the thinking block) and the short `exec_command` step
-  title use the same language as the answer, while code, file paths, command output and
-  identifiers stay verbatim; the title's own schema description says the same.
 - **One entry for every new context.** A new-epoch transition used to have three
   inconsistent entries: the per-card `⧉ Continue in a new window`, a composer `⧉` shown
   only for a harness drift, and a modal raised by a plain send after a model/effort
@@ -138,18 +134,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- **The reasoning-language requirement is gone.** `## Language` asks one thing again: the
-  **answer**. 0.7.0 packed "your reasoning (the thinking block) and the short title …
-  use X too" into the answer bullet, behind a semicolon; a revision here split it into
-  its own imperative bullet instead. Neither wording moved the model — a chain whose
-  frozen prompt carried the clause reasoned in **English on every block** — so the line
-  was removed rather than reworded a third time. `languageLine()` is back to the answer
-  sentence, the template carries `{{language}}` as its only language placeholder, and
-  the "code, file paths, command output and identifiers verbatim" bullet after it stays.
-  The `exec_command` step title keeps its own requirement in that argument's schema
-  (tool channel), not in the prompt. A template change is **harness drift** for every
-  existing chain (the epoch's `templateHash` no longer matches what the window ships),
-  and it reaches the model only in a **new epoch**.
+- **The reply language asks for the answer, and nothing else.** `## Language` carries one
+  bullet again. This release first packed the agent's reasoning (the thinking block) and
+  the short `exec_command` step title into the answer bullet, behind a semicolon, then
+  split them out into an imperative bullet of their own, and finally dropped both: neither
+  wording moved the model, and a chain whose frozen prompt carried the clause reasoned in
+  **English on every block** anyway. What ships is `languageLine()`'s answer sentence as
+  the template's only language placeholder, with the "code, file paths, command output and
+  identifiers verbatim" bullet after it. The step title keeps its requirement in that
+  argument's schema (the tool channel), not in the prompt. A template change is **harness
+  drift** for every existing chain (the epoch's `templateHash` no longer matches what the
+  window ships), and it reaches the model only in a **new epoch**.
 - **A step is italic, and a step is what is indented.** A tool line is now marked as a step
   in two ways and no more: its own wording is *italic* (`.tool-verb` plus a prose
   `.tool-label`), and the step line alone is inset 15 px under the `Ran N steps` header
