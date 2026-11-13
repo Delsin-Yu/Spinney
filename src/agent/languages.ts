@@ -58,3 +58,29 @@ export function replyLanguageName(value: string, vscodeLocale: string): string {
     return candidate; // not a tag this runtime can name
   }
 }
+
+/**
+ * The **tag** side of the same resolution: the BCP-47 tag the language name was
+ * computed from, or `''` when there is none to show.
+ *
+ *  - `auto` (the default), blank, or a blank locale → the locale tag as reported
+ *    (`zh-cn` is canonicalised to `zh-Hans`, the form this repo writes);
+ *  - a language tag → itself, canonicalised the same way;
+ *  - a free-form language name ("Norwegian Bokmål") → `''`, because there is no tag
+ *    to name and inventing one would be a claim about the user's language.
+ *
+ * Paired with {@link replyLanguageName}, this is what the tool schemas carry: the
+ * `exec_command` step title has to be written in the language the user reads, and
+ * "Simplified Chinese (zh-Hans)" says that once, in a form a model follows and a
+ * reader can check. The pair is resolved together in one place, so the prompt, the
+ * tool description and the drift hash always name the same language.
+ */
+export function replyLanguageTag(value: string, vscodeLocale: string): string {
+  const raw = (value || '').trim();
+  const locale = (vscodeLocale || '').trim();
+  const candidate = !raw || raw.toLowerCase() === AUTO_REPLY_LANGUAGE ? locale : raw;
+  if (!candidate || !TAG_PATTERN.test(candidate)) {
+    return ''; // nothing to name, or a free-form language name
+  }
+  return CANONICAL_TAGS[candidate.toLowerCase()] ?? candidate;
+}

@@ -367,10 +367,13 @@ export interface AgentSession {
   titleSource?: TitleSource;
   /** A manual rename locked the title: the automatic namer must never touch it. */
   titleLocked?: boolean;
-  /** When the automatic namer last wrote the title (cooldown gate). */
+  /**
+   * When the model named this session (the once-only gate: `shouldAutoTitle` is false
+   * from here on). Absent ⇒ never named by the model — a session from before automatic
+   * naming, or one whose only title so far was the heuristic fallback. The old
+   * `titleAutoNodes` growth counter is gone; a stored one is simply ignored.
+   */
   titleAutoAt?: number;
-  /** Turn count when the automatic namer last ran (growth gate). */
-  titleAutoNodes?: number;
   createdAt: number;
   updatedAt: number;
   nodes: Record<string, TreeNode>;
@@ -1059,7 +1062,6 @@ function normalizeTreeSession(raw: AgentSession & { rootId?: string | null }): A
         : undefined,
     titleLocked: raw.titleLocked === true ? true : undefined,
     titleAutoAt: typeof raw.titleAutoAt === 'number' ? raw.titleAutoAt : undefined,
-    titleAutoNodes: typeof raw.titleAutoNodes === 'number' ? raw.titleAutoNodes : undefined,
     createdAt: raw.createdAt || Date.now(),
     updatedAt: raw.updatedAt || Date.now(),
     nodes: {},

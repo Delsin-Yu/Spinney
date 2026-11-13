@@ -36,7 +36,16 @@ import { Agent, ImageAccounting } from '../agent/agent';
 import { DEFAULT_REPLY_LANGUAGE, SYSTEM_PROMPT_TEMPLATE, AgentsMdSources, agentsMdSection, systemPrompt } from '../agent/prompt';
 import { Balance, emptyBalance } from '../agent/balance';
 import { ClientRegistry } from '../agent/clients';
-import { AgentEvent, ChatMessage, ContentPart, ThinkingEffort, ToolDefinition, Usage, detectImageMime } from '../agent/types';
+import {
+  AgentEvent,
+  ChatMessage,
+  ContentPart,
+  ThinkingEffort,
+  ToolDefinition,
+  Usage,
+  detectImageMime,
+  withToolTitleLanguage,
+} from '../agent/types';
 import { ToolCapabilities, interceptedDefinitions } from '../agent/tools';
 import {
   IMAGE_BUDGET_RATIO,
@@ -577,6 +586,13 @@ export interface HarnessConfig {
    * `replyLanguageName`.
    */
   replyLanguage: string;
+  /**
+   * The BCP-47 tag of {@link replyLanguage}, resolved from the same setting by the
+   * same call (`replyLanguageTag`), or `''` for a free-form language name. The pair
+   * travels together: the tag names the language inside `exec_command`'s title
+   * description, so the step row is written in the language the user reads.
+   */
+  replyLanguageTag: string;
   maxConcurrentSubagents: number;
   maxLevel2Subagents: number;
   saveSubAgentTranscripts: boolean;
@@ -1093,6 +1109,14 @@ export class SessionRuntime {
    */
   replyLanguage: string = DEFAULT_REPLY_LANGUAGE;
   /**
+   * The BCP-47 tag of {@link replyLanguage} ('' when the setting is a free-form
+   * language name). The pair is resolved together by the provider's `getConfig()` and
+   * pushed by {@link applyReplyLanguage}; only the `exec_command` title description
+   * carries the tag, and `liveToolSchemas` renders it through the same helper an agent
+   * uses so the frozen envelope and the drift hash agree byte for byte.
+   */
+  replyLanguageTag: string = '';
+  /**
    * The context window last reported by {@link recheckContextWindow}, so a settings
    * change that did not move the window of the node in view does not repaint the
    * indicator (the live value is the {@link contextWindow} getter).
@@ -1126,8 +1150,11 @@ export class SessionRuntime {
     // never names a level the provider never heard of.
     this.seedEffort = normalizeEffort(this.cardForCardId(cardId), thinkingEffort);
     // The reply language is not a per-session pick, so it is read straight from
-    // the setting; a later edit arrives through `applyReplyLanguage`.
+    // the setting; a later edit arrives through `applyReplyLanguage`. The tag rides
+    // beside the name: both are resolved together, and the tag is what the
+    // `exec_command` title schema names.
     this.replyLanguage = host.getConfig().replyLanguage;
+    this.replyLanguageTag = host.getConfig().replyLanguageTag;
     // The readout `recheckContextWindow` compares against, seeded from what the node
     // in view reports (a restored session may already stand on an older node with a
     // card of its own, which is not the constructor's seed).
@@ -1447,7 +1474,7 @@ export class SessionRuntime {
       const agent = new Agent(this.clients, tools, (event) => this.handleAgentEventFor(node, event));
       agent.setCard(this.cardForNode(node));
       agent.setThinkingEffort(this.effortForNode(node));
-      agent.setReplyLanguage(this.replyLanguage);
+      agent.setReplyLanguage(this.replyLanguage, this.replyLanguageTag);
       // This agent can spawn sub-agents: hand it this runtime's orchestrator,
       // bound to the same node.
       agent.setSpawnHandler((args, signal) => this.handleSpawnAgents(node, args, signal));
@@ -1676,8 +1703,11 @@ export class SessionRuntime {
    * other nodes may be mid-turn, so nothing here may mutate an agent.
    *
    * A bare registry is enough because no tool *schema* depends on the wiring (the access
-   * objects gate execution, not the definitions); the one runtime value in the whole set
-   * is `exec_command`'s shell label, which is a process-wide probe.
+   * objects gate execution, not the definitions); the runtime values in the whole set are
+   * `exec_command`'s shell label (a process-wide probe) and its `title` description, which
+   * names the reply language — rendered here through the same helper an agent uses
+   * (`withToolTitleLanguage`), with the same name + tag, so a frozen envelope and the
+   * drift hash over it are computed from identical bytes.
    */
   private liveToolSchemas(card: ModelCard, sidecar: boolean): ToolDefinition[] {
     const registry = new ToolRegistry();
@@ -1687,7 +1717,11 @@ export class SessionRuntime {
       canSpawnReadOnly: false,
       canSessions: !sidecar,
     };
-    return [...registry.definitions, ...interceptedDefinitions(capabilities)];
+    return withToolTitleLanguage(
+      [...registry.definitions, ...interceptedDefinitions(capabilities)],
+      this.replyLanguage,
+      this.replyLanguageTag,
+    );
   }
 
   /**
@@ -2126,24 +2160,26 @@ export class SessionRuntime {
 
   /**
    * Adopt a changed `spinney.replyLanguage` setting. `language` is the resolved
-   * **name** (`ChatViewProvider.getConfig().replyLanguage`), so the `auto` →
-   * display-language step has already happened: re-picking `auto` on a window that
-   * already follows its own language is a no-op.
+   * **name** and `tag` its BCP-47 tag (`ChatViewProvider.getConfig().replyLanguage` /
+   * `.replyLanguageTag`), so the `auto` → display-language step has already happened:
+   * re-picking `auto` on a window that already follows its own language is a no-op.
    *
    * Nothing already sent is rewritten. Every frozen envelope keeps the language it was
-   * rendered with, and the value below is what the **next new node** will freeze — which
-   * is exactly what the composer reports as the drift between the two setups
+   * rendered with, and the pair below is what the **next new node** will freeze — which is
+   * exactly what the composer reports as the drift between the two setups
    * (`setupState`). The language is part of a prefix, and a prefix is append-only.
    */
-  applyReplyLanguage(language: string): void {
+  applyReplyLanguage(language: string, tag = ''): void {
     if (this.busy) {
       return; // never move a setup under a running request
     }
     const next = (language || '').trim() || DEFAULT_REPLY_LANGUAGE;
-    if (next === this.replyLanguage) {
+    const nextTag = (tag || '').trim();
+    if (next === this.replyLanguage && nextTag === this.replyLanguageTag) {
       return;
     }
     this.replyLanguage = next;
+    this.replyLanguageTag = nextTag;
     this.host.output.appendLine(`[config] replyLanguage=${next} (new nodes; frozen chains keep theirs)`);
     // The two setups may now disagree: repaint the composer's drift marking.
     this.postConfig();

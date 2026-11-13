@@ -103,8 +103,11 @@
   `rootIds: [rootId]`, and `pruneSession` re-derives the list when it no longer
   describes the tree) — plus `legacyEpoch` (set when a chain was adopted
   retroactively, see `system-prompt.md`), the title bookkeeping
-  (`titleSource: 'provisional'|'auto'|'manual'`, `titleLocked`, `titleAutoAt`,
-  `titleAutoNodes` — see `sessionTitles.ts`) and, since P4, the per-session selection
+  (`titleSource: 'provisional'|'auto'|'manual'`, `titleLocked`, `titleAutoAt` — the
+  once-only gate: the model names a session **once** and nothing re-titles it after
+  that, while a heuristic fallback leaves the field unset so a later turn retries; the
+  retired `titleAutoNodes` growth counter is gone and a stored one is ignored. See
+  `sessionTitles.ts`) and, since P4, the per-session selection
   (`model`, `effort`, and the `modelFromSettings` / `effortFromSettings` retirement
   anchors — all optional, so old state loads unchanged via `normalizeTreeSession`). A
   rename never touches `updatedAt`, so it cannot reorder the sidebar.

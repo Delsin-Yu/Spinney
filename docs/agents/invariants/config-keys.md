@@ -44,7 +44,8 @@ number from `execForegroundSeconds`: one bounds a batch of conversations, the ot
 process, and tuning one must never silently move the other),
 `replyLanguage` (`auto` — the default, i.e. follow the VS Code display language —
 or one of the language tags VS Code ships display translations for; resolved into
-the **name** the prompt carries by `replyLanguageName` in
+the **name** the prompt carries by `replyLanguageName` and, beside it, the BCP-47
+**tag** `replyLanguageTag` in
 `src/agent/languages.ts` — the tags live only in the setting's `enum`, ordered
 `auto`, `en`, `zh-Hans`, `zh-Hant` and then the rest by use, and the setting's
 `enumDescriptions` are exactly the names the prompt receives, so the dropdown reads
@@ -62,10 +63,11 @@ sends them, so nothing here reaches the system prompt),
 `saveSessionTranscripts` (default `true` — dump each main-agent turn; the
 one-time historical backfill is keyed by the Memento marker
 `spinney.transcriptBackfill`),
-`autoSessionTitles` (default `true` — name a session from its conversation after
-the first turn and refresh it when the conversation grows; a manual rename locks
-the title; the one-time historical backfill is keyed by the Memento marker
-`spinney.sessionTitleBackfill`),
+`autoSessionTitles` (default `true` — name a session from its conversation **once**:
+the model names it after the first turn and nothing re-titles it as the conversation
+grows; a manual rename locks the title, and a heuristic fallback — no key, an API
+error — leaves the gate open so a later turn tries once more; the one-time historical
+backfill is keyed by the Memento marker `spinney.sessionTitleBackfill`),
 `subAgentTranscriptDir` (default `""` = global storage; else relative to the
 **agent root** — the workspace folder, or the no-repo scratch folder
 `<globalStorage>/no-workspace`; now the root for **both** transcript kinds),
@@ -138,7 +140,7 @@ no handling.
 | `providers`, `modelCards` | immediately | pushed: `applyModelCards()` (re-parse + install the catalog) → `ClientRegistry.applyCatalog()` (re-point every provider client at its `baseUrl`, install the two concurrency limits) → every runtime's `postConfig()` (both dropdowns + image affordances) and `applyDefaultModel` for sessions with no pick; a `providers` change also fires `refreshBalance()` for every session, so editing a row's `balance` dialect takes effect with it |
 | `model` | immediately when *that key* changed, and only for sessions **without a pick of their own** (a per-tab dropdown pick wins) | pushed through `SessionRuntime.applyDefaultModel` (driven by `onConfigurationChanged`); a running session is skipped, like the dropdowns |
 | `maxConcurrentSubagents` | immediately (raising wakes queued tasks; lowering drains) | pushed: `SubAgentPool.setMaxConcurrent` |
-| `replyLanguage` | immediately when *that key* changed (a running session is skipped) | pushed: `ChatViewProvider.getConfig()` resolves the setting to a language **name** (`auto` → `vscode.env.language`, a tag → its CLDR name, via `replyLanguageName`), and `SessionRuntime.applyReplyLanguage` pushes that name to every node worker's `Agent.setReplyLanguage`, which rewrites `messages[0]`; a session with history gets the cache-miss notice. **No per-session pick**: the language is a property of the reader, so the setting is the only source (`SessionRuntime.replyLanguage` is seeded from it at construction). Re-picking `auto` when the display language is already in force resolves to the same name and is a no-op |
+| `replyLanguage` | immediately when *that key* changed (a running session is skipped) | pushed: `ChatViewProvider.getConfig()` resolves the setting to a language **name** (`auto` → `vscode.env.language`, a tag → its CLDR name, via `replyLanguageName`), and `SessionRuntime.applyReplyLanguage` carries that name **and its tag** (`replyLanguageTag`) to every node worker's `Agent.setReplyLanguage` — the name fills the next frozen `## Language` line, the tag names the language inside `exec_command`'s title description; nothing already sent is rewritten (a frozen epoch keeps its bytes). **No per-session pick**: the language is a property of the reader, so the setting is the only source (`SessionRuntime.replyLanguage` / `replyLanguageTag` are seeded from it at construction). Re-picking `auto` when the display language is already in force resolves to the same name and is a no-op |
 | `promptSections` | immediately, incl. a chat tab already open | pushed: `postConfig()` → the webview rebuilds the snippet menu from `snippets` (it keeps no copy of the list, and the shipped rows are merged in again on every push, so a renamed or emptied row shows up at once) |
 | `httpApi.enabled`, `httpApi.port` | immediately | pushed: `ControlServer.restart()` (rebind the listener; disabling just leaves `start()` a no-op) |
 | `execForegroundSeconds`, `subAgentSyncSeconds`, `maxInlineToolOutput`, `searchTimeoutSeconds`, `maxLevel2Subagents`, `saveSessionTranscripts`, `saveSubAgentTranscripts`, `subAgentTranscriptDir`, `autoSessionTitles`, `hopSession.enabled` | immediately | pulled at the point of use (they already were — no listener needed; both command numbers are read **per call** — an `exec_command` invocation, a join, a spawn — and never cached, so a change applies to the next call and never to a call already waiting. `hopSession.enabled` is read at every turn start (`workerFor` → `Agent.setHopEnabled`) and again in `handleHopSession`) |

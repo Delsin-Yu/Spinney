@@ -123,11 +123,13 @@
   **vscode-free** — the caller passes the paths — which is what makes
   `tools/session-store-acceptance.js` possible. See
   `invariants/session-persistence.md`.
-- `src/chat/sessionTitles.ts` — automatic session titles: the gates
-  (`shouldAutoTitle`: locked / cooldown / growth), the conversation digest, the
-  naming prompts (single + batched), `sanitizeTitle` / `parseBatchTitles`, and the
-  zero-cost `heuristicTitle` fallback. Pure prompt/data helpers — no VS Code APIs,
-  so it is smoke-testable outside the Extension Host.
+- `src/chat/sessionTitles.ts` — automatic session titles: the once-only gate
+  (`shouldAutoTitle`: never twice, never for a locked title; `noteAutoTitle` is the
+  write that closes it, and a heuristic fallback leaves it open), the conversation
+  digest, the naming prompts (single + batched), `sanitizeTitle` /
+  `parseBatchTitles`, and the zero-cost `heuristicTitle` fallback. Pure prompt/data
+  helpers — no VS Code APIs, so it is smoke-testable outside the Extension Host
+  (`tools/check-titles.js`).
 - `src/chat/promptSnippets.ts` — the composer's **prompt snippets**: the two texts
   the extension ships (`SHIPPED_PROMPT_SNIPPETS` — `Plan` / `Implement Parallel`)
   and `resolvePromptSnippets(setting)`, which merges the user's
@@ -234,7 +236,9 @@
 - `src/agent/languages.ts` — `replyLanguageName(value, vscodeLocale)`: the
   reply-language setting (`auto` or a VS Code language tag) → the language **name**
   the prompt carries, named through `Intl.DisplayNames` so the tag list lives only
-  in the setting's `enum`. That `enum` is ordered by use (`auto`, `en`, `zh-Hans`,
+  in the setting's `enum`; `replyLanguageTag` beside it resolves the same setting to
+  its BCP-47 tag (`''` for a free-form name), which only the `exec_command` title
+  description carries. That `enum` is ordered by use (`auto`, `en`, `zh-Hans`,
   `zh-Hant`, then the rest) and its `enumDescriptions` are these same names, so the
   dropdown reads like the prompt does; `zh-cn`/`zh-tw` stay aliased because
   `vscode.env.language` reports the region tags.

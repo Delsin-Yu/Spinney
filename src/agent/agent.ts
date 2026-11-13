@@ -13,6 +13,7 @@ import {
   ToolDefinition,
   Usage,
   detectImageMime,
+  withToolTitleLanguage,
 } from './types';
 import {
   IMAGE_BUDGET_RATIO,
@@ -546,6 +547,13 @@ export class Agent {
   /** Reply language injected as the prompt's `## Language` line. */
   private replyLanguage: string = prompt.DEFAULT_REPLY_LANGUAGE;
   /**
+   * The BCP-47 tag of {@link replyLanguage} ('' when the language is a free-form
+   * name). It travels with the name into the `exec_command` title description only:
+   * the step label has to be written in the language the user reads, and the schema
+   * says so in the language's own name **and** tag.
+   */
+  private replyLanguageTag: string = '';
+  /**
    * The conversation this agent's requests name, when its provider's dialect transmits
    * one ({@link setProviderSession}): the frozen context window of a turn, or a
    * sub-agent's own node. Empty means "nothing to name", and nothing is sent.
@@ -671,8 +679,13 @@ export class Agent {
   }
 
   /** Set the language the agent replies in (the prompt's `## Language` line). */
-  setReplyLanguage(language: string): void {
+  setReplyLanguage(language: string, tag = ''): void {
     this.replyLanguage = language || prompt.DEFAULT_REPLY_LANGUAGE;
+    // The tag is the same language in BCP-47 form; it only appears in the
+    // `exec_command` title description (`withToolTitleLanguage`). A sub-agent never
+    // calls this, so it keeps the English default — it answers the agent that
+    // dispatched it, never the user.
+    this.replyLanguageTag = tag || '';
   }
 
   /** Set a provider hook that runs sub-agents for the `spawn_agents` tool. */
@@ -814,7 +827,15 @@ export class Agent {
     if (this.frozenTools) {
       return this.frozenTools;
     }
-    return [...this.tools.definitions, ...interceptedDefinitions(this.toolCapabilities())];
+    // The one runtime value in an otherwise static set: `exec_command`'s `title`
+    // description names the reply language (`withToolTitleLanguage` is the only place
+    // that substitutes it — `SessionRuntime.liveToolSchemas` renders through the same
+    // call, so a frozen envelope and its drift hash see identical bytes).
+    return withToolTitleLanguage(
+      [...this.tools.definitions, ...interceptedDefinitions(this.toolCapabilities())],
+      this.replyLanguage,
+      this.replyLanguageTag,
+    );
   }
 
   /**
