@@ -297,6 +297,7 @@ console.log('-- the pointer text (Simple) --');
   });
   ok('it starts with the pointer title', pointer.startsWith(C.ROLLOVER_HARNESS_TITLE));
   ok('it says the provider refused the tokens', pointer.includes('the context window was full'));
+  ok('the pointer text says it is a handoff, not a memory too', pointer.includes(C.HANDOFF_IS_NOT_MEMORY));
   ok('it names the previous window', pointer.includes('Previous window: node p0 of session sess-1.'));
   ok('it states the size with the refusal tail', pointer.includes('which is at or past the limit this provider accepts for one request.'));
   ok('it points at the transcript', pointer.includes('/tmp/sess-1/p0.jsonl'));
@@ -384,6 +385,9 @@ console.log('-- the compressed window (Agentic): the handoff first, then the fac
   ok('it starts with the handoff title the next compression reads', compressed.startsWith(C.COMPACTION_HARNESS_TITLE));
   ok('the handoff comes first', compressed.indexOf('## Objective') < compressed.indexOf('Previous window:'));
   ok('  … and it is verbatim', compressed.includes(summary[0]));
+  // The handoff is a brief, not the new window's memory: a model that reads a fact-shaped
+  // summary will otherwise answer "what did you do here" with command output it never produced.
+  ok('the compressed handoff says it is a handoff, not a memory', compressed.includes(C.HANDOFF_IS_NOT_MEMORY));
   ok('the original task is still quoted', compressed.includes('THE ORIGINAL TASK'));
   ok('the size line claims no refusal', compressed.includes('the window was compressed to continue the conversation in a shorter one.'));
   ok('it is not a pointer rollover', !compressed.includes('could not be sent to the model any more'));

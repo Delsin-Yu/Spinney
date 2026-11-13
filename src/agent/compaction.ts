@@ -81,6 +81,21 @@ export const COMPACTION_HARNESS_TITLE = '[Harness: context window reset — hand
 export const ROLLOVER_HARNESS_TITLE = '[Harness: context window reset]';
 
 /**
+ * The one rule that keeps a handoff from becoming a false memory, and it is stated in **both**
+ * shapes because both can be believed instead of read.
+ *
+ * It is not theoretical: on a real session, a fresh window whose only history was its handoff
+ * and one question answered "what did you do here" with a `git status`, a `git worktree list`
+ * and a `git branch --merged` it had never run — the brief's facts, reported as observations.
+ * A brief that is worth reading is a brief a model will mistake for its own experience, so the
+ * text says which voice to use for it (`docs/agents/invariants/compress-node.md` §3).
+ */
+export const HANDOFF_IS_NOT_MEMORY =
+  'This message is a handoff, not your memory. When you repeat a fact from it, say that the handoff says so. ' +
+  'Never write a command or a file as something you ran or read in this window: if you have not called a tool here, ' +
+  'say that what you know came from the handoff, and call the tool when you need a fact of your own.';
+
+/**
  * The openings of the harness' own `role:'user'` texts — the pointer / resume notes
  * (`[Harness…`), an interruption notice (`[Interruption notice]`) and a background job's
  * completion writeback (`Background command …`). The user wrote none of them, so none of
@@ -791,6 +806,7 @@ export function buildContextRolloverMessage(input: PointerFacts & {
     return [
       COMPACTION_HARNESS_TITLE,
       input.summary,
+      HANDOFF_IS_NOT_MEMORY,
       previousLine,
       originalLine,
       requestLine,
@@ -829,6 +845,7 @@ export function buildContextRolloverMessage(input: PointerFacts & {
         : '') +
       'Nothing above was carried over: do not claim to remember it.',
   );
+  paragraphs.push(HANDOFF_IS_NOT_MEMORY);
   paragraphs.push(previousLine);
   if (usageLine) {
     paragraphs.push(usageLine);

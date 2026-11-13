@@ -190,6 +190,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The handoff says what it is: a handoff, not a memory.** A fresh window whose only history
+  was its handoff and one question answered "what did you do here" with a `git status`, a
+  `git worktree list` and a `git branch --merged` it had never run — the brief's facts, reported
+  as observations, with numbers that happened to be right. Both handoff shapes now carry one
+  paragraph in the model's own language: repeating a fact from the handoff says so, and a
+  command or a file is never written as something this window ran or read unless it did. The
+  pointer shape (zero extra requests) gets it for the same reason as the compressed one.
 - **A job card is identified by its card, not by a task number.** Task ids are session-local and
   the hub's counter lives in memory, so the first job after a window reload was `#1` again and
   every restored `#1` card rendered *that* job: several finished cards across nodes all said

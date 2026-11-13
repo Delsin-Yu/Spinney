@@ -108,6 +108,21 @@ compressedFrom: P })`.
 A compression turn therefore cannot change the workspace. That is a fact of the registry it
 was built with, not a promise its prompt makes.
 
+### The handoff says what it is
+
+Both handoff shapes end their opening with `HANDOFF_IS_NOT_MEMORY` (`src/agent/compaction.ts`):
+the message is a handoff, repeating one of its facts says so, and a command or a file is never
+written as something this window ran or read unless it did.
+
+That paragraph exists because of a measurement, not a worry. A fresh window whose entire history
+was one compressed handoff and one question ("summarize our progress within your dialog history
+only") answered with a `git status`, a `git worktree list` and a `git branch --merged` — three
+commands it had not run, with numbers that happened to be right. `messages` held two entries: the
+handoff and the assistant's answer, no tool call at all. A brief that is worth reading is a brief
+a model will mistake for its own experience, so the text has to name the voice. The pointer shape
+(no brief at all, only the transcript pointer) carries the same paragraph for the same reason: it
+misreported a `git status` too.
+
 ## 3. The envelope inheritance (the one thing that must not be wrong)
 
 `epochForNode` walks **up** the path and returns the nearest envelope. C is between P and R,

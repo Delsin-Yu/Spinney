@@ -515,7 +515,7 @@ The `CTX` tooltip is `This node starts a new context window; the branch above it
 Two details that are not faults:
 
 - The pinned user message of the new card is your message.
-- The harness text is English, whatever the display language.
+- The harness text is English, whatever the display language. It also tells the new agent that what it received is a handoff, not a memory: the agent must say when a fact came from the handoff, and it must not report a command or a file as one that it ran or read unless it did so in the new window.
 
 ### 10.4 The two handoffs
 
