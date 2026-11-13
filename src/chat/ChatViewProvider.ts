@@ -5713,7 +5713,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     rt: SessionRuntime,
     text: string,
     attachments: UserAttachment[],
-    opts?: { compress?: boolean },
+    opts?: { mode?: 'compression' | 'fork' },
   ): Promise<void> {
     if (this.isHeld()) {
       rt.postNotice(
@@ -5728,8 +5728,11 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     }
     // The right-click on Send is a deliberate entry (`compressNow`): it asks for a new window
     // here and now, so the trigger question does not apply to it.
-    const forced = opts?.compress === true;
-    const trigger = forced ? 'context' : rt.newEpochTrigger();
+    // The two buttons say what they mean; a message with no mode (an older tab, or the composer's
+    // own send path) keeps the trigger-driven behaviour (`newEpochTrigger`).
+    const fork = opts?.mode === 'fork';
+    const forced = opts?.mode === 'compression';
+    const trigger = fork ? 'drift' : forced ? 'context' : rt.newEpochTrigger();
     if (!trigger) {
       rt.postNotice(
         'info',
@@ -5743,7 +5746,9 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       if (!answer) {
         return;
       }
-      if (rt.newEpochTrigger() !== 'drift') {
+      // A fork click means the drift, even when the window is also near full — its button only
+      // appears for a drift, and `newEpochTrigger()` would answer 'context' first.
+      if (fork ? !rt.hasSetupDrift() : rt.newEpochTrigger() !== 'drift') {
         rt.postNotice(
           'warning',
           vscode.l10n.t('Nothing was sent: the setup or the context window changed while the question was open. Try again.'),
@@ -6070,17 +6075,19 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         // sibling (`editUserMessage` above owns every refusal).
         return this.editUserMessage(rt, String(message.nodeId ?? ''), String(message.text ?? ''));
       case 'newContextTurn':
-        // The composer's ONE new-epoch entry: a new context window when the chain is
-        // near/full, a fork under the live setup when only the setup drifted. The host
-        // picks the backend, asks one modal question and re-validates the trigger
-        // (`newContextEntry`), so the webview never has to know which case it is in.
-        return void this.newContextEntry(rt, String(message.text ?? ''), message.attachments ?? []);
+        // The composer's two new-epoch entries: `mode: 'compression'` is the visible
+        // `#compress-btn` (a new context window, and the host asks Simple or Agentic), `mode:
+        // 'fork'` is the drift-only `#new-context-btn` ("continue under the setup the composer
+        // shows now", which forks the tree). No mode keeps the old "whatever is needed" path.
+        return void this.newContextEntry(rt, String(message.text ?? ''), message.attachments ?? [], {
+          mode: message.mode === 'fork' ? 'fork' : message.mode === 'compression' ? 'compression' : undefined,
+        });
       case 'compressNow':
         // The Send button's own right-click (`media/main.js`): the modal is the menu, so the
         // webview posts the same content a Send would carry and the host asks the question —
         // the same method the composer's entry uses, so the two entries cannot drift apart.
         return void this.newContextEntry(rt, String(message.text ?? ''), message.attachments ?? [], {
-          compress: true,
+          mode: 'compression',
         });
       case 'continueTurn':
         // The ▶ button on a card whose turn was interrupted / failed: the harness

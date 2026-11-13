@@ -1129,10 +1129,10 @@ if (contextLabel !== 'ctx 50%') {
               'insertion must refresh the composer instead of waiting for the next keystroke',
           );
         }
-        if (!/Continue with new context/.test(String(newContext.textContent || ''))) {
+        if (!/Compress/.test(String(elementById('compress-btn').textContent || ''))) {
           problems.push(
-            `choosing a snippet leaves the new-epoch button reading ${JSON.stringify(newContext.textContent)}, ` +
-              'expected "Continue with new context"',
+            `choosing a snippet leaves the compress button reading ${JSON.stringify(elementById('compress-btn').textContent)}, ` +
+              'expected "Compress…"',
           );
         }
       }
@@ -1182,10 +1182,10 @@ if (contextLabel !== 'ctx 50%') {
           'write, so it must refresh the composer instead of waiting for the next keystroke',
       );
     }
-    if (!/Compact and Continue/.test(String(newContextAfterClear.textContent || ''))) {
+    if (!/Compress/.test(String(elementById('compress-btn').textContent || ''))) {
       problems.push(
-        `after \`composerClear\` the new-epoch button reads ${JSON.stringify(newContextAfterClear.textContent)}, ` +
-          'expected "Compact and Continue"',
+        `after \`composerClear\` the compress button reads ${JSON.stringify(elementById('compress-btn').textContent)}, ` +
+          'expected "Compress…" (its label does not follow the box)',
       );
     }
   }
@@ -1356,6 +1356,8 @@ if (contextLabel !== 'ctx 50%') {
   const input = elementById('input');
   const sendBtn = elementById('send-btn');
   const newContextBtn = elementById('new-context-btn');
+  // The window entry sits beside Send at all times; the setup (fork) entry is the drift-only one.
+  const compressBtn = elementById('compress-btn');
   const composer = elementById('composer');
   const ident = () => findByClass(composer, 'composer-ident');
   const lineText = (name) => {
@@ -1384,7 +1386,12 @@ if (contextLabel !== 'ctx 50%') {
     problems.push('a config without `setup` disables Send while the box has text');
   }
   if (!hidden(newContextBtn)) {
-    problems.push('a config without `setup` shows the new-epoch button (nothing is available there)');
+    problems.push('a config without `setup` shows the setup entry (nothing is available there)');
+  }
+  // The window entry is not conditional on anything the composer can see: it is on screen while
+  // the composer is, and the host is what refuses a stale click.
+  if (hidden(compressBtn)) {
+    problems.push('a config without `setup` hides the compress button (it is not a drift-only entry)');
   }
 
   // (b1) The user changed the model / effort: both identities, in two lines.
@@ -1415,10 +1422,13 @@ if (contextLabel !== 'ctx 50%') {
     problems.push('the drifted Send button is disabled — a plain send is a normal send');
   }
   if (hidden(newContextBtn)) {
-    problems.push('a user drift does not show the composer\'s new-epoch button');
+    problems.push('a user drift does not show the setup entry');
   }
   if (newContextBtn.disabled) {
-    problems.push('the new-epoch button is disabled although the box has content and the window is writable');
+    problems.push('the setup entry is disabled although the window is writable');
+  }
+  if (hidden(compressBtn) || compressBtn.disabled) {
+    problems.push('the compress button is not usable beside a drifted Send (it is independent of the setup)');
   }
 
   // The click still posts the same `userMessage` the Enter key does — and the box
@@ -1461,11 +1471,13 @@ if (contextLabel !== 'ctx 50%') {
   if (!sendBtn.disabled) {
     problems.push('an empty composer leaves Send enabled (an empty send must be a disabled state)');
   }
-  // The drift is the only reason for a new epoch here and the box is empty: there is
-  // nothing to send and nothing to compact, so the entry hides rather than offering
-  // "Compact and Continue" for a window that is not full.
-  if (!hidden(newContextBtn)) {
-    problems.push('an empty composer under a setup drift shows the new-epoch button (nothing to send, nothing to compact)');
+  // The box is empty, so there is nothing to carry: the setup entry stays, because a fork with an
+  // empty box is a complete action (the old tree keeps its own bytes and the new one is empty).
+  if (hidden(newContextBtn)) {
+    problems.push('an empty composer under a setup drift hides the setup entry (a fork needs no text)');
+  }
+  if (hidden(compressBtn)) {
+    problems.push('an empty composer hides the compress button (a window needs no text either)');
   }
   if (!sendBtn.title) {
     problems.push('the disabled Send button of an empty composer carries no reason');
@@ -1498,28 +1510,31 @@ if (contextLabel !== 'ctx 50%') {
     problems.push(`a Send with room and content carries a tooltip: ${JSON.stringify(sendBtn.title)}`);
   }
   if (hidden(newContextBtn)) {
-    problems.push('a harness drift does not show the composer\'s new-epoch button');
+    problems.push('a harness drift does not show the setup entry');
   }
-  if (!/Continue with new context/.test(String(newContextBtn.textContent || ''))) {
+  if (!/New setup/.test(String(newContextBtn.textContent || ''))) {
     problems.push(
-      `the new-epoch button reads ${JSON.stringify(newContextBtn.textContent)} with content in the box, expected "Continue with new context"`,
+      `the setup entry reads ${JSON.stringify(newContextBtn.textContent)}, expected "New setup…"`,
     );
   }
   if (!newContextBtn.title) {
-    problems.push('the new-epoch button carries no tooltip explaining what its click does');
+    problems.push('the setup entry carries no tooltip explaining what its click does');
   }
   posted.length = 0;
   const newContextClick = newContextBtn._listeners && newContextBtn._listeners.click;
   if (typeof newContextClick !== 'function') {
-    problems.push('the new-epoch button has no click handler');
+    problems.push('the setup entry has no click handler');
   } else {
     newContextClick({ stopPropagation() {} });
     const sent = posted.find((m) => m && m.type === 'newContextTurn');
     if (!sent) {
-      problems.push(`the new-epoch button posted ${JSON.stringify(posted)}, expected \`{ type: 'newContextTurn' }\``);
+      problems.push(`the setup entry posted ${JSON.stringify(posted)}, expected \`{ type: 'newContextTurn' }\``);
     } else {
       if (sent.text !== 'continue this') {
-        problems.push(`the new-epoch button sent ${JSON.stringify(sent.text)}, expected the composer's text`);
+        problems.push(`the setup entry sent ${JSON.stringify(sent.text)}, expected the composer's text`);
+      }
+      if (sent.mode !== 'fork') {
+        problems.push(`the setup entry sent mode ${JSON.stringify(sent.mode)}, expected 'fork'`);
       }
       if (!Array.isArray(sent.attachments)) {
         problems.push('the `newContextTurn` message carries no attachments array');
@@ -1529,24 +1544,25 @@ if (contextLabel !== 'ctx 50%') {
       problems.push('posting `newContextTurn` cleared the input (the host clears it with `composerClear`)');
     }
   }
-  // …and an empty box under the drift hides the entry: the compaction label is only for
-  // a window that is near or full.
+  // …and it stays with an empty box: a fork needs no text.
   typeInto('');
-  if (!hidden(newContextBtn)) {
-    problems.push('the new-epoch button stays visible with an empty box under a drift (there is nothing to compact)');
+  if (hidden(newContextBtn)) {
+    problems.push('the setup entry hides with an empty box under a drift (a fork needs no text)');
   }
 
-  // Back to no drift: the identity block goes away, and the new-epoch button goes with
-  // it — there is no new epoch to offer when the setup is the live one and the window has
-  // room left.
+  // Back to no drift: the identity block goes away, and the setup entry goes with it — the
+  // window entry stays, because it was never conditional on a drift.
   dispatch(base);
   if (!hidden(ident()) && ident()) {
     problems.push('the identity block stays visible after the setup stopped drifting');
   }
   if (!hidden(newContextBtn)) {
-    problems.push('the new-epoch button stays visible after the drift went away (there is nothing to start)');
+    problems.push('the setup entry stays visible after the drift went away (there is nothing to fork)');
   }
-  notes.push('composer identities: user drift (two lines) + harness drift, one new-epoch button, Send disabled when it cannot act');
+  if (hidden(compressBtn)) {
+    problems.push('the compress button disappears with the drift (it is not a drift-only entry)');
+  }
+  notes.push('composer identities: user drift (two lines) + harness drift, the setup entry, the compress button, Send disabled when it cannot act');
 }
 
 // --- The composer's new-epoch entry: the three situations it exists for ------------
@@ -1568,6 +1584,7 @@ if (contextLabel !== 'ctx 50%') {
   const input = elementById('input');
   const sendBtn = elementById('send-btn');
   const newContextBtn = elementById('new-context-btn');
+  const compressBtn = elementById('compress-btn');
   const hidden = (element) => !!element && element.classList.contains('hidden');
   const typeInto = (value) => {
     input.value = value;
@@ -1586,44 +1603,48 @@ if (contextLabel !== 'ctx 50%') {
     dispatch({ type: 'path', ids: [focus], nodes: [{ id: focus, status: 'done', items: [] }] });
   };
 
-  // 1. No drift, room left: hidden, whatever the box holds.
+  // 1. No drift, room left: the setup entry is hidden (there is nothing to fork) and the window
+  //    entry is on screen, whatever the box holds and however full the window is.
   tree(R, { context: 'ok' });
   typeInto('a message');
   dispatch({ ...base, setup: { node: null, live: null, drift: false, reasons: [] } });
   if (!hidden(newContextBtn)) {
-    problems.push('the new-epoch button is visible with no drift and a window that has room left');
+    problems.push('the setup entry is visible with no drift');
+  }
+  if (hidden(compressBtn)) {
+    problems.push('the compress button is hidden with no drift and a window that has room left');
+  }
+  if (compressBtn.disabled) {
+    problems.push('the compress button is disabled with no drift and a window that has room left');
+  }
+  if (!/Compress/.test(String(compressBtn.textContent || ''))) {
+    problems.push(`the compress button reads ${JSON.stringify(compressBtn.textContent)}, expected "Compress…"`);
   }
 
-  // 2. The context is `near`: available, enabled (there is content).
+  // 2. The context is `near`: the same button, still enabled, and no second entry appears —
+  //    this is the collision the two buttons are split to avoid.
   tree(R, { context: 'near', contextPct: 93 });
   dispatch({ ...base, setup: { node: null, live: null, drift: false, reasons: [] } });
-  if (hidden(newContextBtn)) {
-    problems.push('a near-full window does not offer the new-epoch button');
+  if (hidden(compressBtn) || compressBtn.disabled) {
+    problems.push('a near-full window does not offer a usable compress button');
   }
-  if (newContextBtn.disabled) {
-    problems.push('the new-epoch button of a near-full window is disabled although the box has content');
-  }
-  if (!/Continue with new context/.test(String(newContextBtn.textContent || ''))) {
-    problems.push('the new-epoch button of a near-full window does not read "Continue with new context"');
+  if (!hidden(newContextBtn)) {
+    problems.push('a near-full window shows the setup entry as well (two entries for one job)');
   }
 
-  // 2b. …and with an empty box it is the compaction entry: still shown, because there
-  //     is something to compact.
+  // 2b. …and an empty box is fine: a window needs no text.
   typeInto('');
-  if (hidden(newContextBtn)) {
-    problems.push('a near-full window hides the new-epoch button when the box is empty (the compaction entry must stay)');
-  }
-  if (!/Compact and Continue/.test(String(newContextBtn.textContent || ''))) {
-    problems.push('a near-full window with an empty box does not read "Compact and Continue"');
+  if (hidden(compressBtn) || compressBtn.disabled) {
+    problems.push('a near-full window hides the compress button when the box is empty (a window needs no text)');
   }
   typeInto('a message');
 
-  // 3. The context is `full`: available, and Send is disabled (the request would be
-  //    refused again — the entry is the way out).
+  // 3. The context is `full`: the same button, and Send is disabled (the request would be
+  //    refused again — this button is the way out).
   tree(R, { context: 'full' });
   dispatch({ ...base, setup: { node: null, live: null, drift: false, reasons: [] } });
-  if (hidden(newContextBtn)) {
-    problems.push('a full window does not offer the new-epoch button');
+  if (hidden(compressBtn) || compressBtn.disabled) {
+    problems.push('a full window does not offer a usable compress button');
   }
   if (!sendBtn.disabled) {
     problems.push('a full context window leaves Send enabled (the same request would be refused again)');
@@ -1638,30 +1659,47 @@ if (contextLabel !== 'ctx 50%') {
   if (posted.some((m) => m && m.type === 'userMessage')) {
     problems.push('a full context window sent a `userMessage` anyway');
   }
-
-  // 3b. …and with nothing to send the entry is *still* available: the compaction entry
-  //     is exactly the click a full window with an empty box needs (Send stays disabled).
-  typeInto('');
-  if (newContextBtn.disabled) {
-    problems.push('a full context window disables the new-epoch button when the box is empty (there is nothing else left to do)');
+  // …and the click carries what the box holds, whichever button posted it.
+  posted.length = 0;
+  const compressClick = compressBtn._listeners && compressBtn._listeners.click;
+  if (typeof compressClick !== 'function') {
+    problems.push('the compress button has no click handler');
+  } else {
+    compressClick({ stopPropagation() {} });
+    const asked = posted.find((m) => m && m.type === 'newContextTurn');
+    if (!asked) {
+      problems.push(`the compress button posted ${JSON.stringify(posted)}, expected a \`newContextTurn\``);
+    } else {
+      if (asked.mode !== 'compression') {
+        problems.push(`the compress button sent mode ${JSON.stringify(asked.mode)}, expected 'compression'`);
+      }
+      if (asked.text !== 'a message') {
+        problems.push(`the compress button sent ${JSON.stringify(asked.text)}, expected the composer's text`);
+      }
+    }
+    if (String(input.value) !== 'a message') {
+      problems.push('posting `newContextTurn` cleared the input (the host clears it with `composerClear`)');
+    }
   }
-  if (!/Compact and Continue/.test(String(newContextBtn.textContent || ''))) {
-    problems.push(
-      `the new-epoch button of a full window with an empty box reads ${JSON.stringify(newContextBtn.textContent)}, expected "Compact and Continue"`,
-    );
+
+  // 3b. …and with nothing to send it is *still* usable: a window with an empty box is the one
+  //     click a full window has left (Send stays disabled).
+  typeInto('');
+  if (compressBtn.disabled) {
+    problems.push('a full context window disables the compress button when the box is empty (there is nothing else left to do)');
   }
   typeInto('a message');
 
-  // 4. A sub-agent card is read-only: the entry is there (the epoch may still be
-  //    available) but disabled, with the branch as its reason.
+  // 4. A sub-agent card is read-only: the window entry is there but disabled, with the branch
+  //    as its reason (the setup entry is not offered at all without a drift).
   tree(AGENT, { context: 'ok' });
   typeInto('a message');
   dispatch({ ...base, setup: { node: null, live: null, drift: false, reasons: [] } });
-  if (!newContextBtn.disabled) {
-    problems.push('a sub-agent branch leaves the new-epoch button enabled');
+  if (!compressBtn.disabled) {
+    problems.push('a sub-agent branch leaves the compress button enabled');
   }
-  if (!/sub-agent/i.test(String(newContextBtn.title || ''))) {
-    problems.push(`the disabled new-epoch button of a sub-agent branch carries no reason: ${JSON.stringify(newContextBtn.title)}`);
+  if (!/sub-agent/i.test(String(compressBtn.title || ''))) {
+    problems.push(`the disabled compress button of a sub-agent branch carries no reason: ${JSON.stringify(compressBtn.title)}`);
   }
   if (!sendBtn.disabled) {
     problems.push('a sub-agent branch leaves Send enabled');
@@ -3646,8 +3684,8 @@ if (contextLabel !== 'ctx 50%') {
   if (!elementById('send-btn').disabled) {
     problems.push('a `nodeUpdate` carrying context: "full" left the composer\'s Send enabled');
   }
-  if (elementById('new-context-btn').classList.contains('hidden')) {
-    problems.push('a `nodeUpdate` carrying context: "full" did not offer the composer\'s new-epoch entry');
+  if (elementById('compress-btn').classList.contains('hidden')) {
+    problems.push('a `nodeUpdate` carrying context: "full" did not offer the composer\'s compress button');
   }
   // And the state is not sticky: a later patch that clears it re-enables Send and takes
   // the offer away again.

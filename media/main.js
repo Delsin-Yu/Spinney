@@ -33,9 +33,16 @@
   const inputEl = document.getElementById('input');
   const sendBtn = document.getElementById('send-btn');
   const stopBtn = document.getElementById('stop-btn');
-  // The composer's ONE new-epoch entry (`Continue with new context`): the button that
-  // replaces the per-card `⧉`, the drift `⧉` hint and the ask-on-send modal. Its label,
-  // visibility and disabled state are owned by `updateComposerButtons` below.
+  // The composer's **new-window** entry (`#compress-btn`, immediately left of Send): the
+  // visible, always-available "move this conversation into a new context window" button. It
+  // opens the harness's two questions (Simple / Agentic, then which setup), so compression has
+  // a button of its own instead of living behind the drift-driven one. Its label, visibility and
+  // disabled state are owned by `updateComposerButtons` below.
+  const compressBtn = document.getElementById('compress-btn');
+  // The **setup** entry (`#new-context-btn`): only when the live setup differs from the frozen
+  // one, and it means "continue under the new setup", which forks the tree (the old tree keeps
+  // its bytes). Two buttons because they are two questions; the fork one is hidden whenever it
+  // would have nothing to say.
   const newContextBtn = document.getElementById('new-context-btn');
   const statusDot = document.getElementById('status-dot');
   const statusText = document.getElementById('status-text');
@@ -8175,7 +8182,6 @@ function addBackgroundNotice(item) {
     const context = focusContext();
     return drift || context === 'near' || context === 'full';
   }
-
   /** Why the new-epoch entry cannot be used right now (`''` = it can). */
   function newContextBlockedReason() {
     if (readOnly) return READ_ONLY_TITLE;
@@ -8184,39 +8190,43 @@ function addBackgroundNotice(item) {
   }
 
   /**
-   * The composer's **one** new-epoch entry (`#new-context-btn`, beside Send): the
-   * single way to move a conversation into a new epoch, whether the reason is a setup
-   * that moved away from the frozen one or a context window that is near or past full.
-   * It replaces the three entries that used to disagree — the per-card `⧉ Continue in a
-   * new window`, the harness-drift `⧉` hint and the modal a plain send raised.
-   *
-   * The label follows the box: with something to send the click carries that text into
-   * the new epoch, with an empty box it is the compaction entry. It is shown only while
-   * the host says a new epoch is available, and never while the focused node is doing
-   * something (Stop owns the row then, and both other buttons hide). It stays enabled
-   * with an empty box — the compaction entry is exactly the click for a window that is
-   * full and a box that is empty — and is disabled, with a tooltip that says why, only in
-   * a read-only window or on a sub-agent branch; the host re-checks all of it and answers
-   * with a notice when a stale click arrives.
+   * The composer's **new-window** entry (`#compress-btn`, immediately left of Send). Always on
+   * screen while the composer is, because "move this conversation into a new context window" is
+   * a normal thing to want at any fill level — the two answers are the compression node
+   * (`Agentic`) and the free pointer (`Simple`), and the harness asks which. It is hidden while
+   * Stop shows (one owner of the row) and disabled where no window can start, with the reason in
+   * its tooltip; the host re-checks every precondition and answers a stale click with a notice.
+   */
+  function updateCompressButton() {
+    const reason = newContextBlockedReason();
+    const show = !focusIsRunning() && !focusIsLocked();
+    compressBtn.textContent = tr('Compress…');
+    compressBtn.classList.toggle('hidden', !show);
+    compressBtn.disabled = !!reason;
+    compressBtn.title = reason
+      ? reason
+      : tr(
+          'Move this conversation into a new context window: a pointer (Simple) or a compression turn (Agentic). The harness asks which, and which setup the new window uses.',
+        );
+  }
+
+  /**
+   * The **setup** entry (`#new-context-btn`): shown only when the live setup and the frozen one
+   * disagree, because with no drift the answer is the setup the conversation already runs on.
+   * Its one meaning is "continue under the setup the composer shows now", which forks the tree —
+   * a window is the other button's job, and an empty box is a valid fork.
    */
   function updateNewContextButton() {
-    const hasContent = hasComposerContent();
-    const context = focusContext();
-    // The empty-box form is the *compaction* entry, so it only exists when there is
-    // something to compact: a setup drift with an empty box has nothing to send and
-    // nothing to compact, and the button hides instead of offering "Compact and
-    // Continue" for a window that is not full.
-    const compactable = context === 'near' || context === 'full';
-    newContextBtn.textContent = hasContent ? tr('Continue with new context') : tr('Compact and Continue');
+    const drift = !!(SETUP && SETUP.drift);
     const reason = newContextBlockedReason();
-    const show = newEpochAvailable() && (hasContent || compactable) && !focusIsRunning() && !focusIsLocked();
-    newContextBtn.classList.toggle('hidden', !show);
+    newContextBtn.textContent = tr('New setup…');
+    newContextBtn.classList.toggle('hidden', !drift || focusIsRunning() || focusIsLocked());
     newContextBtn.disabled = !!reason;
     newContextBtn.title = reason
       ? reason
-      : hasContent
-        ? tr('Send this message in a new context window or under the new setup (the harness asks first)')
-        : tr('Compact this conversation and continue in a new context window (the harness asks first)');
+      : tr(
+          'Continue this conversation under the setup the composer shows now. The tree forks, so the old one keeps its own bytes.',
+        );
   }
 
   /**
@@ -8263,6 +8273,7 @@ function addBackgroundNotice(item) {
             : '';
     }
     updateNewContextButton();
+    updateCompressButton();
   }
 
   /**
@@ -8705,9 +8716,10 @@ function addBackgroundNotice(item) {
     } else if (composerIdent) {
       composerIdent.box.classList.add('hidden');
     }
-    // Any drift — the user's or the harness's — is the new-epoch entry's business, so
-    // the button's visibility and disabled state are re-read here.
+    // Any drift — the user's or the harness's — is the setup entry's business, so the two
+    // buttons' visibility and disabled state are re-read here.
     updateNewContextButton();
+    updateCompressButton();
   }
 
   /**
@@ -8718,13 +8730,20 @@ function addBackgroundNotice(item) {
    * here — only the host knows whether it took the turn, and it says so with
    * `composerClear`.
    */
-  function newContextTurn() {
-    if (newContextBtn.disabled) return;
+  /**
+   * The **new-window** entry's click: the same message a Send carries, plus which entry asked —
+   * the host picks the backend from `mode` (`compression`, or a fork for the setup entry) and
+   * re-asks its own questions.
+   */
+  function newContextTurn(mode) {
+    const btn = mode === 'fork' ? newContextBtn : compressBtn;
+    if (btn.disabled) return;
     setFollow(true);
     vscode.postMessage({
       type: 'newContextTurn',
       text: inputEl.value.trim(),
       attachments: pendingAttachments,
+      mode,
     });
   }
 
@@ -9531,7 +9550,8 @@ function addBackgroundNotice(item) {
     setFollow(true);
     vscode.postMessage({ type: 'compressNow', text: inputEl.value.trim(), attachments: pendingAttachments });
   });
-  newContextBtn.addEventListener('click', newContextTurn);
+  newContextBtn.addEventListener('click', () => newContextTurn('fork'));
+  compressBtn.addEventListener('click', () => newContextTurn('compression'));
   stopBtn.addEventListener('click', () => {
     setStatus(tr('Stopping…'));
     // Stop only the view focus node's run (spec §3.2): other nodes stay running.

@@ -24,7 +24,7 @@ hangs **below** the previous one, joined by a **dashed** edge.
 
 ### …so a handoff is a *chosen* one, never a pipeline
 
-The composer's new-epoch entry offers `Simple` beside `Agentic` (§4), and that does not undo
+The composer's window entry (`#compress-btn`) offers `Simple` beside `Agentic` (§4), and that does not undo
 any of the above — it is the same rollover, with the handoff chosen by the user:
 
 - **Simple** is the pointer above, unchanged and still free. It is the default answer, and
@@ -154,7 +154,7 @@ node.status === 'error' && windowFullReason(lastFailureText(node)) !== undefined
 `nodeContextFull()` (runtime.ts) only asks whether the classifier returned
 *anything* — the kind is not its business — so both kinds make a node context-full,
 and both therefore make `contextState(node)` `full` and offer the composer's
-new-epoch entry (§4). The
+window entry (§4). The
 harness note names which refusal it was: `rolloverReason()` (`runtime.ts`) returns
 `'images'` for the byte refusal and `'full'` for the token one, because the two are
 different statements and a model told the wrong one redoes the wrong thing (§6). The
@@ -182,7 +182,7 @@ the webview:
 **`usage.prompt_tokens` is still never a *machine* trigger.** It stays a readout
 (and `model-capabilities.md` records how it lied once already — header read
 `ctx 65%` while the request carried ~1.28 M tokens); the 90 % entry does not start
-anything on its own, it only makes the composer's new-epoch button appear, and the
+anything on its own, it only makes the composer's window entry appear, and the
 user's click is what opens the window (§4, §11).
 
 The host computes the state once and ships it in the `tree` node payload and in
@@ -193,7 +193,7 @@ alongside, but `media/main.js` reads `context` / `contextPct` only.
 ## 4. The composer's one entry point
 
 There is exactly **one** entry for every new-epoch transition, and it lives in the
-composer: `#new-context-btn`, immediately left of `#send-btn` inside `#actions`
+composer: `#compress-btn` (the window entry) and `#new-context-btn` (the drift-only setup entry), both in `#actions` left of `#send-btn`
 (`src/chat/webviewShell.ts`). It replaces the three entries that used to disagree —
 this feature's per-card `⧉ Continue in a new window` (`syncContinueButton`'s rollover
 half, the `.node-continue` / `.node-window` pair), the composer's `#new-setup-btn` `⧉`
@@ -620,7 +620,7 @@ block), the `CTX` / `CMP` badges (compact dock tokens), and the `[config]` / `[p
   is ignored rather than repaired (so the live-render fallback is reached), and
   `parseContextLengthError` reads the real provider text (plus two reworded
   fallbacks and a non-matching error).
-- `npm run check:webview` — the composer's one new-epoch entry: its labels (with and
+- `npm run check:webview` — the composer's two epoch entries (the window button and the drift-only setup button): their labels (with and
   without content), that it is hidden with no epoch available and while Stop shows, that
   it is disabled on an empty box, in a read-only window and on a sub-agent branch, that a
   click posts `newContextTurn` with the box's text and attachments and clears nothing,

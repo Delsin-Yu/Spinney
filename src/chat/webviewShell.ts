@@ -95,6 +95,7 @@ export function buildChatShell(webview: vscode.Webview, opts: ChatShellOptions):
         <div id="actions">
           <button id="stop-btn" class="hidden">${vscode.l10n.t('Stop')}</button>
           <button id="new-context-btn" class="hidden"></button>
+          <button id="compress-btn" class="hidden"></button>
           <button id="send-btn">${vscode.l10n.t('Send')}</button>
         </div>
       </div>

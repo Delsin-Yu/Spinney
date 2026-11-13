@@ -1,7 +1,7 @@
 # The compression node (a handoff written by a turn)
 
 When a context window ends, the conversation continues in a new one. There are exactly two
-deliveries, and the composer's new-epoch entry asks them as one question with two answers
+deliveries, and the composer's window entry asks them as one question with two answers
 (`context-rollover.md` §4):
 
 - **Simple** — the **pointer** rollover: the new window is pointed at the previous window's
@@ -30,11 +30,12 @@ why `Durable references` — how to retrieve what was left out — is asked for 
 
 | entry | what posts it | how it asks |
 | --- | --- | --- |
-| `#new-context-btn` (the composer's one new-epoch button) | `media/main.js` `newContextTurn` | when the host says a new epoch is available (`SessionRuntime.newEpochTrigger`) |
+| `#compress-btn` (the composer's window entry, left of Send) | `media/main.js` `newContextTurn('compression')` | always: the button is on screen while the composer is, and the host answers a stale click with a notice |
+| `#new-context-btn` (the drift-only setup entry) | `media/main.js` `newContextTurn('fork')` | only when the live setup differs from the frozen one (`hasSetupDrift`), because with no drift the answer would be the same bytes |
 | **right-click on `#send-btn`** | `media/main.js`, a `contextmenu` listener that `preventDefault`s and posts `{ type: 'compressNow', text, attachments }` | always: the click *is* the request, so no trigger is consulted |
 
-Both land in `ChatViewProvider.newContextEntry` (`opts.compress` marks the right-click), so
-the two entries cannot drift apart. There is deliberately **no menu drawn** on the right
+All three land in `ChatViewProvider.newContextEntry` (`opts.mode` says which entry asked), so
+the entries cannot drift apart. There is deliberately **no menu drawn** on the right
 click: the modal is the menu, because the choice is one question with two answers, not a list
 of commands.
 
@@ -56,7 +57,7 @@ answers are the same bytes, so the question is not asked. The answer reaches the
 `setup: 'current' | 'latest'` — `rolloverContext(nodeId, setup, …)` for Simple,
 `compressAndContinue(nodeId, { setup })` for Agentic, which plants P's envelope (`epochFrom`) or
 freezes fresh (`epochFrom: null, freshEpoch: true`) on R accordingly. Keeping the old setup is
-what leaves the composer's new-epoch entry visible afterwards: it is still offering the other
+what leaves the other entry's answer unasked: the composer's setup entry stays visible, still offering it
 answer.
 
 The entry's precondition is `SessionRuntime.windowStartBlocker(nodeId)` — a conversational node
