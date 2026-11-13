@@ -60,7 +60,7 @@ function waitTimedOutText(task: BackgroundTask, waitedSec: number): string {
   const dur = formatDuration((task.finishedAt ?? Date.now()) - task.startedAt);
   const out = task.handle.getOutput().trim();
   const detached = task.detached
-    ? ` This job is detached, so no completion notice will arrive for it either: its result is read only by ` +
+    ? ` This job is global (bound to this VS Code window), so no completion notice will arrive for it either: its result is read only by ` +
       `asking again (check_command(${task.id}) or another wait_for_command(${task.id})).`
     : '';
   return limitInline(
