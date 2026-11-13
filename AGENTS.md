@@ -66,6 +66,7 @@ A change to anything under `src/`, `media/`, or `package.json` is not finished u
 ## Versioning
 
 - The version follows SemVer. We are at `0.x`, which is pre-1.0: a breaking change bumps the minor version only.
+- **The version number is the developer's, never the agent's.** `version` in `package.json` and `package-lock.json`, a `## [X.Y.Z]` CHANGELOG heading, folding `[Unreleased]` into one, and a `vX.Y.Z` tag are written only when the developer's own message names the number. "Ship it", "release it" and "prepare the release" are not a bump: entries keep accumulating under `[Unreleased]` and the agent asks which number it takes. A bump that appeared without that number is **reported, never repaired by a further bump**, and history is never rewritten on the agent's own initiative. The four actions, the report and the repair path: `versioning`.
 - Tag every release as `vX.Y.Z`.
 - `vscode:prepublish` (compile plus the twenty guards) is the release gate: a release does not ship when that script fails.
 - `CHANGELOG.md` uses the [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) format.
@@ -108,5 +109,6 @@ A change to anything under `src/`, `media/`, or `package.json` is not finished u
 - The shipped user manual: `user-manual` (the `manual/**` pages, the `Spinney: Show User Manual` command, the page-per-language rule, the STE writing rule, the `check:docs` guard)
 - No-workspace mode (no folder open): `no-repo-mode` (root, session storage, behavior differences)
 - Acceptance and artifacts: `testing` · `scratch-space`
+- Versioning and releases: `versioning` (the number is the developer's decision, the four actions it authorises, what an unauthorized bump costs, the report and the repair path)
 - Implemented in 0.2.0 (the plan stays as the design record): `plans/image-budget` — the image budget is **bytes, not tokens**: `read_image` transforms before the upload (crop to `rect`, downscale to `IMAGE_TARGET_MAX_SIDE`), a per-request brake delegates instead of attaching, and a window can be full by bytes and roll over. Its §8 landing record holds the one open item (the fork replay) and the one open measurement.
 - Implemented in 0.1.0 (the plan stays as the design record): `plans/session-epoch` — session context epochs, one frozen request envelope per node, so the provider's prefix cache keeps hitting. The rules it produced live in `invariants/system-prompt.md` and `invariants/context-rollover.md`.
