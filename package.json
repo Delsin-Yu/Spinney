@@ -373,6 +373,12 @@
             },
             "markdownDescription": "%spinney.promptSections.markdownDescription%",
             "scope": "window"
+          },
+          "spinney.streamAnimation": {
+            "type": "boolean",
+            "default": true,
+            "description": "%spinney.streamAnimation.description%",
+            "scope": "window"
           }
         }
       },
@@ -407,12 +413,6 @@
             "minimum": 1,
             "maximum": 600,
             "description": "%spinney.searchTimeoutSeconds.description%",
-            "scope": "window"
-          },
-          "spinney.hopSession.enabled": {
-            "type": "boolean",
-            "default": true,
-            "description": "%spinney.hopSession.enabled.description%",
             "scope": "window"
           }
         }
@@ -513,6 +513,7 @@
     "check:l10n": "node tools/check-l10n.js",
     "check:grid": "node tools/check-tree-grid.js",
     "check:docs": "node tools/check-docs.js",
+    "check:titles": "node tools/check-titles.js",
     "check:neterror": "node tools/check-neterror.js",
     "check:unicode": "node tools/check-unicode.js",
     "check:cwd": "node tools/exec-cwd-acceptance.js",
@@ -528,7 +529,7 @@
     "check:jpeg": "node tools/check-jpeg.js",
     "sim": "node tools/sim/run.mjs",
     "sim:selftest": "node tools/sim/run.mjs --selftest",
-    "vscode:prepublish": "npm run compile && npm run sync:l10n && npm run check:models && npm run check:webview && npm run check:modeltree && npm run check:signals && npm run check:l10n && npm run check:rollover && npm run check:compaction && npm run check:grid && npm run check:docs && npm run check:cwd && npm run check:args && npm run check:search && npm run check:shell && npm run check:kill && npm run check:exec && npm run check:dock && npm run check:websearch && npm run check:image && npm run check:neterror && npm run check:unicode && npm run check:continue"
+    "vscode:prepublish": "npm run compile && npm run sync:l10n && npm run check:models && npm run check:webview && npm run check:modeltree && npm run check:signals && npm run check:l10n && npm run check:rollover && npm run check:compaction && npm run check:grid && npm run check:docs && npm run check:titles && npm run check:cwd && npm run check:args && npm run check:search && npm run check:shell && npm run check:kill && npm run check:exec && npm run check:dock && npm run check:websearch && npm run check:image && npm run check:neterror && npm run check:unicode && npm run check:continue"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

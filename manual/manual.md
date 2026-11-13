@@ -122,6 +122,8 @@ Each step carries its own token line: `[Prompt: 1200 + Completion: 340, Cache Hi
 
 A `HARNESS` block holds the exact text that the harness sent to the model. The `HARNESS` blocks sit in the work log with the other steps.
 
+A reply can hold a link to a file. The link opens that file in an editor tab. The tab selects the lines of the link and shows them in the centre of the editor. A link can name one line, or a range of lines. The path of the link is relative to the workspace root. A link with no line opens the file at the top. Example: `src/extension.ts:12-20` opens that file and selects lines 12 to 20.
+
 Codes that stay in English on purpose: `SUB`, `BG`, `CTX`, `HARNESS`, `Delivered`.
 
 ### 3.4 The frozen setup and the trees
@@ -172,6 +174,8 @@ The command does not change the conversation. It does not stop a running turn. W
 The new turn becomes a sibling branch. Spinney deletes nothing. The old line stays in the tree as dimmed one-line cards. One click brings it back.
 
 A checkout is free. You can check out another turn while a turn streams. The checkout moves the view, not the running turn.
+
+You can also branch from a prompt that you sent before. Click the pencil at the top right of the question in the card. The question becomes an input box. Change the text, then press **Enter**. Spinney sends the changed text as a new branch from the turn above the card. The original turn stays in the tree as a sibling branch. Press **Shift+Enter** to add a line. Press `Escape` to cancel, or click away. The images of the original prompt stay with the changed prompt.
 
 ### 4.2 Delete a branch
 
@@ -313,7 +317,7 @@ The level `none` is special. It sends no `reasoning_effort` at all, and the syst
 
 Spinney never sends a level that the card does not declare. A level that the card does not offer falls back to the `defaultEffort` of that card, without a message.
 
-## 8. Sub-agents and background terminals
+## 8. Sub-agents, sessions and background terminals
 
 ### 8.1 Sub-agents
 
@@ -385,21 +389,20 @@ After a restart, a job that was running shows as `interrupted`. A card never cla
 
 A sub-agent can start and manage a background terminal of its own. A read-only sub-agent cannot run a command at all.
 
-### 8.3 Session handoff
+### 8.3 Sessions and nodes
 
-The agent can give a self-contained task to a new session. The tool is `hop_session`. The new session runs the task, and Spinney can bring the answer back to this conversation.
+The agent can work with other sessions. It has four tools for this.
 
-| Fact | Detail |
+| Tool | What it does |
 |---|---|
-| Start | The hop waits for the current turn to end. Then Spinney creates a new session and sends the task there. The new session cannot see this conversation, so the task must be complete. |
-| Answer | Spinney sends the final reply of the new session back to the node that started the hop, as a new branch. A `returnNodeId` names another node. Spinney sends the answer when the new session has no work left. If the new session still runs a background command, Spinney waits for that command. |
-| Quiet delivery | The answer does not open or focus the tab of this session. It does not move the checked-out node. It does not clear the input box. It does not ask the frozen-setup question. |
-| Busy node | If the node that must receive the answer is busy, Spinney holds the answer and delivers it when the node is free again. |
-| No answer | The `mode` argument selects the behaviour. The default mode is `return_when_finished`. With `mode: "fire_and_forget"` no answer comes back, and Spinney writes nothing into this conversation. |
-| One per session | A session has one hop in flight at a time. A hop in another session does not block it. |
-| Limit | A hop is refused while the session has a running background terminal. |
-| Settings | `spinney.hopSession.enabled` turns the tool on and off. The default is on. `list_nodes` and `rename_session` stay available when it is off. |
-| Reload | The hop list lives in memory. A window reload drops a hop that is in flight. The new session keeps its history. |
+| `create_session` | Create a new session, name it, and send the first message there. The call returns at once, so the turn of the agent continues. The new session runs its own turn in parallel. Spinney does not open or focus its tab. The new session shows in the Sessions view. |
+| `send_session_message` | Send a message to an exact node of any session, and start a turn there. The call is refused while that node runs a turn, or while it still owns a background command or a sub-agent. |
+| `list_sessions` | List the sessions with their id, title, node count, and the number of nodes that run. A query filters the list. |
+| `list_nodes` | List the tree of one session. Each row shows the real state: `running` for a live turn, `busy` for a node that still owns work, and `checked out` for the node in view. A query filters the rows. |
+
+A new session cannot see the conversation that made it. The first message must hold everything the new session needs, including the node that must receive the answer. A tool call delivers nothing by itself: the message to the caller is a separate call, and it can come later.
+
+The tools belong to the main agent only. A sub-agent cannot start a session, and it cannot send to one.
 
 ### 8.4 The terminal dock
 
@@ -527,7 +530,7 @@ All keys start with `spinney.`. Open the Settings UI, or edit `settings.json`.
 | `spinney.subAgentSyncSeconds` | `300` | The time a `spawn_agents` or `send_agent_message` call in `sync` mode can hold the turn, in seconds. 300 is 5 minutes. The minimum is 30 and the maximum is 1800. A batch that still runs at the end of this time returns the agent ids, and every summary arrives later as one batch notice. |
 | `spinney.maxInlineToolOutput` | `32768` | The size limit of a tool result, in bytes. A larger result goes to a file. The answer shows a preview of not more than 2048 characters. `0` turns the limit off. |
 | `spinney.searchTimeoutSeconds` | `10` | The time limit of one search, in seconds. It applies to `search_files` and `search_transcripts`. The minimum is 1 second and the maximum is 600 seconds. The limit covers the whole call. A search that reaches the limit returns an error and no results. Then make the search smaller: use a narrower path, a tighter pattern, a glob, or less context. |
-| `spinney.hopSession.enabled` | `true` | Let the agent send a self-contained task to a new session with `hop_session`. A conversation that is already frozen keeps the tool, and Spinney refuses the call. |
+| `spinney.streamAnimation` | `true` | Animate the text and the rows of a live turn. New characters fade in, and new rows fade in and move up. Turn it off to draw every character and every row at once. The reduced-motion setting of the operating system also turns the animation off. |
 | `spinney.maxConcurrentSubagents` | `15` | How many level-1 sub-agents can run at once. Extra tasks wait. |
 | `spinney.maxLevel2Subagents` | `2` | How many children one sub-agent can start. |
 | `spinney.autoSessionTitles` | `true` | Name sessions from their conversation. |

@@ -42,6 +42,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   against the agent root, so a workspace-relative hit lands on the right file while a transcript
   dump, which lives outside the workspace, opens as it is.
 
+- **A session is a tool, not a handoff.** `create_session` opens a fresh session with its
+  first message and returns at once, so the caller's turn continues while the new session
+  runs its own; `send_session_message` delivers a message to an exact node of any session
+  and refuses while that node runs a turn or still owns a background job or a sub-agent;
+  `list_sessions` lists the conversations; `list_nodes` reports each node's real state
+  (`running`, `busy`, `checked out`) and takes a query. The new session opens no tab and
+  never moves the caller's view, and the child reports back through the same tool, with the
+  caller's session and node ids named in its first message. `hop_session`, `finish_hop` and
+  the hop bookkeeping are gone: nothing is delivered automatically any more, and nothing has
+  to be.
+- **A reply can link to a file.** `[src/a.ts:12-20](spinney:src/a.ts#L12-L20)` opens the file
+  in an editor tab with those whole lines selected and centred; `#L12` alone opens at that
+  line, and no fragment opens the file at the top. A relative path resolves against the
+  harness root, so the link the model writes is the path it already reads. The system prompt
+  teaches the convention, and the one rule that matters: never invent a line.
+- **A prompt can be edited, and the edit branches.** The question at the top of a card has a
+  pencil. Enter sends the changed text as a new branch from the turn above that card,
+  Shift+Enter adds a line, Escape cancels. The original turn stays in the tree as a sibling
+  branch, and the images of the original prompt stay with the edit.
+- **The reload is one tool call.** `node tools/reload-window.mjs --message "…"` queues a
+  reload and returns in milliseconds: the window reloads as soon as it is idle, and the next
+  instance delivers the message back to the node that asked for it. The reload is bound to
+  that node, so no argument can point it somewhere else, and the agent ends its turn right
+  after the call.
+- **`spinney.streamAnimation`** turns the streaming animation off or on (the default is on):
+  new characters fade in and new rows fade in and move up, and every character is drawn at
+  once when it is off. The reduced-motion setting of the operating system also turns it off.
+
 ### Changed
 
 - **`run_type` is `foreground`, `background` or `global`** — the values name the lifecycle a
@@ -55,6 +83,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Tool row verbs read as one phrase per kind of action**, and a tool's arguments are shown
   as one line of plain words instead of JSON. The three file-writing tools share one verb
   (`Edited` / `编辑文件`): to the reader they are one thing — the file was edited.
+
+- **A session is named once.** The automatic namer used to rewrite the title every two turns
+  after a two-minute cooldown; it now runs once, right after the first answer, and the only
+  ways to a different name are a manual rename, `Spinney: Auto-rename Session` and the
+  `rename_session` tool. A model call that failed falls back to the first prompt and does
+  not count as a naming, so a later turn tries once more.
+- **`exec_command`'s step title is written in the reply language, and the schema says which
+  one.** The description now carries the language and its tag (`Write it in Simplified
+  Chinese (zh-Hans), the language your reply to the user is in.`), so the one-line step row
+  follows `spinney.replyLanguage` the way the answer does. The schema freezes with the rest
+  of the epoch, so a chain built before this build keeps the sentence it was written with.
+- **The `+n -n` chip is quieter.** Green and red are mixed toward the dim text colour, so the
+  counts read as a footnote on the step row instead of a stop light. The tints of the diff
+  rows are unchanged.
+
+### Removed
+
+- **The `hvsc` supervisor.** `tools/hyper-vscode/` (`hvsc.mjs`, `serve.ps1`, its README
+  and the daemon state) is gone, and the control plane is the whole story: the window now
+  defers its own reload (`POST /reload-window {idle:true}`) instead of needing an external
+  process that waits, reloads and posts the message back. `tools/reload-window.mjs` replaces
+  it, and the identity `exec_command` puts into every child's environment is what points it
+  at the window.
+- **`hop_session`, `finish_hop`, `spinney.hopSession.enabled`, and `returnTo` on
+  `POST /session/start`.** A caller that still sends the hop fields gets a 400 that names
+  them; `POST /session/message` is the control plane's form of `send_session_message`.
 
 ### Fixed
 
@@ -79,6 +133,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reads a `global` job's flag from the durable `bgDetached` record.
 - **A background job's completion notice shows the model's `title`**, not the command line,
   the same rule the step row follows.
+- **Shift+wheel pans horizontally from anywhere again.** The native-scroll-zone check sat in
+  front of the shift branch, so the gesture did nothing over a card's work log, its ask, an
+  expanded step or the composer, the four places a plain wheel is deliberately the zone's
+  own. Shift now sits beside alt, and both pan the camera whatever is under the pointer.
+- **A thinking block the reader unlocked stays open.** A thought that was open when its
+  message started answering folded to one line even though the reader had released its
+  follow light to read it. Releasing that light now counts as reading it: the row keeps its
+  open form to the end of the turn, and the steps group that holds it does not fold either.
 
 ## [0.7.0] - 2026-11-13
 
