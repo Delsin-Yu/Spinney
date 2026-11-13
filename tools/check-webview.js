@@ -3199,6 +3199,18 @@ if (contextLabel !== 'ctx 50%') {
     if (dotsIn(findByClass(longCard, 'node-work-wrap')) !== 1) {
       problems.push('the green .scroll-lock-dot is not in .node-work-wrap (the log is the only scroller that follows a turn)');
     }
+    // The light's horizontal offset is **measured** (the centre of the log's scrollbar
+    // gutter), so with no layout — this stub reports 0 for every box — nothing may be
+    // written at all and the stylesheet's fixed `right` has to stand. That fallback is what
+    // keeps the guard itself honest: a card painted without a gutter must not be handed a
+    // `right: NaNpx` (or a `0px`, which would put the light on the log's right edge).
+    const longDot = findByClass(longCard, 'scroll-lock-dot');
+    if (longDot && longDot.style && longDot.style.right) {
+      problems.push(
+        `a card with no measurable scroll gutter moved its light to ${JSON.stringify(longDot.style.right)} — without a ` +
+          'layout the stylesheet\'s fixed offset has to stand (`.node-work-wrap > .scroll-lock-dot`)',
+      );
+    }
 
     // --- (k) a folded log has no window to extend -------------------------------
     // The steps fold took the job the scroll window existed for: a long turn now keeps
@@ -4075,6 +4087,90 @@ if (contextLabel !== 'ctx 50%') {
         );
       }
     }
+  }
+
+  // (c0) A tool call the model is still **writing** (`toolCallDelta`, before `toolStart`):
+  // one row with the ordinary tool-row shape and **one fixed label**. There is no argument
+  // text, no elapsed chip (nothing has started yet) and the detail stays folded and empty;
+  // the verb is the one thing that follows the stream, because the tool's name arrives in
+  // pieces. `toolStart` upgrades that same element into the running row, so a live call and
+  // a replayed one are still the same shape.
+  {
+    dispatch({ type: 'toolCallDelta', nodeId: NODE, index: 20, id: 'draft-tool', name: 'read_f' });
+    const row = lastOf('tool');
+    if (!row || !hasClass(row, 'live')) {
+      problems.push('a drafting tool call rendered no `.msg.tool.live` row');
+    } else {
+      if (verbOf(row) !== 'read_f') {
+        problems.push(
+          `a drafting row's verb reads ${JSON.stringify(verbOf(row))}, expected the name fragment it was sent ("read_f")`,
+        );
+      }
+      if (labelOf(row) !== 'Writing tool call...') {
+        problems.push(
+          `a drafting row's label reads ${JSON.stringify(labelOf(row))}, expected the fixed "Writing tool call..."`,
+        );
+      }
+      if (hasClass(findByClass(row, 'tool-label'), 'mono')) {
+        problems.push('a drafting row sets its fixed label in monospace — monospace is for a derived command or pattern');
+      }
+      if (findByClass(row, 'tool-elapsed')) {
+        problems.push('a drafting row carries an elapsed chip — a call that is composing its arguments has not started');
+      }
+      if (findByClass(row, 'tool-args-line') || findByClass(row, 'tool-result')) {
+        problems.push(
+          'a drafting row shows the arguments — half a JSON blob is not a label, and the detail is empty until the call settles',
+        );
+      }
+      expectToolOpen(row, false, 'a drafting tool row');
+      // The rest of the name arrives: the verb follows it **in place**. One row per index —
+      // a second row here is what a reader saw as the same step twice.
+      dispatch({ type: 'toolCallDelta', nodeId: NODE, index: 20, id: 'draft-tool', name: 'ile' });
+      if (lastOf('tool') !== row) {
+        problems.push('a second `toolCallDelta` for one index built a second row — the draft is indexed, not appended');
+      }
+      if (verbOf(row) !== 'Read') {
+        problems.push(
+          `a drafting row's verb reads ${JSON.stringify(verbOf(row))} after the rest of its name arrived, expected "Read"`,
+        );
+      }
+      if (labelOf(row) !== 'Writing tool call...') {
+        problems.push('the draft label changed while the call was being written — it says the one thing that is true');
+      }
+      // `toolStart` is the call settling: the settled arguments and the model's own `title`
+      // replace the draft's fixed line, and the elapsed chip is born.
+      dispatch({
+        type: 'toolStart',
+        nodeId: NODE,
+        index: 20,
+        id: 'draft-tool',
+        name: 'read_file',
+        args: '{"path":"d.ts"}',
+        title: 'read the draft',
+        startedAt: Date.now() - 40,
+      });
+      if (lastOf('tool') !== row) {
+        problems.push('`toolStart` built a second row for a drafting call — the draft is upgraded in place');
+      }
+      if (hasClass(row, 'live')) {
+        problems.push('a finalized draft row still carries `live`');
+      }
+      if (verbOf(row) !== 'Read' || labelOf(row) !== 'read the draft') {
+        problems.push(
+          `a finalized draft reads ${JSON.stringify([verbOf(row), labelOf(row)])}, expected ["Read", "read the draft"] — ` +
+            "the settled arguments and the model's own title replace the draft's fixed line",
+        );
+      }
+      if (!findByClass(row, 'tool-elapsed')) {
+        problems.push('a finalized draft row has no elapsed chip — settling the arguments is when that chip is born');
+      }
+      expectToolOpen(row, false, 'a finalized draft row');
+    }
+    dispatch({ type: 'toolEnd', nodeId: NODE, id: 'draft-tool', content: 'File: d.ts (1 lines, LF)\nx', ms: 40 });
+    notes.push(
+      'draft tool row: one line per call with the fixed "Writing tool call..." label, no arguments and no chip, the verb ' +
+        'following the name, and `toolStart` upgrading that same row',
+    );
   }
 
   // (d) A tool row: the one line (`Verb label`), the chip, and a detail that holds the
@@ -6380,6 +6476,28 @@ if (contextLabel !== 'ctx 50%') {
             'carries no light',
         );
       }
+      // …and its horizontal offset is **measured**, not a fixed number: the light belongs on
+      // the centre of the box's own scrollbar gutter, so reopening the row measures it. The
+      // stub has no layout, so the numbers are handed to it — a 10px gutter in a 208px box,
+      // the row's 2px right padding under a 212px padding box, and a 6px dot — which put the
+      // centre at `(10 - 6) / 2 + 2 = 4` from the row's padding box.
+      const measure = () => {
+        box.offsetWidth = 208;
+        box.clientWidth = 198;
+        box.offsetLeft = 2;
+        row.clientWidth = 212;
+        rdot.offsetWidth = 6;
+      };
+      measure();
+      clickOf(row, 'the reasoning row, reopened for the offset measurement');
+      if (!hasClass(row, 'open')) {
+        problems.push('reopening the reasoning row for the offset measurement did nothing — the case below checks nothing');
+      } else if (rdot.style.right !== '4px') {
+        problems.push(
+          `the reasoning light's measured offset reads ${JSON.stringify(rdot.style.right)}, expected "4px" — the dot's ` +
+            'centre has to land on the centre of the box\'s scroll gutter, not on a fixed offset',
+        );
+      }
     }
   }
 
@@ -7699,17 +7817,20 @@ if (contextLabel !== 'ctx 50%') {
 // the edited node's parent with the edited text (`editUserMessage`; nothing is edited
 // in place, and the composer is not involved at all), Shift+Enter is the textarea's own
 // newline, and Esc puts the rendered ask back. What is pinned here:
-//   - the pencil exists on an idle turn card and on **no** running or sidecar card, and
-//     it follows `state`'s `lockedNodes` without a repaint;
+//   - the pencil exists on every turn card that has a prompt — **including a card whose
+//     turn is still running** — and on no sidecar card, and nothing `state` reports about
+//     running or locked nodes takes it away: the edit branches from the edited node's
+//     parent, so the streaming node is not touched at all;
 //   - a click opens an editor holding the raw prompt text, and no Markdown is rendered
 //     into it;
 //   - Enter posts `{ type: 'editUserMessage', nodeId, text }` with that node and that
-//     text — and an empty editor posts nothing; Shift+Enter posts nothing;
+//     text — from a running card too — and an empty editor posts nothing; Shift+Enter
+//     posts nothing;
 //   - a repaint never leaves a stale textarea behind, and Esc on a fresh edit restores
 //     the ask with the node's original text.
 {
   const ROOT = 'ask-edit-root';        // finished turn, on the view path → the pencil
-  const RUN = 'ask-edit-running';      // the same card, still streaming → no pencil
+  const RUN = 'ask-edit-running';      // the same card, still streaming → the pencil too
   const SUB = 'ask-edit-sub';          // `kind:'agent'` sidecar → no pencil
   const ORIGINAL = 'the **original** ask';
   const row = (id, parentId, children, status, kind, extra) =>
@@ -7773,30 +7894,74 @@ if (contextLabel !== 'ctx 50%') {
 
   dispatch({ type: 'reset' });
   // `RUN` is live, which is what `state`'s `runningNodes` says — the same authority the
-  // Send/Stop pair reads, and the second half of the pencil's gate.
+  // Send/Stop pair reads. It is deliberately **not** part of the pencil's gate any more:
+  // editing a prompt branches from the edited node's parent, so the streaming node is never
+  // touched (see `editUserMessage` in `ChatViewProvider`).
   dispatch({ type: 'state', busy: true, status: '', sessionId: 'smoke-session', runningNodes: [RUN], lockedNodes: [] });
   dispatch(treeMsg);
   dispatch(pathMsg);
 
-  // (a) Where the pencil may appear.
+  // (a) Where the pencil may appear: a card with a prompt that is not a sidecar — running
+  // or not, locked or not.
   if (!pencilOf(ROOT)) {
     problems.push('an idle turn card has no edit pencil on its pinned ask');
   }
-  if (pencilOf(RUN)) {
-    problems.push('a card whose turn is still running offers the edit pencil (the host refuses that edit)');
+  if (!pencilOf(RUN)) {
+    problems.push(
+      'a card whose turn is still running offers no edit pencil — the edit branches from the edited node\'s parent, ' +
+        'so a running turn is not in its way',
+    );
   }
   if (pencilOf(SUB)) {
     problems.push('a sub-agent card offers the edit pencil (it has no prompt of its own)');
   }
-  // The host's `state` is the other half of the gate, and it arrives without a repaint.
-  dispatch({ type: 'state', busy: false, status: '', sessionId: 'smoke-session', runningNodes: [], lockedNodes: [ROOT] });
-  if (pencilOf(ROOT)) {
-    problems.push('a node that still owns unfinished work (`lockedNodes`) still offers the edit pencil');
+  // The host's `state` is the other authority the pencil used to read, and it arrives without
+  // a repaint: a node that still owns unfinished work stays editable, and so does a running one.
+  dispatch({ type: 'state', busy: false, status: '', sessionId: 'smoke-session', runningNodes: [], lockedNodes: [ROOT, RUN] });
+  if (!pencilOf(ROOT)) {
+    problems.push('a node that still owns unfinished work (`lockedNodes`) offers no edit pencil — the edit does not touch it');
   }
   dispatch({ type: 'state', busy: false, status: '', sessionId: 'smoke-session', runningNodes: [], lockedNodes: [] });
-  if (!pencilOf(ROOT)) {
-    problems.push('the edit pencil did not come back once the node stopped being locked');
+  if (!pencilOf(ROOT) || !pencilOf(RUN)) {
+    problems.push('the edit pencil went away once nothing was locked — it is the render that offers it');
   }
+
+  // (a2) The card whose turn is **still running** edits its prompt like any other: the host
+  // turns the edit into a branch under the edited node's parent, so nothing about the live
+  // turn is rewritten and nothing has to wait for it to finish.
+  dispatch({ type: 'state', busy: true, status: '', sessionId: 'smoke-session', runningNodes: [RUN], lockedNodes: [] });
+  if (!click(pencilOf(RUN))) {
+    problems.push("a running card's edit pencil has no click handler");
+  } else {
+    const live = editorOf(RUN);
+    if (!live) {
+      problems.push('clicking a running card\'s edit pencil opened no editor — a running turn is not a reason to refuse');
+    } else {
+      if (String(live.value) !== 'live prompt') {
+        problems.push(
+          `a running card's editor is pre-filled with ${JSON.stringify(live.value)}, expected its own prompt ("live prompt")`,
+        );
+      }
+      posted.length = 0;
+      live.value = 'edited while running';
+      press(live, 'Enter', false);
+      const sentWhileRunning = editPosts()[0];
+      if (!sentWhileRunning || sentWhileRunning.nodeId !== RUN || sentWhileRunning.text !== 'edited while running') {
+        problems.push(
+          `Enter in a running card's editor posted ${JSON.stringify(posted)}, expected ` +
+            `{ type: 'editUserMessage', nodeId: '${RUN}', text: 'edited while running' }`,
+        );
+      }
+      if (posted.some((message) => message && message.type === 'userMessage')) {
+        problems.push('editing a running prompt posted a `userMessage` — the composer is not part of this edit');
+      }
+    }
+  }
+  // The repaint below closes that editor like any other, so the rest of the block starts from
+  // the same freshly-rendered cards the block opened with.
+  dispatch({ type: 'state', busy: false, status: '', sessionId: 'smoke-session', runningNodes: [], lockedNodes: [] });
+  dispatch(treeMsg);
+  dispatch(pathMsg);
 
   // (b) The editor: the raw text, no Markdown, one hint line.
   if (!click(pencilOf(ROOT))) {
@@ -7890,7 +8055,7 @@ if (contextLabel !== 'ctx 50%') {
       }
     }
   }
-  notes.push('prompt edit: the pencil on an idle turn card only, Enter posts the node and the edited text, a repaint leaves no textarea, Esc restores the ask');
+  notes.push('prompt edit: the pencil on any turn card with a prompt (a running one included) and never a sidecar, Enter posts the node and the edited text, a repaint leaves no textarea, Esc restores the ask');
 }
 
 // --- report ------------------------------------------------------------------

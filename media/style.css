@@ -651,7 +651,10 @@ button.icon-btn {
    itself inside the log, so it follows (and is released) on its own: a smaller dot in the
    row's bottom-right corner, over the box's last line and inside the strip its
    `scrollbar-gutter` keeps free. `setThinkingOpen` puts the element in the row on open and
-   takes it out on close, so a closed row — one ellipsised line — carries no light at all. */
+   takes it out on close, so a closed row — one ellipsised line — carries no light at all.
+   `right` here is the same fallback the log's light has: the centre of the box's own
+   gutter is measured when the row opens (`lockDotRight` in `media/main.js`), and this
+   value stands only where there is no layout to measure. */
 .thinking-row > .scroll-lock-dot {
   right: 12px;
   bottom: 4px;
@@ -2939,7 +2942,10 @@ button.icon-btn {
    (`margin-bottom`), docked in the bottom-right corner of the transcript area. Green
    means "following the newest content"; dim means the reader owns the offset. A click
    toggles it, and scrolling is the other way in and out of it (see the direction rule in
-   `createScrollController`) — the light never blocks the scrollbar. */
+   `createScrollController`) — the light never blocks the scrollbar. The `right` here is
+   only the generic default: each host overrides it, and where the host has a layout the
+   horizontal offset is measured onto the scrollbar gutter's own centre instead
+   (`lockDotRight` / `syncLockDot` in `media/main.js`). */
 .scroll-lock-dot {
   position: absolute;
   right: 10px;
@@ -2978,12 +2984,17 @@ button.icon-btn {
 
 /* The node transcript's dot hangs off `.node-work-wrap`, which now pads, and it is
    positioned against that wrapper's *padding box* — which, since `.node-body` lost
-   its own 10px, reaches the card's edge. The offsets therefore have to carry the
-   10px again to leave the light exactly where it was: 10px in from the log's right
-   edge, in the strip the log's `margin-bottom` reserves below it. Scoped to this
+   its own 10px, reaches the card's edge. **The horizontal offset below is a fallback,
+   not the position**: the log keeps a `scrollbar-gutter: stable` strip down its right
+   edge, and the dot has to sit centred on that bar rather than half a gutter to the left
+   of it, so `media/main.js` measures the gutter once the card is laid out
+   (`lockDotRight`, written as an inline `right` by the `relayout` pass). A box with no
+   layout — the offline guard's DOM, or one whose log is hidden — measures nothing, and
+   then this value stands. The *vertical* offset is the stylesheet's on purpose: the
+   wrapper's padding keeps the dot in the strip the log's `margin-bottom` reserves below
+   it, which is directly under the scrollbar. Scoped to this
    host on purpose — it is the log's light, not any other dot in the card (the open
-   reasoning row's own light has its own rule, `.thinking-row > .scroll-lock-dot`) —
-   and the offsets must not move. */
+   reasoning row's own light has its own rule, `.thinking-row > .scroll-lock-dot`). */
 .node-work-wrap > .scroll-lock-dot {
   right: 20px;
   bottom: 18px;
@@ -3300,10 +3311,12 @@ button.icon-btn {
                  collapses exactly like the text node it is merged into and the merge
                  itself is invisible;
      .row-in     a row that has just been appended (assistant text, tool, thinking,
-                 notice): one 120 ms fade + 2 px rise, removed again on `animationend`;
-     .label-in   a live tool row's label, whose text is rewritten per argument delta:
-                 the class is removed and re-added on the same element, which restarts
-                 the fade without wrapping the label in a span.
+                 notice): one 120 ms fade + 2 px rise, removed again on `animationend`.
+
+   A tool call still being written is one fixed line (`Writing tool call...`), so no label
+   is rewritten per delta any more and there is no `.label-in` to restart: the only text
+   that changes while a call composes is its verb, and that changes by a name delta that
+   arrives once.
 
    The durations are duplicated in media/main.js as the *fallback* timer
    (`ANIMATION_FALLBACK_MS`, 400 ms): an engine that never fires `animationend` still
@@ -3319,11 +3332,6 @@ button.icon-btn {
   to { opacity: 1; transform: translateY(0); }
 }
 
-@keyframes label-in {
-  from { opacity: 0.35; }
-  to { opacity: 1; }
-}
-
 .chunk-in {
   /* An inline span, never a block: it sits inside the answer's own text run, and it
      deliberately sets no `white-space` — it inherits the host's, so the chunk lays out
@@ -3335,18 +3343,13 @@ button.icon-btn {
   animation: row-in 120ms ease-out;
 }
 
-.tool-label.label-in {
-  animation: label-in 160ms ease-out;
-}
-
 /* The OS' own wish wins, and it is also read in the script (`prefersReducedMotion`):
    with it on, nothing is wrapped in a span at all, so these rules are the second half
    of one decision — a stale class left over from before the wish changed must not
    animate either. */
 @media (prefers-reduced-motion: reduce) {
   .chunk-in,
-  .row-in,
-  .tool-label.label-in {
+  .row-in {
     animation: none;
   }
 }

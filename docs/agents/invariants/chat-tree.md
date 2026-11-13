@@ -110,9 +110,13 @@
   off the current checkout. The old node's `messages`, `displayItems` and prompt stay
   untouched — a rewrite would change the history the provider's prefix cache and the
   model's answer were built from — and the new node is focused by the ordinary `beginTurn`
-  / `attachNode` path, with no focus code of its own. A sidecar, an unknown node, an empty
-  text, and a node whose turn is running or which still owns unfinished work are each
-  refused with one sentence.
+  / `attachNode` path, with no focus code of its own. A sidecar, an unknown node and an empty
+  text are each refused with one sentence. **A node whose turn is running is not refused**,
+  and neither is one that still owns unfinished work: the edit is a branch under the edited
+  node's parent, so the streaming node's `messages`, `displayItems` and prompt are touched by
+  nothing, and `beginTurn` refuses only a second run on the **basis** node — two branches of
+  one session may run at once. The pencil is therefore offered on every turn card that has a
+  prompt (a sidecar has none), whatever its status.
 - `attachNode` repairs a missing parent by attaching the node to the **root**
   instead of leaving it unreachable (an orphan would still become the checkout
   point and silently blank the history); `leafOf` skips both sidecar kinds via

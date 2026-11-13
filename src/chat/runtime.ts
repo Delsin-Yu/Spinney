@@ -798,7 +798,13 @@ export interface TurnRun {
   startedAt: number;
   pendingText: string;
   pendingThinking: string;
-  pendingTools: Map<number, { id?: string; name: string; args: string }>;
+  /**
+   * The tool calls of this flush window, by the call's index: its id and the pieces of its
+   * **name** that have arrived. The arguments are deliberately not accumulated here — the
+   * webview draws a call that is still being written as one fixed line, and the settled
+   * arguments travel with `toolStart` instead (`flushStreamDeltas`).
+   */
+  pendingTools: Map<number, { id?: string; name: string }>;
   flushTimer: ReturnType<typeof setTimeout> | null;
   /**
    * The run's one **display-only** marker: the engine's silent-retry notice
@@ -4796,7 +4802,7 @@ export class SessionRuntime {
         }
         break;
       case 'toolCallDelta':
-        if (run) this.queueToolCallDelta(run, event.index, event.id, event.name, event.args);
+        if (run) this.queueToolCallDelta(run, event.index, event.id, event.name);
         break;
       case 'toolStart':
         if (run) {
@@ -4970,16 +4976,13 @@ export class SessionRuntime {
     }
   }
 
-  private queueToolCallDelta(run: TurnRun, index: number, id?: string, name?: string, args?: string): void {
-    const existing = run.pendingTools.get(index) ?? { id, name: '', args: '' };
+  private queueToolCallDelta(run: TurnRun, index: number, id?: string, name?: string): void {
+    const existing = run.pendingTools.get(index) ?? { id, name: '' };
     if (id) {
       existing.id = id;
     }
     if (name) {
       existing.name += name;
-    }
-    if (args) {
-      existing.args += args;
     }
     run.pendingTools.set(index, existing);
     this.scheduleStreamFlush(run);
@@ -5025,12 +5028,15 @@ export class SessionRuntime {
     }
     if (tools > 0) {
       for (const [index, draft] of run.pendingTools) {
+        // The draft row is one fixed line in the webview (`addLiveTool`), so the arguments
+        // would be a payload nothing renders: they travel once, with `toolStart`, from the
+        // call's settled `args`. A call's arguments were the bulk of what this loop used to
+        // carry (up to 8 KiB per flush, per call), so this is a net reduction.
         this.post({
           type: 'toolCallDelta',
           index,
           id: draft.id,
           name: draft.name,
-          args: clipForUi(draft.args, 8 * 1024),
           nodeId: run.nodeId,
         });
       }

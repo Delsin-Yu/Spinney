@@ -1464,6 +1464,42 @@
   const LOCK_TITLE_ON = tr('Auto-scroll on — click to release');
   const LOCK_TITLE_OFF = tr('Auto-scroll off — click to follow again');
 
+  /**
+   * The `right` that puts the light's centre on the centre of its scrollbar, or `null` when
+   * there is nothing to measure.
+   *
+   * The scroller keeps a gutter down its own right edge (`scrollbar-gutter: stable`), so its
+   * bar sits in a strip that is inside the box while the dot is positioned against the
+   * **host's** padding box — a fixed `right` is therefore half a gutter off the bar. Both
+   * numbers are read, never guessed: the gutter is `offsetWidth - clientWidth`, and the
+   * host's own right padding is what is left of its width beyond the scroller's left edge and
+   * the scroller itself. A box that has no layout yet (a card is appended a few lines after
+   * its dot is created, and the offline guard's DOM has no geometry at all) measures no
+   * gutter, and then nothing is written at all: the stylesheet's fixed offset stands, which
+   * is the fallback `tools/check-webview.js` pins. Nothing is ever cleared either — a box
+   * that loses its gutter (a hidden log) keeps the offset it had.
+   */
+  function lockDotRight(container, host, dot) {
+    const gutter = (container.offsetWidth || 0) - (container.clientWidth || 0);
+    if (gutter <= 0) return null;
+    const pad = Math.max(0, (host.clientWidth || 0) - (container.offsetLeft || 0) - (container.offsetWidth || 0));
+    const right = Math.max(0, (gutter - (dot.offsetWidth || 0)) / 2 + pad);
+    return right + 'px';
+  }
+
+  /** Write one measured offset onto its dot. A `null` value changes nothing. */
+  function applyLockDot(dot, value) {
+    if (!value || !dot || !dot.style || dot.style.right === value) return;
+    dot.style.right = value;
+  }
+
+  /** Measure and apply in one step, for a single dot outside a layout pass. */
+  function syncLockDot(container, host, dot) {
+    const value = lockDotRight(container, host, dot);
+    applyLockDot(dot, value);
+    return value !== null;
+  }
+
   // The green dot lives on the host of a scrollable container, in the strip reserved below
   // it (the container keeps a bottom margin so the dot sits just under the scrollbar).
   // Live turns start following (the dot is green); finished nodes start released. A click
@@ -1474,7 +1510,8 @@
   //
   // The log is a card's only scroller, so it carries the only light a card has — except
   // the open form of a thinking row, which is a 240px scroller of its own
-  // (`attachRowLock`, below).
+  // (`attachRowLock`, below). Both lights are positioned by measurement (`syncLockDot`), so
+  // the vertical offset is the stylesheet's and the horizontal one is the gutter's own.
   function attachLock(container, host, locked) {
     const dot = el('div', 'scroll-lock-dot' + (locked === false ? '' : ' locked'));
     const ctrl = createScrollController(container, (isLocked) => {
@@ -1490,6 +1527,11 @@
       ctrl.toggle();
     });
     host.appendChild(dot);
+    // The dot's offset is the log's own scroll gutter (see `lockDotRight`). It is measured
+    // again on every layout pass (`relayout`), because this call happens before the card is
+    // appended and so measures nothing.
+    ctrl.syncDot = () => syncLockDot(container, host, dot);
+    ctrl.syncDot();
     return ctrl;
   }
 
@@ -1523,6 +1565,10 @@
       ctrl.toggle();
     });
     row._lockDot = dot;
+    // Same measured offset as the log's light (`lockDotRight`): the row is built a task before
+    // it is appended and it only has a scroller while it is open, so `setThinkingOpen`
+    // measures again on the transition that puts the dot in the row.
+    ctrl.syncDot = () => syncLockDot(container, row, dot);
     return ctrl;
   }
 
@@ -1633,6 +1679,9 @@
       // The light belongs to the open form: it goes into the row as the box opens, and
       // opening puts the reader back at the end of the reasoning, following it.
       row.appendChild(row._lockDot);
+      // …and this is the one moment the box has a gutter to measure: the dot's offset is the
+      // scrollbar's own strip, not a fixed number (`lockDotRight`).
+      if (row._scroll.syncDot) row._scroll.syncDot();
       row._scroll.lock();
     } else if (!row._open && row._lockDot.parentElement === row) {
       // A closed row is one ellipsised line: no scroller, no light.
@@ -2111,24 +2160,6 @@
     setTimeout(settle, ANIMATION_FALLBACK_MS);
   }
 
-  /**
-   * Restart the label's short opacity fade. A live tool's label is **rewritten** per
-   * argument delta, so it is deliberately not wrapped in a span: the same element loses
-   * the class and gets it back in the next frame, which is what restarts a CSS animation
-   * on an element that is already on screen — and, unlike the `offsetWidth` trick, it
-   * reads no layout in the streaming path.
-   */
-  function fadeLabel(labelEl) {
-    if (!labelEl || !labelEl.classList || !animationsOn()) return;
-    labelEl.classList.remove('label-in');
-    if (labelEl._labelFade) return;
-    labelEl._labelFade = true;
-    requestAnimationFrame(() => {
-      labelEl._labelFade = false;
-      labelEl.classList.add('label-in');
-    });
-  }
-
   // ---- Message rendering into a container (defaults to the active node) ----
   // Zone 1 of a card: the pinned user ask (`.node-ask`, top of an expanded card).
   // It does not scroll with the work log and does not trigger tree panning, and it
@@ -2202,11 +2233,12 @@
   /**
    * The pencil beside a card's pinned ask, created lazily and kept on the card
    * (`_askEditBtn`) so a repaint puts the **same** element back instead of stacking a
-   * second one. It is offered only where editing can go through: an expanded,
-   * non-sidecar card whose node is not running and does not still own unfinished work
-   * — the same four refusals the host re-checks (`editUserMessage` in
-   * `ChatViewProvider`). The ask's own `hidden` class is what keeps it out of sight on
-   * a collapsed card or a monitor window; there is nothing to edit without a prompt.
+   * second one. It is offered wherever editing can go through: a non-sidecar card that has
+   * a prompt. **A running turn is not in the way** — the edit branches from the edited
+   * node's own parent and leaves the streaming node untouched (`editUserMessage` in
+   * `ChatViewProvider`), so a reader fixing a typo never has to wait a turn out. The ask's
+   * own `hidden` class is what keeps it out of sight on a collapsed card or a monitor
+   * window; there is nothing to edit without a prompt.
    */
   function syncAskEdit(card) {
     if (!card || !card.querySelector) return;
@@ -2214,13 +2246,7 @@
     const meta = id ? treeNodes[id] : null;
     const ask = card.querySelector('.node-ask');
     if (!ask) return;
-    const want =
-      !!id &&
-      !!card._askText &&
-      !isSidecarKind(meta && meta.kind) &&
-      (!meta || meta.status !== 'running') &&
-      !runningNodes.has(id) &&
-      !lockedNodes.has(id);
+    const want = !!id && !!card._askText && !isSidecarKind(meta && meta.kind);
     const btn = card._askEditBtn;
     if (!want) {
       if (btn) {
@@ -4148,6 +4174,15 @@
   const liveTools = Object.create(null);
 
   /**
+   * What a tool row says while the model is still writing the call. The call's arguments
+   * are half a JSON blob by then and the row has no room to lie about them, so the draft
+   * says the one thing that is true for the whole of it — that a call is being written —
+   * and keeps the verb of the tool it is going to be. `finalizeLiveTool` turns the element
+   * into the ordinary row the moment the call settles.
+   */
+  const LIVE_TOOL_LABEL = tr('Writing tool call...');
+
+  /**
    * Bucket key for `owner`: an explicit node id, or — when `owner` is undefined —
    * the node the current routed call writes into, else the view focus node (a
    * legacy, unrouted call writes into that node's card too). '' is the
@@ -4166,27 +4201,29 @@
   }
 
   /**
-   * A tool call whose arguments are still streaming: the same row as `addTool`, with
-   * an empty label that grows with the deltas and no elapsed chip yet (the call has
-   * not started). It is folded like every other row, and a click opens its detail —
-   * which is where the partial arguments show, so what the model is composing is
-   * still readable while it composes it.
+   * A tool call whose name (and arguments) are still streaming: **one row with one fixed
+   * label**. The verb is the tool the first name delta named — a name that arrives in
+   * pieces says what it says until it is whole — and the label is `Writing tool call...`
+   * until the call settles, because the arguments are half a JSON blob and a row that
+   * showed them would be a row a reader has to un-read. There is no elapsed chip (nothing
+   * has started yet) and the detail stays empty until `finalizeLiveTool` paints it from
+   * the settled arguments.
    */
-  function addLiveTool(index, id, name, args) {
+  function addLiveTool(index, id, name) {
     if (!messagesEl) return;
     const node = el('div', 'msg tool live running');
     node.dataset.index = String(index);
     node.dataset.kind = 'tool';
     if (id) node.dataset.id = id;
 
-    // No `title` exists yet at this point — the label is the derived brief and it grows
-    // with the arguments — so a command or a pattern tool is set in monospace here.
-    const head = toolRowHead(name || '', args ? toolBrief(name, args) : '', MONO_LABEL_TOOLS.has(name));
+    // A prose label, so never monospace: monospace is the *derived* command or pattern,
+    // and a draft has none — `finalizeLiveTool` re-derives it from the settled arguments.
+    const head = toolRowHead(name || '', LIVE_TOOL_LABEL, false);
     node.appendChild(head);
 
-    // The detail is painted when the arguments settle (`finalizeLiveTool`): a
-    // half-streamed JSON blob is not something to put in front of a reader, and the row
-    // is folded while it composes anyway.
+    // The detail is painted when the arguments settle (`finalizeLiveTool`): a half-streamed
+    // JSON blob is not something to put in front of a reader, and the row is folded while
+    // it composes anyway.
     const detail = el('div', 'tool-detail hidden');
     node.appendChild(detail);
 
@@ -4199,7 +4236,7 @@
     node._detailEl = detail;
     node._verbEl = byClass(head, 'tool-verb');
     node._labelEl = byClass(head, 'tool-label');
-    node._argsRaw = args || '';
+    node._toolName = name || '';
 
     const group = ensureStepsGroup();
     tuckReasoningIntoRun(group);
@@ -4211,31 +4248,23 @@
     return node;
   }
 
-  /** One streaming delta of a call's arguments: the row's label and detail follow it. */
-  function appendLiveTool(index, id, nameDelta, argsDelta) {
+  /**
+   * One streaming delta of a call: the pieces of its **name** are the only thing this path
+   * can still change, and they change the row's verb in place (a rebuild per delta would
+   * throw away the row the reader may have just opened). Nothing here grows a label or an
+   * argument string: the fixed draft label is what keeps a composing call from rewriting
+   * its own text — and reading its own layout — on every delta it announces.
+   */
+  function appendLiveTool(index, id, nameDelta) {
     const bucket = liveBucket(undefined, true);
     let node = bucket[index];
     if (!node) {
-      node = addLiveTool(index, id, '', '');
+      node = addLiveTool(index, id, nameDelta || '');
+    } else if (nameDelta) {
+      node._toolName = (node._toolName || '') + nameDelta;
+      if (node._verbEl) node._verbEl.textContent = toolVerb(node._toolName);
     }
     if (id) node.dataset.id = id;
-    if (argsDelta) {
-      node._argsRaw = (node._argsRaw || '') + argsDelta;
-      // The label is derived from the arguments as they arrive, in place (a rebuild
-      // per delta would throw away the row the reader may have just opened). The label
-      // is never wrapped: the written text is the whole label, and its element restarts
-      // one short fade (`.label-in`) instead.
-      const name = node._verbEl ? node._verbEl.textContent : '';
-      const label = toolLabel(name, node._argsRaw);
-      if (node._labelEl) {
-        node._labelEl.textContent = label;
-        fadeLabel(node._labelEl);
-      } else if (label && node._rowEl) {
-        node._labelEl = el('span', 'tool-label' + (MONO_LABEL_TOOLS.has(name) ? ' mono' : ''), label);
-        node._rowEl.appendChild(node._labelEl);
-        fadeLabel(node._labelEl);
-      }
-    }
     followActive();
     return node;
   }
@@ -6177,8 +6206,9 @@ function addBackgroundNotice(item) {
       if (typeof msg.contextPct === 'number') treeNodes[msg.id].contextPct = msg.contextPct;
     }
     if (card) syncContinueButton(card, treeNodes[msg.id] || { id: msg.id, status: msg.status, children: [] });
-    // The pencil on the ask is gated on the node's status too (`syncAskEdit`), and this
-    // patch is how a turn's end reaches its card without a repaint.
+    // The pencil on the ask is offered by the render (`syncAskEdit`), and nothing a `node`
+    // patch carries can take it away: a turn starting or ending is not a reason to stop
+    // offering an edit that branches beside it.
     if (card) syncAskEdit(card);
     // The context state is half of what the composer's own two buttons read (a refused
     // request disables Send and offers the new-epoch entry), and it can arrive *after*
@@ -6555,6 +6585,11 @@ function addBackgroundNotice(item) {
       if (!card) continue;
       heights[id] = card.offsetHeight || 120;
       widths[id] = card.offsetWidth || NODE_W;
+      // …and the log's follow light is placed from the boxes this pass just laid out: its
+      // `right` is the scroll gutter's own centre, never a fixed offset (`lockDotRight`).
+      // The write is a style-only change on an absolutely positioned 8px box, so it changes
+      // no number read here — and a box with no gutter yet (a hidden log) writes nothing.
+      if (card._itemScroll && card._itemScroll.syncDot) card._itemScroll.syncDot();
     }
     // The session is a FOREST (§3): the engine lays out one tree at a time, so each
     // root gets its own pass and the results are placed left to right, in `rootIds`
@@ -8784,10 +8819,6 @@ function addBackgroundNotice(item) {
         // refuses every turn there, so the composer says so up front instead of letting a
         // send fail. A host that predates the flag sends nothing: not read-only.
         readOnly = msg.readOnly === true;
-        // The ask's edit pencil is gated on exactly these two sets — a running or locked
-        // node is refused host-side (`editUserMessage`) — so every card re-reads them.
-        // The `tree` did not change, which is why this cannot wait for a repaint.
-        for (const id in nodeEls) syncAskEdit(nodeEls[id]);
         updateComposerButtons();
         setBusy(msg.busy);
         setStatus(msg.status);
@@ -8869,8 +8900,12 @@ function addBackgroundNotice(item) {
         routeTo(msg.nodeId, () => appendUsage(msg.usage), 'usage');
         break;
       case 'toolCallDelta':
-        addTpsTokens((msg.name || '') + (msg.args || ''));
-        routeTo(msg.nodeId, () => appendLiveTool(msg.index, msg.id, msg.name, msg.args), 'toolCallDelta');
+        // The host sends the call's index, id and name and **not its arguments** (see
+        // `queueToolCallDelta`): the draft row is one fixed line (`addLiveTool`), so the
+        // argument bytes are a payload nothing renders. The tok/s readout still counts the
+        // name it did get.
+        addTpsTokens(msg.name || '');
+        routeTo(msg.nodeId, () => appendLiveTool(msg.index, msg.id, msg.name), 'toolCallDelta');
         break;
       case 'toolStart':
         routeTo(msg.nodeId, () => { finalizeStreamingAnswer(); finalizeLiveTool(msg.index, msg.id, msg.name, msg.args, msg.startedAt, null, msg.title); }, 'toolStart');
