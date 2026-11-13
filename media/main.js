@@ -2390,11 +2390,13 @@
   // The label comes from the harness text's own title line. Those titles are constants the
   // host writes and `detectPriorHandoffSummary` already depends on, so matching their
   // prefix is the same contract, not a guess; the label itself is localized.
+  // Each entry asks `tr()` for its label, at load, so the shipped catalogues carry all of
+  // them (a table of plain strings would be invisible to `npm run check:l10n`).
   const HARNESS_LABELS = [
-    ['[Harness: compression turn]', 'Compression instruction'],
-    ['[Harness: context window reset — handoff summary]', 'Handoff summary'],
-    ['[Harness: context window reset', 'Context handoff'],
-    ['[Harness]', 'Harness note'],
+    ['[Harness: compression turn]', tr('Compression instruction')],
+    ['[Harness: context window reset — handoff summary]', tr('Handoff summary')],
+    ['[Harness: context window reset', tr('Context handoff')],
+    ['[Harness]', tr('Harness note')],
   ];
 
   /** The row's label and the title line it replaces, for one harness text. */
@@ -2403,7 +2405,7 @@
     for (const [prefix, label] of HARNESS_LABELS) {
       if (value.startsWith(prefix)) return { label, title: prefix };
     }
-    return { label: 'Harness note', title: '' };
+    return { label: tr('Harness note'), title: '' };
   }
 
   /**
@@ -2435,7 +2437,7 @@
     const head = el('div', 'harness-head');
     const chev = el('span', 'chev', '▶');
     head.appendChild(chev);
-    head.appendChild(el('span', 'harness-badge', tr(label)));
+    head.appendChild(el('span', 'harness-badge', label));
     head.appendChild(el('span', 'harness-preview', harnessPreviewOf(text, title)));
     const body = el('div', 'harness-body');
     body.appendChild(el('span', 'harness-text', text));

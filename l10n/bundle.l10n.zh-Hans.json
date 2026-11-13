@@ -131,7 +131,6 @@
   "Follow the active node": "跟随活动节点",
   "Following the active node": "正在跟随活动节点",
   "Global instructions for every workspace: Spinney adds this file to the system prompt of every session. Reload the window after you edit it.": "适用于所有工作区的全局指令：Spinney 会把此文件加入每个会话的系统提示词。编辑后请重新加载窗口。",
-  "HARNESS": "框架",
   "Handoff summary": "交接摘要",
   "Harness note": "harness 消息",
   "History: {0} turn(s) and {1} sub-agent card(s) are removed from this conversation.": "历史：本对话将移除 {0} 个回合和 {1} 个子智能体卡片。",
