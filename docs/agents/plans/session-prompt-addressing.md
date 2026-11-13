@@ -365,6 +365,42 @@ filters by provenance rather than by position. If the shared prompt line ever tu
 wrong default, the fix is a session-level "where should my prompt land" argument, not a node
 argument folded into the prompt.
 
+### 8.6 Two follow-ups, found by a live chat
+
+Both came out of one real use: two sessions chatting across five rounds, this window and a
+fresh one, on the landed surface. The tools behaved; what the walk found was one hole in the
+budget and one card that said nothing.
+
+**The hole: `create_session` handed out a fresh ceiling.** It threaded `from` and stopped there,
+so the first node of an agent-created session never got a `roundsAllowance` field, and
+`handleSendSessionPrompt`'s `inherited ?? cap` then read that absence as "take the ceiling".
+An agent mid-exchange with 4 rounds left could open a session with 16 — the brake could be
+refilled by creating sessions instead of continuing a line, which is the shape the allowance
+exists to stop. The child noticed it first: its machine line read
+`[session prompt from <id>/<node>]` with no `rounds left`, because `opts.rounds` was undefined.
+
+Fixed by giving both agent-written prompts **one** arithmetic. `spendExchangeRound(node,
+declared?)` resolves the effective number, charges the caller one round and answers what the
+receiver inherits; `refundExchangeRound` gives it back when nothing was sent (a busy target, a
+bad id, a torn-down window). `send_session_prompt` passes its declared `max_rounds`;
+`create_session` declares nothing — it has no such argument — so the round comes off the
+ceiling, exactly as a prompt on a human-started line does. Consequences, stated because they
+are real: a line with **no** allowance left can no longer create a session either (it is the
+same brake, and the refusal already says what to do), and every `create_session` now writes a
+`roundsAllowance` onto the caller's node and a `rounds left n` machine line onto the child's
+first turn. The multiplication this closes is the only refill there was: `min()` still never
+raises, and a human message is still the one reset.
+
+**The card said nothing.** The four session tools were mapped to the `note` kind, so a folded
+row read `Prompted a session` with no target (nothing in `toolBrief` knew a session id was the
+identifying argument), and opening it showed the raw receipt — `{"state":"delivered",…}` — to a
+human. They now have a kind of their own (`session`), which states the target and the rounds
+left in the head, shows the text the call **sent** in the body, and reads the receipt into
+those facts instead of printing it. The rounds also became a chip on the folded row
+(`syncSessionRounds`), because a budget the reader has to open a card to see is a budget nobody
+watches. `check:webview` pins both shapes with real samples — a receipt and a sentence — so a
+rewording of either result is a red guard rather than an empty card.
+
 ## Related
 
 - `plans/session-message-channel.md` — the design this replaces for the agent-facing tools; the

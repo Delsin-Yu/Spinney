@@ -893,9 +893,16 @@ export interface RuntimeHost {
    * titled with the explicit (locking) `session_name`, and return without waiting.
    * The provider owns the session list, the tab and the persistence, so the whole
    * creation is its answer — this runtime only passes its own node along, because
-   * the result tells the caller where a report should come back to.
+   * the result tells the caller where a report should come back to. `rounds` is what
+   * this runtime's own exchange allowance leaves for that first line: it is an
+   * agent-written user message like any prompt, so it never starts with a fresh ceiling.
    */
-  handleCreateSession(rt: SessionRuntime, node: TreeNode, args: Record<string, unknown>): Promise<string>;
+  handleCreateSession(
+    rt: SessionRuntime,
+    node: TreeNode,
+    args: Record<string, unknown>,
+    rounds?: number,
+  ): Promise<string>;
   /**
    * `send_session_prompt`: start one turn in a session, addressed only by its id. The
    * provider owns every session's live state, so its answer is the busy refusal; the
@@ -5940,9 +5947,25 @@ export class SessionRuntime {
    * `create_session` tool: the provider owns session creation and persistence.
    * `node` names the caller, because the answer has to say where a report should
    * come back to.
+   *
+   * Its first message is an **agent-written** user message into another session, so it
+   * pays the same round `send_session_prompt` pays and hands the child what is left.
+   * Handing a fresh ceiling instead let an agent refill the brake by opening a session
+   * rather than continuing a line — the only reset in this design is a human's own
+   * message (`docs/agents/plans/session-prompt-addressing.md` §8.6).
    */
-  private handleCreateSession(node: TreeNode, args: Record<string, unknown>): Promise<string> {
-    return this.host.handleCreateSession(this, node, args);
+  private async handleCreateSession(node: TreeNode, args: Record<string, unknown>): Promise<string> {
+    // No declared budget: `create_session` has no `max_rounds` argument, so the round it
+    // spends comes off the ceiling, exactly as a prompt with no inherited allowance does.
+    const spent = this.spendExchangeRound(node);
+    if (!spent.ok) {
+      return spent.error;
+    }
+    const result = await this.host.handleCreateSession(this, node, args, spent.roundsLeft);
+    if (result.startsWith('Error:')) {
+      this.refundExchangeRound(node, spent.previous);
+    }
+    return result;
   }
 
   /**
@@ -5959,29 +5982,59 @@ export class SessionRuntime {
         'Count the exchanges you actually need and state it.'
       );
     }
-    const cap = sessionMaxRounds();
-    const inherited = typeof node.roundsAllowance === 'number' ? node.roundsAllowance : undefined;
-    if (inherited !== undefined && inherited <= 0) {
-      return (
-        "Error: this line's exchange allowance is used up (no rounds left; the ceiling is " +
-        `${cap} per exchange since the last human message), so the prompt was not sent. ` +
-        'Report back to your user (or wait for a human message on this line) instead of sending it from another session.'
-      );
+    const spent = this.spendExchangeRound(node, declared);
+    if (!spent.ok) {
+      return spent.error;
     }
-    const effective = Math.min(declared, inherited ?? cap, cap);
-    const roundsLeft = effective - 1;
-    // Spend the round on the sender's own node as well, and give it back when the prompt
-    // never started a turn: a busy target or a torn-down window must not cost a round.
-    const before = node.roundsAllowance;
-    node.roundsAllowance = roundsLeft;
-    const result = await this.host.handleSendSessionPrompt(args, this.sessionId, roundsLeft, {
+    const result = await this.host.handleSendSessionPrompt(args, this.sessionId, spent.roundsLeft, {
       sessionId: this.sessionId,
       nodeId: node.id,
     });
     if (result.startsWith('Error:')) {
-      node.roundsAllowance = before;
+      this.refundExchangeRound(node, spent.previous);
     }
     return result;
+  }
+
+  /**
+   * Spend **one round** of the inter-session exchange on `node`, and answer how many the
+   * receiver inherits. This is the one arithmetic both agent-written prompts share:
+   * `send_session_prompt`, which declares its budget, and `create_session`'s first
+   * message, which does not (so it comes off the ceiling).
+   *
+   * `min()` never raises, so a session can use less than it was handed and never buys
+   * more; the ceiling is `spinney.sessionMaxRounds`, read live; and the only reset is a
+   * human's own message on that line. A node with nothing left is refused here rather
+   * than at the provider, because the budget belongs to the caller's line.
+   */
+  private spendExchangeRound(
+    node: TreeNode,
+    declared?: number,
+  ): { ok: true; roundsLeft: number; previous: number | undefined } | { ok: false; error: string } {
+    const cap = sessionMaxRounds();
+    const inherited = typeof node.roundsAllowance === 'number' ? node.roundsAllowance : undefined;
+    if (inherited !== undefined && inherited <= 0) {
+      return {
+        ok: false,
+        error:
+          "Error: this line's exchange allowance is used up (no rounds left; the ceiling is " +
+          `${cap} per exchange since the last human message), so nothing was sent. ` +
+          'Report back to your user (or wait for a human message on this line) instead of sending it from another session.',
+      };
+    }
+    const effective = Math.min(declared ?? (inherited ?? cap), inherited ?? cap, cap);
+    const previous = node.roundsAllowance;
+    node.roundsAllowance = effective - 1;
+    return { ok: true, roundsLeft: effective - 1, previous };
+  }
+
+  /**
+   * Give a spent round back. A refusal costs the sender nothing: a busy target, a
+   * torn-down window or a bad `session_id` must not eat into the budget that is what
+   * stops two agents answering each other unattended.
+   */
+  private refundExchangeRound(node: TreeNode, previous: number | undefined): void {
+    node.roundsAllowance = previous;
   }
 
   /** `wait_for_session_idle` tool: the provider holds every session's live runs. */

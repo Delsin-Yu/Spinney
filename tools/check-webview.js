@@ -4456,6 +4456,96 @@ if (contextLabel !== 'ctx 50%') {
         problems.push(`a sub-agent row reads ${JSON.stringify(id && textOf(id))}, expected the short id "#123456"`);
       }
     }
+    // A session prompt's two halves live on opposite sides of the call: the session and
+    // the text it was handed are in the arguments, the remaining exchange budget is in
+    // the result. Both belong on the card, the budget also on the folded row (it is the
+    // one number that says whether this line can still answer), and the JSON receipt is
+    // read into facts — it is never the answer a reader is shown.
+    {
+      const args = JSON.stringify({ session_id: 'mwfcuwfm1fdvo3', prompt: '第一轮：链路通了吗？\n第二行不该单独成标签', max_rounds: 5 });
+      const row = endRow(
+        10,
+        'rows-session',
+        'send_session_prompt',
+        args,
+        JSON.stringify({
+          state: 'delivered',
+          target: { session_id: 'mwfcuwfm1fdvo3', node_id: 'mwfcv2en36k18r' },
+          how: 'turn',
+          rounds_left: 3,
+        }),
+      );
+      const label = row ? findByClass(row, 'tool-label') : null;
+      if (!label || textOf(label) !== '#mwfcuwfm1fdvo3') {
+        problems.push(
+          `a session prompt's row reads ${JSON.stringify(label && textOf(label))}, expected the target's id — ` +
+            '"Prompted a session" with nothing after it says nothing about which conversation moved',
+        );
+      }
+      const chip = row ? findByClass(row, 'tool-rounds') : null;
+      if (!chip || textOf(chip) !== '3 rounds left') {
+        problems.push(
+          `a session prompt's row reads the budget as ${JSON.stringify(chip && textOf(chip))}, expected "3 rounds left"`,
+        );
+      }
+      const view = row ? findByClass(row, 'session-view') : null;
+      if (!view) {
+        problems.push('a send_session_prompt row renders no .session-view');
+      } else {
+        const target = findByClass(view, 'session-target');
+        if (!target || textOf(target) !== '#mwfcuwfm1fdvo3') {
+          problems.push(
+            `a session prompt's viewer names ${JSON.stringify(target && textOf(target))}, expected the target's id`,
+          );
+        }
+        const sent = findByClass(view, 'session-prompt');
+        if (!sent || textOf(sent).indexOf('链路通了吗') < 0) {
+          problems.push('a session prompt viewer does not show the text it sent — that text is the point of the card');
+        }
+        const whole = textOf(view);
+        if (whole.indexOf('rounds_left') >= 0 || whole.indexOf('"state"') >= 0) {
+          problems.push('a session prompt viewer prints its JSON receipt — a receipt is read into facts, never shown');
+        }
+      }
+    }
+    {
+      // `create_session` answers in words, so the new session's id and the budget are read
+      // out of the sentence — and the sentence itself stays, unlike a receipt.
+      const args = JSON.stringify({ session_name: '闲聊搭档', session_initial_prompt: '先自我介绍一下。' });
+      const row = endRow(
+        11,
+        'rows-create',
+        'create_session',
+        args,
+        'Started session mwfcuwfm1fdvo3 "闲聊搭档". Its first turn is already running — this call did not ' +
+          'wait for it, opened no tab, and did not move this conversation\'s view.\n' +
+          'Its first line has 4 rounds left for the exchange: this call spent one round of this line\'s own ' +
+          'allowance, so a session an agent opens never starts with a fresh budget.\n' +
+          'Nothing comes back on its own: that session cannot see this conversation and is not told to answer you.',
+      );
+      const view = row ? findByClass(row, 'session-view') : null;
+      if (!view) {
+        problems.push('a create_session row renders no .session-view');
+      } else {
+        const target = findByClass(view, 'session-target');
+        if (!target || textOf(target) !== '#mwfcuwfm1fdvo3') {
+          problems.push(
+            `a created session's card reads ${JSON.stringify(target && textOf(target))}, ` +
+              "expected the new session's id out of the result sentence",
+          );
+        }
+        const rounds = findByClass(view, 'session-rounds');
+        if (!rounds || textOf(rounds) !== '4 rounds left') {
+          problems.push(
+            `a created session's card reads the budget as ${JSON.stringify(rounds && textOf(rounds))}, ` +
+              'expected "4 rounds left"',
+          );
+        }
+        if (!findByClass(view, 'note-view')) {
+          problems.push("a create_session card lost the tool's own sentence — its answer is words, not a receipt");
+        }
+      }
+    }
     {
       // An image row asks the host for the pixels once, and the answer is what draws them.
       // The viewer is about that call's image, so the request must name the file, the box

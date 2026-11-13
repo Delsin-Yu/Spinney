@@ -1671,6 +1671,88 @@ button.icon-btn {
   -webkit-user-select: text;
 }
 
+/* A session tool's card: the conversation it addressed, the exchange budget it has left,
+   and the text it sent — in the same boxed shape as the hits / document / agents viewers
+   (a header bar on `--bg2`, a body on `--tool-bg`), because that shape is what tells a
+   reader "this detail is a tool's answer" anywhere in the app. The budget sits at the right
+   end of the bar, where the elapsed chip sits on the row above it: they are the two numbers
+   about one call. */
+.session-view {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--tool-bg);
+  overflow: hidden;
+  font-size: 11px;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
+.session-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  padding: 3px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg2);
+  font-size: 10px;
+  color: var(--text-dim);
+}
+
+/* The name a `create_session` was given, then the id: the two strings that say *which*
+   conversation this call moved. The id is the bright one, in the monospace an id reads
+   best in — the treatment `.doc-url` gives a URL. */
+.session-title,
+.session-target {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.session-title {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.session-target {
+  font-family: "Consolas", "Courier New", monospace;
+  color: var(--text);
+}
+
+.session-rounds {
+  margin-left: auto;
+  padding: 0 4px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-family: "Consolas", "Courier New", monospace;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.session-body {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 6px 8px;
+}
+
+/* The text the call sent. It is a quote, not the card's own voice: a hairline bar on the
+   left, the dim body colour, and a cap so a prompt of two hundred lines does not turn the
+   card into a wall (the same 280px cap the document and search viewers use). */
+.session-prompt {
+  max-height: 280px;
+  overflow: auto;
+  scrollbar-gutter: stable;
+  padding-left: 8px;
+  border-left: 2px solid var(--border);
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-word;
+  user-select: text;
+  -webkit-user-select: text;
+}
+
 .tool-error {
   margin-top: 4px;
   color: var(--error-text);
@@ -1879,6 +1961,18 @@ button.icon-btn {
 
 .tool-diff-del {
   color: var(--diff-del-text);
+}
+
+/* A session prompt's remaining exchange budget (`3 rounds left`), in the same small
+   monospace numbers as the two chips beside it: it is a count about a call, not words
+   about it, and it must not grow the row (so it never wraps). */
+.tool-rounds {
+  flex: 0 0 auto;
+  font-size: 10px;
+  font-family: "Consolas", "Courier New", monospace;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-dim);
+  white-space: nowrap;
 }
 
 /* `Delivered` badge (D1): this sidecar's completion signal already reached the

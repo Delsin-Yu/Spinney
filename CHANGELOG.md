@@ -83,6 +83,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`spinney.streamAnimation`** turns the streaming animation off or on (the default is on):
   new characters fade in and new rows fade in and move up, and every character is drawn at
   once when it is off. The reduced-motion setting of the operating system also turns it off.
+- **A session tool call has a card of its own.** The four session tools used to open onto their
+  raw result, and a `send_session_prompt` row read `Prompted a session` with no target and
+  opened the JSON receipt. The row now names the session it addressed (`#id`, or the title for
+  `create_session`) and carries the remaining exchange budget as a chip, and the card shows the
+  target, the rounds left and **the text that was sent** — while the receipt is read into those
+  facts instead of being printed. `rename_session` keeps the plain-sentence card.
 
 ### Changed
 
@@ -126,6 +132,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A session an agent opened no longer starts with a fresh exchange budget.** `create_session`
+  carried the caller as `from` but no rounds, so its first node had no `roundsAllowance` and the
+  prompt path's `inherited ?? cap` read that as "take the ceiling": an agent with 4 rounds left
+  could open a session with 16, which is the brake refilled by opening sessions instead of
+  continuing a line. Both agent-written prompts now share one arithmetic
+  (`spendExchangeRound` / `refundExchangeRound`): `create_session` spends a round of the
+  caller's allowance (its ceiling-bound share, since the tool declares no budget) and the new
+  session's first line inherits the rest, so its machine line says `rounds left n` like any
+  other prompt. A line with nothing left can no longer create a session either, and a refused
+  prompt never costs a round.
 - **A dismissed dock row no longer silences a later job.** Dismissals are stored per
   `(sessionId, taskId)` and survive a reload, while the task id counter lives in memory and
   restarts at 1: a job that reused a dismissed id was dropped from the dock for good. A

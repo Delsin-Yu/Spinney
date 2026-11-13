@@ -25,7 +25,8 @@
   | `image` | `read_image` | the region the call sent (`rect` clipped by CSS), a click opens the source file; the host answers `imageUrl` with a data URL and the file's mtime, and a file rewritten after the call is flagged. A **whole** image is centred in its box (`plain`); a clipped one never is, because there the box **is** the crop and the picture is offset by the region's origin. The request carries the **call's own path**, which is usually workspace-relative, so the host resolves it (`resolvePath`) before reading — the same rule a jump follows, and the reason a relative read shows pixels instead of "could not be read". The **geometry** of that clip (the box is `rect`'s size, the picture is pushed by `rect`'s origin), both mtime verdicts and the `plain` class are pinned in `check:webview`; the host side (the data URL, the mtime, the cap, a directory, an empty path, a missing file, a relative path) is `check:dock`'s; the real crop (`overflow: hidden`) and the downscaled pixels need a window |
   | `agents` | `spawn_*`, `send_*` | one block per sub-agent, its final answer rendered as Markdown |
   | `count` | `list_nodes`, `list_sessions` | one sentence: `Checked N nodes in <session> (id)` |
-  | `note` | `create_session`, `send_session_prompt`, `wait_for_session_idle`, `interrupt_session`, `rename_session` | the tool's own sentence |
+  | `session` | `create_session`, `send_session_prompt`, `wait_for_session_idle`, `interrupt_session` | the target session (the id it addressed, or the one a `create_session` made, read out of the result sentence), the rounds left, and the text the call sent. `send_session_prompt` answers with a **JSON receipt**, so it is read into those facts and never printed; the other three answer in words and their sentence stays. The rounds are also a chip on the folded row (`syncSessionRounds`, left of the elapsed chip like the diff), because the budget is the one fact a reader needs before opening anything |
+  | `note` | `rename_session` | the tool's own sentence |
 
 - **The arguments are one line of plain words, never JSON.** `TOOL_ARG_SUMMARY` has a line per
   tool (`pattern "x" · src/ · glob *.ts`, `npm test`, `#3`); an unknown tool falls back to
@@ -74,6 +75,6 @@
   `paintToolDetail`, `tuckReasoningIntoRun`, `addBackgroundNotice`, and the one place a `jump`
   is wired (each viewer posts its own `openFile`).
 - `media/style.css`: the `.code-*` / `.diff-*` / `.term-*` / `.entries-*` / `.hits-*` /
-  `.results-*` / `.doc-*` / `.agents-*` / `.image-*` / `.notice-line` blocks, one per kind.
+  `.results-*` / `.doc-*` / `.agents-*` / `.image-*` / `.session-*` / `.notice-line` blocks, one per kind.
 - `tools/check-webview.js`: one real sample per kind, plus the repaint pass that must produce
   the same rows the live stream did.

@@ -3293,7 +3293,12 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    * the new session id, and it says how the caller hears back (`send_session_prompt`
    * with this session's id from the child's own prompt, or `list_nodes`).
    */
-  async handleCreateSession(rt: SessionRuntime, node: TreeNode, args: Record<string, unknown>): Promise<string> {
+  async handleCreateSession(
+    rt: SessionRuntime,
+    node: TreeNode,
+    args: Record<string, unknown>,
+    rounds?: number,
+  ): Promise<string> {
     const name = typeof args.session_name === 'string' ? args.session_name.trim() : '';
     const prompt = typeof args.session_initial_prompt === 'string' ? args.session_initial_prompt.trim() : '';
     if (!name) {
@@ -3312,6 +3317,9 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       // The first turn of a session this agent asked for is the agent's own line:
       // `lastFrom` is what lets `interrupt_session` end it later.
       from: { sessionId: rt.session.id, nodeId: node.id },
+      // And it carries an agent's budget, not a fresh one: the caller spent a round of its
+      // own allowance for this message, and the child starts with what is left.
+      rounds,
     });
     if (!created.ok || !created.sessionId) {
       return `Error: the session could not be created: ${created.error ?? 'unknown reason'}.`;
@@ -3329,6 +3337,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     );
     return [
       `Started session ${created.sessionId} "${session ? session.title : name}". Its first turn is already running — this call did not wait for it, opened no tab, and did not move this conversation's view.`,
+      `Its first line has ${rounds ?? 0} rounds left for the exchange: this call spent one round of this line's own allowance, so a session an agent opens never starts with a fresh budget.`,
       `Nothing comes back on its own: that session cannot see this conversation and is not told to answer you. To hear back, have it report — \`send_session_prompt\` with session_id ${rt.session.id} from its own prompt. The session id is the whole address, so nothing about this node has to be carried across: check on it with list_nodes (session_id ${created.sessionId}) or list_sessions.`,
     ].join('\n');
   }
@@ -4987,6 +4996,12 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
      * human door.
      */
     from?: { sessionId: string; nodeId: string };
+    /**
+     * The rounds its **first** line inherits — the exchange budget the caller had left
+     * after spending one on this message. Omitted by the human doors (the composer, the
+     * control plane), because a message a person writes starts a fresh allowance.
+     */
+    rounds?: number;
   }): Promise<ControlResult> {
     const open = opts.open !== false;
     const session = this.createSessionInMemory(open);
@@ -5002,7 +5017,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     if (open) {
       this.panels.ensure(session.id);
     }
-    await this.dispatchUserMessage(rt, opts.prompt, [], opts.from);
+    await this.dispatchUserMessage(rt, opts.prompt, [], opts.from, opts.rounds);
     return { ok: true, sessionId: session.id, nodeId: session.activeNodeId, prompted: true };
   }
 
@@ -5491,6 +5506,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     text: string,
     attachments: UserAttachment[],
     from?: { sessionId: string; nodeId: string },
+    rounds?: number,
   ): Promise<void> {
     if (this.isHeld()) {
       rt.postNotice(
@@ -5519,7 +5535,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     // A send is the moment a key matters: nudge once (never block — the request
     // itself reports the real error).
     void this.warnMissingApiKey();
-    await rt.onUserMessage(text, attachments, from ? { from } : undefined);
+    await rt.onUserMessage(text, attachments, from || rounds !== undefined ? { from, rounds } : undefined);
     // The composer holds the text until this point: a refused send must not eat what the
     // user typed (`composerClear`).
     this.postTo(rt.sessionId, { type: 'composerClear' });

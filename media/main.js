@@ -1231,6 +1231,70 @@
     return chip;
   }
 
+  /**
+   * The tools whose result carries the remaining **exchange budget**, i.e. the two that
+   * send something into another session. `wait_for_session_idle` and `interrupt_session`
+   * spend nothing, so they never grow this chip.
+   */
+  const ROUNDS_CHIP_TOOLS = new Set(['send_session_prompt', 'create_session']);
+
+  /**
+   * The JSON receipt `send_session_prompt` answers with, or null when the answer is a
+   * sentence (the other three session tools). A receipt is read into facts and never
+   * printed: `{"state":"delivered",…}` in a card is a debug trace, not an answer.
+   */
+  function sessionReceipt(content) {
+    const text = String(content || '').trim();
+    if (text.charAt(0) !== '{') return null;
+    try {
+      const parsed = JSON.parse(text);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * `3` for `…"rounds_left":3` (a receipt) or for `…3 rounds left…` (a sentence), null when
+   * the answer names no budget. Both shapes are real: `create_session` says it in words.
+   */
+  function roundsLeftOf(content, receipt) {
+    if (receipt && typeof receipt.rounds_left === 'number') return receipt.rounds_left;
+    const m = /(\d+) rounds? left/.exec(String(content || ''));
+    return m ? Number(m[1]) : null;
+  }
+
+  /** The session a `create_session` made, out of `Started session <id> "<title>"`. */
+  function createdSessionId(content) {
+    const m = /Started session (\S+)/.exec(String(content || ''));
+    return m ? m[1] : '';
+  }
+
+  /**
+   * The remaining exchange budget of a session prompt, as one chip in the row's head: the
+   * one number that says whether this line can still answer. It lives only in the result,
+   * so a folded row would otherwise say nothing about it, and the receipt it comes from is
+   * a click away. `beforeEl` keeps it left of the elapsed chip, exactly as `syncDiff` does.
+   */
+  function syncSessionRounds(parent, name, content, beforeEl) {
+    if (!parent) return null;
+    let chip = byClass(parent, 'tool-rounds');
+    const rounds = ROUNDS_CHIP_TOOLS.has(name) ? roundsLeftOf(content, sessionReceipt(content)) : null;
+    if (rounds === null) {
+      if (chip) chip.remove();
+      return null;
+    }
+    if (!chip) {
+      chip = el('span', 'tool-rounds', '');
+      // Only an anchor that really is a child of `parent` may be used (see `syncDiff`).
+      if (beforeEl && beforeEl.parentElement === parent) parent.insertBefore(chip, beforeEl);
+      else parent.appendChild(chip);
+    }
+    chip.textContent = rounds === 1 ? tr('1 round left') : tr('{0} rounds left', String(rounds));
+    chip.title = tr('The exchange budget this line has left');
+    return chip;
+  }
+
   // ---- Markdown ----
   // `linkify` is OFF: it turned a bare `AGENTS.md` (and any `file.ext`, version number or
   // dotted identifier) into a web link, which is wrong far more often than it is right in a
@@ -2801,6 +2865,23 @@
   ]);
 
   /**
+   * The argument that names what a **session** tool acted on, because such a tool has no
+   * path and no command: it has a conversation. Its row's label is that value —
+   * `#sessionId` for everything that addresses an existing session, the quoted title for
+   * the two that name one by hand — so a row never reads `Prompted a session` and then
+   * nothing, which says nothing about which conversation moved.
+   */
+  const SESSION_ARG_KEYS = {
+    create_session: 'session_name',
+    send_session_prompt: 'session_id',
+    wait_for_session_idle: 'session_id',
+    interrupt_session: 'session_id',
+    list_sessions: 'query',
+    list_nodes: 'session_id',
+    rename_session: 'title',
+  };
+
+  /**
    * The bold verb of a tool row. A name no verb knows keeps its own name rather than
    * borrowing another tool's word: an unknown tool is a fact about this build, and a
    * wrong verb would hide it.
@@ -2812,10 +2893,10 @@
 
   /**
    * The argument that identifies this step, in one line: the path for a file tool,
-   * the command for `exec_command`, the pattern/query for a search, else whatever of
-   * `path` / `command` / `cwd` / `url` / `query` the call carries. Unparsable
-   * arguments still yield the path or command a regex can find, because a card is
-   * more useful with a label than with none.
+   * the command for `exec_command`, the pattern/query for a search, the session for a
+   * session tool, else whatever of `path` / `command` / `cwd` / `url` / `query` the call
+   * carries. Unparsable arguments still yield the path or command a regex can find,
+   * because a card is more useful with a label than with none.
    */
   function toolBrief(name, args) {
     if (!args || args === '{}') return '';
@@ -2823,22 +2904,28 @@
     try {
       const obj = JSON.parse(args);
       if (obj && typeof obj === 'object') {
-        const key = ['read_file', 'write_file', 'replace_in_file', 'read_image', 'list_dir'].includes(name)
-          ? 'path'
-          : name === 'exec_command'
-            ? 'command'
-            : ['search_files', 'search_transcripts'].includes(name)
-              ? 'pattern'
-              : name === 'web_search'
-                ? 'query'
-                : name === 'web_fetch'
-                  ? 'url'
-                  : obj.path ? 'path'
-                    : obj.command ? 'command'
-                      : obj.pattern ? 'pattern'
-                        : obj.query ? 'query'
-                          : obj.url ? 'url' : 'cwd';
-        value = obj[key] || obj.path || obj.command || '';
+        const sessionKey = SESSION_ARG_KEYS[name];
+        if (sessionKey) {
+          const raw = obj[sessionKey];
+          value = raw === undefined || raw === null || raw === '' ? '' : sessionKey === 'session_id' ? '#' + raw : '"' + raw + '"';
+        } else {
+          const key = ['read_file', 'write_file', 'replace_in_file', 'read_image', 'list_dir'].includes(name)
+            ? 'path'
+            : name === 'exec_command'
+              ? 'command'
+              : ['search_files', 'search_transcripts'].includes(name)
+                ? 'pattern'
+                : name === 'web_search'
+                  ? 'query'
+                  : name === 'web_fetch'
+                    ? 'url'
+                    : obj.path ? 'path'
+                      : obj.command ? 'command'
+                        : obj.pattern ? 'pattern'
+                          : obj.query ? 'query'
+                            : obj.url ? 'url' : 'cwd';
+          value = obj[key] || obj.path || obj.command || '';
+        }
       }
     } catch {
       const m = String(args).match(/"path"\s*:\s*"((?:[^"\\]|\\.)*)"|"command"\s*:\s*"((?:[^"\\]|\\.)*)"/);
@@ -2906,6 +2993,18 @@
   }
 
   /**
+   * The first line of a piece of prose a call sent — a session prompt, a new session's
+   * opening message — quoted and clipped. It is what the row says while the call runs,
+   * before any result exists to read a fact out of.
+   */
+  function firstLineLabel(text) {
+    const s = String(text === undefined || text === null ? '' : text).trim();
+    if (!s) return '';
+    const line = s.split(/\r?\n/)[0].trim();
+    return '"' + (line.length > 60 ? line.slice(0, 60) : line) + '"';
+  }
+
+  /**
    * One line of plain words per tool, the replacement for `> {json}`. A field the call
    * did not carry contributes nothing, so no line is ever `undefined` or `null`.
    */
@@ -2934,8 +3033,12 @@
     spawn_readonly_agents: (a) => [agentCountLabel(a), 'read-only'],
     send_agent_message: (a) => [a.id ? `#${a.id}` : ''],
     send_readonly_agent_message: (a) => [a.id ? `#${a.id}` : ''],
-    create_session: (a) => [a.session_name ? '"' + a.session_name + '"' : ''],
-    send_session_prompt: (a) => [a.session_id ? '#' + a.session_id : ''],
+    create_session: (a) => [a.session_name ? '"' + a.session_name + '"' : '', firstLineLabel(a.session_initial_prompt)],
+    send_session_prompt: (a) => [
+      a.session_id ? '#' + a.session_id : '',
+      a.max_rounds ? a.max_rounds + ' rounds' : '',
+      firstLineLabel(a.prompt),
+    ],
     wait_for_session_idle: (a) => [
       a.session_id ? '#' + a.session_id : '',
       a.seconds ? a.seconds + 's' : '',
@@ -2992,10 +3095,10 @@
     spawn_readonly_agents: 'agents',
     send_agent_message: 'agents',
     send_readonly_agent_message: 'agents',
-    create_session: 'note',
-    send_session_prompt: 'note',
-    wait_for_session_idle: 'note',
-    interrupt_session: 'note',
+    create_session: 'session',
+    send_session_prompt: 'session',
+    wait_for_session_idle: 'session',
+    interrupt_session: 'session',
     list_sessions: 'count',
     rename_session: 'note',
   };
@@ -3005,7 +3108,7 @@
    * the file, a terminal shows the command, an entry listing the directory): showing the
    * summary line above them would say it twice.
    */
-  const KIND_HIDES_ARGS = new Set(['code', 'diff', 'terminal', 'entries', 'image', 'count', 'note', 'results', 'document', 'agents']);
+  const KIND_HIDES_ARGS = new Set(['code', 'diff', 'terminal', 'entries', 'image', 'count', 'note', 'session', 'results', 'document', 'agents']);
 
   /**
    * The reasoning that immediately precedes a run's **first** tool row belongs inside that
@@ -3750,6 +3853,51 @@
     return el('div', 'note-view', tr('Checked {0} nodes in {1} ({2})', header[3], header[2], header[1]));
   }
 
+  /**
+   * The viewer for the four **session** tools (`create_session`, `send_session_prompt`,
+   * `wait_for_session_idle`, `interrupt_session`).
+   *
+   * They are the only tools whose answer is about another conversation, and the facts a
+   * reader wants are split across the two strings the host stores: *which* session and
+   * *what was sent* are in the arguments, while the outcome and the budget left are in the
+   * result. So the head states the target and the rounds left, the body is the text that
+   * was sent, and the tool's own words stay — unless they are the JSON receipt of a
+   * prompt, which is read into the head's facts and never printed.
+   */
+  function sessionViewer(a, content) {
+    const text = String(content || '');
+    const receipt = sessionReceipt(text);
+    const target = String(
+      a.session_id ||
+        (receipt && receipt.target && receipt.target.session_id) ||
+        createdSessionId(text) ||
+        '',
+    ).trim();
+    const head = el('div', 'session-head');
+    if (a.session_name) head.appendChild(el('span', 'session-title', '"' + a.session_name + '"'));
+    if (target) {
+      const targetEl = el('span', 'session-target', '#' + target);
+      targetEl.title = target;
+      head.appendChild(targetEl);
+    }
+    const rounds = roundsLeftOf(text, receipt);
+    if (rounds !== null) {
+      head.appendChild(
+        el('span', 'session-rounds', rounds === 1 ? tr('1 round left') : tr('{0} rounds left', String(rounds))),
+      );
+    }
+    const view = el('div', 'session-view');
+    if (head.children.length > 0) view.appendChild(head);
+    const body = el('div', 'session-body');
+    // What the call sent: the prompt itself. A prompt is prose, so it wraps.
+    const sent = a.prompt || a.session_initial_prompt || '';
+    if (sent) body.appendChild(el('div', 'session-prompt', String(sent)));
+    // A receipt has already been turned into the head's facts; a sentence is the answer.
+    if (!receipt && text.trim()) body.appendChild(el('div', 'note-view', text));
+    if (body.children.length > 0) view.appendChild(body);
+    return view;
+  }
+
   /** Pending `imageUrl` requests, keyed by the id the host echoes back. */
   const imageRequests = new Map();
   let imageRequestSeq = 0;
@@ -3896,6 +4044,7 @@
     if (kind === 'document') return documentViewer(content);
     if (kind === 'agents') return agentsViewer(content);
     if (kind === 'count') return countViewer(content);
+    if (kind === 'session') return sessionViewer(a, content);
     if (kind === 'note') return el('div', 'note-view', content);
     return el('pre', 'tool-result', content);
   }
@@ -3959,6 +4108,8 @@
     // streaming its arguments — nothing has started yet, so the row deliberately shows
     // no chip.
     syncElapsed(head, 'tool-elapsed', opts.start, opts.ms);
+    // A session prompt's remaining budget, from the receipt: left of the time, like the diff.
+    syncSessionRounds(head, name, opts.content, byClass(head, 'tool-elapsed'));
     node.appendChild(head);
     const detail = el('div', 'tool-detail hidden');
     paintToolDetail(detail, {
@@ -4181,6 +4332,8 @@
     if (head) syncElapsed(head, 'tool-elapsed', null, ms);
     // Left of the frozen time chip, where the head's design keeps it.
     if (head) syncDiff(head, diff, byClass(head, 'tool-elapsed'));
+    // The result is the only place a session prompt's remaining budget exists.
+    if (head) syncSessionRounds(head, node._name, content, byClass(head, 'tool-elapsed'));
     const detail = node._detailEl || byClass(node, 'tool-detail');
     // The result arrives: the row's detail is painted whole from the settled arguments
     // and the result, exactly as a repaint of the same item would paint it.
