@@ -48,6 +48,17 @@ of commands.
 
 Dismissing it sends nothing, kills nothing and keeps the composer's text.
 
+Then one **second** question, and only when the live setup differs from the chain's frozen one
+(`hasSetupDrift`, `confirmHandoffSetup`): `Keep this window’s setup` inherits the frozen envelope
+of the window being handed over (the provider has that prefix cached), `Use the latest setup`
+freezes the live model and level on the new window (one cache miss). With no drift the two
+answers are the same bytes, so the question is not asked. The answer reaches the runtime as
+`setup: 'current' | 'latest'` — `rolloverContext(nodeId, setup, …)` for Simple,
+`compressAndContinue(nodeId, { setup })` for Agentic, which plants P's envelope (`epochFrom`) or
+freezes fresh (`epochFrom: null, freshEpoch: true`) on R accordingly. Keeping the old setup is
+what leaves the composer's new-epoch entry visible afterwards: it is still offering the other
+answer.
+
 The entry's precondition is `SessionRuntime.windowStartBlocker(nodeId)` — a conversational node
 whose own turn is not streaming and none of whose windows is still being written — and it says
 **nothing about how full the window is**, and **nothing about a child the card already has**:

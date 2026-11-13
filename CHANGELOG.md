@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The new window is asked which setup it continues on.** The new-epoch entry used to plant the
+  frozen envelope of the window being handed over and stop there, so a window whose composer
+  showed a different model kept running on the old one — and the composer's new-epoch entry stayed
+  visible, still offering the answer nobody had been asked. A **second** question now follows the
+  handoff choice (`Which setup does the new window continue on?`): `Keep this window’s setup`
+  inherits the frozen bytes the provider already cached, `Use the latest setup` freezes the live
+  model and level on the new window at the price of one cache miss. It is asked only when the two
+  differ, because otherwise both answers are the same bytes. Both handoffs take the answer
+  (`rolloverContext(nodeId, setup, …)`, `compressAndContinue(nodeId, { setup })`).
 - **A compression node between two context windows.** The composer's new-epoch entry (and the
   Send button's own right-click) now asks one question with two answers: `Simple` is the
   pointer rollover, unchanged and free; `Agentic` runs a real turn — a **compression node** —

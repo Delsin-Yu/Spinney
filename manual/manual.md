@@ -524,7 +524,7 @@ The question has two answers.
 - **Simple** costs no extra request. The new window is pointed at the record of the old window, and the agent reads that record when it needs a detail. The list of the handoff holds the first request of the old window, your last request, the files that the window changed, and the work that was stopped.
 - **Agentic** runs one more turn first. A **compression node** (`CMP`) reads the window that ends. It reads the transcript on disk, the workspace, and the files that the window changed. It writes one short brief: the objective, your standing instructions, the facts, the changes, the checks, the dead ends, and the remaining plan. The new window starts from that brief.
 
-A compression node cannot change anything. It can read files, list folders, search files and search transcripts. Its card has no input box. While it runs, its card carries its own Stop.
+A compression node cannot change anything. It can read files, list folders, search files and search transcripts. Its card has no input box. While it runs, its card carries its own Stop. When the two setups differ, a second question asks which setup the new window continues on. `Keep this window’s setup` inherits the frozen setup of the conversation, which the provider has already cached. `Use the latest setup` freezes the current model and thinking level instead, so its first request misses the cache. With the same setup on both sides, Spinney does not ask.
 
 You can start several windows from the same card. Each attempt is a new branch below it, so you can keep both and compare them: one `Simple` and one `Agentic`, for example. While an attempt still runs, wait for it to finish, then start the next one.
 

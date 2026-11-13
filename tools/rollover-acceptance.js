@@ -484,6 +484,33 @@ const HANDFF = C.COMPRESS_SECTIONS.map((heading) => `## ${heading}\n- a fact`).j
     }
   }
 
+  console.log('-- the second question: the window may continue on the latest setup --');
+  {
+    // The default (`current`) plants a *copy* of P's envelope: same bytes, same freeze time, a new
+    // identity. `latest` freezes the live setup instead — a new envelope, frozen now — which is
+    // the answer to "stop sending this conversation on the old model", at one cache miss.
+    answerText = HANDFF;
+    requests.length = 0;
+    const s = makeSession();
+    const { rt: crt } = makeRuntime(s);
+    const pEpoch = s.nodes.root.epoch;
+    await crt.compressAndContinue('p0');
+    const inherited = Object.values(s.nodes).find((n) => n.role === 'resume');
+    ok(
+      'by default the window inherits the frozen envelope of the window it continues',
+      !!inherited && !!inherited.epoch && inherited.epoch.frozenAt === pEpoch.frozenAt,
+      inherited && inherited.epoch ? `${inherited.epoch.frozenAt} vs ${pEpoch.frozenAt}` : 'no envelope',
+    );
+    const s2 = makeSession();
+    const { rt: rt2 } = makeRuntime(s2);
+    const p2 = s2.nodes.root.epoch;
+    await rt2.compressAndContinue('p0', { setup: 'latest' });
+    const fresh = Object.values(s2.nodes).find((n) => n.role === 'resume');
+    ok('with `latest` the window freezes a new envelope', !!fresh && !!fresh.epoch && fresh.epoch.frozenAt !== p2.frozenAt);
+    ok('  … of the main kind (never the compression template)', !!fresh && !!fresh.epoch && fresh.epoch.kind !== 'compress');
+    ok('  … and its first request sends it', !!fresh && !!fresh.epoch && String(fresh.epoch.prompt).length > 0);
+  }
+
   console.log('-- two attempts from the same card: compare the two handoffs --');
   {
     answerText = HANDFF;

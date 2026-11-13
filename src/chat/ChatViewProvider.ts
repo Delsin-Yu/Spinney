@@ -5765,6 +5765,15 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     if (!choice) {
       return;
     }
+    // **Second question**: which setup does the window continue on? The chain's frozen envelope
+    // is what the conversation was written in, and the live one is what the composer shows now;
+    // inheriting keeps the provider's cached prefix, freezing the live one costs that cache but
+    // stops the composer from asking about it afterwards. Only asked when the two differ — with
+    // no drift the answer would be the same bytes twice.
+    const setup = await this.confirmHandoffSetup(rt);
+    if (!setup) {
+      return;
+    }
     // Re-validated after the question: a turn may have finished, or a child appeared, while
     // it was open — and acting on an answer given for another state is the bug this check
     // exists for.
@@ -5788,14 +5797,14 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         return;
       }
     }
-    // The new window inherits the checked-out chain's frozen epoch: the question this entry
-    // asks is about the *window*, not about the setup, and a window that inherits keeps the
-    // bytes the conversation was already written in.
+    // The new window inherits the checked-out chain's frozen epoch unless the user asked for the
+    // live setup, in which case it freezes that one: the question this entry asked is about the
+    // *window*, and the second question answered where its bytes come from.
     if (choice === 'agentic') {
       // The chain runs on after this method returns: the compression turn, then the window.
       // The composer is cleared only when the handoff was really delivered — a compression
       // the user stops must not eat the text they typed.
-      void rt.compressAndContinue(nodeId, { text }).then((delivered) => {
+      void rt.compressAndContinue(nodeId, { text, setup }).then((delivered) => {
         if (delivered) {
           this.postTo(rt.sessionId, { type: 'composerClear' });
         }
@@ -5804,7 +5813,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     }
     // `force`: the user answered this question about this node, and a window that still has
     // room is a legitimate moment to move on (the right-click entry has no fill condition).
-    const started = await rt.rolloverContext(nodeId, 'current', { text, force: true });
+    const started = await rt.rolloverContext(nodeId, setup, { text, force: true });
     if (!started) {
       rt.postNotice(
         'warning',
@@ -5876,6 +5885,44 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     return vscode.l10n.t(
       'Could not continue in a new context here — wait for the running turn to finish and try again.',
     );
+  }
+
+  /**
+   * The **second** question of the new-epoch entry: which setup the window continues on
+   * (`docs/agents/invariants/compress-node.md` §1).
+   *
+   *  - `current` — inherit the frozen envelope of the window being handed over. The provider has
+   *    this prefix in its cache, and the conversation keeps the bytes it was written in. This is
+   *    the default, and the one a full window has to take when the live setup is the thing that
+   *    did not fit.
+   *  - `latest` — freeze the live setup on the new window. The user's dropdowns are what the next
+   *    request runs on, at the price of one cache miss (`api-retries.md`).
+   *
+   * Asked **only when the two disagree**: with no drift, "inherit" and "freeze" produce the same
+   * bytes, and a modal that cannot change the outcome is noise. A dismissed question returns
+   * `null`, which the caller treats as "nothing happens".
+   */
+  private async confirmHandoffSetup(rt: SessionRuntime): Promise<'current' | 'latest' | null> {
+    if (!rt.hasSetupDrift()) {
+      return 'current';
+    }
+    const keep = vscode.l10n.t('Keep this window’s setup');
+    const latest = vscode.l10n.t('Use the latest setup');
+    const pick = await vscode.window.showWarningMessage(
+      vscode.l10n.t('Which setup does the new window continue on?'),
+      {
+        modal: true,
+        detail: vscode.l10n.t(
+          'The window inherits the frozen setup of the conversation it continues, which is not the setup the composer shows now. Keeping it re-sends bytes the provider has already cached. Using the latest setup freezes the current model and thinking level instead, and its first request misses the cache.',
+        ),
+      },
+      keep,
+      latest,
+    );
+    if (pick === latest) {
+      return 'latest';
+    }
+    return pick === keep ? 'current' : null;
   }
 
   /**

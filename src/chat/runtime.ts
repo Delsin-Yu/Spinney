@@ -1975,6 +1975,16 @@ export class SessionRuntime {
    * user's choice. Keeping the judgement here is what makes "default send always uses the
    * old setup" true by construction instead of by agreement between two code bases.
    */
+  /**
+   * Whether the live setup and the checked-out chain's frozen one disagree (`setupState().drift`).
+   * The new-window entry asks its second question only when they do: with no drift, "inherit the
+   * old envelope" and "freeze the live one" are the same bytes, so a modal could not change the
+   * outcome (`confirmHandoffSetup` in `ChatViewProvider`).
+   */
+  hasSetupDrift(): boolean {
+    return this.setupState().drift !== false;
+  }
+
   private setupState(): {
     node: { cardId: string; cardLabel: string; effort: ThinkingEffort; language: string } | null;
     live: { cardId: string; cardLabel: string; effort: ThinkingEffort; language: string };
@@ -4156,7 +4166,20 @@ export class SessionRuntime {
    * was delivered), `false` when nothing started, when C was stopped, or when C answered
    * nothing.
    */
-  async compressAndContinue(nodeId: string, opts?: { text?: string }): Promise<boolean> {
+  async compressAndContinue(
+    nodeId: string,
+    opts?: {
+      text?: string;
+      /**
+       * Which envelope the produced window sends with (`confirmHandoffSetup`): `'current'`
+       * inherits the compressed window's frozen bytes, `'latest'` freezes the live setup on it.
+       * The compression turn itself always runs on the chain's own card and freezes fresh — it
+       * summarises the window, so it belongs to the old setup's side of the boundary
+       * (`docs/agents/invariants/compress-node.md` §1).
+       */
+      setup?: 'current' | 'latest';
+    },
+  ): Promise<boolean> {
     const node = this.session.nodes[nodeId];
     if (!node || isSidecar(node)) {
       return false;
@@ -4214,7 +4237,7 @@ export class SessionRuntime {
     // The turn's **real** end, not a timer: `finishTurn` resolves this whatever the status,
     // so a Stop is an ordinary outcome here and the chain simply stops.
     await run.settled;
-    return this.deliverCompression(run, handoff, nextWindow, startedAt, opts?.text ?? '');
+    return this.deliverCompression(run, handoff, nextWindow, startedAt, opts?.text ?? '', opts?.setup ?? 'current');
   }
 
   /**
@@ -4237,6 +4260,7 @@ export class SessionRuntime {
     windowNo: number,
     startedAt: number,
     text: string,
+    setup: 'current' | 'latest',
   ): boolean {
     const node = run.node;
     if (this.dead || !this.session.nodes[node.id]) {
@@ -4314,13 +4338,18 @@ export class SessionRuntime {
       usage: handoff.usage,
       summary,
     });
-    // The window below: P's **frozen envelope**, planted on the new node (`epochFrom`), so
-    // nothing of the compression turn's own envelope travels into the conversation.
+    // The window below: the setup the user chose in the second question. `current` plants P's
+    // **frozen envelope** on the new node (`epochFrom`), so nothing of the compression turn's
+    // own envelope travels into the conversation and the provider's prefix stays cacheable;
+    // `latest` freezes the live setup instead, which is the answer to "stop sending me this
+    // conversation on the old model" and costs one cache miss (`api-retries.md`).
     const resume = this.beginTurn(vscode.l10n.t('Context window {0}', windowNo), {
       parentId: node.id,
       freshContext: true,
       role: 'resume',
-      epochFrom: previous.id,
+      ...(setup === 'latest'
+        ? { epochFrom: null, freshEpoch: true }
+        : { epochFrom: previous.id }),
     });
     if (!resume) {
       this.setBusy(this.runs.size > 0);
@@ -4337,7 +4366,7 @@ export class SessionRuntime {
     this.host.output.appendLine(
       `[compression] ${previous.id} -> ${node.id} -> ${resume.node.id} ` +
         `(window ${windowNo}, envelope ${resume.node.epoch?.kind ?? 'main'}` +
-        `${fromEpoch ? `, inherited ${fromEpoch.kind ?? 'main'} from ${previous.id}` : ', frozen live'})`,
+        `${fromEpoch && setup !== 'latest' ? `, inherited ${fromEpoch.kind ?? 'main'} from ${previous.id}` : ', frozen from the live setup'})`,
     );
     resume.node.handoff = 'summary';
     resume.node.handoffSummary = summary;

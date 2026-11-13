@@ -250,19 +250,28 @@ Then one modal, whose text depends on the backend (`confirmCompression` / `confi
 | drift | `Continue with the new workspace or model configuration?` | `The conversation history (about {0} tokens for the current model) will be sent to the provider under the new configuration. This request will miss the provider’s cache.` — `{0}` is `chainPromptTokensLive()` | `Continue` |
 
 VS Code adds its own Cancel. Dismissing sends nothing, kills nothing and keeps the input
-box. The context answer is re-validated after the question (`canCompress(nodeId)` again): a
+box. When the live setup and the chain's frozen one differ, one **second** question follows
+(`Which setup does the new window continue on?`, `confirmHandoffSetup`): keep the frozen setup of
+the conversation, or freeze the live one on the new window (`compress-node.md` §1). With no drift
+it is not asked, because both answers would be the same bytes. The context answer is
+re-validated after the questions (`canCompress(nodeId)` again): a
 turn may have finished, or a child appeared, while the modal was open — and acting on an
 answer given for another state is exactly the bug the check prevents; it posts a notice and
 stops instead. The drift answer re-validates its own trigger (`newEpochTrigger() !== 'drift'`).
 
-`Simple` maps to `rolloverContext(nodeId, 'current', { text, force: true })` — the pointer
+`Simple` maps to `rolloverContext(nodeId, setup, { text, force: true })` — the pointer
 shape of §6, with `force` relaxing the 90 % condition (the user answered `Simple` for *this*
-node). The new window **inherits** the parent's frozen epoch: the question this entry asks is
-about the *window*, not about the setup, so a window that inherits keeps the bytes the
-conversation was already written in; acting on a drift stays available afterwards, and that is
-what the fork backend is for. `Agentic` maps to `compressAndContinue(nodeId, { text })` — the
+node). `Agentic` maps to `compressAndContinue(nodeId, { text, setup })` — the
 compression chain of `compress-node.md`, which records the handoff on the window it produces
 (`TreeNode.handoff = 'summary'`, `TreeNode.handoffSummary`).
+
+`setup` is the answer to the entry's **second** question (`confirmHandoffSetup`), asked after the
+handoff and only when the live setup differs from the chain's frozen one: `'current'` inherits the
+parent's frozen epoch — the question this entry asks is about the *window*, so a window that
+inherits keeps the bytes the conversation was already written in (and the composer's new-epoch
+entry stays visible, still offering the other answer) — while `'latest'` freezes the live model
+and level on the new window, at one cache miss. With no drift the two answers are the same
+bytes, so no second question is asked.
 
 Killing running work is asked about **separately** and in both answers
 (`confirmKillBackgrounds`, §7): a rollover stops a node's background terminals and sub-agents,
