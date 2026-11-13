@@ -3421,13 +3421,18 @@ if (contextLabel !== 'ctx 50%') {
     problems.push('the stranded-tool fact of an in-place continue is not rendered in the continued node');
   } else {
     if (!findByClass(harnessBlock, 'harness-badge')) {
-      problems.push('a harness continue message carries no HARNESS badge');
+      problems.push('a harness continue message carries no label');
     }
-    const harnessText = findByClass(harnessBlock, 'harness-text');
-    if (!harnessText || String(harnessText.textContent) !== HARNESS_FACT_TEXT) {
+    // The row, not a panel: what is on screen while it is closed is the label and the start
+    // of the text. The `[Harness]` title line is the label in another language, so the row
+    // does not repeat it (the body, one click away, keeps the exact bytes).
+    const closedText = findByClass(harnessBlock, 'harness-preview');
+    if (!closedText) {
+      problems.push('the harness continue block has no row (no `.harness-preview`)');
+    } else if (String(closedText.textContent).indexOf('cut off and did not finish') < 0) {
       problems.push(
-        `the harness continue block shows ${JSON.stringify(harnessText && harnessText.textContent)}, expected the one ` +
-          'fact the engine returned',
+        `the harness continue row shows ${JSON.stringify(closedText.textContent)}, expected the start of the ` +
+          'one fact the engine returned',
       );
     }
   }
@@ -3461,8 +3466,15 @@ if (contextLabel !== 'ctx 50%') {
       if (String(preview.textContent).indexOf('cut off and did not finish') < 0) {
         problems.push(`the row's preview shows ${JSON.stringify(preview.textContent)}, expected the start of the text`);
       }
-      if (String(findByClass(body, 'harness-text').textContent) !== HARNESS_FACT_TEXT) {
-        problems.push('the opened body does not hold the exact text the model received');
+      if (preview.textContent.indexOf('`') >= 0) {
+        problems.push('the row\'s preview kept the markdown markers (it is the plain text of the first line)');
+      }
+      // The body is rendered on the **first open**, never at creation: the two compression
+      // blocks are tens of thousands of characters, and a repaint must not pay to render text
+      // nobody has opened. The sandbox has no markdown-it, so `renderMarkdown` falls back to
+      // escaped text here; the real webview renders the same string through it.
+      if (findByClass(body, 'harness-text')) {
+        problems.push('a closed harness row already rendered its body (the markdown is built on the first open)');
       }
       if (harnessBlock.classList.contains('open')) {
         problems.push('a harness note renders open (it is one row until a click)');
@@ -3474,6 +3486,16 @@ if (contextLabel !== 'ctx 50%') {
         openClick({ stopPropagation() {} });
         if (!harnessBlock.classList.contains('open')) {
           problems.push('a click on the harness row did not open it');
+        } else {
+          const rendered = findByClass(body, 'harness-text');
+          const markup = String((rendered && rendered.innerHTML) || '');
+          if (!rendered) {
+            problems.push('opening a harness row built no body (the message is never rendered)');
+          } else if (markup.indexOf('cut off and did not finish') < 0) {
+            problems.push('the opened body does not hold the message the model received');
+          } else if (!rendered.classList.contains('answer')) {
+            problems.push('the opened body is not rendered as markdown content (no `.answer`)');
+          }
         }
         openClick({ stopPropagation() {} });
         if (harnessBlock.classList.contains('open')) {

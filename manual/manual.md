@@ -534,7 +534,7 @@ The window that a compression produced has no delete button. Delete the compress
 
 The compression node is a normal card in the tree. Click it to read what it did. It shows its own tool lines.
 
-A `HARNESS` block is one line: a blue label and the start of the text. Click the line to read the whole message in a small box that scrolls. Click the line again to close it. The label names the block: `Compression instruction`, `Handoff summary`, `Context handoff` or `Harness note`.
+A `HARNESS` block is one line: a blue label and the start of the text. Click the line to read the whole message in a small box that scrolls. Click the line again to close it. The box shows the Markdown of the message: the headings, the lists and the code read as such. Spinney renders the text when you open the box. The label names the block: `Compression instruction`, `Handoff summary`, `Context handoff` or `Harness note`.
 
 ## 11. Settings reference
 

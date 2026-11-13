@@ -128,7 +128,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   card. Each is now one line: a blue label taken from the text's own title line
   (`Compression instruction`, `Handoff summary`, `Context handoff`, `Harness note`), the start
   of the text in italic, and a click that opens the whole message in a 240 px scroller of its
-  own. The card's text is never cut, and a second click closes it.
+  own. The opened text is **Markdown** (headings, lists, code and quotes read as such), and it
+  is rendered on the first open rather than at creation: a repaint must not pay to render tens
+  of thousands of characters nobody has asked to read. The card's text is never cut, and a
+  second click closes it.
 - **The compression node is a card of its own.** It wears `CMP` instead of `CTX`, has no
   composer, and carries its own ⏹ Stop while it runs (there is no input dock to host the
   composer's). Once it has produced its window it is sealed: no ▶ Continue, and the host

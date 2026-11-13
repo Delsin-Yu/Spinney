@@ -2410,13 +2410,24 @@
 
   /**
    * The line that stands for the block while it is closed: the first text the block actually
-   * carries, with its title line removed (the label already says it) and blank lines skipped.
+   * carries, with its title line removed (the label already says it), blank lines skipped and
+   * the markdown markers taken off — `## Objective` reads as `Objective` on the row, and the
+   * formatted heading is one click away.
    */
   function harnessPreviewOf(text, title) {
     const rest = title ? String(text || '').slice(title.length) : String(text || '');
     for (const line of rest.split('\n')) {
       const trimmed = line.trim();
-      if (trimmed) return trimmed;
+      if (trimmed) {
+        return trimmed
+          .replace(/^#{1,6}\s+/, '')
+          .replace(/^[-*+]\s+/, '')
+          .replace(/^\d+\.\s+/, '')
+          .replace(/^>\s+/, '')
+          .replace(/`([^`]*)`/g, '$1')
+          .replace(/\*\*([^*]+)\*\*/g, '$1')
+          .trim();
+      }
     }
     return '';
   }
@@ -2426,8 +2437,11 @@
    * which resumes the node in place instead of growing a new card
    * (`SessionRuntime.continueFrom`), and the two blocks of a compression
    * (`docs/agents/invariants/compress-node.md`). It is a row, not a user bubble (the user
-   * did not type it) and not the pinned prompt (that still holds what the user asked for);
-   * the row and its body show the exact text the model received.
+   * did not type it) and not the pinned prompt (that still holds what the user asked for).
+   *
+   * The body is **markdown** and it is rendered on the first open, never at creation: the two
+   * compression blocks are tens of thousands of characters, and a repaint must not pay for
+   * rendering text nobody has asked to read.
    */
   function addHarnessNote(text) {
     if (!messagesEl) return;
@@ -2440,11 +2454,19 @@
     head.appendChild(el('span', 'harness-badge', label));
     head.appendChild(el('span', 'harness-preview', harnessPreviewOf(text, title)));
     const body = el('div', 'harness-body');
-    body.appendChild(el('span', 'harness-text', text));
+    let filled = false;
+    const fillBody = () => {
+      if (filled) return;
+      filled = true;
+      const rendered = el('div', 'answer harness-text');
+      rendered.innerHTML = renderMarkdown(text);
+      body.appendChild(rendered);
+    };
     node.appendChild(head);
     node.appendChild(body);
     node.title = tr('Click to read the whole message the harness wrote');
     const setOpen = (open) => {
+      if (open) fillBody();
       node.classList.toggle('open', open);
       chev.classList.toggle('open', open);
     };

@@ -3005,19 +3005,28 @@ button.icon-btn {
 }
 
 /* The opened message: a small scroller of its own, the same 240 px cap an open thinking row
-   uses, so neither of the two things that open inside a turn can push the answer away. */
+   uses, so neither of the two things that open inside a turn can push the answer away. The
+   body is **markdown** (`.answer` carries the typography) and it is a block flow, so no
+   `pre-wrap` and no reserved scrollbar gutter: a permanent gutter was a blank column down the
+   right of a box whose content usually fits, and the width the text has is the width the box
+   has. */
 .msg.harness-note.open .harness-body {
   display: block;
   margin: 0 0 4px 2px;
-  padding: 5px 8px;
+  padding: 4px 6px;
   max-height: 240px;
   overflow: auto;
-  scrollbar-gutter: stable;
-  white-space: pre-wrap;
   word-break: break-word;
   background: var(--bg2);
   border: 1px dashed var(--border);
   border-radius: 6px;
+}
+
+/* The rendered body reads at the answer's size, one notch above the row's 11 px: it is a
+   document when it is open, not a label. */
+.msg.harness-note .harness-body .answer {
+  font-size: 12px;
+  line-height: 1.5;
 }
 
 /* ▶ Continue / ↻ Retry: the per-card "run it again for me" button. Only rendered
