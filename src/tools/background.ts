@@ -164,12 +164,22 @@ export interface CommandHandle {
  * floods output past `OUTPUT_CAP` is killed so it cannot balloon memory; when
  * false (background behavior), the output is truncated/dropped but the process
  * keeps running — it must keep draining the pipe or the child would block.
+ *
+ * `opts.env` is **added on top of** the shell's own environment, never instead of
+ * it: a child must keep `PATH`, `COMSPEC` and whatever else the detected shell
+ * needs, and the tool only ever contributes namespaced identities
+ * (`SPINNEY_SESSION_ID`, `SPINNEY_NODE_ID`, `SPINNEY_DISCOVERY_FILE`). A caller
+ * that passes nothing gets exactly the shell's environment, as before.
  */
-export function spawnShellCommand(command: string, cwd: string, opts: { killOnTruncate: boolean }): CommandHandle {
+export function spawnShellCommand(
+  command: string,
+  cwd: string,
+  opts: { killOnTruncate: boolean; env?: Record<string, string> },
+): CommandHandle {
   const shell = getShell();
   const child = spawn(shell.file, shell.buildArgs(command), {
     cwd,
-    env: shell.env,
+    env: { ...shell.env, ...(opts.env ?? {}) },
     windowsHide: true,
     // POSIX: lead a new process group so killChildProcess can signal the whole
     // tree (`process.kill(-pid)`). Windows uses taskkill /T instead.

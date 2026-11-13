@@ -146,8 +146,10 @@
   outside the Extension Host).
 - `src/http/controlServer.ts` — the opt-in local HTTP control plane
   (`/health`, `/state`, `/wait-for-finish`, `/navigate`, `/continue`, `/stop`,
-  `/session/start`, `/reload-window`); token + discovery file, loopback only. See
-  "External control plane & the `hvsc` supervisor".
+  `/session/start`, `/reload-window` — immediate, or deferred to the window's own
+  idle moment with `{idle:true}`); token + discovery file, loopback only.
+  `controlEnv()` is what a command receives (instance id + discovery path, never the
+  token). See "External control plane & the deferred reload".
 - `src/manual.ts` — the shipped **user manual**: `manualFileNames()` /
   `canonicalLocale()` (which page a display language picks, through
   `languageTags.ts`) and `showManual()` (`spinney.showManual` reads the page with
@@ -162,8 +164,12 @@
 - `docs/agents/multi-session.md` — the frozen multi-session / multi-branch contract
   (P1–P4): view-focus vs turn-basis, the host⇄webview protocol, the tools-side
   `BackgroundHub` API, and the acceptance evidence.
-- `tools/hyper-vscode/` — the `hvsc` supervisor (CLI + daemon + `serve.ps1`),
-  **not** shipped in the `.vsix`.
+- `tools/reload-window.mjs` — the one-shot **deferred reload** script an agent runs
+  as an ordinary `exec_command` (`node tools/reload-window.mjs --message "…"`): it
+  posts `POST /reload-window {idle:true, continue}` with the node id and session id
+  it read from its own environment and exits; the window reloads itself when idle.
+  No dependencies, no daemon, no state — and no fallback when the environment does
+  not name a window. Dev-only, **not** shipped in the `.vsix`.
 - `tools/harness-test.mjs` — the control-plane acceptance harness for P1–P4 (suites
   `health`, `sessions`, `concurrency`, `navigation`, `background`, `signals`,
   `branch`, `selftest`). Dev tooling: `.vscodeignore` excludes `tools/**`, so it is never shipped.

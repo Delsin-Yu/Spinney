@@ -63,12 +63,11 @@ modules have no `ExtensionContext`).
     (previously read once per activation with no listener at all).
   - `transcriptRoot()` resolves a *relative* `spinney.subAgentTranscriptDir`
     against the agent root instead of silently falling back to global storage.
-- **P3 — supervisor** (`tools/hyper-vscode/hvsc.mjs`, `serve.ps1`, its README):
-  `workspace: null` becomes a first-class instance identity (`samePath` treats
-  both-null as a match, `launchCode` can launch `code -n` with no folder,
-  `hvsc start --no-workspace`). Needed to *develop* in no-repo mode; the
-  extension side already publishes an honest `workspace: null` in its discovery
-  file.
+- **P3 — no-folder identity**: a window with no folder open publishes an honest
+  `workspace: null` in its discovery file and is addressable exactly like a folder
+  window — `<globalStorage>/http/<pid-NNN>.json` is the identity, not the folder.
+  The extension side carries all of it; the supervisor that used to launch such
+  windows (and the `code -n` identity matching it needed) is gone.
 - **P4 — docs**: this file (indexed from `AGENTS.md`), `tools.md`,
   `scratch-space.md`, `invariants/system-prompt.md`, `invariants/config-keys.md`,
   `invariants/transcripts.md`, `control-plane.md`, `README.md`.
@@ -103,7 +102,8 @@ modules have no `ExtensionContext`).
 - [x] P1 — prompt (`EnvironmentFacts.{root,rootKind}`, two-line `{{environment}}`)
 - [x] P2 — session/config + workspace changes (`globalState` when no folder,
       `setHarnessStorageDir`, `onDidChangeWorkspaceFolders`, `transcriptRoot()`)
-- [x] P3 — supervisor (`hvsc start --no-workspace`, `workspace: null` matching)
+- [x] P3 — no-folder identity (`workspace: null` in the discovery file, addressed
+      by instance id like any other window)
 - [x] P4 — docs
 
 Verified with a throwaway harness-mocked smoke test

@@ -2,26 +2,32 @@
  * Local HTTP control plane (opt-in, off by default).
  *
  * The extension cannot reload its own window and report back — it dies with the
- * reload. So the external supervisor (`tools/hyper-vscode`, the `hvsc` CLI) owns
- * the process lifecycle and uses this endpoint to:
+ * reload. So a reload is **requested** here and executed by the extension itself
+ * at its own idle moment; the endpoint therefore serves two kinds of caller: a
+ * person at a terminal (or a script), and the agent's own `exec_command`, whose
+ * child process is handed this plane's identity (`controlEnv()` below,
+ * `tools/reload-window.mjs`). The routes are:
  *
  *   1. `GET  /health`          is the new instance up?
  *   2. `GET  /state`           which session/node is checked out, is it busy?
  *   3. `POST /wait-for-finish` block until the agent is idle (and its last write
- *                              is flushed) — the caller then kills the process
+ *                              is flushed)
  *   4. `POST /navigate`        check out a node (and open the panel)
  *   5. `POST /continue`        send a user message that continues from a node
  *   6. `POST /session/start`   create (or jump to) a session and optionally send
  *                              a caller-supplied prompt as its first turn
  *   7. `POST /stop`            cancel a node's run (or every run of a session)
  *   8. `POST /reload-window`   ask VS Code to reload this window (202; the reply
- *                              is observed as a *new* instance on the other side)
+ *                              is observed as a *new* instance on the other side).
+ *                              `idle: true` queues it instead: the window reloads
+ *                              as soon as nothing is running, and `continue` is
+ *                              delivered afterwards by the new instance
  *
  * Bound to 127.0.0.1 and gated by a bearer token generated per process; the
- * port/token are written to `<globalStorage>/http/<instanceId>.json` (0600) so
- * the supervisor can discover them. `SPINNEY_INSTANCE_ID`,
- * `SPINNEY_HTTP_PORT` and `SPINNEY_HTTP_TOKEN` override the
- * discovery identity (the supervisor sets the instance id when it spawns `code`).
+ * port/token are written to `<globalStorage>/http/<instanceId>.json` (0600), the
+ * discovery file — never into a child's environment: `controlEnv()` hands out the
+ * instance id and that file's **path** only. `SPINNEY_INSTANCE_ID`,
+ * `SPINNEY_HTTP_PORT` and `SPINNEY_HTTP_TOKEN` override the discovery identity.
  *
  * `/continue` makes the agent run a caller-supplied instruction, i.e. it is a
  * local-trust RCE boundary: keep `spinney.httpApi.enabled` off unless a
@@ -123,6 +129,12 @@ export interface ControlResult {
   /** `POST /reload-window`: the optional continue was stored and will be sent after
    *  the reload (the caller must not post `/continue` a second time). */
   continueQueued?: boolean;
+  /**
+   * `POST /reload-window {idle:true}`: the reload was **queued**, not performed —
+   * the window reloads when it goes idle and the caller has nothing more to do. The
+   * reply is `{ ok: true, deferred: true, continueQueued: true }`.
+   */
+  deferred?: boolean;
   /** `POST /session/start {returnTo}`: the origin session the answer goes back to. */
   originSessionId?: string;
   /** `POST /stop`: how many agents (one per run) were cancelled. */
@@ -172,18 +184,25 @@ export interface ControlHost {
     mode?: string;
   }): Promise<ControlResult>;
   /**
-   * Reload this window (`workbench.action.reloadWindow`). The only way to restart
-   * an instance that shares the user's profile — the supervisor cannot kill it
-   * without killing every other window of the same main process.
+   * Reload this window (`workbench.action.reloadWindow`). It refuses while anything
+   * is live, so a caller that *is* a turn cannot use the immediate form — that is
+   * what `idle` is for.
    *
    * `continue` is the reload's own message: it is **persisted before the reload** and
-   * delivered by the next instance once this window is idle, so a supervisor that
-   * dies with the reload (a daemon started from inside the window does) cannot lose
-   * it. The reply then carries `continueQueued: true`, and the caller must not post
-   * `/continue` again.
+   * delivered by the next instance once this window is idle, so nothing has to survive
+   * the reload to relay it. The reply then carries `continueQueued: true`, and the
+   * caller must not post `/continue` again.
+   *
+   * `idle: true` queues the reload instead of performing it: the window polls itself
+   * every 250 ms and reloads as soon as no turn, sub-agent or background terminal is
+   * running (there is no timeout — a turn that never ends keeps waiting). `continue`
+   * must then name **both** `sessionId` and `nodeId`: the request that queued it is
+   * long gone by the time it fires, so the landing place is decided here, once.
    */
   controlReloadWindow(opts?: {
     continue?: { message: string; sessionId?: string; nodeId?: string };
+    /** Queue the reload for the window's own idle moment instead of reloading now. */
+    idle?: boolean;
   }): ControlResult;
 }
 
@@ -208,7 +227,7 @@ export class ControlServer implements vscode.Disposable {
   /** Start listening when enabled; a no-op otherwise. Never throws. */
   async start(): Promise<void> {
     const cfg = vscode.workspace.getConfiguration('spinney');
-    // Off by default; a supervisor may opt in per instance with the env var.
+    // Off by default; a controller may opt in per instance with the env var.
     const enabled = (cfg.get<boolean>('httpApi.enabled') ?? false) || process.env.SPINNEY_HTTP === '1';
     if (!enabled) {
       return;
@@ -252,6 +271,26 @@ export class ControlServer implements vscode.Disposable {
     await this.start();
   }
 
+  /**
+   * This plane's identity as environment variables — what a child process needs to
+   * talk back to *this* window: the instance id and the discovery file the port and
+   * bearer token are read from. `{}` while the plane is not listening (disabled, or
+   * failed to bind): a command started then has nothing to call, and a script that
+   * refuses to guess is the safe default.
+   *
+   * The **token is deliberately absent**. It stays in the 0600 discovery file, so a
+   * command is handed a path it must open, never a secret in an environment that
+   * every child of that shell can read (`AGENTS.md`, "Never harvest a credential"),
+   * and the file is removed with the plane, so a stale path fails loudly instead of
+   * reaching a window that no longer exists.
+   */
+  controlEnv(): Record<string, string> {
+    if (!this.server || !this.discoveryFile) {
+      return {};
+    }
+    return { SPINNEY_INSTANCE_ID: this.instanceId, SPINNEY_DISCOVERY_FILE: this.discoveryFile };
+  }
+
   dispose(): void {
     this.server?.close();
     this.server = null;
@@ -259,7 +298,8 @@ export class ControlServer implements vscode.Disposable {
       try {
         fs.rmSync(this.discoveryFile, { force: true });
       } catch {
-        // Best effort: a stale file is pruned by the supervisor's pid check.
+        // Best effort: a leftover file is pruned by the pid check every reader does
+        // before it trusts a discovery record.
       }
       this.discoveryFile = null;
     }
@@ -390,6 +430,7 @@ export class ControlServer implements vscode.Disposable {
       }
       if (route === 'POST /reload-window') {
         const body = await this.readBody(req);
+        const idle = body.idle === true;
         let carry: { message: string; sessionId?: string; nodeId?: string } | undefined;
         if (body.continue && typeof body.continue === 'object') {
           const raw = body.continue as Record<string, unknown>;
@@ -404,7 +445,21 @@ export class ControlServer implements vscode.Disposable {
             nodeId: typeof raw.nodeId === 'string' ? raw.nodeId : undefined,
           };
         }
-        const result = this.host.controlReloadWindow(carry ? { continue: carry } : undefined);
+        // A deferred reload outlives the request that queued it, so the message it
+        // carries has to name its landing place **now**: by the time it fires there is
+        // no caller left to ask, and "which node asked for this" is only knowable from
+        // the process that ran the command (its environment), never from the window's
+        // view focus half a minute later.
+        if (idle && (!carry?.sessionId || !carry?.nodeId)) {
+          send(400, {
+            ok: false,
+            error:
+              'a deferred reload is bound to the node that requested it: continue.sessionId and ' +
+              'continue.nodeId are both required with idle',
+          });
+          return;
+        }
+        const result = this.host.controlReloadWindow({ ...(carry ? { continue: carry } : {}), idle });
         send(result.ok ? 202 : 409, result);
         return;
       }

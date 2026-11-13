@@ -869,6 +869,20 @@ export interface RuntimeHost {
    */
   isHeld(): boolean;
   /**
+   * The control plane's identity as environment variables
+   * (`SPINNEY_INSTANCE_ID`, `SPINNEY_DISCOVERY_FILE`), or `{}` while it is not
+   * listening. It is injected into **every** `exec_command` child
+   * (`BackgroundAccess.spawnEnv`), which is how `node tools/reload-window.mjs
+   * --message "…"` knows which window to ask for its own deferred reload — no
+   * discovery scan, no fallback, and no window named on the command line.
+   *
+   * Never the bearer token: the child is handed the **path** of the 0600 discovery
+   * file and reads the token from it, so a command's environment is not a
+   * credential store — and a plain terminal, which has no path, cannot use the
+   * script at all.
+   */
+  controlEnv(): Record<string, string>;
+  /**
    * True when another window owns this workspace's session files. Every turn start is
    * refused, not just the composer's: nothing may be written into a session this window
    * does not own (`docs/agents/plans/session-epoch.md` §5).
@@ -1408,6 +1422,14 @@ export class SessionRuntime {
       tools.setBackgroundAccess({
         currentOwner: () => ({ sessionId: this.sessionId, nodeId: node.id }),
         hub: this.hub,
+        // The identity every child process of this node is born with: which node asked
+        // (so a command can name the exact conversation it belongs to) plus the window's
+        // control plane. Recomputed per spawn, so a plane that is enabled later, or
+        // rebound to another port by `restart()`, is never stale.
+        spawnEnv: (owner) => ({
+          ...(owner ? { SPINNEY_SESSION_ID: owner.sessionId, SPINNEY_NODE_ID: owner.nodeId } : {}),
+          ...this.host.controlEnv(),
+        }),
       });
       // The two web tools read `searchProvider` off **this node's** card: the paid tier
       // is the card's declaration, and the token it needs is that card's provider's —
@@ -1567,7 +1589,7 @@ export class SessionRuntime {
    * plane's `POST /wait-for-finish` (`scope:'all'`) and the reload refusal wait on — and,
    * through `runningNodes` / `lockedNodes`, the hop return's child-idle gate. Counting a
    * detached job there would mean a dev server keeps the harness permanently not-idle, so
-   * the supervisor could never reload the window.
+   * the window could never defer a reload or dispatch a hop.
    *
    * The kill paths still count it: `runningBackgroundCount` is what the delete/clear
    * confirmations read (a reload or a branch deletion really does kill the process), and

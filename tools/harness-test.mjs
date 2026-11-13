@@ -14,10 +14,10 @@
  * an agent turn, which makes the window busy for as long as the caller runs —
  * blocking on "idle" would deadlock. Every suite polls `GET /state` instead.
  *
- * Discovery mirrors `tools/hyper-vscode/hvsc.mjs`: read
- * `<globalStorage>/http/<instanceId>.json` (port + bearer token + pid +
- * workspace) from the usual VS Code global-storage folders, keep the newest
- * record whose pid answers `process.kill(pid, 0)`.
+ * Discovery mirrors the extension's own file (`writeDiscovery` in
+ * `src/http/controlServer.ts`): read `<globalStorage>/http/<instanceId>.json`
+ * (port + bearer token + pid + workspace) from the usual VS Code global-storage
+ * folders, keep the newest record whose pid answers `process.kill(pid, 0)`.
  *
  * Phasing: the spec is implemented P1→P4, so suites are **phased tolerant**.
  * A suite that needs a `/state` field the host does not expose yet prints
@@ -377,7 +377,7 @@ function pidAlive(pid) {
   }
 }
 
-/** Where the extension writes its per-process discovery files (mirrors hvsc). */
+/** Where the extension writes its per-process discovery files (mirrors `writeDiscovery`). */
 function globalStorageDirs(env = process.env) {
   const override = (env.HARNESS_GLOBAL_STORAGE || env.HYPER_VSCODE_GLOBAL_STORAGE || '').trim();
   if (override) {
