@@ -7817,17 +7817,20 @@ if (contextLabel !== 'ctx 50%') {
 // the edited node's parent with the edited text (`editUserMessage`; nothing is edited
 // in place, and the composer is not involved at all), Shift+Enter is the textarea's own
 // newline, and Esc puts the rendered ask back. What is pinned here:
-//   - the pencil exists on an idle turn card and on **no** running or sidecar card, and
-//     it follows `state`'s `lockedNodes` without a repaint;
+//   - the pencil exists on every turn card that has a prompt — **including a card whose
+//     turn is still running** — and on no sidecar card, and nothing `state` reports about
+//     running or locked nodes takes it away: the edit branches from the edited node's
+//     parent, so the streaming node is not touched at all;
 //   - a click opens an editor holding the raw prompt text, and no Markdown is rendered
 //     into it;
 //   - Enter posts `{ type: 'editUserMessage', nodeId, text }` with that node and that
-//     text — and an empty editor posts nothing; Shift+Enter posts nothing;
+//     text — from a running card too — and an empty editor posts nothing; Shift+Enter
+//     posts nothing;
 //   - a repaint never leaves a stale textarea behind, and Esc on a fresh edit restores
 //     the ask with the node's original text.
 {
   const ROOT = 'ask-edit-root';        // finished turn, on the view path → the pencil
-  const RUN = 'ask-edit-running';      // the same card, still streaming → no pencil
+  const RUN = 'ask-edit-running';      // the same card, still streaming → the pencil too
   const SUB = 'ask-edit-sub';          // `kind:'agent'` sidecar → no pencil
   const ORIGINAL = 'the **original** ask';
   const row = (id, parentId, children, status, kind, extra) =>
@@ -7891,30 +7894,74 @@ if (contextLabel !== 'ctx 50%') {
 
   dispatch({ type: 'reset' });
   // `RUN` is live, which is what `state`'s `runningNodes` says — the same authority the
-  // Send/Stop pair reads, and the second half of the pencil's gate.
+  // Send/Stop pair reads. It is deliberately **not** part of the pencil's gate any more:
+  // editing a prompt branches from the edited node's parent, so the streaming node is never
+  // touched (see `editUserMessage` in `ChatViewProvider`).
   dispatch({ type: 'state', busy: true, status: '', sessionId: 'smoke-session', runningNodes: [RUN], lockedNodes: [] });
   dispatch(treeMsg);
   dispatch(pathMsg);
 
-  // (a) Where the pencil may appear.
+  // (a) Where the pencil may appear: a card with a prompt that is not a sidecar — running
+  // or not, locked or not.
   if (!pencilOf(ROOT)) {
     problems.push('an idle turn card has no edit pencil on its pinned ask');
   }
-  if (pencilOf(RUN)) {
-    problems.push('a card whose turn is still running offers the edit pencil (the host refuses that edit)');
+  if (!pencilOf(RUN)) {
+    problems.push(
+      'a card whose turn is still running offers no edit pencil — the edit branches from the edited node\'s parent, ' +
+        'so a running turn is not in its way',
+    );
   }
   if (pencilOf(SUB)) {
     problems.push('a sub-agent card offers the edit pencil (it has no prompt of its own)');
   }
-  // The host's `state` is the other half of the gate, and it arrives without a repaint.
-  dispatch({ type: 'state', busy: false, status: '', sessionId: 'smoke-session', runningNodes: [], lockedNodes: [ROOT] });
-  if (pencilOf(ROOT)) {
-    problems.push('a node that still owns unfinished work (`lockedNodes`) still offers the edit pencil');
+  // The host's `state` is the other authority the pencil used to read, and it arrives without
+  // a repaint: a node that still owns unfinished work stays editable, and so does a running one.
+  dispatch({ type: 'state', busy: false, status: '', sessionId: 'smoke-session', runningNodes: [], lockedNodes: [ROOT, RUN] });
+  if (!pencilOf(ROOT)) {
+    problems.push('a node that still owns unfinished work (`lockedNodes`) offers no edit pencil — the edit does not touch it');
   }
   dispatch({ type: 'state', busy: false, status: '', sessionId: 'smoke-session', runningNodes: [], lockedNodes: [] });
-  if (!pencilOf(ROOT)) {
-    problems.push('the edit pencil did not come back once the node stopped being locked');
+  if (!pencilOf(ROOT) || !pencilOf(RUN)) {
+    problems.push('the edit pencil went away once nothing was locked — it is the render that offers it');
   }
+
+  // (a2) The card whose turn is **still running** edits its prompt like any other: the host
+  // turns the edit into a branch under the edited node's parent, so nothing about the live
+  // turn is rewritten and nothing has to wait for it to finish.
+  dispatch({ type: 'state', busy: true, status: '', sessionId: 'smoke-session', runningNodes: [RUN], lockedNodes: [] });
+  if (!click(pencilOf(RUN))) {
+    problems.push("a running card's edit pencil has no click handler");
+  } else {
+    const live = editorOf(RUN);
+    if (!live) {
+      problems.push('clicking a running card\'s edit pencil opened no editor — a running turn is not a reason to refuse');
+    } else {
+      if (String(live.value) !== 'live prompt') {
+        problems.push(
+          `a running card's editor is pre-filled with ${JSON.stringify(live.value)}, expected its own prompt ("live prompt")`,
+        );
+      }
+      posted.length = 0;
+      live.value = 'edited while running';
+      press(live, 'Enter', false);
+      const sentWhileRunning = editPosts()[0];
+      if (!sentWhileRunning || sentWhileRunning.nodeId !== RUN || sentWhileRunning.text !== 'edited while running') {
+        problems.push(
+          `Enter in a running card's editor posted ${JSON.stringify(posted)}, expected ` +
+            `{ type: 'editUserMessage', nodeId: '${RUN}', text: 'edited while running' }`,
+        );
+      }
+      if (posted.some((message) => message && message.type === 'userMessage')) {
+        problems.push('editing a running prompt posted a `userMessage` — the composer is not part of this edit');
+      }
+    }
+  }
+  // The repaint below closes that editor like any other, so the rest of the block starts from
+  // the same freshly-rendered cards the block opened with.
+  dispatch({ type: 'state', busy: false, status: '', sessionId: 'smoke-session', runningNodes: [], lockedNodes: [] });
+  dispatch(treeMsg);
+  dispatch(pathMsg);
 
   // (b) The editor: the raw text, no Markdown, one hint line.
   if (!click(pencilOf(ROOT))) {
@@ -8008,7 +8055,7 @@ if (contextLabel !== 'ctx 50%') {
       }
     }
   }
-  notes.push('prompt edit: the pencil on an idle turn card only, Enter posts the node and the edited text, a repaint leaves no textarea, Esc restores the ask');
+  notes.push('prompt edit: the pencil on any turn card with a prompt (a running one included) and never a sidecar, Enter posts the node and the edited text, a repaint leaves no textarea, Esc restores the ask');
 }
 
 // --- report ------------------------------------------------------------------

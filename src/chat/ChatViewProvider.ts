@@ -5556,9 +5556,14 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    * so nothing here moves the view.
    *
    * Each refusal is one sentence and starts no turn: a node this session does not have,
-   * a sidecar (a sub-agent window or job card has no prompt of its own), an empty text, a
-   * node that is still running or still owns unfinished work, and the two window-level
-   * gates every turn start shares (the reboot hold and read-only).
+   * a sidecar (a sub-agent window or job card has no prompt of its own), an empty text, and
+   * the two window-level gates every turn start shares (the reboot hold and read-only).
+   * **A running turn is not one of them.** The edit is a branch from the edited node's
+   * *parent*, so the node that is streaming is not touched at all: its `messages`, its
+   * `displayItems` and the bytes its request was built from stay exactly as they are, and
+   * two branches of one session are allowed to run at once (`beginTurn` refuses only a
+   * second run on the *basis* node). Refusing here would have made the reader wait out a
+   * long turn to fix a typo they can see.
    */
   private async editUserMessage(rt: SessionRuntime, nodeId: string, text: string): Promise<void> {
     if (this.isHeld()) {
@@ -5587,22 +5592,6 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     const edited = text.trim();
     if (!edited) {
       rt.postNotice('info', vscode.l10n.t('Nothing to send: the edited prompt is empty.'));
-      return;
-    }
-    if (node.status === 'running' || rt.runningNodes().includes(nodeId)) {
-      rt.postNotice(
-        'warning',
-        vscode.l10n.t('This turn is still running — wait for it to finish before editing its prompt.'),
-      );
-      return;
-    }
-    if (rt.lockedWorkCount(nodeId) > 0) {
-      rt.postNotice(
-        'warning',
-        vscode.l10n.t(
-          'A background task or sub-agent is still running here — wait for it to finish before editing this prompt.',
-        ),
-      );
       return;
     }
     // The images the edited prompt carried: they are part of the wording being edited,

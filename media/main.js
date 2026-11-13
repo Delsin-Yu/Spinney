@@ -2233,11 +2233,12 @@
   /**
    * The pencil beside a card's pinned ask, created lazily and kept on the card
    * (`_askEditBtn`) so a repaint puts the **same** element back instead of stacking a
-   * second one. It is offered only where editing can go through: an expanded,
-   * non-sidecar card whose node is not running and does not still own unfinished work
-   * — the same four refusals the host re-checks (`editUserMessage` in
-   * `ChatViewProvider`). The ask's own `hidden` class is what keeps it out of sight on
-   * a collapsed card or a monitor window; there is nothing to edit without a prompt.
+   * second one. It is offered wherever editing can go through: a non-sidecar card that has
+   * a prompt. **A running turn is not in the way** — the edit branches from the edited
+   * node's own parent and leaves the streaming node untouched (`editUserMessage` in
+   * `ChatViewProvider`), so a reader fixing a typo never has to wait a turn out. The ask's
+   * own `hidden` class is what keeps it out of sight on a collapsed card or a monitor
+   * window; there is nothing to edit without a prompt.
    */
   function syncAskEdit(card) {
     if (!card || !card.querySelector) return;
@@ -2245,13 +2246,7 @@
     const meta = id ? treeNodes[id] : null;
     const ask = card.querySelector('.node-ask');
     if (!ask) return;
-    const want =
-      !!id &&
-      !!card._askText &&
-      !isSidecarKind(meta && meta.kind) &&
-      (!meta || meta.status !== 'running') &&
-      !runningNodes.has(id) &&
-      !lockedNodes.has(id);
+    const want = !!id && !!card._askText && !isSidecarKind(meta && meta.kind);
     const btn = card._askEditBtn;
     if (!want) {
       if (btn) {
@@ -6211,8 +6206,9 @@ function addBackgroundNotice(item) {
       if (typeof msg.contextPct === 'number') treeNodes[msg.id].contextPct = msg.contextPct;
     }
     if (card) syncContinueButton(card, treeNodes[msg.id] || { id: msg.id, status: msg.status, children: [] });
-    // The pencil on the ask is gated on the node's status too (`syncAskEdit`), and this
-    // patch is how a turn's end reaches its card without a repaint.
+    // The pencil on the ask is offered by the render (`syncAskEdit`), and nothing a `node`
+    // patch carries can take it away: a turn starting or ending is not a reason to stop
+    // offering an edit that branches beside it.
     if (card) syncAskEdit(card);
     // The context state is half of what the composer's own two buttons read (a refused
     // request disables Send and offers the new-epoch entry), and it can arrive *after*
@@ -8823,10 +8819,6 @@ function addBackgroundNotice(item) {
         // refuses every turn there, so the composer says so up front instead of letting a
         // send fail. A host that predates the flag sends nothing: not read-only.
         readOnly = msg.readOnly === true;
-        // The ask's edit pencil is gated on exactly these two sets — a running or locked
-        // node is refused host-side (`editUserMessage`) — so every card re-reads them.
-        // The `tree` did not change, which is why this cannot wait for a repaint.
-        for (const id in nodeEls) syncAskEdit(nodeEls[id]);
         updateComposerButtons();
         setBusy(msg.busy);
         setStatus(msg.status);
