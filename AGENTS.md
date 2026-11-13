@@ -104,7 +104,7 @@ A change to anything under `src/`, `media/`, or `package.json` is not finished u
 - Sessions and persistence: `invariants/conversation-validity` · `invariants/session-persistence` (persistence + rename_session auto-naming and locking) · `invariants/chat-tree` (branch / checkout) · `invariants/interrupt-rollback` · `invariants/api-retries` (a failed model call: the 10-attempt backoff, then the silent whole-request re-issues the model is never told about, behind the ▶ Continue / ↻ Retry button) · `invariants/context-rollover` (a full window continues in a new one: the API prefix is cut at the node's context base)
 - Multi-session / concurrency: `multi-session` (multi-tab + session/branch concurrency, the frozen P1–P4 contract) · the acceptance driver `tools/harness-test.mjs` (dev-only, not shipped in the `.vsix`)
 - Control plane / desktop: `control-plane` (includes the session tools: create_session / send_session_prompt / wait_for_session_idle / interrupt_session / list_sessions / list_nodes)
-- Other invariants: `invariants/line-endings` · `invariants/config-keys` · `invariants/streaming-perf` · `invariants/vendored-deps`
+- Other invariants: `invariants/line-endings` · `invariants/config-keys` · `invariants/streaming-perf` · `invariants/vendored-deps` · `invariants/request-payload`
 - UI text / i18n: `invariants/i18n` (one catalog per language, the two lookup paths, the `check:l10n` guard, what is deliberately left English)
 - The shipped user manual: `user-manual` (the `manual/**` pages, the `Spinney: Show User Manual` command, the page-per-language rule, the STE writing rule, the `check:docs` guard)
 - No-workspace mode (no folder open): `no-repo-mode` (root, session storage, behavior differences)

@@ -310,14 +310,14 @@
   `tools/websearch-acceptance.js` ·
   `tools/check-png.js` · `tools/check-resample.js` · `tools/check-image.js` ·
   `tools/check-jpeg.js` · `tools/check-neterror.js` · `tools/check-unicode.js` ·
-  `tools/check-continue.js` · `tools/check-compaction.js` —
+  `tools/check-continue.js` · `tools/check-compaction.js` · `tools/check-payload.js` —
   the packaging guards
   (`npm run check:models` / `check:webview` / `check:signals` / `check:l10n` /
   `check:rollover` / `check:modeltree` / `check:grid` / `check:docs` / `check:cwd` /
   `check:shell` / `check:kill` / `check:exec` / `check:dock` /
   `check:search` / `check:websearch` / `check:png` / `check:resample` / `check:image` /
   `check:jpeg` / `check:neterror` / `check:unicode` / `check:continue` /
-  `check:compaction`, run
+  `check:compaction` / `check:payload`, run
   by `vscode:prepublish`):
   model-config drift (the default is the fallback card, `providers` / `modelCards`
   exist as object schemas, no `enum` on `model`, no model id in the code or the
@@ -390,8 +390,11 @@
   `src/agent/jpegReconstruct.ts` (dequant, IDCT, chroma upsampling, colour) behind a frozen
   seam, so the scope rules live in exactly one place and each half can be read on its own.
 - `src/agent/apiClient.ts` — `ApiClient` (stream SSE over `fetch`,
-  `ApiError`), builds `stream: true`, `stream_options.include_usage`,
-  `reasoning_effort`. The read loop flushes the `TextDecoder` and parses a final
+  `ApiError`), and the **one** request-body constructor `buildChatRequestBody` (called by
+  `stream()`, by `complete()` and by `Spinney: Show Request Payload`, so the command's tab
+  shows the bytes the transport sends — see `invariants/request-payload.md`), with
+  `chatCompletionsUrl` as the one spelling of the endpoint. The read loop flushes the
+  `TextDecoder` and parses a final
   `data:` line that arrived without a trailing newline. It is transport and retries
   only: it no longer reads a wallet (that moved to `balance.ts` below), so nothing
   in it names a vendor — the error strings are the client's own (`API error 400: …`,

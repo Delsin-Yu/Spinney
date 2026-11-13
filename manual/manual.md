@@ -570,6 +570,7 @@ Every command lives in the Command Palette under `Spinney: `.
 | `Spinney: Set API Key` | Stores an API key for a provider. |
 | `Spinney: Clear API Key` | Erases a stored API key. |
 | `Spinney: Show System Prompt` | Opens the exact prompt that the model receives. |
+| `Spinney: Show Request Payload` | Shows the complete JSON request body that the next request sends. |
 | `Spinney: Open Global AGENTS.md` | Opens the instruction file for all workspaces, and creates it when it does not exist. |
 | `Spinney: Show User Manual` | Opens this manual in an editor tab. |
 | `Spinney: Reload Chat Webview` | Builds the chat tab again from the state of the session. |
@@ -595,7 +596,7 @@ Four facts to know:
 - The global file applies to every workspace, and to a window with no folder open.
 - With no folder open, Spinney reads no workspace file, because there is no workspace root.
 
-Run **`Spinney: Show System Prompt`** to read the exact prompt that the model receives. The content follows the current model card, the thinking effort, the reply language, and the two instruction snapshots of the session.
+Run **`Spinney: Show System Prompt`** to read the exact prompt that the model receives. The content follows the current model card, the thinking effort, the reply language, and the two instruction snapshots of the session. Run **`Spinney: Show Request Payload`** to read the complete JSON body of the next request.
 
 ## 14. Privacy and data
 

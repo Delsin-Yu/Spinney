@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The request body can be read before it is sent.** `Spinney: Show Request Payload` opens
+  the complete JSON body of the next request from the checked-out node in an untitled editor
+  tab, and writes one `[payload]` line to the output channel (session, node, card, provider,
+  endpoint, message count, image count, byte count, and the provider's conversation header
+  when its row declares one). The body is not a copy: `ApiClient.stream()` and `complete()`
+  now call one exported constructor (`buildChatRequestBody`, with `chatCompletionsUrl` for
+  the endpoint), and the command calls the same one, so what the tab shows is what would be
+  sent — normalised by `wellFormedDeep` exactly like the wire copy, carrying the chain's
+  frozen prompt and tool set, its card and its level, and no API key anywhere on the path.
+  `npm run check:payload` (in `vscode:prepublish`) fails packaging if a second constructor or
+  a hard-coded body field grows back beside it.
 - **A prompt is addressed to a session, not to a node.** `send_session_message` became
   `send_session_prompt`: it starts one turn on the target session's own active node, which is
   exactly where a human's own send lands, so no node id is ever carried across a conversation
