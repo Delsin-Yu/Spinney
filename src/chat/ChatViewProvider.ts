@@ -5323,10 +5323,23 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   private rebuildBgDismissed(): void {
     this.bgDismissed.clear();
     for (const session of this.sessions) {
+      let maxTaskId = 0;
       for (const node of Object.values(session.nodes)) {
-        if (node.kind === 'bg' && node.bgDockDismissed === true && node.bgTaskId != null) {
-          this.bgDismissed.add(bgDockHandle(session.id, node.bgTaskId));
+        if (node.kind === 'bg' && node.bgTaskId != null) {
+          if (node.bgTaskId > maxTaskId) {
+            maxTaskId = node.bgTaskId;
+          }
+          if (node.bgDockDismissed === true) {
+            this.bgDismissed.add(bgDockHandle(session.id, node.bgTaskId));
+          }
         }
+      }
+      // **Ids are never reused across a reload.** A job card keeps its `bgTaskId` in the store
+      // and the hub's counter is in memory, so without this seed the first job of the next
+      // window is `#1` again and every restored `#1` card renders that job instead of its own
+      // (`BackgroundHub.seedCounter`).
+      if (maxTaskId > 0) {
+        this.backgroundHub.seedCounter(session.id, maxTaskId);
       }
     }
   }

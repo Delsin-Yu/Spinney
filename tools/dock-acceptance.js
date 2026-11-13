@@ -363,6 +363,17 @@ console.log('-- the kill path keeps the record (real runtime, real hub) --');
     const { s, hub, rt } = build();
     const handle = handleFor('GLOBAL-OUTPUT');
     const id = hub.register({ sessionId: s.id, nodeId: 'turn' }, handle, 'npm run dev', '.', true, 'dev server');
+    // Ids must never be reused across a reload: a job card keeps its `bgTaskId` in the store
+    // while the counter lives in memory (`BackgroundHub.seedCounter`), so a restored `#1` card
+    // would otherwise answer to the first job of the next window.
+    hub.seedCounter(s.id, id + 4);
+    const nextId = hub.register({ sessionId: s.id, nodeId: 'turn' }, handleFor('AFTER-SEED'), 'npm test', '.', true);
+    check(
+      'a seeded counter hands out an id past the ones already in the store',
+      nextId === id + 5,
+      `first=${id} next=${nextId}`,
+    );
+    check('  … and seeding never moves a counter backwards', (hub.seedCounter(s.id, 1), hub.register({ sessionId: s.id, nodeId: 'turn' }, handleFor('AFTER-OLD-SEED'), 'npm test', '.', true)) === id + 6);
     const card = cardOf(s);
     check(
       'the card is born with `bgDetached`, not told at its end',

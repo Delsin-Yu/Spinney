@@ -290,4 +290,21 @@ export class BackgroundHub {
     this.counters.set(sessionId, id);
     return id;
   }
+
+  /**
+   * Start this session's id counter above `min`.
+   *
+   * Ids are session-local and the counter lives **in memory**, while a `kind:'bg'` card keeps
+   * its `bgTaskId` in the store. Without this seed the first job after a window reload is `#1`
+   * again, and every restored `#1` card answers to *that* job — the "all my job cards say
+   * running" bug, because the webview keys the snapshot by id. Seeding past the largest id the
+   * session has ever used makes an id unique for the life of the conversation
+   * (`docs/agents/invariants/background-terminals.md`).
+   */
+  seedCounter(sessionId: string, min: number): void {
+    const floor = Number.isFinite(min) ? Math.floor(min) : 0;
+    if (floor > (this.counters.get(sessionId) ?? 0)) {
+      this.counters.set(sessionId, floor);
+    }
+  }
 }

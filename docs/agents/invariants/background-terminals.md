@@ -278,8 +278,11 @@
   dock row — the record, normalized to `interrupted`, would come back invisible. The terminal
   snapshot writes it again, so a task read at its end cannot settle a record that disagrees.
   Two traps that are already paid for: a registration must clear a stale
-  `bgDismissed` entry for its id (dismissals persist, the id counter does not — it restarts at 1
-  after every reload), and the record's `kind` can only say `background`, so a notice's producer
+  `bgDismissed` entry for its id, and an id must never be **reused** — `BackgroundHub.seedCounter`
+  starts a session's counter above the largest `bgTaskId` its records already carry, so a
+  restored `#1` card cannot answer to the first job of the next window (dismissals persist in the
+  records; the counter is in memory and is seeded from them at load). The second trap: the
+  record's `kind` can only say `background`, so a notice's producer
   travels separately (`DisplayItem.producer`) or a repaint draws a sub-agent batch as a terminal.
   `jobs[]` is de-duplicated by `(sessionId, id)` — a task id is session-local, so the pair is a
   job's identity and the same number in two sessions is two jobs — and built from the live hub
@@ -425,7 +428,8 @@
   detached=<true|false>` (no `budget=` field) and `bg kill id=<id> pid=<pid|none>
   reason=<user|stop|rollover|none> outcome=<exited|no-exit|no-pid|unknown> ms=<elapsed>`, the
   latter written **only** when the confirmation failed. `hub.removeNode(session, node, {kill})`
-  drops one node's jobs + registry (the session counter is kept — ids are never reused),
+  drops one node's jobs + registry (the session counter is kept, and never re-minted below what
+  the store already carries — `seedCounter`),
   `hub.removeSession(session, {kill})` drops a whole session (`SessionRuntime.dispose()`), and
   `hub.killAll()` tears every job down (window dispose) so nothing is orphaned.
   `spawnShellCommand`/`killChildProcess` do the process-tree kill and report the `KillOutcome`

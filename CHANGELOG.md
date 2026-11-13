@@ -190,6 +190,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A job card is identified by its card, not by a task number.** Task ids are session-local and
+  the hub's counter lives in memory, so the first job after a window reload was `#1` again and
+  every restored `#1` card rendered *that* job: several finished cards across nodes all said
+  `running`, with the new job's output tail. Two halves fix it. The host seeds each session's
+  counter above the largest `bgTaskId` its records already carry (`BackgroundHub.seedCounter`,
+  called from the load path), so an id is never reused for the life of a conversation; and the
+  webview keys the job snapshot by the `cardNodeId` the host already ships instead of by the id,
+  so a card can only ever render the job that mirrors it.
 - **A card may start several windows, so the two handoffs can be compared.** The entry used to
   refuse a card that already continued below, which made `Simple` against `Agentic` a choice
   nobody could look at twice. Each attempt is now its own branch under the same card: keep both,

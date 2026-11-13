@@ -5003,7 +5003,13 @@ function addBackgroundNotice(item) {
   }
 
   /** task.id -> BackgroundInfo of the last snapshot (live jobs only). */
-  let bgTasks = new Map();
+  /**
+   * The session's live job snapshot, keyed by the **card** the host says mirrors each job
+   * (`cardNodeId`). A `kind:'bg'` card resolves its job through this, never through its id: the
+   * id is session-local and a card keeps its own in the store across a reload, so an id is not
+   * an identity (`BackgroundHub.seedCounter` is the host's half of the same rule).
+   */
+  let bgTaskByCard = new Map();
 
   function killBackgroundButton(id) {
     const kill = el('button', 'bg-kill', tr('kill'));
@@ -5096,7 +5102,7 @@ function addBackgroundNotice(item) {
     // wherever a job card is rendered — the snapshot, a `tree`, a `path` — and not only
     // while the job is in the snapshot (see `syncSharedBadge`).
     syncSharedBadge(card, meta);
-    const task = meta && meta.bgTaskId != null ? bgTasks.get(Number(meta.bgTaskId)) : null;
+    const task = meta && meta.id != null ? bgTaskByCard.get(String(meta.id)) ?? null : null;
     const itemsEl = card.querySelector('.node-work');
     if (!itemsEl) return;
     // A job card's body is a terminal mirror, not a conversation: the log *is* the
@@ -5137,13 +5143,16 @@ function addBackgroundNotice(item) {
    * in place; jobs the snapshot no longer lists keep their persisted terminal state.
    */
   function renderBackgrounds(tasks, legacy) {
-    bgTasks = new Map();
+    bgTaskByCard = new Map();
     for (const task of tasks || []) {
       if (!task || task.id == null) continue;
       // Legacy shape (an older host): no owner is named, so the jobs belong to the
       // focused node — the only node a one-run host could have spawned them from.
       if (legacy && !task.nodeId) task.nodeId = treeActiveId;
-      bgTasks.set(Number(task.id), task);
+      // The host says **which card mirrors this job**, and that pair, not the id, is what a
+      // card is. Ids are session-local, and a reused one (`BackgroundHub.seedCounter` keeps
+      // that from happening) must never make a card adopt a job it does not own.
+      if (task.cardNodeId) bgTaskByCard.set(String(task.cardNodeId), task);
     }
     let touched = false;
     for (const id in treeNodes) {
