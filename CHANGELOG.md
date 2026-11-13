@@ -188,6 +188,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A blocked new-context entry says which rule it hit.** Every structural refusal used the
+  sentence written for a streaming turn, so a card that already had a window below it told the
+  reader to wait for a turn that had already finished. `windowStartBlocker` now names the three
+  reasons — no such card (or a sidecar), that card's own turn is running, and the card already
+  continues below — and each posts its own sentence; the `continued` one says where to click
+  instead (the card at the end of the line).
 - **A hand-over says nothing it cannot back up.** Two sentences in the harness text were
   written for the full-window case and then said on every trigger: the leftover-work line
   read `none — 0 background terminal(s) and 0 sub-agent(s) were stopped …, because their

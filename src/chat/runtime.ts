@@ -3829,11 +3829,34 @@ export class SessionRuntime {
    * window that still has room.
    */
   private canWindowStart(nodeId: string): boolean {
+    return this.windowStartBlocker(nodeId) === null;
+  }
+
+  /**
+   * Why this node cannot start a new context window right now (`null` when it can), named so
+   * the refusal can say the truth: the three structural reasons are different problems with
+   * different fixes, and one sentence that only ever described the running case sent a user
+   * waiting for a turn that had already finished (`compress-node.md` §1).
+   *
+   *  - `missing` — no such node, or a sidecar (a sub-agent window or a job card has no
+   *    conversation of its own to hand over);
+   *  - `running` — that card's own turn is streaming; wait for it;
+   *  - `continued` — the card **already continues below**. A window starts where a line ends,
+   *    and a second one from the same card would be two continuations of one window (the
+   *    context base cannot be cut twice), so the entry is on the card at the end of the line.
+   */
+  windowStartBlocker(nodeId: string): 'missing' | 'running' | 'continued' | null {
     const node = this.session.nodes[nodeId];
-    if (!node || isSidecar(node) || this.runs.has(nodeId)) {
-      return false;
+    if (!node || isSidecar(node)) {
+      return 'missing';
     }
-    return !node.children.some((id) => !isSidecar(this.session.nodes[id]));
+    if (this.runs.has(nodeId)) {
+      return 'running';
+    }
+    if (node.children.some((id) => !isSidecar(this.session.nodes[id]))) {
+      return 'continued';
+    }
+    return null;
   }
 
   /**

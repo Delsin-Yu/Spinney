@@ -268,6 +268,11 @@ const HANDFF = C.COMPRESS_SECTIONS.map((heading) => `## ${heading}\n- a fact`).j
     // node that already has a conversational child.
     ok('canCompress() is true for the tip of the branch', rt.canCompress('p0') === true);
     ok('  … and false for a node that already continued', rt.canCompress('root') === false);
+    // The **reason** is what the refusal sentence is built from (`windowStartBlocker`): a
+    // card that already continues below must not tell the reader to wait for a turn.
+    ok('  … and it is named as "continued", not "running"', rt.windowStartBlocker('root') === 'continued');
+    ok('  … the tip has no blocker', rt.windowStartBlocker('p0') === null);
+    ok('  … a missing node is "missing"', rt.windowStartBlocker('nope') === 'missing');
     const s2 = makeSession();
     s2.nodes.p0.displayItems[5].text = 'WARN DeepSeek stream stalled: first chunk.';
     const { rt: rt2 } = makeRuntime(s2);

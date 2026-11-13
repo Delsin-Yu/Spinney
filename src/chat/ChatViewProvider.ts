@@ -5740,13 +5740,12 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       await this.forkEntry(rt, text, attachments);
       return;
     }
-    if (!rt.canCompress(nodeId)) {
-      // One predicate covers every structural precondition, and `false` here means the state
-      // moved between the click and this line.
-      rt.postNotice(
-        'warning',
-        vscode.l10n.t('Could not continue in a new context here — wait for the running turn to finish and try again.'),
-      );
+    const blocked = rt.windowStartBlocker(nodeId);
+    if (blocked) {
+      // The **reason**, not one sentence for all three: `continued` is the common one (the card
+      // already has a window below it) and it is not something waiting can fix — the entry is
+      // on the card at the end of that line.
+      rt.postNotice('warning', this.windowStartReason(blocked));
       return;
     }
     const choice = await this.confirmCompression();
@@ -5850,6 +5849,26 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       return 'simple';
     }
     return pick === agentic ? 'agentic' : null;
+  }
+
+  /**
+   * The sentence a **blocked** new-context entry posts, per reason
+   * (`SessionRuntime.windowStartBlocker`). One sentence used to cover all three, and it only
+   * ever described the running case: a card that already had a window below it told the user to
+   * wait for a turn that had already finished.
+   */
+  private windowStartReason(reason: 'missing' | 'running' | 'continued'): string {
+    if (reason === 'continued') {
+      return vscode.l10n.t(
+        'This card already continues below. Start a new context window from the card at the end of this line.',
+      );
+    }
+    if (reason === 'missing') {
+      return vscode.l10n.t('This card cannot start a new context window.');
+    }
+    return vscode.l10n.t(
+      'Could not continue in a new context here — wait for the running turn to finish and try again.',
+    );
   }
 
   /**

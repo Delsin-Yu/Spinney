@@ -297,6 +297,8 @@
   "Thinking effort": "推理力度",
   "Thinking…": "思考中…",
   "This cannot be undone.": "此操作无法撤销。",
+  "This card already continues below. Start a new context window from the card at the end of this line.": "这张卡片下面已经有延续。请从这条线最末端的卡片开始新的上下文窗口。",
+  "This card cannot start a new context window.": "这张卡片无法开始新的上下文窗口。",
   "This card has no prompt of its own to edit.": "这张卡片没有自己的提示词可编辑。",
   "This compression has already been delivered to the window below it. To redo it, start again from the window above.": "这次压缩已经交付给下面的窗口。要重做，请从上面的窗口重新发起。",
   "This context window is full, so the request was not sent. Use “Continue with new context” to carry the conversation into a new window.": "此上下文窗口已满，因此请求未发送。请使用「Continue with new context」把对话带入新的窗口。",
