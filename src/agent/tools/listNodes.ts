@@ -1,10 +1,9 @@
 import type { InterceptedTool } from './index';
 
 /**
- * Read-only view of one session's chat tree, so the agent can name a node — e.g. as
- * `send_session_message`'s `session_node_id` — instead of guessing. Node ids are
- * otherwise invisible to the model: they live in the persisted tree, not in the
- * prompt.
+ * Read-only view of one session's chat tree. Node ids are for **reading**: no tool
+ * takes one as an address any more, so they live in the persisted tree and in this
+ * render, nowhere else.
  *
  * Rewritten for the session tools: it takes `session_id` (default: the caller's own
  * session, see `list_sessions`) and `query`, and every node line carries its **true**

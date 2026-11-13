@@ -40,7 +40,7 @@ Control plane routes (all require `Authorization: Bearer <token>`):
 | `POST /continue` | send a caller-supplied message (`{sessionId?, nodeId?, message}`) that continues from a node — node-scoped, so a run on another branch does not block it |
 | `POST /stop` | `{sessionId?, nodeId?}` — with `nodeId` a **union kill**: that node's live run, every background terminal it owns and every sub-agent it is still running, and nothing continues (the notices are written back into that node's history, so they ride the next request instead of opening a turn); without `nodeId`, cancel every run of the session (else the active session) and leave background jobs alone. Returns `{ok, sessionId, nodeId, stopped}`. Nothing running is `stopped: 0`; an unknown session is 409. Never touches the reload hold |
 | `POST /session/start` | create a session (`{title?, prompt?}`) or jump to one (`{sessionId, nodeId?, prompt?}`) and send `prompt` as its first turn |
-| `POST /session/message` | `{sessionId, nodeId, message}` — deliver a message into **one node of one session** and start a turn there, the same delivery the agent's `send_session_message` makes. 200 with `{ok, sessionId, nodeId}`; **409** when that node is running a turn or still owns unfinished work (wait and retry), and 409 for an unknown session / node. `sessionId` and `nodeId` are required (400) — this route never means "the active session" |
+| `POST /session/message` | `{sessionId, message, nodeId?}` — send a prompt into **one session**: one turn on its own active node, exactly like a human's own send. `nodeId` is accepted and validated but addresses nothing (the prompt lands on the active node). 200 with `{ok, sessionId, nodeId, state:'delivered', how:'turn'}`. **409** for an unknown session / node, or for a session that cannot take a prompt now (running a turn, unfinished work, a reload hold, a full context window) — never queued; 400 when `sessionId` or `message` is missing. It carries no round budget and no `from`: an external controller is the human door. |
 | `POST /reload-window` | 202, then `workbench.action.reloadWindow`. Without `idle` it is the immediate form: it refuses while a turn, sub-agent or background job is live (409), and a caller that is *itself* a turn is refused by its own existence. An optional body `{ continue: { message, sessionId?, nodeId? } }` is **persisted before the reload** and delivered by the next instance once it is idle; the reply then carries `continueQueued: true` and the caller must not post `/continue`. With `idle: true` it is the **deferred** form: 202 `{ok, deferred: true, continueQueued: true}` and the window waits for its own idle moment (see "Deferred reload"); `continue.sessionId` **and** `continue.nodeId` are then both required (400), because the request that queued it is gone by the time it fires |
 
 **Session jump** (`POST /session/start`): the agent can hand a task to a *fresh*
@@ -78,11 +78,11 @@ deferred path arms this very hold itself, 30 s, at the moment it fires — a que
 does **not** hold the window while it waits, or a long turn could never end the way its
 own Stop intends. Do not weaken it.
 
-**The session tools** (`create_session` / `send_session_message` / `list_sessions` /
-`list_nodes`, plus `rename_session`) are the agent-facing half of the same surface,
-and they are one capability (`canSessions`, main agent only): a caller that may start
-a session and message a node also has to be able to name them, and a sub-agent or a
-sidecar card never may.
+**The session tools** (`create_session` / `send_session_prompt` / `wait_for_session_idle` /
+`interrupt_session` / `list_sessions` / `list_nodes`, plus `rename_session`) are the
+agent-facing half of the same surface, and they are one capability (`canSessions`, main agent
+only): a caller that may start a session also has to be able to prompt it, wait for it and
+end what it started, and a sub-agent or a sidecar card never may.
 
 `create_session` starts a fresh session and gives it its first turn, then returns
 **immediately**: the turn is dispatched, not awaited, no tab is opened or focused
@@ -90,19 +90,36 @@ sidecar card never may.
 the turn still runs and persists — `postTo` simply drops messages for a session with
 no tab. The title is the caller's `session_name` applied as a **manual** title
 (`applySessionTitle(…, 'manual')`), so the automatic namer never overwrites it.
-Nothing reports back on its own, so the result names the new session id and its first
-node id and says how to hear back.
+Nothing reports back on its own, so the result names the new session id and says to
+report with `send_session_prompt` — the session id is the whole address, so no node id
+is carried across.
 
-`send_session_message` is that way back, and the only channel between conversations
-in either direction: `{session_id, session_node_id, prompt}` delivers `prompt` as a
-user message to that exact node and starts a turn there, branched off that node
-(`onUserMessage` with an explicit `basisNodeId`) — never off whatever tab has focus,
-and without moving the window's session pointer. It is **refused** while the target
-node is running (`runningNodes().includes(node)`) or still owns unfinished work
-(`lockedNodes()`), naming the node and telling the caller to wait or read `list_nodes`;
-an unknown session, an unknown node and a sidecar node (a sub-agent window or a
-`kind:'bg'` job card) are refused the same way. `POST /session/message` is the same
-delivery over the control plane, 409 while the node is busy.
+`send_session_prompt` is that way back, and the only channel between conversations in either
+direction: `{session_id, prompt, max_rounds}` starts **one turn** in that session, on its own
+active node (`session.activeNodeId`, the node `list_nodes` marks checked out), which is exactly
+where a human's send would land. It behaves like a user message because it *is* one: the same
+gate (`SessionRuntime.onUserMessage` → `promptBlocker`) decides whether a turn may start, so a
+busy session is a refusal naming the node, how long it has been busy, and the two ways out
+(`wait_for_session_idle`, `interrupt_session`) — never a queued message. The call blocks until
+the **turn has started**, never until the answer is. `max_rounds` is **required** (clamped to
+`spinney.sessionMaxRounds`, default 16): the receiver inherits one fewer and can never raise it,
+and a node with no rounds left is refused with a sentence that says to report back, not to
+re-send from another session. Still refused: an unknown session, a read-only window, a reload
+hold, a full context window, and an invalid `max_rounds`. `POST /session/message` is the same
+prompt over the control plane: no budget and no `from` (an external controller is the human
+door), and its `nodeId` is accepted only to be validated, because the prompt lands on the
+session's active node.
+
+`wait_for_session_idle` is the wait that replaces the old 30 s receipt window, shaped like
+`wait_for_command`: a slice, not a timeout. It polls `promptBlocker` — the same predicate the
+prompt checks, so `idle` means the prompt will be accepted — and answers normally when the
+window runs out, naming the node and what is holding it.
+
+`interrupt_session` ends the live work **an agent's prompt started** in that session, and
+nothing else: every node whose `lastFrom` names the calling session and which still has a live
+turn, background terminals or running sub-agents. The scope is provenance, not position, so a
+line a human started is not in the set. It is the union kill `stopNode` already performs
+(`POST /stop {nodeId}` is its control-plane twin), and the result reports what died.
 
 `list_sessions` names the window's sessions — id, title, node count, active node,
 running-node count, the focused marker and the title bookkeeping — because nothing
@@ -112,9 +129,10 @@ runtime: `running` from that session's runs, `busy` from `lockedNodes()`, and
 `checked out` only for the session the window is focused on. A session with no runtime
 is idle by definition — a turn only runs inside a runtime — so the renderer never
 guesses from a stored `status` field, which would resurrect a turn that ended before a
-reload. `list_nodes` reads another session through two `RuntimeHost` hooks
-(`runningNodesIn` / `lockedNodesIn`); a runtime owns one session, the provider owns
-them all.
+reload. `from=` / `rounds=` are the last prompt's sender and the node's remaining
+allowance, which is also what `interrupt_session` reads. `list_nodes` reads another
+session through `RuntimeHost` hooks (`runningNodesIn` / `lockedNodesIn`); a runtime owns
+one session, the provider owns them all.
 
 **Deferred reload** (`POST /reload-window { idle: true, continue }`): the form a
 *command* uses, and the only one that works from inside a turn.

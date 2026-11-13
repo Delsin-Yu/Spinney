@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A prompt is addressed to a session, not to a node.** `send_session_message` became
+  `send_session_prompt`: it starts one turn on the target session's own active node, which is
+  exactly where a human's own send lands, so no node id is ever carried across a conversation
+  (a node id only lives until the next turn). Two new tools complete the loop:
+  `wait_for_session_idle` waits for the session to be able to take a prompt — a slice, not a
+  timeout, shaped like `wait_for_command` — and `interrupt_session` ends the live work in that
+  session that an agent's prompt started and nothing else, by provenance (`lastFrom`) rather
+  than by position, so a line a human started can never be in its scope. A busy session is now
+  a refusal naming the node and the two ways out, never a queued message: the whole
+  signal-queue delivery of a cross-session message is gone, together with its per-node queue
+  cap, its `delivered` promise and the `spinney.sessionSendSeconds` setting. `list_nodes` keeps
+  `from=` and `rounds=` (and no longer has a `queued=`). `interrupt_session` is the agent-facing
+  twin of the composer's Stop and reuses it: the turn is cancelled, its background terminals and
+  sub-agents die with it, and pending notices are kept for that node's next prompt.
 - **A viewer for every tool call.** A tool row used to open onto its raw arguments and a wall
   of result text. Every tool now opens its own view, built from the two strings the host
   already stores (`DisplayItem.args` and `.content`): a code surface with a line-number

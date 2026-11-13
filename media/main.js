@@ -2782,7 +2782,9 @@
     send_agent_message: tr('Sent task instructions'),
     send_readonly_agent_message: tr('Sent research instructions'),
     create_session: tr('Started a session'),
-    send_session_message: tr('Messaged a session'),
+    send_session_prompt: tr('Prompted a session'),
+    wait_for_session_idle: tr('Waited for a session'),
+    interrupt_session: tr('Interrupted a session'),
     list_sessions: tr('Listed sessions'),
     rename_session: tr('Renamed session'),
   };
@@ -2933,10 +2935,12 @@
     send_agent_message: (a) => [a.id ? `#${a.id}` : ''],
     send_readonly_agent_message: (a) => [a.id ? `#${a.id}` : ''],
     create_session: (a) => [a.session_name ? '"' + a.session_name + '"' : ''],
-    send_session_message: (a) => [
+    send_session_prompt: (a) => [a.session_id ? '#' + a.session_id : ''],
+    wait_for_session_idle: (a) => [
       a.session_id ? '#' + a.session_id : '',
-      a.session_node_id ? '#' + a.session_node_id : '',
+      a.seconds ? a.seconds + 's' : '',
     ],
+    interrupt_session: (a) => [a.session_id ? '#' + a.session_id : ''],
     list_sessions: (a) => [a.query ? '"' + a.query + '"' : ''],
     list_nodes: (a) => [a.session_id ? '#' + a.session_id : '', a.query ? '"' + a.query + '"' : ''],
     rename_session: (a) => [a.title ? `"${a.title}"` : ''],
@@ -2989,7 +2993,9 @@
     send_agent_message: 'agents',
     send_readonly_agent_message: 'agents',
     create_session: 'note',
-    send_session_message: 'note',
+    send_session_prompt: 'note',
+    wait_for_session_idle: 'note',
+    interrupt_session: 'note',
     list_sessions: 'count',
     rename_session: 'note',
   };
@@ -4212,7 +4218,17 @@
    * something the turn did, finished. It used to be a bordered block with its output always
    * open, which dropped a wall of text into the middle of the essay every time a job ended.
    */
-  function addBackgroundNotice(item) {
+  /**
+ * A message another session sent, shown as plain text: it is neither a terminal (no
+ * command, no output stream) nor a batch (no rows), so it gets no viewer of its own.
+ */
+function sessionMessageBody(content) {
+  const body = el('div', 'session-msg-body');
+  body.textContent = String(content || '');
+  return body;
+}
+
+function addBackgroundNotice(item) {
     if (!messagesEl) return;
     // A notice that **opens the next round** is a boundary, not a step: it ends the run
     // above it and then stands alone in the flow as one dim line, with the batch summary
@@ -4222,7 +4238,9 @@
     // swallows two.
     if (item.round) {
       closeStepsGroup();
-      const isSub = (item.producer || item.kind) === 'subagent';
+      const producer = item.producer || item.kind;
+      const isSub = producer === 'subagent';
+      const isSession = producer === 'session';
       // The line reads like a step's own line: a **title** in the verb's slot and a short
       // human sentence beside it, both italic, all of it in the accent colour because this
       // is the one row in the log that is an *event* rather than work or words.
@@ -4237,7 +4255,13 @@
       line.dataset.kind = 'background';
       line.dataset.round = '1';
       const text = el('div', 'notice-text');
-      text.appendChild(el('b', 'notice-title', isSub ? tr('Sub-agent finished') : tr('Background job finished')));
+      text.appendChild(
+        el(
+          'b',
+          'notice-title',
+          isSession ? tr('Session message') : isSub ? tr('Sub-agent finished') : tr('Background job finished'),
+        ),
+      );
       if (context) {
         text.appendChild(document.createTextNode(' '));
         text.appendChild(el('i', 'notice-context', context));
@@ -4249,7 +4273,11 @@
         // to open).
         const detail = el('div', 'tool-detail hidden');
         if (item.id != null && item.id !== '') detail.appendChild(el('div', 'notice-id', '#' + item.id));
-        if (item.content) detail.appendChild(isSub ? batchViewer(item.content) : terminalViewer(item.content, ''));
+        if (item.content) {
+          detail.appendChild(
+            isSession ? sessionMessageBody(item.content) : isSub ? batchViewer(item.content) : terminalViewer(item.content, ''),
+          );
+        }
         line.appendChild(detail);
         text.addEventListener('click', () => {
           markRowTouched(line);
@@ -4266,28 +4294,33 @@
     node.dataset.kind = 'background';
     // The tag names the producer, so a background terminal and a sub-agent batch are told
     // apart at a glance (they used to share the same "BG").
-    const isSub = (item.producer || item.kind) === 'subagent';
+    const producer = item.producer || item.kind;
+    const isSub = producer === 'subagent';
+    const isSession = producer === 'session';
     const head = el('div', 'tool-row');
     // The tag is a word, not a code: `BG`/`SUB` were three letters a reader had to learn,
-    // and both are localized like every other verb in the log.
+    // and all of them are localized like every other verb in the log.
     head.appendChild(
       el(
         'b',
-        'tool-verb bgnotify-badge ' + (isSub ? 'sub' : 'bg'),
-        isSub ? tr('Sub-agent finished') : tr('Background job finished'),
+        'tool-verb bgnotify-badge ' + (isSession ? 'session' : isSub ? 'sub' : 'bg'),
+        isSession ? tr('Session message') : isSub ? tr('Sub-agent finished') : tr('Background job finished'),
       ),
     );
     const command = isSub ? '' : item.name || item.cmd || '';
     const id = item.id != null && item.id !== '' ? '#' + item.id : '';
     const label = [id, command].filter(Boolean).join(' ');
     if (label) head.appendChild(el('span', 'tool-label mono', label));
-    head.appendChild(el('span', 'bgnotify-status', item.doneText || tr('finished')));
+    if (item.doneText) head.appendChild(el('span', 'bgnotify-status', item.doneText));
     node.appendChild(head);
     const detail = el('div', 'tool-detail hidden');
     // A batch notice is the same rows the `spawn_agents` viewer draws (its body is prose,
-    // not JSON, so it is parsed); a job notice is a terminal, command and output.
+    // not JSON, so it is parsed); a job notice is a terminal, command and output; a
+    // session message is the text another conversation sent.
     if (item.content) {
-      detail.appendChild(isSub ? batchViewer(item.content) : terminalViewer(item.content, command));
+      detail.appendChild(
+        isSession ? sessionMessageBody(item.content) : isSub ? batchViewer(item.content) : terminalViewer(item.content, command),
+      );
     }
     node.appendChild(detail);
     head.addEventListener('click', () => {

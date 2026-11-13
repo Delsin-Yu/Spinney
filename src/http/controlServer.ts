@@ -16,8 +16,8 @@
  *   5. `POST /continue`        send a user message that continues from a node
  *   6. `POST /session/start`   create (or jump to) a session and optionally send
  *                              a caller-supplied prompt as its first turn
- *   7. `POST /session/message` deliver a message to one node of one session and
- *                              start a turn there (409 while that node is busy)
+ *   7. `POST /session/message` send a prompt into one session and start a turn
+ *                              there (409 while that session cannot take one)
  *   8. `POST /stop`            cancel a node's run (or every run of a session)
  *   9. `POST /reload-window`   ask VS Code to reload this window (202; the reply
  *                              is observed as a *new* instance on the other side).
@@ -98,6 +98,9 @@ export interface ControlResult {
   runningBackgrounds?: boolean;
   /** `POST /session/start`: whether the caller's prompt was sent as a turn. */
   prompted?: boolean;
+  /** `POST /session/message`: the receipt of one prompt (a turn was started). */
+  state?: 'delivered' | 'queued';
+  how?: string;
   /** `POST /reload-window`: the optional continue was stored and will be sent after
    *  the reload (the caller must not post `/continue` a second time). */
   continueQueued?: boolean;
@@ -146,12 +149,13 @@ export interface ControlHost {
     prompt?: string;
   }): Promise<ControlResult>;
   /**
-   * Deliver a message into one node of one session (`POST /session/message`) and
-   * start a turn there. The node must exist and be idle: a running or busy target
-   * is `409`, so the caller can wait and retry instead of stacking two agents on
-   * one conversation line.
+   * Send a prompt into one session (`POST /session/message`) and start a turn there.
+   * The prompt lands on the session's own active node, exactly like a human's own
+   * send: a session that cannot take a turn right now (running, unfinished work, a
+   * reload hold, a full window) is `409`, so the caller can wait and retry. `nodeId`
+   * is validated but does not address anything.
    */
-  controlSessionMessage(opts: { sessionId: string; nodeId: string; message: string }): Promise<ControlResult>;
+  controlSessionMessage(opts: { sessionId: string; nodeId?: string; message: string }): Promise<ControlResult>;
   /**
    * Reload this window (`workbench.action.reloadWindow`). It refuses while anything
    * is live, so a caller that *is* a turn cannot use the immediate form — that is
@@ -399,17 +403,17 @@ export class ControlServer implements vscode.Disposable {
           send(400, { ok: false, error: 'sessionId is required' });
           return;
         }
-        if (typeof body.nodeId !== 'string' || !body.nodeId) {
-          send(400, { ok: false, error: 'nodeId is required (the node the message branches off)' });
-          return;
-        }
         if (typeof body.message !== 'string' || !body.message.trim()) {
           send(400, { ok: false, error: 'message is required (supplied by the caller)' });
           return;
         }
+        // `nodeId` is accepted and validated but addresses nothing: a prompt lands on the
+        // session's own active node, the way a human's message does. An old caller that
+        // still sends one keeps working; an unknown one is a 409 rather than a silent
+        // landing somewhere else.
         const result = await this.host.controlSessionMessage({
           sessionId: body.sessionId,
-          nodeId: body.nodeId,
+          nodeId: typeof body.nodeId === 'string' ? body.nodeId : undefined,
           message: body.message,
         });
         send(result.ok ? 200 : 409, result);

@@ -1,14 +1,16 @@
 import { ToolDefinition } from '../types';
 import { createSessionTool } from './createSession';
+import { interruptSessionTool } from './interruptSession';
 import { listNodesTool } from './listNodes';
 import { listSessionsTool } from './listSessions';
 import { readImageTool } from './readImage';
 import { renameSessionTool } from './renameSession';
 import { sendAgentMessageTool } from './sendAgentMessage';
 import { sendReadonlyAgentMessageTool } from './sendReadonlyAgentMessage';
-import { sendSessionMessageTool } from './sendSessionMessage';
+import { sendSessionPromptTool } from './sendSessionPrompt';
 import { spawnAgentsTool } from './spawnAgents';
 import { spawnReadonlyAgentsTool } from './spawnReadonlyAgents';
+import { waitForSessionIdleTool } from './waitForSessionIdle';
 
 /**
  * The tools the **provider** orchestrates and `Agent` intercepts (spawning,
@@ -37,12 +39,13 @@ export interface ToolCapabilities {
   canSpawnReadOnly: boolean;
   /**
    * Main agent only: the session surface — `create_session`,
-   * `send_session_message`, `list_sessions`, `list_nodes` and `rename_session`.
+   * `send_session_prompt`, `wait_for_session_idle`, `interrupt_session`,
+   * `list_sessions`, `list_nodes` and `rename_session`.
    *
-   * One capability for all five, because they are one surface: a caller that may
-   * start a session and message a node also has to be able to name them, and a
-   * sub-agent (or a sidecar card) never may — its report goes up to its
-   * dispatcher, not sideways into another conversation.
+   * One capability for all of them, because they are one surface: a caller that may
+   * start a session and prompt it also has to be able to name it, wait for it and
+   * end what it started, and a sub-agent (or a sidecar card) never may — its report
+   * goes up to its dispatcher, not sideways into another conversation.
    */
   canSessions: boolean;
 }
@@ -55,7 +58,9 @@ export const INTERCEPTED_TOOLS: readonly InterceptedTool[] = [
   spawnReadonlyAgentsTool,
   sendReadonlyAgentMessageTool,
   createSessionTool,
-  sendSessionMessageTool,
+  sendSessionPromptTool,
+  waitForSessionIdleTool,
+  interruptSessionTool,
   listSessionsTool,
   listNodesTool,
   renameSessionTool,

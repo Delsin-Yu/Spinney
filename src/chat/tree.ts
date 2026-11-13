@@ -203,7 +203,7 @@ export interface DisplayItem {
    * a sub-agent batch as a terminal: wrong title, wrong viewer. Absent on an item stored by
    * a build that did not record it, where the webview falls back to the old guess.
    */
-  producer?: 'background' | 'subagent';
+  producer?: 'background' | 'subagent' | 'session';
   /** For a background notice card: the status phrase, e.g. "finished with exit code 0". */
   doneText?: string;
 }
@@ -286,6 +286,21 @@ export interface TreeNode {
    */
   model?: string;
   effort?: string;
+  /**
+   * The last session prompt that created this node: the sender's session and node
+   * (`send_session_prompt`). `list_nodes` renders it as `from=`, and
+   * `interrupt_session` reads it to decide what an agent may stop. Absent on a human
+   * turn, which is also what makes that line unreachable to the kill and the boundary
+   * of an unattended exchange.
+   */
+  lastFrom?: { sessionId: string; nodeId: string };
+  /**
+   * How many more inter-session rounds this line may use. Inherited from the last
+   * delivery and merged as a **minimum**, so a receiver can use less than it was given
+   * and can never buy more. Absent on a human-created node, which starts a fresh
+   * allowance (`spinney.sessionMaxRounds` is the ceiling).
+   */
+  roundsAllowance?: number;
   /** Optional user-resized card bounds (px). Absent ⇒ size from CSS defaults. */
   customSize?: { w: number; h: number };
   /**
@@ -1131,6 +1146,21 @@ function normalizeTreeSession(raw: AgentSession & { rootId?: string | null }): A
       model: typeof node.model === 'string' && node.model ? node.model : undefined,
       effort: asThinkingEffort(node.effort),
     };
+    // Who prompted this node, and what is left of the exchange budget it carries. Both
+    // are **authority**, not display: `interrupt_session` decides what an agent may stop
+    // by `lastFrom`, so a reload that dropped it would hand every old line back as
+    // "started by a human" and take away the agent's ability to end its own work.
+    // Validated field by field — a malformed record is dropped rather than repaired.
+    n.lastFrom =
+      node.lastFrom &&
+      typeof node.lastFrom.sessionId === 'string' &&
+      typeof node.lastFrom.nodeId === 'string'
+        ? { sessionId: node.lastFrom.sessionId, nodeId: node.lastFrom.nodeId }
+        : undefined;
+    n.roundsAllowance =
+      typeof node.roundsAllowance === 'number' && Number.isFinite(node.roundsAllowance) && node.roundsAllowance >= 0
+        ? node.roundsAllowance
+        : undefined;
     n.kind = node.kind === 'agent' ? 'agent' : node.kind === 'bg' ? 'bg' : undefined;
     n.delivered = node.delivered === true ? true : undefined;
     n.agentDepth = typeof node.agentDepth === 'number' ? node.agentDepth : undefined;

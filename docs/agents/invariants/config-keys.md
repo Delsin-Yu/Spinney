@@ -2,7 +2,7 @@
 The settings are contributed in **groups**: `contributes.configuration` is an array of
 `{ title, properties }` sections — Model & API (`model`, `providers`, `modelCards`) · Chat & Display
 (`replyLanguage`, `promptSections`) · Tools & Execution
-(`execForegroundSeconds`, `subAgentSyncSeconds`, `maxInlineToolOutput`, `searchTimeoutSeconds`, `hopSession.enabled`) · Sub-agents
+(`execForegroundSeconds`, `subAgentSyncSeconds`, `sessionMaxRounds`, `maxInlineToolOutput`, `searchTimeoutSeconds`) · Sub-agents
 (`maxConcurrentSubagents`, `maxLevel2Subagents`) · Sessions & Transcripts (`autoSessionTitles`,
 `saveSessionTranscripts`, `saveSubAgentTranscripts`, `subAgentTranscriptDir`) ·
 Control Plane (`httpApi.*`). The
@@ -42,6 +42,14 @@ every summary arrives later as one batch notice. It replaces every use the delet
 `commandMaxForegroundDuration` had on the chat side, and it is deliberately a *different*
 number from `execForegroundSeconds`: one bounds a batch of conversations, the other one
 process, and tuning one must never silently move the other),
+`sessionMaxRounds` (rounds, default **16**, minimum **1**, maximum **64** — the ceiling of
+one inter-session exchange. `send_session_prompt` requires `max_rounds`, clamps it to
+this number, and hands the receiver one fewer; `node.roundsAllowance` merges every
+delivery as a **minimum**, so a receiver can spend less but never buy more. A node with no
+rounds left is refused. Only unattended agent-to-agent work is counted: a human message
+creates a node with no allowance, which starts a fresh stretch. Read live by
+`sessionMaxRounds()`, the brake behind the caller's declaration — see
+`plans/session-prompt-addressing.md`),
 `replyLanguage` (`auto` — the default, i.e. follow the VS Code display language —
 or one of the language tags VS Code ships display translations for; resolved into
 the **name** the prompt carries by `replyLanguageName` and, beside it, the BCP-47
@@ -136,7 +144,7 @@ no handling.
 | `replyLanguage` | immediately when *that key* changed (a running session is skipped) | pushed: `ChatViewProvider.getConfig()` resolves the setting to a language **name** (`auto` → `vscode.env.language`, a tag → its CLDR name, via `replyLanguageName`), and `SessionRuntime.applyReplyLanguage` carries that name **and its tag** (`replyLanguageTag`) to every node worker's `Agent.setReplyLanguage` — the name fills the next frozen `## Language` line, the tag names the language inside `exec_command`'s title description; nothing already sent is rewritten (a frozen epoch keeps its bytes). **No per-session pick**: the language is a property of the reader, so the setting is the only source (`SessionRuntime.replyLanguage` / `replyLanguageTag` are seeded from it at construction). Re-picking `auto` when the display language is already in force resolves to the same name and is a no-op |
 | `promptSections` | immediately, incl. a chat tab already open | pushed: `postConfig()` → the webview rebuilds the snippet menu from `snippets` (it keeps no copy of the list, and the shipped rows are merged in again on every push, so a renamed or emptied row shows up at once) |
 | `httpApi.enabled`, `httpApi.port` | immediately | pushed: `ControlServer.restart()` (rebind the listener; disabling just leaves `start()` a no-op) |
-| `execForegroundSeconds`, `subAgentSyncSeconds`, `maxInlineToolOutput`, `searchTimeoutSeconds`, `maxLevel2Subagents`, `saveSessionTranscripts`, `saveSubAgentTranscripts`, `subAgentTranscriptDir`, `autoSessionTitles`, `hopSession.enabled` | immediately | pulled at the point of use (they already were — no listener needed; both command numbers are read **per call** — an `exec_command` invocation, a join, a spawn — and never cached, so a change applies to the next call and never to a call already waiting. `hopSession.enabled` is read at every turn start (`workerFor` → `Agent.setHopEnabled`) and again in `handleHopSession`) |
+| `execForegroundSeconds`, `subAgentSyncSeconds`, `sessionMaxRounds`, `maxInlineToolOutput`, `searchTimeoutSeconds`, `maxLevel2Subagents`, `saveSessionTranscripts`, `saveSubAgentTranscripts`, `subAgentTranscriptDir`, `autoSessionTitles` | immediately | pulled at the point of use (they already were — no listener needed; the numbers are read **per call** — an `exec_command` invocation, a join, a spawn, an inter-session prompt — and never cached, so a change applies to the next call and never to a call already waiting) |
 
 - **`model` / `thinkingEffort` arbitration (P4):** the selection belongs to the **node**.
   A turn records the card and level it ran with on the node it creates; a follow-up

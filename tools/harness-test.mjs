@@ -31,7 +31,7 @@
  * Usage:
  *   node tools/harness-test.mjs <suite...|all> [options]
  *
- *   Suites: health sessions concurrency navigation background signals branch sessionMessage selftest
+ *   Suites: health sessions concurrency navigation background signals branch sessionPrompt selftest
  *
  *   --instance <pid-NNNN>    target that discovery instance (by id or file stem)
  *   --discovery <file>       target the control plane recorded in that JSON file
@@ -59,13 +59,15 @@ import * as path from 'node:path';
 // ---------------------------------------------------------------------------
 
 const EXT_ID = 'de-yu.spinney';
-const SUITES = ['health', 'sessions', 'concurrency', 'navigation', 'background', 'signals', 'branch', 'sessionMessage', 'selftest'];
+const SUITES = ['health', 'sessions', 'concurrency', 'navigation', 'background', 'signals', 'branch', 'sessionPrompt', 'selftest'];
 const DEFAULT_TIMEOUT_SEC = 180;
 const DEFAULT_INTERVAL_MS = 250;
 /** How long a suite waits for a turn's transcript dump to appear. */
 const TRANSCRIPT_WAIT_MS = 60_000;
-/** Per-HTTP-request budget. */
-const REQUEST_TIMEOUT_MS = 20_000;
+/** Per-HTTP-request budget. `POST /session/message` starts a turn and answers at once,
+ * so this is generous headroom rather than a wait: no route in this driver blocks on
+ * anything but a model call. */
+const REQUEST_TIMEOUT_MS = 45_000;
 
 /**
  * The `/state` fields the suites assert on, and the phase that introduces them.
@@ -101,8 +103,9 @@ Suites:
   signals       a finished job's notice lands INSIDE the owning node: no new node,
                 unchanged node count, backgroundNodes still the turn node
   branch        two nodes of ONE session stream at once; node-scoped POST /stop
-  sessionMessage  POST /session/message into one node: 409 while it runs, 200 when
-                idle, 409 for an unknown session / node
+  sessionPrompt  POST /session/message into a session: 409 with the ways out while it
+                runs a turn, 200 starting a NEW turn once it is idle, 409 for an
+                unknown session / node
   selftest      pure-logic checks of this script's own helpers (needs no window)
 
 Options:
@@ -2532,29 +2535,32 @@ async function suiteSelftestAll(cx) {
 
 
 // ---------------------------------------------------------------------------
-// Suite: sessionMessage — POST /session/message delivers into one exact node
+// Suite: sessionPrompt — POST /session/message starts one turn in a session
 // ---------------------------------------------------------------------------
 
 /**
- * A message to one node of one session (`POST /session/message {sessionId, nodeId,
- * message}`), in the shape the two session tools give the agent:
+ * A prompt into one session (`POST /session/message {sessionId, message}`), in the
+ * shape the session tools give the agent:
  *
- *  - a message into a node that has a **live run** is refused with `409` — a second
- *    agent on one conversation line is exactly what the node-scoped rule prevents,
- *    and the caller is expected to wait and retry;
- *  - the same message into the **same node** once it is idle is `200`, and the
- *    answer names the new node the turn runs in (so the caller can follow it);
- *  - an unknown session and an unknown node are refused (`409`), naming the
- *    problem, instead of silently starting a turn somewhere else.
+ *  - a prompt into a session that is **running a turn, or still owns unfinished
+ *    work**, is refused (409) with one sentence naming the node, how long it has been
+ *    busy, and the two ways out (`wait_for_session_idle`, `interrupt_session`). There
+ *    is no queued delivery any more: the prompt is a user message, so it either starts
+ *    a turn or it does not;
+ *  - the same prompt once the session is idle starts **one new turn** on that
+ *    session's active node, and the receipt names the node it created;
+ *  - an unknown session, and a `nodeId` that names nothing, are refused (409) instead
+ *    of silently landing somewhere else.
  *
- * The first turn is slow enough to be observed running, and the suite waits for
- * the session to be idle (no run, no locked node) before the accepted send.
+ * `wait_for_session_idle` and `interrupt_session` are **agent tools**, not control
+ * plane routes, so this driver cannot reach them; they are exercised by the live walk
+ * in `plans/session-prompt-addressing.md` §7.
  */
-async function suiteSessionMessage(cx) {
+async function suiteSessionPrompt(cx) {
   const checks = makeChecks();
-  const name = 'sessionMessage';
+  const name = 'sessionPrompt';
 
-  const started = await startSession(cx, { label: 'MSG', prompt: longRunPrompt(cx.runId, 'MSG', 15000) });
+  const started = await startSession(cx, { label: 'PRM', prompt: longRunPrompt(cx.runId, 'PRM', 15000) });
   if (started.fail) {
     return suiteResult(name, 'FAIL', started.fail, checks);
   }
@@ -2572,7 +2578,7 @@ async function suiteSessionMessage(cx) {
     return suiteResult(name, 'FAIL', 'the suite has no node to address', checks);
   }
 
-  // The refused case: the node is streaming its first turn.
+  // Case 1: the session is busy. It is a refusal, not a delivery and not a queue.
   const running = await pollState(
     cx,
     (state) => (sessionRunningNodes(state, sessionId).includes(nodeId) ? true : undefined),
@@ -2580,23 +2586,31 @@ async function suiteSessionMessage(cx) {
   );
   if (!running.ok) {
     checks.subskip(
-      'a message into a node with a live run is refused',
+      'a prompt into a running session is refused (409)',
       'the first turn was never observed running on that node, so the busy case was not exercised',
     );
   } else {
     const busy = await cx.client.sessionMessage({
       sessionId,
       nodeId,
-      message: `HARNESS-TEST ${cx.runId} MSG-BUSY: reply with the single word "ok".`,
+      message: `HARNESS-TEST ${cx.runId} PRM-BUSY: reply with the single word "ok".`,
     });
+    const busyError = String(busy.body?.error ?? '');
     checks.check(
-      'a message into a node with a live run is refused (409)',
-      busy.status === 409 && busy.body?.ok !== true,
-      `HTTP ${busy.status}: ${busy.body?.error ?? JSON.stringify(busy.body)}`,
+      'a prompt into a running session is refused (409)',
+      busy.status === 409 && busy.body?.ok === false,
+      `HTTP ${busy.status}: ${busyError || JSON.stringify(busy.body)}`,
+    );
+    checks.check(
+      'the refusal names the node and the two ways out',
+      /running a turn/i.test(busyError) &&
+        /wait_for_session_idle/.test(busyError) &&
+        /interrupt_session/.test(busyError),
+      busyError,
     );
   }
 
-  // The accepted case: the same node, now idle (no run, no unfinished work).
+  // Case 2: the session is idle. One turn starts, on a node it created.
   const idle = await pollState(
     cx,
     (state) => {
@@ -2621,29 +2635,31 @@ async function suiteSessionMessage(cx) {
   }
   const delivered = await cx.client.sessionMessage({
     sessionId,
-    nodeId,
-    message: `HARNESS-TEST ${cx.runId} MSG-OK: reply with the single word "ok" and end your turn.`,
+    message: `HARNESS-TEST ${cx.runId} PRM-OK: reply with the single word "ok" and end your turn.`,
   });
+  const deliveredError = String(delivered.body?.error ?? '');
   checks.check(
-    'a message into an idle node is delivered (200)',
+    'a prompt into an idle session starts a turn (200)',
     delivered.status === 200 && delivered.body?.ok === true,
-    `HTTP ${delivered.status}: ${delivered.body?.error ?? JSON.stringify(delivered.body)}`,
+    `HTTP ${delivered.status}: ${deliveredError || JSON.stringify(delivered.body)}`,
   );
   checks.check(
-    'the accepted message names the node the turn runs in',
-    typeof delivered.body?.nodeId === 'string' && delivered.body.nodeId.length > 0,
-    String(delivered.body?.nodeId),
+    'the receipt says it landed as a turn',
+    delivered.body?.state === 'delivered' && delivered.body?.how === 'turn',
+    JSON.stringify({ state: delivered.body?.state, how: delivered.body?.how }),
   );
   checks.check(
-    'the message branched off the node it named',
-    delivered.body?.nodeId !== nodeId,
-    `new=${delivered.body?.nodeId} basis=${nodeId}`,
+    'the prompt created a new node, it did not land in the old one',
+    typeof delivered.body?.nodeId === 'string' &&
+      delivered.body.nodeId.length > 0 &&
+      delivered.body.nodeId !== nodeId,
+    `got=${delivered.body?.nodeId} old=${nodeId}`,
   );
 
-  // The two refusals a caller can hit by mis-addressing the target.
+  // Case 3: the two mis-addressings a caller can hit. `nodeId` no longer addresses
+  // anything, but an unknown one is still refused rather than ignored.
   const noSession = await cx.client.sessionMessage({
     sessionId: `harness-test-${cx.runId}-nosuchsession`,
-    nodeId,
     message: 'x',
   });
   checks.check(
@@ -2684,7 +2700,7 @@ const SUITE_FNS = {
   background: suiteBackground,
   signals: suiteSignals,
   branch: suiteBranch,
-  sessionMessage: suiteSessionMessage,
+  sessionPrompt: suiteSessionPrompt,
   selftest: suiteSelftestAll,
 };
 

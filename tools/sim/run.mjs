@@ -419,7 +419,7 @@ function toolCallOf(events) {
   }
 }
 
-const TOOLS_MAIN = ['read_file', 'search_files', 'spawn_agents', 'send_agent_message', 'create_session', 'send_session_message', 'list_sessions', 'list_nodes'].map((name) => ({ type: 'function', function: { name } }));
+const TOOLS_MAIN = ['read_file', 'search_files', 'spawn_agents', 'send_agent_message', 'create_session', 'send_session_prompt', 'wait_for_session_idle', 'interrupt_session', 'list_sessions', 'list_nodes'].map((name) => ({ type: 'function', function: { name } }));
 const TOOLS_SUB = ['read_file', 'search_files', 'spawn_readonly_agents'].map((name) => ({ type: 'function', function: { name } }));
 
 function conversation(rounds, extra) {

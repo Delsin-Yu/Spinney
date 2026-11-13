@@ -391,18 +391,22 @@ A sub-agent can start and manage a background terminal of its own. A read-only s
 
 ### 8.3 Sessions and nodes
 
-The agent can work with other sessions. It has four tools for this.
+The agent can work with other sessions. It has six tools for this.
 
 | Tool | What it does |
 |---|---|
 | `create_session` | Create a new session, name it, and send the first message there. The call returns at once, so the turn of the agent continues. The new session runs its own turn in parallel. Spinney does not open or focus its tab. The new session shows in the Sessions view. |
-| `send_session_message` | Send a message to an exact node of any session, and start a turn there. The call is refused while that node runs a turn, or while it still owns a background command or a sub-agent. |
+| `send_session_prompt` | Send a prompt to a session. The prompt is a user message, and it starts one new turn. It goes to the active node of that session, which is the node that a message from you would go to. You do not supply a node id. The call returns when the turn starts. It does not wait for the answer. It returns a receipt. After you send, end your turn. The answer comes back as a new turn on your node. A session cannot send a reply while it runs a turn. The prompt is refused while the other session runs a turn or still owns work. The refusal names `wait_for_session_idle` and `interrupt_session`. The call requires a round budget (`max_rounds`). |
+| `wait_for_session_idle` | Wait until a session can take a prompt. The default time is 30 seconds, and the maximum is 300 seconds. The call returns as soon as the session is free. If the time ends first, the result is normal, not an error. It names the node that holds the session and the reason. |
+| `interrupt_session` | End the work in a session that a prompt from the agent started. It stops the turn, the background terminals, and the sub-agents of that work. It cannot stop a turn that you started. It reports what it stopped. |
 | `list_sessions` | List the sessions with their id, title, node count, and the number of nodes that run. A query filters the list. |
-| `list_nodes` | List the tree of one session. Each row shows the real state: `running` for a live turn, `busy` for a node that still owns work, and `checked out` for the node in view. A query filters the rows. |
+| `list_nodes` | List the tree of one session. Each row shows the real state: `running` for a live turn, `busy` for a node that still owns work, and `checked out` for the node in view. A node that received a prompt shows `from=` and its remaining rounds. A query filters the rows. |
 
 A new session cannot see the conversation that made it. The first message must hold everything the new session needs, including the node that must receive the answer. A tool call delivers nothing by itself: the message to the caller is a separate call, and it can come later.
 
 The tools belong to the main agent only. A sub-agent cannot start a session, and it cannot send to one.
+
+The round budget stops two sessions that answer each other without a person. The caller sends `max_rounds` with each message. The receiver gets one round less. It cannot increase the number. `spinney.sessionMaxRounds` is the maximum. A node with no rounds left cannot send. A message that you type starts a new budget.
 
 ### 8.4 The terminal dock
 
@@ -528,6 +532,7 @@ All keys start with `spinney.`. Open the Settings UI, or edit `settings.json`.
 | `spinney.promptSections` | `{}` | Extra prompt snippets, keyed by the name in the menu. A name that matches a shipped snippet replaces its text. |
 | `spinney.execForegroundSeconds` | `30` | The time a command runs in the turn, in seconds, before Spinney moves it to the background. 30 seconds is the default. The minimum is 10. The command is not killed: it continues as a background job, and the agent receives its id. |
 | `spinney.subAgentSyncSeconds` | `300` | The time a `spawn_agents` or `send_agent_message` call in `sync` mode can hold the turn, in seconds. 300 is 5 minutes. The minimum is 30 and the maximum is 1800. A batch that still runs at the end of this time returns the agent ids, and every summary arrives later as one batch notice. |
+| `spinney.sessionMaxRounds` | `16` | The maximum number of rounds of one exchange between sessions. The minimum is 1 and the maximum is 64. The caller states `max_rounds` with each prompt. The value cannot be larger than this setting. |
 | `spinney.maxInlineToolOutput` | `32768` | The size limit of a tool result, in bytes. A larger result goes to a file. The answer shows a preview of not more than 2048 characters. `0` turns the limit off. |
 | `spinney.searchTimeoutSeconds` | `10` | The time limit of one search, in seconds. It applies to `search_files` and `search_transcripts`. The minimum is 1 second and the maximum is 600 seconds. The limit covers the whole call. A search that reaches the limit returns an error and no results. Then make the search smaller: use a narrower path, a tighter pattern, a glob, or less context. |
 | `spinney.streamAnimation` | `true` | Animate the text and the rows of a live turn. New characters fade in, and new rows fade in and move up. Turn it off to draw every character and every row at once. The reduced-motion setting of the operating system also turns the animation off. |

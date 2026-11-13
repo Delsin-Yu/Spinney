@@ -567,12 +567,28 @@ export class Agent {
   private createSessionHandler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null =
     null;
   /**
-   * Provider hook that delivers a message to one node of one session for
-   * `send_session_message`: the one channel between conversations, in both
-   * directions. Only the provider can read another session's live state, so the
-   * refusal of a running / busy target node is its answer, not this agent's.
+   * Provider hook that starts a turn in a session for `send_session_prompt`: the one
+   * channel between conversations, in both directions. A prompt is addressed to a
+   * **session**, never to a node, so whether that session can take one right now is
+   * the provider's answer, not this agent's.
    */
-  private sendSessionMessageHandler:
+  private sendSessionPromptHandler:
+    | ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>)
+    | null = null;
+  /**
+   * Provider hook that waits for a session to be able to take a prompt, for
+   * `wait_for_session_idle`. It is a slice, not a timeout: it returns when the
+   * session frees up, or when the window runs out, whichever comes first.
+   */
+  private waitForSessionIdleHandler:
+    | ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>)
+    | null = null;
+  /**
+   * Provider hook that ends the live work an agent's prompt started in a session,
+   * for `interrupt_session`. Its scope is provenance, not position, so an agent can
+   * never ask for a line a human started to be killed.
+   */
+  private interruptSessionHandler:
     | ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>)
     | null = null;
   /** Provider hook that lists the window's sessions for `list_sessions`. */
@@ -600,7 +616,8 @@ export class Agent {
   private canSpawn = true;
   /**
    * Whether the session tools are exposed — `create_session`,
-   * `send_session_message`, `list_sessions`, `list_nodes` and `rename_session`.
+   * `send_session_prompt`, `wait_for_session_idle`, `interrupt_session`,
+   * `list_sessions`, `list_nodes` and `rename_session`.
    * Main agent only: a sub-agent reports to its dispatcher, and a sidecar card
    * (sub-agent window / background-job card) is not a conversation of its own.
    */
@@ -705,14 +722,25 @@ export class Agent {
     this.createSessionHandler = handler;
   }
 
-  /**
-   * Set a provider hook that delivers a message to one node of one session, for
-   * `send_session_message`.
-   */
-  setSendSessionMessageHandler(
+  /** Set a provider hook that starts a turn in a session, for `send_session_prompt`. */
+  setSendSessionPromptHandler(
     handler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null,
   ): void {
-    this.sendSessionMessageHandler = handler;
+    this.sendSessionPromptHandler = handler;
+  }
+
+  /** Set a provider hook that waits for a session to free up, for `wait_for_session_idle`. */
+  setWaitForSessionIdleHandler(
+    handler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null,
+  ): void {
+    this.waitForSessionIdleHandler = handler;
+  }
+
+  /** Set a provider hook that ends agent-started work in a session, for `interrupt_session`. */
+  setInterruptSessionHandler(
+    handler: ((args: Record<string, unknown>, signal: AbortSignal) => Promise<string>) | null,
+  ): void {
+    this.interruptSessionHandler = handler;
   }
 
   /** Set a provider hook that lists the window's sessions for `list_sessions`. */
@@ -748,8 +776,9 @@ export class Agent {
   }
 
   /**
-   * Allow/deny the session tools (`create_session` / `send_session_message` /
-   * `list_sessions` / `list_nodes` / `rename_session`). Main agent only; every
+   * Allow/deny the session tools (`create_session` / `send_session_prompt` /
+   * `wait_for_session_idle` / `interrupt_session` / `list_sessions` /
+   * `list_nodes` / `rename_session`). Main agent only; every
    * sub-agent and every sidecar card keeps it off and never sees them.
    */
   setCanSessions(v: boolean): void {
@@ -817,7 +846,8 @@ export class Agent {
    * `search_transcripts`) plus the tools the provider orchestrates and the Agent
    * intercepts: `read_image` (vision models only), the `spawn_*` / `send_*` pair
    * matching this agent's capabilities, and — main agent only — `create_session` /
-   * `send_session_message` / `list_sessions` / `list_nodes` / `rename_session`.
+   * `send_session_prompt` / `wait_for_session_idle` / `interrupt_session` /
+   * `list_sessions` / `list_nodes` / `rename_session`.
    * Every tool is advertised with its full
    * schema; there is no folded "gradual reveal" tier. The intercepted set comes
    * from the same capability flags the system prompt's `## Delegation` guidance
@@ -1449,16 +1479,34 @@ export class Agent {
         : this.createSessionHandler
           ? await this.createSessionHandler(args, signal)
           : 'Error: session creation is not available in this session.';
-    } else if (call.function.name === 'send_session_message') {
-      // The one channel between conversations, in both directions. The provider
-      // owns both sessions' live state, so it is what refuses a running / busy
-      // target node.
+    } else if (call.function.name === 'send_session_prompt') {
+      // The one channel between conversations, in both directions. The prompt is
+      // addressed to a session and starts a turn there; the provider owns every
+      // session's live state, so it is what refuses a busy one.
       const args = parseToolArgs(call.function.arguments);
       result = !this.canSessions
-        ? 'Error: only the main agent may message another session.'
-        : this.sendSessionMessageHandler
-          ? await this.sendSessionMessageHandler(args, signal)
-          : 'Error: cross-session messaging is not available in this session.';
+        ? 'Error: only the main agent may prompt another session.'
+        : this.sendSessionPromptHandler
+          ? await this.sendSessionPromptHandler(args, signal)
+          : 'Error: cross-session prompts are not available in this session.';
+    } else if (call.function.name === 'wait_for_session_idle') {
+      // A slice, not a timeout: the provider resolves it the moment the session can
+      // take a prompt, and answers normally when the window runs out.
+      const args = parseToolArgs(call.function.arguments);
+      result = !this.canSessions
+        ? 'Error: only the main agent may wait on another session.'
+        : this.waitForSessionIdleHandler
+          ? await this.waitForSessionIdleHandler(args, signal)
+          : 'Error: cross-session waits are not available in this session.';
+    } else if (call.function.name === 'interrupt_session') {
+      // Ends the live work an agent's prompt started, and nothing else: the scope is
+      // provenance (`lastFrom`), which the provider resolves per node.
+      const args = parseToolArgs(call.function.arguments);
+      result = !this.canSessions
+        ? 'Error: only the main agent may interrupt work in another session.'
+        : this.interruptSessionHandler
+          ? await this.interruptSessionHandler(args, signal)
+          : 'Error: interrupting another session is not available in this session.';
     } else if (call.function.name === 'list_sessions') {
       const args = parseToolArgs(call.function.arguments);
       result = !this.canSessions

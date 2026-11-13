@@ -220,7 +220,8 @@
   the identity line in place), the completion-signal injection hook
   (`setSignalHandler`; consulted after each whole tool batch, like the `read_image`
   image block) and the interception of the provider-orchestrated tools
-  (`spawn_*` / `send_*` / `create_session` / `send_session_message` / `list_sessions` /
+  (`spawn_*` / `send_*` / `create_session` / `send_session_prompt` /
+  `wait_for_session_idle` / `interrupt_session` / `list_sessions` /
   `list_nodes` / `rename_session` / `read_image`). The prompt text is **not** here — see `prompt.ts`.
 - `src/agent/prompt.ts` — **the system prompt**: both templates, the
   `{{placeholder}}` renderer (plus the unresolved-placeholder guard) and the two

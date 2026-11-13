@@ -511,22 +511,24 @@ throttled to one per 500 ms, so the two clocks have to be reconciled in the only
 webview runs without a host. See the same issue, and the ladder, in
 `invariants/streaming-perf.md`.
 
-## The `sessionMessage` suite's shape (a live window only)
+## The `sessionPrompt` suite's shape (a live window only)
 
-`node tools/harness-test.mjs --suite sessionMessage` pins the one session-tool contract a pure
-function cannot: a message may only land on a node that is **idle**.
+`node tools/harness-test.mjs --suite sessionPrompt` pins the one session-tool contract a pure
+function cannot: a prompt either starts a turn or it is refused — there is no queued delivery.
 
 1. `POST /session/start` with a prompt creates a session and starts its first turn;
-2. while that turn runs, `POST /session/message` to its first node is **409** with
-   `busy: true`, so the caller can wait and retry instead of stacking two agents on one
-   conversation line;
-3. the session going idle (no run, no unfinished work in `lockedNodes`) makes the same
-   request answer **200** with the new turn's `nodeId`, and that node is a child of the node
-   the caller named;
-4. the two mis-addressing refusals are checked too: an unknown `sessionId` and an unknown
-   `nodeId` are both 409, never "the active session";
-5. `GET /state` carries no `hops` and no `pendingReceipts`: nothing is delivered
-   automatically any more, and the only return path is another `send_session_message`.
+2. while that turn runs, `POST /session/message` into the session is **409** with a sentence that
+   names the running node and the two ways out (`wait_for_session_idle`, `interrupt_session`), so
+   the caller can wait instead of stacking two agents on one conversation line;
+3. the session going idle (no run, no unfinished work in `lockedNodes`) makes the same request
+   answer **200** with `state: delivered`, `how: turn`, and the id of a **new** node — the prompt
+   created it, it did not land in the old one;
+4. the two mis-addressings are checked too: an unknown `sessionId` and an unknown `nodeId` are
+   both 409, never "the active session" (a `nodeId` no longer addresses anything, but it is
+   still validated);
+5. `wait_for_session_idle` and `interrupt_session` are **agent tools**, not routes, so this
+   driver cannot reach them; they are covered by the live walk in
+   `plans/session-prompt-addressing.md` §7/§8.
 
 ## Windowed checks (the bounded wait, and what no guard can see)
 

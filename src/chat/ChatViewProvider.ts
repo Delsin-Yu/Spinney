@@ -112,6 +112,7 @@ import {
   workReadout,
 } from '../perf';
 import { sliceText } from '../text';
+import { formatDuration } from '../duration';
 import { setSearchAccessResolver } from '../tools/webAccess';
 
 // Model cards, providers, context windows and image support all live in one
@@ -451,7 +452,7 @@ const IMAGE_VIEW_TYPES: Record<string, string> = {
  *  - the `sessionId → SessionRuntime` map (`runtimes`);
  *  - tabs (`panels`), titles, transcripts, config, the control plane;
  *  - the session surface the agent's tools read (`list_sessions` / `list_nodes`
- *    across sessions, `create_session`, `send_session_message`) — the sessions and
+ *    across sessions, `create_session`, `send_session_prompt`) — the sessions and
  *    their runtimes are here, so a cross-session read has to be.
  *
  * `activeSessionId` is only "the last focused tab" (persisted); every piece of
@@ -3289,9 +3290,8 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    * never overwritten by the automatic namer.
    *
    * Nothing reports back on its own, so the answer has to be actionable: it names
-   * the new session id and its first node id, and it says how the caller hears back
-   * (`send_session_message` into this very node from the child's own prompt, or
-   * `list_nodes`).
+   * the new session id, and it says how the caller hears back (`send_session_prompt`
+   * with this session's id from the child's own prompt, or `list_nodes`).
    */
   async handleCreateSession(rt: SessionRuntime, node: TreeNode, args: Record<string, unknown>): Promise<string> {
     const name = typeof args.session_name === 'string' ? args.session_name.trim() : '';
@@ -3305,7 +3305,14 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     if (this.readOnly) {
       return 'Error: another window owns this workspace\u2019s sessions, so this window cannot start a session (it is read-only).';
     }
-    const created = await this.startFreshSession({ title: name, prompt, open: false });
+    const created = await this.startFreshSession({
+      title: name,
+      prompt,
+      open: false,
+      // The first turn of a session this agent asked for is the agent's own line:
+      // `lastFrom` is what lets `interrupt_session` end it later.
+      from: { sessionId: rt.session.id, nodeId: node.id },
+    });
     if (!created.ok || !created.sessionId) {
       return `Error: the session could not be created: ${created.error ?? 'unknown reason'}.`;
     }
@@ -3321,69 +3328,9 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       `[session] create_session from ${rt.session.id} node ${node.id} -> ${created.sessionId} node ${firstNodeId}`,
     );
     return [
-      `Started session ${created.sessionId} "${session ? session.title : name}". Its first node is ${firstNodeId}, and that turn is already running — this call did not wait for it, opened no tab, and did not move this conversation's view.`,
-      `Nothing comes back on its own: that session cannot see this conversation and is not told to answer you. To hear back, have it report — \`send_session_message\` with session_id ${rt.session.id} and session_node_id ${node.id} from its own prompt — or check on it yourself with list_nodes (session_id ${created.sessionId}) or list_sessions.`,
+      `Started session ${created.sessionId} "${session ? session.title : name}". Its first turn is already running — this call did not wait for it, opened no tab, and did not move this conversation's view.`,
+      `Nothing comes back on its own: that session cannot see this conversation and is not told to answer you. To hear back, have it report — \`send_session_prompt\` with session_id ${rt.session.id} from its own prompt. The session id is the whole address, so nothing about this node has to be carried across: check on it with list_nodes (session_id ${created.sessionId}) or list_sessions.`,
     ].join('\n');
-  }
-
-  /**
-   * `send_session_message`: deliver one message to one exact node of one session —
-   * the only channel between conversations, and it works in both directions.
-   *
-   * The refusals are the interesting half. A target node that is **running** would
-   * put a second agent on one conversation line, and a node that still owns
-   * unfinished work would receive the new turn *and* its queued completion notice
-   * in different places — the same rule the composer's Stop-not-Send button
-   * follows, so the tool answers `Error:` naming the node instead of claiming a
-   * delivery that did not happen.
-   *
-   * The message goes in through `onUserMessage` with an explicit `basisNodeId`: it
-   * branches off the named node, never off whatever tab has focus, and it does not
-   * move this window's session pointer.
-   */
-  async handleSendSessionMessage(args: Record<string, unknown>, callerSessionId: string): Promise<string> {
-    const sessionId = typeof args.session_id === 'string' ? args.session_id.trim() : '';
-    const nodeId = typeof args.session_node_id === 'string' ? args.session_node_id.trim() : '';
-    const prompt = typeof args.prompt === 'string' ? args.prompt.trim() : '';
-    if (!sessionId) {
-      return 'Error: "session_id" is required (list_sessions lists the session ids).';
-    }
-    if (!nodeId) {
-      return `Error: "session_node_id" is required (list_nodes session_id=${sessionId} lists its nodes).`;
-    }
-    if (!prompt) {
-      return 'Error: "prompt" is required (the message the target receives).';
-    }
-    if (this.disposed) {
-      return 'Error: this window is shutting down, so the message was not delivered.';
-    }
-    if (this.readOnly) {
-      return 'Error: another window owns this workspace\u2019s sessions, so this window cannot start a turn (it is read-only).';
-    }
-    const session = this.sessions.find((s) => s.id === sessionId);
-    if (!session) {
-      return `Error: no such session "${sessionId}" (list_sessions lists the session ids).`;
-    }
-    if (!session.nodes[nodeId]) {
-      return `Error: no such node "${nodeId}" in session ${sessionId} (list_nodes session_id=${sessionId} lists its nodes).`;
-    }
-    // The live-state gates and the delivery are one implementation (`deliverToNode`),
-    // shared with the control plane's `POST /session/message`: a second agent on one
-    // conversation line is exactly what they refuse.
-    const result = await this.deliverToNode(session, nodeId, prompt);
-    if (!result.ok) {
-      return (
-        `Error: ${result.error}, so the message was not delivered. Check list_nodes session_id=${sessionId} — ` +
-        `wait until that node is idle (or stop what it owns) and send again.`
-      );
-    }
-    this.outputLog(
-      `[session] message from ${callerSessionId} -> ${sessionId} node ${nodeId} (new node ${result.nodeId})`,
-    );
-    return (
-      `Delivered. Session ${sessionId} is answering your message in node ${result.nodeId ?? '(unknown)'}, ` +
-      `branched off node ${nodeId}. Its turn runs there; read it later with list_nodes session_id=${sessionId}.`
-    );
   }
 
   /**
@@ -4771,62 +4718,224 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   }
 
   /**
-   * Deliver a message to one node of one session (`send_session_message` in the
-   * agent, `POST /session/message` on the control plane).
+   * Start a turn in one session — `send_session_prompt` in the agent, and the same
+   * shape on the control plane (`POST /session/message`).
    *
-   * This is the shared body of both entry points, because the rules are one rule:
-   * an unknown session or node and a **sidecar** node (a sub-agent window or a
-   * background-job card) are refused, and so is a node that is running a turn or
-   * still owns unfinished work — a second agent on one conversation line is
-   * exactly what the composer's Stop-not-Send button exists to prevent. The
-   * message branches off the named node (`basisNodeId`), so no tab and no pointer
-   * has to move for it to land.
+   * A prompt is a **user message addressed to a session**: it lands on that session's
+   * own active node (`session.activeNodeId`, the node `list_nodes` marks checked out),
+   * which is exactly where the human's own send would land. A node id is never part of
+   * the address, because a node id only lives until the next turn
+   * (`docs/agents/plans/session-prompt-addressing.md` §2).
+   *
+   * **Whether a turn may start is `SessionRuntime.onUserMessage`'s decision**, made
+   * once there. This method adds the window-level gates every turn start shares and
+   * turns the outcome into a receipt or one sentence; it does not re-decide anything.
    */
-  private async deliverToNode(
+  private async deliverPrompt(
     session: AgentSession,
-    nodeId: string,
     message: string,
-  ): Promise<{ ok: boolean; error?: string; busy?: boolean; nodeId?: string | null }> {
-    const target = session.nodes[nodeId];
-    if (!target) {
-      return { ok: false, error: `no such node "${nodeId}" in session ${session.id}` };
+    opts?: { from?: { sessionId: string; nodeId: string }; rounds?: number },
+  ): Promise<{ ok: boolean; error?: string; busy?: boolean; nodeId?: string }> {
+    if (this.disposed) {
+      return { ok: false, error: 'this window is shutting down, so the prompt was not sent.' };
     }
-    if (isSidecar(target)) {
+    if (this.readOnly) {
       return {
         ok: false,
-        error: `node ${nodeId} in session ${session.id} is a sidecar (a sub-agent window or a background-job card), not a conversation node`,
+        error: 'another window owns this workspace\u2019s sessions; this window is read-only',
       };
     }
     const rt = this.runtimeFor(session);
-    if (rt.runningNodes().includes(nodeId)) {
-      return { ok: false, busy: true, error: `node ${nodeId} is running a turn right now` };
-    }
-    if (rt.lockedNodes().includes(nodeId)) {
+    // A full window cannot take a request at all, so a prompt into it would start a
+    // turn that fails on its first call. There is no agent-side way to roll the target
+    // over: only a human can carry that conversation into a new window, so the sender
+    // is told to report rather than retry.
+    if (rt.contextStateLive() === 'full') {
       return {
         ok: false,
-        busy: true,
-        error: `node ${nodeId} still owns unfinished work (a background terminal, a sub-agent batch or a queued notice)`,
+        error:
+          `session ${session.id} has a full context window, so the prompt was not sent. ` +
+          'Report it to your user: only a human can continue that conversation in a new window.',
       };
     }
-    if (this.isHeld()) {
-      return { ok: false, busy: true, error: 'this window is holding for a reload' };
+    const outcome = await rt.onUserMessage(message, [], {
+      from: opts?.from,
+      rounds: opts?.rounds,
+      quiet: true,
+    });
+    if (outcome.ok) {
+      return { ok: true, nodeId: outcome.nodeId };
     }
-    const before = Object.keys(session.nodes).length;
-    await rt.onUserMessage(message, [], { basisNodeId: nodeId });
-    if (Object.keys(session.nodes).length === before) {
-      return { ok: false, busy: true, error: `the turn did not start on node ${nodeId}` };
+    const nodeId = outcome.nodeId ?? session.activeNodeId ?? '(none)';
+    switch (outcome.code) {
+      case 'running':
+        return {
+          ok: false,
+          busy: true,
+          error:
+            `node ${nodeId} in session ${session.id} is running a turn (${formatDuration(outcome.ranMs ?? 0)} so far); ` +
+            'nothing was sent. Use wait_for_session_idle, or interrupt_session to end work an agent started.',
+        };
+      case 'locked':
+        return {
+          ok: false,
+          busy: true,
+          error:
+            `node ${nodeId} in session ${session.id} still owns unfinished work ` +
+            `(${outcome.locked ?? 1} background task(s) or sub-agent batch(es)); nothing was sent. ` +
+            'Use wait_for_session_idle, or interrupt_session to end work an agent started.',
+        };
+      case 'held':
+        return { ok: false, busy: true, error: 'this window is holding for a reload; nothing was sent.' };
+      case 'missing':
+        return { ok: false, error: `no such conversation node "${nodeId}" in session ${session.id}` };
+      case 'empty':
+        return { ok: false, error: 'the prompt was empty, so nothing was sent.' };
+      default:
+        return { ok: false, error: `session ${session.id} could not take the prompt; nothing was sent.` };
     }
-    return { ok: true, nodeId: session.activeNodeId };
+  }
+
+  /** `send_session_prompt`: start a turn in a session, addressed only by its id. */
+  async handleSendSessionPrompt(
+    args: Record<string, unknown>,
+    _callerSessionId: string,
+    roundsLeft: number,
+    from: { sessionId: string; nodeId: string },
+  ): Promise<string> {
+    const sessionId = typeof args.session_id === 'string' ? args.session_id.trim() : '';
+    const prompt = typeof args.prompt === 'string' ? args.prompt : '';
+    if (!sessionId) {
+      return 'Error: "session_id" is required (list_sessions lists the session ids).';
+    }
+    if (!prompt.trim()) {
+      return 'Error: "prompt" is required.';
+    }
+    const session = this.sessions.find((s) => s.id === sessionId);
+    if (!session) {
+      return `Error: no such session: ${sessionId} (list_sessions lists the session ids).`;
+    }
+    const result = await this.deliverPrompt(session, prompt, { from, rounds: roundsLeft });
+    if (!result.ok) {
+      return `Error: ${result.error}`;
+    }
+    return JSON.stringify({
+      state: 'delivered',
+      target: { session_id: session.id, node_id: result.nodeId },
+      how: 'turn',
+      rounds_left: roundsLeft,
+    });
   }
 
   /**
-   * `POST /session/message`: deliver a message into one node of one session, over
-   * the control plane. The node must exist and be idle (a running or busy node is
-   * `409`), and the message is never sent on behalf of "the active session".
+   * `wait_for_session_idle`: resolve the moment that session can take a prompt, or when
+   * the caller's slice runs out — **a slice, not a timeout**
+   * (`docs/agents/invariants/background-terminals.md`). It asks the same predicate the
+   * prompt asks (`SessionRuntime.promptBlocker`), so `idle` means the prompt will be
+   * accepted and nothing else does.
+   */
+  async handleWaitForSessionIdle(
+    args: Record<string, unknown>,
+    _callerSessionId: string,
+    signal: AbortSignal,
+  ): Promise<string> {
+    const sessionId = typeof args.session_id === 'string' ? args.session_id.trim() : '';
+    if (!sessionId) {
+      return 'Error: "session_id" is required (list_sessions lists the session ids).';
+    }
+    const session = this.sessions.find((s) => s.id === sessionId);
+    if (!session) {
+      return `Error: no such session: ${sessionId} (list_sessions lists the session ids).`;
+    }
+    const raw = args.seconds;
+    const seconds =
+      typeof raw === 'number' && Number.isFinite(raw) ? Math.max(1, Math.min(300, Math.round(raw))) : 30;
+    const rt = this.runtimeFor(session);
+    const startedAt = Date.now();
+    const deadline = startedAt + seconds * 1000;
+    let blocker = rt.promptBlocker();
+    while (blocker && !signal.aborted && Date.now() < deadline) {
+      // The same 150 ms heartbeat `controlWaitForFinish` uses: a session's runs change
+      // on engine events that carry no promise this side can await.
+      await new Promise((resolve) => setTimeout(resolve, 150));
+      blocker = rt.promptBlocker();
+    }
+    const waited = formatDuration(Date.now() - startedAt);
+    if (!blocker) {
+      return `idle after ${waited}: session ${session.id} accepts a prompt now (node ${session.activeNodeId ?? '(none)'}).`;
+    }
+    const nodeId = blocker.nodeId ?? '(none)';
+    const what =
+      blocker.code === 'running'
+        ? `running a turn for ${formatDuration(blocker.ranMs ?? 0)}`
+        : blocker.code === 'locked'
+          ? `holding ${blocker.locked ?? 1} unfinished background task(s) or sub-agent batch(es)`
+          : blocker.code === 'held'
+            ? 'held for a window reload'
+            : `unavailable (${blocker.code})`;
+    const stopped = signal.aborted ? ' (Stop: the wait ended early)' : '';
+    return (
+      `still busy after ${waited}${stopped}: node ${nodeId} is ${what}. ` +
+      'Wait again, use interrupt_session (agent-started work only), or report back to your user.'
+    );
+  }
+
+  /**
+   * `interrupt_session`: end the live work **this caller's prompts started** in that
+   * session, and nothing else. The scope is provenance, so a line a human started is
+   * never in it (`SessionRuntime.interruptLines`).
+   */
+  async handleInterruptSession(args: Record<string, unknown>, callerSessionId: string): Promise<string> {
+    const sessionId = typeof args.session_id === 'string' ? args.session_id.trim() : '';
+    if (!sessionId) {
+      return 'Error: "session_id" is required (list_sessions lists the session ids).';
+    }
+    const session = this.sessions.find((s) => s.id === sessionId);
+    if (!session) {
+      return `Error: no such session: ${sessionId} (list_sessions lists the session ids).`;
+    }
+    const { lines, untouched } = this.runtimeFor(session).interruptLines(callerSessionId);
+    const untouchedText =
+      untouched.length === 0
+        ? ''
+        : ` Still live and untouched: ${untouched
+            .map(
+              (u) =>
+                `${u.nodeId} (${u.by === 'human' ? 'started by a human prompt' : `started by ${u.by}`})`,
+            )
+            .join(', ')}.`;
+    if (lines.length === 0) {
+      return `Nothing of yours to interrupt in session ${session.id}.${untouchedText}`;
+    }
+    const detail = lines
+      .map((line) => {
+        const parts = [
+          line.turn ? `turn, ${formatDuration(line.ranMs)}` : '',
+          line.terminals ? `${line.terminals} background terminal(s)` : '',
+          line.subAgents ? `${line.subAgents} sub-agent(s)` : '',
+        ]
+          .filter(Boolean)
+          .join(', ');
+        return `node ${line.nodeId} (${parts})`;
+      })
+      .join('; ');
+    return (
+      `Interrupted ${lines.length} line(s) in session ${session.id}: ${detail}. ` +
+      `Pending notices are kept for that node's next prompt; nothing continues on its own.${untouchedText}`
+    );
+  }
+
+  /**
+   * `POST /session/message`: send a prompt to a session over the control plane.
+   *
+   * The router's `nodeId` is accepted and validated but no longer addresses anything:
+   * a prompt lands on the session's active node, which is what a human's own send
+   * does. A node id that names nothing is still a `409`, so an old script fails
+   * loudly instead of silently landing somewhere else.
    */
   async controlSessionMessage(opts: {
     sessionId: string;
-    nodeId: string;
+    nodeId?: string;
     message: string;
   }): Promise<ControlResult> {
     const message = (opts.message ?? '').trim();
@@ -4840,14 +4949,20 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     if (!session) {
       return { ok: false, error: `no such session: ${opts.sessionId}` };
     }
-    if (!opts.nodeId || !session.nodes[opts.nodeId]) {
-      return { ok: false, error: `no such node: ${opts.nodeId ?? '(none)'}` };
+    if (opts.nodeId && !session.nodes[opts.nodeId]) {
+      return { ok: false, error: `no such node: ${opts.nodeId}` };
     }
-    const result = await this.deliverToNode(session, opts.nodeId, message);
+    const result = await this.deliverPrompt(session, message);
     if (!result.ok) {
       return { ok: false, error: result.error, busy: result.busy };
     }
-    return { ok: true, sessionId: session.id, nodeId: result.nodeId ?? null };
+    return {
+      ok: true,
+      sessionId: session.id,
+      nodeId: result.nodeId,
+      state: 'delivered',
+      how: 'turn',
+    };
   }
 
   /**
@@ -4864,6 +4979,14 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     title?: string;
     prompt: string;
     open?: boolean;
+    /**
+     * The agent whose `create_session` asked for this, when one did. It is written onto
+     * the first node as `lastFrom`, so the line it starts is a line that agent may later
+     * end with `interrupt_session` — a session an agent created must not be a session it
+     * can never clean up. Omitted for the control plane and the composer, which are the
+     * human door.
+     */
+    from?: { sessionId: string; nodeId: string };
   }): Promise<ControlResult> {
     const open = opts.open !== false;
     const session = this.createSessionInMemory(open);
@@ -4879,7 +5002,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     if (open) {
       this.panels.ensure(session.id);
     }
-    await this.dispatchUserMessage(rt, opts.prompt, []);
+    await this.dispatchUserMessage(rt, opts.prompt, [], opts.from);
     return { ok: true, sessionId: session.id, nodeId: session.activeNodeId, prompted: true };
   }
 
@@ -5367,6 +5490,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     rt: SessionRuntime,
     text: string,
     attachments: UserAttachment[],
+    from?: { sessionId: string; nodeId: string },
   ): Promise<void> {
     if (this.isHeld()) {
       rt.postNotice(
@@ -5395,7 +5519,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     // A send is the moment a key matters: nudge once (never block — the request
     // itself reports the real error).
     void this.warnMissingApiKey();
-    await rt.onUserMessage(text, attachments);
+    await rt.onUserMessage(text, attachments, from ? { from } : undefined);
     // The composer holds the text until this point: a refused send must not eat what the
     // user typed (`composerClear`).
     this.postTo(rt.sessionId, { type: 'composerClear' });

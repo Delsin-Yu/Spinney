@@ -299,6 +299,22 @@ function subAgentSyncSeconds(): number {
     : DEFAULT_SUB_AGENT_SYNC_SEC;
 }
 
+/** Fallback when `spinney.sessionMaxRounds` is absent or not a positive number. */
+const DEFAULT_SESSION_MAX_ROUNDS = 16;
+
+/**
+ * The ceiling of one inter-session exchange — `spinney.sessionMaxRounds`, read live.
+ * The caller declares `max_rounds` per send (that is legibility); this number is the
+ * brake, because a model under pressure simply declares the ceiling. Only unattended
+ * agent-to-agent work is counted: a human message starts a fresh allowance.
+ */
+export function sessionMaxRounds(): number {
+  const configured = vscode.workspace.getConfiguration('spinney').get<number>('sessionMaxRounds');
+  return typeof configured === 'number' && Number.isFinite(configured) && configured > 0
+    ? configured
+    : DEFAULT_SESSION_MAX_ROUNDS;
+}
+
 /**
  * Resolve after `ms` — the timer half of a bounded wait (`Promise.race` against the
  * work). Unref'd: a wait that nobody needs any more (the work finished first) must
@@ -706,13 +722,18 @@ export type SignalKind = 'background' | 'subagent';
 /**
  * One message for a batch of signals (D2): a single `user` message per delivery, so
  * a burst of finishes costs the model one round of context, not N.
+ *
+ * This queue carries **completion notices** only: work the node itself started.
+ * An inter-session prompt never rides it — it is a turn of its own
+ * (`send_session_prompt`), because the rules for "your job finished" and "someone
+ * is talking to you" are opposite ones (`docs/agents/plans/session-prompt-addressing.md` §3).
  */
 function combineSignalText(batch: SignalNotice[]): string {
   if (batch.length === 1) {
     return batch[0].text;
   }
   const background = batch.filter((s) => s.kind === 'background').length;
-  const subagents = batch.length - background;
+  const subagents = batch.filter((s) => s.kind === 'subagent').length;
   const parts = [
     background > 0 ? `${background} background terminal(s)` : '',
     subagents > 0 ? `${subagents} sub-agent batch(es)` : '',
@@ -730,7 +751,7 @@ function combineSignalText(batch: SignalNotice[]): string {
  * the work, never on the view focus, and it renders as a notification block
  * inside that node's card rather than as a user bubble.
  */
-interface SignalNotice {
+export interface SignalNotice {
   /** The node that owns the work: where the signal (and its block) lands. */
   nodeId: string;
   kind: SignalKind;
@@ -769,6 +790,11 @@ export interface TurnRun {
   prefixTail: ChatMessage | null;
   /** True when this run created its node (a user turn), false for an injected turn. */
   fresh: boolean;
+  /**
+   * When this run started, in epoch ms. A refusal that says "busy for 1m 12s" and an
+   * interrupt report both quote it, so the number a sender reads is the run's own.
+   */
+  startedAt: number;
   pendingText: string;
   pendingThinking: string;
   pendingTools: Map<number, { id?: string; name: string; args: string }>;
@@ -871,12 +897,31 @@ export interface RuntimeHost {
    */
   handleCreateSession(rt: SessionRuntime, node: TreeNode, args: Record<string, unknown>): Promise<string>;
   /**
-   * `send_session_message`: deliver a message to one exact node of one session and
-   * start a turn there. The provider owns every session's live state, so the
-   * refusal while the target node is running or still owns unfinished work — and
-   * the answer that names the new node — is its job.
+   * `send_session_prompt`: start one turn in a session, addressed only by its id. The
+   * provider owns every session's live state, so its answer is the busy refusal; the
+   * caller's runtime resolves the allowance (`max_rounds`) and names itself as `from`.
    */
-  handleSendSessionMessage(args: Record<string, unknown>, callerSessionId: string): Promise<string>;
+  handleSendSessionPrompt(
+    args: Record<string, unknown>,
+    callerSessionId: string,
+    roundsLeft: number,
+    from: { sessionId: string; nodeId: string },
+  ): Promise<string>;
+  /**
+   * `wait_for_session_idle`: resolve as soon as that session can take a prompt, or when
+   * the caller's window runs out — a slice, not a timeout, so the caller can act on
+   * "still busy" instead of reading a failure.
+   */
+  handleWaitForSessionIdle(
+    args: Record<string, unknown>,
+    callerSessionId: string,
+    signal: AbortSignal,
+  ): Promise<string>;
+  /**
+   * `interrupt_session`: end the work this caller's prompts started in that session, and
+   * nothing else. The scope is provenance, so a line a human started is never in it.
+   */
+  handleInterruptSession(args: Record<string, unknown>, callerSessionId: string): Promise<string>;
   /** `list_sessions`: the window's sessions, rendered one line each. */
   handleListSessions(args: Record<string, unknown>): string;
   /**
@@ -1490,13 +1535,14 @@ export class SessionRuntime {
       agent.setSpawnHandler((args, signal) => this.handleSpawnAgents(node, args, signal));
       // And it can resume a finished sub-agent with a follow-up message.
       agent.setSendMessageHandler((args, signal) => this.handleSendAgentMessage(node, args, signal));
-      // The session surface: start a fresh session, message one node of one
-      // session, and read the window's sessions / a session's tree. Main agent
-      // only — a sub-agent reports to its dispatcher, not into another
-      // conversation.
+      // The session surface: start a fresh session, prompt one, wait for it, end what
+      // it started, and read the window's sessions / a session's tree. Main agent
+      // only — a sub-agent reports to its dispatcher, not into another conversation.
       agent.setCanSessions(true);
       agent.setCreateSessionHandler((args) => this.handleCreateSession(node, args));
-      agent.setSendSessionMessageHandler((args) => this.handleSendSessionMessage(node, args));
+      agent.setSendSessionPromptHandler((args) => this.handleSendSessionPrompt(node, args));
+      agent.setWaitForSessionIdleHandler((args, signal) => this.handleWaitForSessionIdle(args, signal));
+      agent.setInterruptSessionHandler((args) => this.handleInterruptSession(args));
       agent.setListSessionsHandler((args) => Promise.resolve(this.handleListSessions(args)));
       agent.setListNodeHandler((args) => Promise.resolve(this.handleListNodes(node, args)));
       // Completion signals (a finished background terminal or an async sub-agent)
@@ -1534,6 +1580,45 @@ export class SessionRuntime {
   /** Node ids with a live run. */
   runningNodes(): string[] {
     return [...this.runs.keys()];
+  }
+
+  /**
+   * What stops a prompt from starting on `basis` (absent = the session's active node)
+   * right now, or `null` when it would start.
+   *
+   * **One predicate, three callers**: `onUserMessage` refuses on it, `wait_for_session_idle`
+   * polls it, and the busy sentence an inter-session prompt returns is built from these
+   * same fields. Each entry point checking the four conditions itself is how five
+   * slightly different gates appeared in the first place
+   * (`docs/agents/plans/session-prompt-addressing.md` §1).
+   *
+   * The order is the composer's: an absent node, a live run, unfinished work the basis
+   * still owns, then the reload hold.
+   */
+  promptBlocker(basis: string | null = this.session.activeNodeId): {
+    code: 'missing' | 'running' | 'locked' | 'held';
+    nodeId: string | null;
+    ranMs: number;
+    locked: number;
+  } | null {
+    if (basis && !this.session.nodes[basis]) {
+      return { code: 'missing', nodeId: basis, ranMs: 0, locked: 0 };
+    }
+    const run = basis ? this.runs.get(basis) : undefined;
+    if (run) {
+      return { code: 'running', nodeId: basis, ranMs: Date.now() - run.startedAt, locked: 0 };
+    }
+    // Unfinished work (a background job, an async sub-agent batch, or a notice about to
+    // be injected into it): a send would open a second run on the same line while that
+    // notice lands in the very node the new turn branches from.
+    const locked = basis ? this.lockedWorkCount(basis) : 0;
+    if (locked > 0) {
+      return { code: 'locked', nodeId: basis, ranMs: 0, locked };
+    }
+    if (this.host.isHeld()) {
+      return { code: 'held', nodeId: basis, ranMs: 0, locked: 0 };
+    }
+    return null;
   }
 
   /**
@@ -1624,8 +1709,7 @@ export class SessionRuntime {
    * here, and that is not cosmetic: the idle gates that call this feed the session list's
    * `busy` flag, `globallyIdle()` — which the control plane's `POST /wait-for-finish`
    * (`scope:'all'`) and the reload refusal wait on — and, through `runningNodes` /
-   * `lockedNodes`, what `list_nodes` reports as `busy` and what `send_session_message`
-   * refuses. Counting a detached job there would mean a dev server keeps the harness
+   * `lockedNodes`, what `list_nodes` reports as `busy` and what a prompt refuses on. Counting a detached job there would mean a dev server keeps the harness
    * permanently not-idle, so the window could never defer a reload.
    *
    * The kill paths still count it: `runningBackgroundCount` is what the delete/clear
@@ -1935,6 +2019,10 @@ export class SessionRuntime {
   /** Tear down: kill background jobs, abort sub-agents, cancel timers. */
   dispose(): void {
     this.disposed = true;
+    // Nothing is waiting on a queued notice any more: the inter-session channel does
+    // not use this queue (`send_session_prompt` starts a turn), so a pending signal is
+    // just work whose window is going down.
+    this.signals.clear();
     if (this.signalDrainTimer != null) {
       clearTimeout(this.signalDrainTimer);
       this.signalDrainTimer = null;
@@ -2996,6 +3084,7 @@ export class SessionRuntime {
       prefixLen: worker.agent.getMessages().length,
       prefixTail: worker.agent.getMessages()[worker.agent.getMessages().length - 1] ?? null,
       fresh: true,
+      startedAt: Date.now(),
       pendingText: '',
       pendingThinking: '',
       pendingTools: new Map(),
@@ -3071,6 +3160,7 @@ export class SessionRuntime {
       prefixLen: messages.length,
       prefixTail: messages[messages.length - 1] ?? null,
       fresh: false,
+      startedAt: Date.now(),
       pendingText: '',
       pendingThinking: '',
       pendingTools: new Map(),
@@ -3194,29 +3284,54 @@ export class SessionRuntime {
     }
   }
 
+  /**
+   * Start one user turn, from `opts.basisNodeId` (absent = the session's active node).
+   *
+   * **The decision whether a turn may start is made here, once.** Two callers present
+   * it differently — the composer posts a localized notice, and an inter-session
+   * prompt needs a sentence in a tool result (`quiet` suppresses the notice) — but the
+   * gate itself is this method, so a new entry point cannot acquire a slightly
+   * different rule (`docs/agents/plans/session-prompt-addressing.md` §2.2).
+   *
+   * `from` / `rounds` are the inter-session provenance and allowance: they are written
+   * onto the node this turn creates, which is what `list_nodes` renders and what
+   * `interrupt_session` reads to decide what an agent may stop.
+   */
   async onUserMessage(
     text: string,
     attachments: UserAttachment[] = [],
-    opts?: { basisNodeId?: string | null },
-  ): Promise<void> {
+    opts?: {
+      basisNodeId?: string | null;
+      from?: { sessionId: string; nodeId: string };
+      rounds?: number;
+      quiet?: boolean;
+    },
+  ): Promise<
+    | { ok: true; nodeId: string }
+    | {
+        ok: false;
+        code: 'missing' | 'running' | 'locked' | 'held' | 'empty' | 'refused';
+        /** The node the decision was about, when there is one. */
+        nodeId?: string | null;
+        /** `running`: how long that turn has been going. */
+        ranMs?: number;
+        /** `locked`: how many pieces of unfinished work are holding the line. */
+        locked?: number;
+      }
+  > {
     // P3: only the node this turn would continue from must be free — another
     // branch of this session may stream meanwhile. (This mirrors the composer's
     // Stop-not-Send rule; `beginTurn` re-checks the same condition once the basis
-    // is known.) `basisNodeId` is the **explicit** basis a cross-session message
-    // comes back to (`send_session_message`): the turn branches off that node
-    // without moving the session's checkout, which is what lets a message land
-    // while the user is reading another branch.
+    // is known.)
     //
     // `'basisNodeId' in opts` — a presence test, never a truthiness read — is what
     // tells an explicit `null` apart from an absent option. `null` means "no parent":
     // an edited **root** node's replacement therefore starts a second forest root
     // instead of silently branching off whatever happens to be checked out
     // (`editUserMessage` in `ChatViewProvider`).
+    const quiet = opts?.quiet === true;
     const basis =
       opts && 'basisNodeId' in opts ? opts.basisNodeId ?? null : this.session.activeNodeId;
-    if (basis && !this.session.nodes[basis]) {
-      return;
-    }
     // The card this send runs on **and** the card the image path below must use are
     // the ones of the node the send came from (its own, else an ancestor's, else the
     // session seed), plus a pending pick made on it. Both are read here, once, before
@@ -3224,32 +3339,47 @@ export class SessionRuntime {
     // one card, so a checkout that lands mid-upload must not build the request for
     // one card and then run it on another.
     const sendCard = this.card;
-    if (basis && this.runs.has(basis)) {
-      return;
-    }
-    // The basis node still owns unfinished work (a background job, an async
-    // sub-agent batch, or a notice about to be injected into it): a send here would
-    // open a second run on the same line while that notice lands in the very node
-    // this turn branches from. The composer shows Stop for those nodes (`lockedNodes`
-    // in `state`), so this is the host-side half of one rule.
-    if (basis && this.lockedWorkCount(basis) > 0) {
-      this.postNotice(
-        'warning',
-        vscode.l10n.t(
-          'A background task or sub-agent is still running on this branch ({0}). Press Stop to kill it, or wait for it to finish.',
-          this.lockedWorkCount(basis),
-        ),
-      );
-      return;
-    }
-    if (this.host.isHeld()) {
-      this.postNotice(
-        'warning',
-        vscode.l10n.t('An external controller is rebooting the window; please wait a moment.'),
-      );
-      return;
+    // **One predicate decides whether this turn may start** (`promptBlocker`): an
+    // absent node, a live run, unfinished work the basis still owns, or a reload hold.
+    // The composer is told which one in a notice; an inter-session prompt gets the same
+    // answer, in the terms of its receipt (`quiet`).
+    const blocker = this.promptBlocker(basis);
+    if (blocker) {
+      if (!quiet) {
+        if (blocker.code === 'locked') {
+          this.postNotice(
+            'warning',
+            vscode.l10n.t(
+              'A background task or sub-agent is still running on this branch ({0}). Press Stop to kill it, or wait for it to finish.',
+              blocker.locked || 1,
+            ),
+          );
+        } else if (blocker.code === 'held') {
+          this.postNotice(
+            'warning',
+            vscode.l10n.t('An external controller is rebooting the window; please wait a moment.'),
+          );
+        }
+      }
+      return {
+        ok: false,
+        code: blocker.code,
+        nodeId: blocker.nodeId,
+        ranMs: blocker.ranMs,
+        locked: blocker.locked,
+      };
     }
     const userText = text.trim();
+    // **The one machine line an inter-session prompt starts with.** It is not localized
+    // and not translated, whatever language the reply is in: the model has to be able to
+    // tell another agent's instruction from the developer's, or a message from a peer
+    // reads as a message from the user. Only the bytes the provider sends carry it (the
+    // card shows the prompt itself, and `list_nodes` shows `from=`), so the line never
+    // reaches the composer or a human reading the card.
+    const promptOrigin = opts?.from
+      ? `[session prompt from ${opts.from.sessionId}/${opts.from.nodeId}` +
+        `${typeof opts.rounds === 'number' ? `, rounds left ${opts.rounds}` : ''}]\n`
+      : '';
 
     // Only a card that declares itself image-capable (`card.vision.enabled`) may
     // carry image blocks. A card that is not would not 400 — DeepSeek silently
@@ -3298,7 +3428,7 @@ export class SessionRuntime {
       /** What each image part was actually sent as, by part identity (read back below). */
       const sent = new Map<ContentPart, PreparedAttachment>();
       if (userText) {
-        parts.push({ type: 'text', text: userText });
+        parts.push({ type: 'text', text: promptOrigin + userText });
       }
       if (sendCard.vision.transport === 'openai') {
         for (const att of attachments) {
@@ -3337,7 +3467,7 @@ export class SessionRuntime {
               this.lastStatus = vscode.l10n.t('Interrupted');
               this.post({ type: 'status', text: vscode.l10n.t('Interrupted') });
               this.post({ type: 'interrupted' });
-              return;
+              return { ok: false, code: 'refused' };
             }
             failed.push(att.name || 'image');
             this.host.output.appendLine(`[image] upload failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -3355,7 +3485,7 @@ export class SessionRuntime {
           this.syncBusy();
           this.lastStatus = '';
           this.post({ type: 'status', text: '' });
-          return;
+          return { ok: false, code: 'empty' };
         }
       }
       content = parts;
@@ -3395,14 +3525,14 @@ export class SessionRuntime {
         }
       });
     } else {
-      content = userText;
+      content = promptOrigin + userText;
     }
 
     if (typeof content === 'string' && !content) {
-      return;
+      return { ok: false, code: 'empty' };
     }
     if (Array.isArray(content) && content.length === 0) {
-      return;
+      return { ok: false, code: 'empty' };
     }
 
     // Name a fresh session from its first user message (provisional: the
@@ -3423,7 +3553,17 @@ export class SessionRuntime {
     // the card `beginTurn` records on the new node.
     const run = this.beginTurn(titleFromPrompt(userText || attachments[0]?.name || ''), { parentId: basis });
     if (!run) {
-      return;
+      return { ok: false, code: 'refused' };
+    }
+    // Inter-session provenance and allowance live on the node this prompt created:
+    // `from=` is what `list_nodes` shows, and `roundsAllowance` is what the answer's
+    // own prompt is charged against. `min()` never raises, so a receiving session can
+    // use less of the budget it was handed and can never buy more.
+    if (opts?.from) {
+      run.node.lastFrom = opts.from;
+    }
+    if (typeof opts?.rounds === 'number') {
+      run.node.roundsAllowance = Math.min(run.node.roundsAllowance ?? sessionMaxRounds(), opts.rounds);
     }
     if (sources.length > 0) {
       run.node.imageSources = sources;
@@ -3434,6 +3574,7 @@ export class SessionRuntime {
     this.lastStatus = vscode.l10n.t('Thinking…');
     this.post({ type: 'status', text: this.lastStatus });
     void run.agent.sendUserMessage(content);
+    return { ok: true, nodeId: run.node.id };
   }
 
   /**
@@ -4264,6 +4405,50 @@ export class SessionRuntime {
   }
 
   /**
+   * `interrupt_session`: end the live work **this caller's prompts started** in this
+   * session, and nothing else.
+   *
+   * The scope is a filter over nodes, not a position in the tree: a node qualifies
+   * when its `lastFrom` names `callerSessionId` and it is still live. A line a human
+   * started carries no `lastFrom` and another agent's line carries a different one,
+   * so neither can be reached — not by a check that could be got wrong, but because
+   * they are not in the set (`docs/agents/plans/session-prompt-addressing.md` §2.3).
+   *
+   * `untouched` reports what was live and was not ours, so the caller can report back
+   * instead of guessing why nothing died.
+   */
+  interruptLines(callerSessionId: string): {
+    lines: Array<{ nodeId: string; turn: boolean; terminals: number; subAgents: number; ranMs: number }>;
+    untouched: Array<{ nodeId: string; by: 'human' | string }>;
+  } {
+    const lines: Array<{ nodeId: string; turn: boolean; terminals: number; subAgents: number; ranMs: number }> = [];
+    const untouched: Array<{ nodeId: string; by: 'human' | string }> = [];
+    for (const node of Object.values(this.session.nodes)) {
+      if (isSidecar(node)) {
+        continue;
+      }
+      const run = this.runs.get(node.id);
+      const live = run != null || this.lockedWorkCount(node.id) > 0;
+      if (!live) {
+        continue;
+      }
+      if (node.lastFrom?.sessionId !== callerSessionId) {
+        untouched.push({ nodeId: node.id, by: node.lastFrom?.sessionId ?? 'human' });
+        continue;
+      }
+      // Snapshot the facts before the kill: `stopNode` tears them down.
+      const terminals = this.hub
+        .listForNode(this.sessionId, node.id)
+        .filter((task) => task.status === 'running').length;
+      const subAgents = this.subAgentSubtree(node.id).length;
+      const ranMs = run ? Date.now() - run.startedAt : 0;
+      this.stopNode(node.id);
+      lines.push({ nodeId: node.id, turn: run != null, terminals, subAgents, ranMs });
+    }
+    return { lines, untouched };
+  }
+
+  /**
    * Everything one node owns, in one go. The completion notices are *redirected*
    * (`queueWriteback`) rather than dropped, so the interrupt message is still in the
    * context of the next request — it just cannot start one by itself.
@@ -4410,7 +4595,7 @@ export class SessionRuntime {
         continue;
       }
       // The card shows what happened (the same block a delivered notice renders)…
-      this.renderSignalCards(nodeId, batch);
+      this.renderSignalCards(nodeId, batch, false);
       // …and the interrupt travels with the next request instead of starting one.
       node.messages = [...node.messages, { role: 'user', content: combineSignalText(batch) }];
       this.persistTurn();
@@ -5671,9 +5856,9 @@ export class SessionRuntime {
   }
 
   /**
-   * `list_nodes` tool: render one session's tree so the agent can name a node —
-   * e.g. as `send_session_message`'s `session_node_id`. Node ids otherwise live
-   * only in the persisted tree.
+   * `list_nodes` tool: render one session's tree, the read half of the session
+   * surface. Node ids are for reading: no tool takes one as an address any more, so
+   * they live in the persisted tree and in this render, nowhere else.
    *
    * `node` is the caller's own node (P3 binds the handler per node) and decides the
    * default session; `args.session_id` reads **another** session, whose live state
@@ -5724,6 +5909,8 @@ export class SessionRuntime {
         running.has(n.id) ? 'running' : '',
         busy.has(n.id) ? 'busy' : '',
         n.delivered ? 'delivered' : '',
+        n.lastFrom ? `from=${n.lastFrom.sessionId}/${n.lastFrom.nodeId}` : '',
+        typeof n.roundsAllowance === 'number' ? `rounds=${n.roundsAllowance}` : '',
       ].filter(Boolean);
       if (target.active && n.id === session.activeNodeId) {
         marks.push('checked out');
@@ -5758,9 +5945,53 @@ export class SessionRuntime {
     return this.host.handleCreateSession(this, node, args);
   }
 
-  /** `send_session_message` tool: the provider owns every session's live state. */
-  private handleSendSessionMessage(_node: TreeNode, args: Record<string, unknown>): Promise<string> {
-    return this.host.handleSendSessionMessage(args, this.sessionId);
+  /**
+   * `send_session_prompt` tool. The **allowance** is the caller node's business (it is
+   * the node a reply comes back to), so it is resolved here; the provider owns every
+   * session's live state, and whether the target can take a turn is its answer.
+   */
+  private async handleSendSessionPrompt(node: TreeNode, args: Record<string, unknown>): Promise<string> {
+    const raw = args.max_rounds;
+    const declared = typeof raw === 'number' && Number.isFinite(raw) ? Math.floor(raw) : Number.NaN;
+    if (!Number.isFinite(declared) || declared < 1) {
+      return (
+        'Error: "max_rounds" is required and must be an integer of at least 1 (how many rounds this exchange may still use). ' +
+        'Count the exchanges you actually need and state it.'
+      );
+    }
+    const cap = sessionMaxRounds();
+    const inherited = typeof node.roundsAllowance === 'number' ? node.roundsAllowance : undefined;
+    if (inherited !== undefined && inherited <= 0) {
+      return (
+        "Error: this line's exchange allowance is used up (no rounds left; the ceiling is " +
+        `${cap} per exchange since the last human message), so the prompt was not sent. ` +
+        'Report back to your user (or wait for a human message on this line) instead of sending it from another session.'
+      );
+    }
+    const effective = Math.min(declared, inherited ?? cap, cap);
+    const roundsLeft = effective - 1;
+    // Spend the round on the sender's own node as well, and give it back when the prompt
+    // never started a turn: a busy target or a torn-down window must not cost a round.
+    const before = node.roundsAllowance;
+    node.roundsAllowance = roundsLeft;
+    const result = await this.host.handleSendSessionPrompt(args, this.sessionId, roundsLeft, {
+      sessionId: this.sessionId,
+      nodeId: node.id,
+    });
+    if (result.startsWith('Error:')) {
+      node.roundsAllowance = before;
+    }
+    return result;
+  }
+
+  /** `wait_for_session_idle` tool: the provider holds every session's live runs. */
+  private handleWaitForSessionIdle(args: Record<string, unknown>, signal: AbortSignal): Promise<string> {
+    return this.host.handleWaitForSessionIdle(args, this.sessionId, signal);
+  }
+
+  /** `interrupt_session` tool: the provider holds every session's live runs. */
+  private handleInterruptSession(args: Record<string, unknown>): Promise<string> {
+    return this.host.handleInterruptSession(args, this.sessionId);
   }
 
   // ---- Background terminals ----
@@ -5998,11 +6229,14 @@ export class SessionRuntime {
     // every ending goes through (natural exit, kill, session teardown).
     const took = formatDuration((task.finishedAt ?? Date.now()) - task.startedAt);
     // A job has no deadline any more, so there are exactly two endings to report: it
-    // exited on its own, or something killed it (Stop, the card's kill, kill_command,
-    // or the session going away). The verdict replaces the whole clause, which is why
-    // the sentence is assembled from it rather than from `outcome` + `after …`.
+    // exited on its own, or something killed it (the composer's Stop, the card's kill,
+    // kill_command, `interrupt_session`, or the session going away). The verdict
+    // replaces the whole clause, which is why the sentence is assembled from it rather
+    // than from `outcome` + `after …`. It does not say **who** killed it: since
+    // `interrupt_session` an agent can end a line too, so "by the user" would be a lie
+    // half the time.
     const verdict = task.killed
-      ? `was killed by the user after ${took}`
+      ? `was stopped after ${took}`
       : `finished with exit code ${task.exitCode ?? 'unknown'} after ${took}`;
     const output = this.truncateField(task.handle.getOutput().trim(), 1200);
     const text = `Background command \`${cmd}\` (id ${task.id}) ${verdict}.${output ? `\nOutput:\n${output}` : ''}`;
@@ -6107,7 +6341,8 @@ export class SessionRuntime {
       const node = this.session.nodes[nodeId];
       if (!node) {
         // The owning branch was deleted: nothing may own the signal any more.
-        this.settleSignals(this.takePendingSignals(nodeId, { settleStale: false }));
+        const orphaned = this.takePendingSignals(nodeId, { settleStale: false });
+        this.settleSignals(orphaned);
         this.signals.delete(nodeId);
         continue;
       }

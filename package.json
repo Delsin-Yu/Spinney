@@ -401,6 +401,14 @@
             "description": "%spinney.subAgentSyncSeconds.description%",
             "scope": "window"
           },
+          "spinney.sessionMaxRounds": {
+            "type": "number",
+            "default": 16,
+            "minimum": 1,
+            "maximum": 64,
+            "description": "%spinney.sessionMaxRounds.description%",
+            "scope": "window"
+          },
           "spinney.maxInlineToolOutput": {
             "type": "number",
             "default": 32768,
