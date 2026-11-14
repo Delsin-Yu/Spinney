@@ -7,8 +7,132 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-14
+
 ### Added
 
+- **A step group per run, and the text stays in the flow.** A turn is cut into runs by the
+  text the model writes: every contiguous run of tool rows becomes its own `.steps` group
+  with its own `Ran N steps` / `Ran 1 step` header, opened by the first tool row of the run
+  and closed by the next assistant text. The header counts that run's calls, each group
+  folds on its own (open while the turn runs, folded when it ends, a click wins for that
+  group), and the assistant's text — including the turn's final answer — is appended to
+  the log itself, never inside a group, so a reply is no longer interleaved with the
+  reasoning while it streams. A history repaint splits the items with the same rule, and a
+  finished card still builds each group's body only when its header is clicked.
+- **`exec_command` takes a required `title`, and no other tool takes one.** The folded step
+  row shows it instead of the command, so a call reads `Ran Checking the git history`; a
+  call without a `title` is refused by the argument validation before anything starts. The
+  display titles were removed from every other tool schema — they were self-explanatory
+  already — while `hop_session` and `rename_session` keep their own semantic `title`.
+- **The reasoning box has its own follow light.** The open 240 px reasoning scroller
+  carries a small green dot of its own: it follows the newest line, a scroll up releases
+  it, and a scroll back to the end engages it again; clicking the dot toggles it, and the
+  click does not open or close the row.
+- **One entry for every new context.** A new-epoch transition used to have three
+  inconsistent entries: the per-card `⧉ Continue in a new window`, a composer `⧉` shown
+  only for a harness drift, and a modal raised by a plain send after a model/effort
+  change. All three are replaced by one composer button, immediately left of Send:
+  **`Continue with new context`**, or **`Compact and Continue`** when the box is empty.
+  It appears when a new epoch exists (setup drift, a context window near 90%, or a full
+  window), never while the focused node is running or locked (Stop owns the row), and it
+  is disabled only in a read-only window or on a sub-agent branch. A click asks one
+  question and then does one of two things: with a full or near window it opens a new
+  context window (dotted edge, `CTX` badge) carrying your message as a real user turn;
+  with a setup drift it forks the tree and sends there. The question offers **`Write a
+  handoff summary`** (one extra request) or **`Just continue`** (point the new window at
+  the previous branch); on a full window it also names the context length the provider
+  just refused. Send now disables on an empty box and on a full window, and Enter goes
+  through it, so a disabled Send means Enter does nothing; a plain send with a drift keeps
+  the frozen setup silently. The frozen prompt and the tool set are still compared by
+  content hash, but the AGENTS.md half is now read from disk at the moment of the check
+  (`src/chat/agentsMd.ts`, mtime-cached), so a file edited while VS Code was closed shows
+  up as a drift instead of needing a reload. A breaking tool-schema change (like this
+  release's) therefore marks every older chain as drifted, and this button is the way to
+  carry it into a new epoch.
+- **A handoff summary for a rollover.** Choosing `Write a handoff summary` runs one
+  bounded, tool-less, non-streaming request on the outgoing card before the new window
+  exists. The input is never the whole chain: the first user message verbatim, every user
+  message clipped to 500 chars, the last eight assistant texts, and each tool call as
+  `name -> brief -> first line of the result`, capped at 60,000 chars with a head+tail
+  selection. The answer is a fixed eleven-section handoff (primary request, concepts,
+  files with "re-read before editing", errors and fixes, problem solving, all user
+  messages, pending tasks, current work, the quoted next step, durable references, and a
+  handoff contract naming the successor as the same agent). It is validated against nine
+  required headings, retried once, and on any timeout (30 s), error, empty or invalid
+  answer the rollover falls back to the pointer text and says the summary was
+  unavailable. `npm run check:compaction` pins the bounds, the schema and every fallback
+  offline.
+- **A hopped-to session hands back when it decides to.** A session started by a
+  `return_when_finished` hop now sees a `finish_hop(source_session_node_id?)` tool, and
+  **nothing returns to the caller on its own**: a turn end, an interrupt and a Stop all
+  leave the hop armed, so a hopped session can finally be steered. The call marks the
+  hand-back and picks the landing node (validated against the origin session); the report
+  is the child's final reply, delivered once the child is idle (a running node job, a
+  sub-agent batch or a queued notice still holds it). The child's first prompt carries a
+  short preamble naming the caller, the tool and the landing rule, and `fire_and_forget`
+  children never get the tool. `tools/harness-test.mjs`'s hop suite and the simulator now
+  exercise the hand-back.
+- **`exec_command` has run types, and waiting is a tool.** The four `timeout_behavior`
+  values and the two command timeouts are gone. The schema is
+  `exec_command(command, cwd?, run_type?)` with `run_type` `foreground` (default),
+  `background` or `detached`; no job has a deadline any more, so the budget machinery
+  (`timeoutMs`, `deadlineAt`, `expireBudget`, `remainingBudgetMs`) is deleted with it. A
+  foreground command still running after `spinney.execForegroundSeconds` (default 30,
+  10…999999999999) is **always** moved to the background with a handle and instructions
+  instead of being killed or refused. Waiting is now a tool: `wait_for_command(id,
+  seconds?)` (default 30, at most 300) returns the moment the command ends and is a plain
+  "still running" answer when it does not, pointing at `check_command` (a status read) or
+  `kill_command` (then relaunch a quieter command); never `sleep` for a job again. The
+  three management tools are also exposed to writable sub-agents, which could already
+  start a job but not read it, and `npm run check:exec` (104 checks) pins the whole
+  matrix.
+- **A window-global terminal dock.** Every background command of the window, running or
+  finished, whatever session, is one list on every chat tab: `#term-dock`, fixed at the
+  top-right, with a collapsible `Terminals · N running` header and one row per job. A row
+  is the same card body the owning node renders (a shared builder, so the two views cannot
+  disagree) plus the session title, the live output tail, the elapsed chip, the kill
+  button while it runs and a ✕ when it is finished. The host broadcasts
+  `backgroundsGlobal` to every open panel on the same ~200 ms coalescing as the
+  per-session snapshot; a tab that comes up is sent one at once. Removing a job is a
+  field on its record (`bgDockDismissed`), persisted with the session, so a reload keeps
+  the dock clean while the tree card — the other view — stays; the tree's delete still
+  removes the record. `Clear finished` empties the dock for the whole window.
+- **A hard search budget, and a search that is not tied to the workspace.** `search_files`
+  and `search_transcripts` now share one hard wall clock, `spinney.searchTimeoutSeconds`
+  (default 10, 1…600), for the whole call; on timeout the answer is an `Error:` line with
+  no hits at all, telling the model to narrow the path, tighten the pattern, add a glob,
+  lower the context, or ask the user to raise the setting. The ripgrep child and the
+  fallback walk share that one budget instead of spending 20 s each. `search.exclude` /
+  `files.exclude` are applied only when the search root is inside the open workspace, the
+  build directories are passed to ripgrep as globs (they used to be pruned only by the
+  walk), the per-file cap rose from 1 MB to 8 MB, and ripgrep itself is now vendored for
+  five platforms (`media/vendor/ripgrep/<platform>-<arch>/`, with `PROVENANCE.md` and
+  hashes) and tried before VS Code's copy, with PATH last; `win32-arm64` has no upstream
+  ripgrep 14.1.1 build and falls through to VS Code's bundled binary. The tool
+  descriptions now say to prefer many small searches and to keep the shell for what is not
+  a search.
+- **`append_file`, and the verbatim frame is gone.** The `<<<RAW:key>>>` frame form is
+  removed from argument parsing, from the `write_file` / `replace_in_file` schemas and
+  from every doc; arguments are strict JSON. The one malformed shape agents kept
+  producing — the whole value wrapped in markers — is answered with one sentence telling
+  the model to send a plain JSON string, and nothing is written. For large files there is
+  now `append_file(path, content)`: write the first part with `write_file`, then append in
+  bounded chunks, preserving the file's line endings. `npm run check:args` pins both.
+- **One essay per turn.** The chat card is no longer a stack of blocks. Thinking renders
+  as one inline row: expanded as a dimmed italic paragraph while the turn runs, collapsed
+  to a single ellipsised line when it ends, and one click opens the full text with its
+  `[Prompt: … + Completion: …, Cache Hit …, Cache Miss …]` line. A tool call is one line
+  too: a bold, localized verb and a label, a status dot and the elapsed chip while it
+  runs, and a click expands the command, the result and the usage in place. Every tool
+  schema now takes an optional `title` — one short human label the model writes — which
+  the host reads into the display item so a clipped argument string cannot lose it; the
+  derived label is the fallback. The zone-2/zone-3 split, the answer promotion and the
+  work-log fold are deleted: the card has one flow and one scroller, and the final answer
+  is simply the last block.
+- **Alt + wheel pans the tree.** The wheel keeps its gestures (ctrl/cmd zooms, shift pans
+  sideways, a native scroll zone keeps its own wheel); Alt + wheel now pans the whole tree
+  vertically from anywhere, including over a card, a step detail or the composer.
 - **The prompt editor has a cancel.** While a card's question is being edited, the pencil that
   opened the editor becomes an **✕** in the same top-right corner of the box, and a click on it
   puts the question back exactly as `Esc` does — nothing is sent. It is one element, not two:
@@ -155,6 +279,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The reply language asks for the answer, and nothing else.** `## Language` carries one
+  bullet again. This release first packed the agent's reasoning (the thinking block) and
+  the short `exec_command` step title into the answer bullet, behind a semicolon, then
+  split them out into an imperative bullet of their own, and finally dropped both: neither
+  wording moved the model, and a chain whose frozen prompt carried the clause reasoned in
+  **English on every block** anyway. What ships is `languageLine()`'s answer sentence as
+  the template's only language placeholder, with the "code, file paths, command output and
+  identifiers verbatim" bullet after it. The step title keeps its requirement in that
+  argument's schema (the tool channel), not in the prompt. A template change is **harness
+  drift** for every existing chain (the epoch's `templateHash` no longer matches what the
+  window ships), and it reaches the model only in a **new epoch**.
+- **A step is italic, and a step is what is indented.** A tool line is now marked as a step
+  in two ways and no more: its own wording is *italic* (`.tool-verb` plus a prose
+  `.tool-label`), and the step line alone is inset 15 px under the `Ran N steps` header
+  (`.steps-body > .msg.tool`, which lands a row's text on the header's own label). The inset
+  is per row and never a block: the reasoning row that can ride the same group body keeps the
+  prose's left edge, and the group's body itself carries no padding and no rule down its side.
+  A monospace label (a derived command, path or pattern), the `.tool-elapsed` chip and
+  everything in `.tool-detail` stay upright: Consolas has no true italic, and an 11 px
+  synthesized oblique smears a command's glyphs, while the chip and the detail are metadata
+  and code rather than a step's wording. The expanded detail's own left margin drops from
+  12 px to 6 px, because the row it belongs to is already 15 px in and the two indents would
+  otherwise read as a staircase. **The reasoning is deliberately untouched and unindented**:
+  the italic and the inset both mark what the agent did, not what it thought. The two design
+  comments in `media/style.css`, `docs/agents/invariants/streaming-perf.md` (the three type
+  levels and the tool-row bullet), `docs/agents/file-map.md` (the log's styling and the steps
+  group) and the three manual pages now describe this instead of the old "nothing is italic"
+  rule.
+- **The system prompt says each thing once.** The main template dropped from 6491 to 4429
+  characters with no rule lost: the `exec_command` mechanism it used to restate (`run_type`
+  semantics, `wait_for_command` / `check_command` / `kill_command`, the foreground setting)
+  now lives only in that tool's schema, which the model reads on every request anyway. What
+  the prompt keeps is the rule a schema cannot carry as a prohibition: never hand work to a
+  process the harness does not own. The exec acceptance check holds the split in both
+  directions — the rule present, the mechanism not repeated.
+- **The green light means "follow", not "the scrollbar is locked".** While it is green you
+  can scroll; the log follows the newest content at the same time. Scrolling up releases
+  the follow (the dot dims), scrolling back to the end re-engages it, and clicking the dim
+  dot locks *and* jumps to the bottom. The rule is directional now — a programmatic pin or
+  a growing turn can never release it — which is what used to go wrong with a lot of
+  streaming content: the old "is it at the bottom" test read a stale offset and unlocked
+  itself. A live turn starts green; a finished card opens dim and stays at its newest
+  content.
+- **The card is 840 px high by default** (`--node-max-h`, was 1200); the drag-resize still
+  raises it.
+- **Three type levels** for visual clearance: the reasoning is the brightest text (13 px,
+  normal), the tool row is one grey line (the verb and the 12 px label both `--text-dim`,
+  11 px monospace only when the label is a derived command or pattern; its status dot is
+  gone and the ticking elapsed chip is the running cue), and the expanded detail is one
+  level further down (11 px `--text-dim`). The usage line stays the faintest.
+- **The steps tuck under one fold, and the final answer is plain flow text.** A turn
+  with tool calls now puts everything from its first tool call onward into one `.steps`
+  group under a `Ran N steps` header (or `Ran 1 step`): the reasoning, the tool lines,
+  the prose between them and the harness notes. The group is open while the turn runs
+  and folds when the reply finishes; a click toggles it and always wins over the resting
+  state. The final answer is lifted out of the group when the turn ends and is the
+  flow's last block, with no frame of its own (`.msg.assistant` lost its background and
+  border; the error variant keeps its tint). The reasoning line and the tool detail are
+  normal text — no dim, no italic — and an open reasoning line is capped at 240 px with
+  its own scrollbar, following its newest line unless the reader scrolled it. A cold card
+  with steps builds only the run-up, the header and the answer; the body is built on the
+  click that opens it, so the old scroll window now applies only to a tool-less long
+  turn.
+- Send is **disabled** on an empty box and on a full context window (a disabled Send also
+  means Enter does nothing); Stop still replaces it while the node runs or owns unfinished
+  work.
+- `check_background_terminal` / `join_background` / `kill_background` are now
+  `check_command` / `wait_for_command` / `kill_command`.
+- `spinney.commandDefaultTimeout` and `spinney.commandMaxForegroundDuration` are replaced
+  by `spinney.execForegroundSeconds` (30) and `spinney.subAgentSyncSeconds` (300, the sync
+  wait of `spawn_agents` / `send_agent_message`).
+- Every command still starts in the harness root and says so on its first line; a
+  foreground command that outlives the setting now says which id it became instead of
+  dying.
 - **The prompt pencil takes no width from the question.** The pencil on a card's pinned question
   sat at the top right of the pin strip with a 26 px gutter reserved for it, so a prompt wrapped
   26 px early — a visible notch in every card, for a 16 px button. It is now a child of the
@@ -227,6 +425,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Removed
 
+- `spinney.foldThinking`, `spinney.foldToolCalls` and `spinney.foldWork` (the blocks they
+  folded no longer exist).
+- `spinney.commandDefaultTimeout`, `spinney.commandMaxForegroundDuration`, and the
+  `timeout` / `timeout_behavior` arguments of `exec_command` (a stale call is answered
+  with one sentence naming `run_type` and nothing is started).
+- The verbatim frame syntax and the `frame` argument.
+- The three old new-epoch entries: the card's `⧉`, the composer's harness-drift `⧉`, and
+  the setup modal (`askSetups` / `discardPendingSetup`).
 - **The one-shot handoff summary.** `Write a handoff summary` is gone, together with its extra
   non-streaming request, its one validation retry and its 30 s deadline. The compression node
   replaces it: the handoff is now a card you can read, stop, continue and delete, and the free
@@ -243,6 +449,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The compaction entry only exists when there is something to compact.** With an
+  empty input box the new-epoch button now shows only when the focused chain's context is
+  `near` or `full`; a setup drift alone used to show it as `Compact and Continue` for a
+  window that was nowhere near full, where there was neither a message to carry nor a
+  window to compact.
+- **A reload carries its own continue.** `hvsc reboot --continue` lost its message
+  whenever the supervisor died with the reload — which a daemon started from inside the
+  window always did, because the extension host's teardown kills that process tree: the
+  window came back and nobody told it to continue, so the session had to be woken by
+  hand. `POST /reload-window` now accepts `{ continue: { message, sessionId?, nodeId? } }`,
+  the extension persists it (workspace-keyed, ten-minute freshness) before reloading and
+  answers `continueQueued: true`, and the next instance delivers it through the same
+  continue path once the window is idle and not held; hvsc sends it with the reload and
+  skips its own post-reload `/continue` when the reply says it was queued.
+- **A message that streams text and reasoning alternately is one row and one block.** The
+  webview routed each delta by the log's last child, so a reasoning delta that arrived
+  after the message's text had started began a second row after the text, and the next
+  text delta began a second block — one answer split into alternating fragments. A
+  reasoning delta now joins its own message's row (above the answer, in place, without
+  re-opening it), whatever order the provider streams them in.
+- **Applying a prompt snippet enables Send, like typing does.** `insertSnippet` wrote the
+  input's value directly and never refreshed the composer, so both composer buttons kept
+  the state of the old content until a key was pressed; `composerClear` had the same
+  omission. One helper now runs `autoGrow()` + `updateComposerButtons()` after any
+  programmatic write.
+- **A hop return waits for the child session to be idle, not just for its turn to
+  end.** The return trip fired on the child's *first* finished turn, even when that
+  session still owned work: a running node background terminal, a running sub-agent
+  batch, or a completion notice already queued for it. In the incident, hop 53 ended
+  its turn with the `G0..G6` gate run in the background, the origin got the receipt,
+  judged the child's `.nsw.lock` stale, cleared it, ran the gates itself and committed
+  743c0e82 — while the child was still working, so two sessions wrote one working tree
+  (the child then saw `G3–G6` blocked by the origin's own gate run). The hop now
+  records the finished turn's answer on `Hop.pendingReturn`, stays armed while
+  `runningNodes()` / `lockedNodes()` are non-empty (the same set that keeps the
+  composer on Stop), re-checks once a second, refreshes the answer at every later turn
+  end, and is retired only when the receipt is queued. A `start_detached` job is not
+  part of that set by design: it never reports back. `tools/harness-test.mjs`'s hop
+  suite now starts its child with a background job and asserts no receipt lands before
+  the child goes idle.
+- **The composer keeps its caret across a window reactivation.** With the caret in the
+  input, clicking another window and then clicking back into the input used to show the
+  caret for a few milliseconds and lose it. The cause is the platform, not a repaint: on
+  reactivation VS Code focuses the retained webview's **frame** (after a ~50 ms throttle),
+  not the element inside it, and VS Code closed the "restore focus inside the webview"
+  request as out of scope for extensions. The composer now tracks its own focus with
+  `focusin` / `focusout`, restores the caret (and the selection) after the platform's
+  focus on the next frame and again a tick later until it sticks, never steals focus when
+  the click was elsewhere, and logs one `composer-focus` trace per sequence.
+- **A single-line tool result can no longer kill a node.** An oversized result is
+  spilled to `.spinney/tool-output/` and the answer is a pointer with a preview, but
+  that preview used to be "the first 8 **lines**". A minified file is one line: a
+  `grep` for `splita` in an `ir.json` returned two lines and 7.75 MB, the whole thing
+  was inlined as the preview, and the next request asked for 2,781,817 tokens against
+  a 1,048,576-token window. The provider refused it with a 400, and every retry from
+  that node was refused the same way, because the tool message stays in `messages`.
+  The preview is now cut to **2048 characters** (byte-safe, `headByBytes` /
+  `tailByBytes` in `src/text.ts`), and when it had to be clipped the pointer says so,
+  names the first line's length and tells the model that a smaller line range will
+  not help. `read_file` — which had no cap at all — now answers a range over
+  **256 KiB** with an explicit `[TRUNCATED: …]` head/tail excerpt (never a silent
+  cut, and it warns against using it as `replace_in_file` `oldText`; the hint names
+  `search_files` when one line is wider than the excerpt). `Agent` also caps any one
+  tool result at **512 KiB** before it enters `messages`, so a tool that forgets
+  cannot brick a conversation. `npm run check:unicode` now pins both byte helpers.
 - **Deleting one branch no longer waits for another branch's turn.** `branchDeletionBlocked` read
   `rt.isRunning()`, which is session-wide, so a single streaming node made every other branch of
   that session undeletable (`Cannot delete a branch while the agent is running`) — a rule left
@@ -338,289 +609,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   message started answering folded to one line even though the reader had released its
   follow light to read it. Releasing that light now counts as reading it: the row keeps its
   open form to the end of the turn, and the steps group that holds it does not fold either.
-
-## [0.7.0] - 2026-11-13
-
-### Added
-
-- **A step group per run, and the text stays in the flow.** A turn is cut into runs by the
-  text the model writes: every contiguous run of tool rows becomes its own `.steps` group
-  with its own `Ran N steps` / `Ran 1 step` header, opened by the first tool row of the run
-  and closed by the next assistant text. The header counts that run's calls, each group
-  folds on its own (open while the turn runs, folded when it ends, a click wins for that
-  group), and the assistant's text — including the turn's final answer — is appended to
-  the log itself, never inside a group, so a reply is no longer interleaved with the
-  reasoning while it streams. A history repaint splits the items with the same rule, and a
-  finished card still builds each group's body only when its header is clicked.
-- **`exec_command` takes a required `title`, and no other tool takes one.** The folded step
-  row shows it instead of the command, so a call reads `Ran Checking the git history`; a
-  call without a `title` is refused by the argument validation before anything starts. The
-  display titles were removed from every other tool schema — they were self-explanatory
-  already — while `hop_session` and `rename_session` keep their own semantic `title`.
-- **The reasoning box has its own follow light.** The open 240 px reasoning scroller
-  carries a small green dot of its own: it follows the newest line, a scroll up releases
-  it, and a scroll back to the end engages it again; clicking the dot toggles it, and the
-  click does not open or close the row.
-- **One entry for every new context.** A new-epoch transition used to have three
-  inconsistent entries: the per-card `⧉ Continue in a new window`, a composer `⧉` shown
-  only for a harness drift, and a modal raised by a plain send after a model/effort
-  change. All three are replaced by one composer button, immediately left of Send:
-  **`Continue with new context`**, or **`Compact and Continue`** when the box is empty.
-  It appears when a new epoch exists (setup drift, a context window near 90%, or a full
-  window), never while the focused node is running or locked (Stop owns the row), and it
-  is disabled only in a read-only window or on a sub-agent branch. A click asks one
-  question and then does one of two things: with a full or near window it opens a new
-  context window (dotted edge, `CTX` badge) carrying your message as a real user turn;
-  with a setup drift it forks the tree and sends there. The question offers **`Write a
-  handoff summary`** (one extra request) or **`Just continue`** (point the new window at
-  the previous branch); on a full window it also names the context length the provider
-  just refused. Send now disables on an empty box and on a full window, and Enter goes
-  through it, so a disabled Send means Enter does nothing; a plain send with a drift keeps
-  the frozen setup silently. The frozen prompt and the tool set are still compared by
-  content hash, but the AGENTS.md half is now read from disk at the moment of the check
-  (`src/chat/agentsMd.ts`, mtime-cached), so a file edited while VS Code was closed shows
-  up as a drift instead of needing a reload. A breaking tool-schema change (like this
-  release's) therefore marks every older chain as drifted, and this button is the way to
-  carry it into a new epoch.
-- **A handoff summary for a rollover.** Choosing `Write a handoff summary` runs one
-  bounded, tool-less, non-streaming request on the outgoing card before the new window
-  exists. The input is never the whole chain: the first user message verbatim, every user
-  message clipped to 500 chars, the last eight assistant texts, and each tool call as
-  `name -> brief -> first line of the result`, capped at 60,000 chars with a head+tail
-  selection. The answer is a fixed eleven-section handoff (primary request, concepts,
-  files with "re-read before editing", errors and fixes, problem solving, all user
-  messages, pending tasks, current work, the quoted next step, durable references, and a
-  handoff contract naming the successor as the same agent). It is validated against nine
-  required headings, retried once, and on any timeout (30 s), error, empty or invalid
-  answer the rollover falls back to the pointer text and says the summary was
-  unavailable. `npm run check:compaction` pins the bounds, the schema and every fallback
-  offline.
-- **A hopped-to session hands back when it decides to.** A session started by a
-  `return_when_finished` hop now sees a `finish_hop(source_session_node_id?)` tool, and
-  **nothing returns to the caller on its own**: a turn end, an interrupt and a Stop all
-  leave the hop armed, so a hopped session can finally be steered. The call marks the
-  hand-back and picks the landing node (validated against the origin session); the report
-  is the child's final reply, delivered once the child is idle (a running node job, a
-  sub-agent batch or a queued notice still holds it). The child's first prompt carries a
-  short preamble naming the caller, the tool and the landing rule, and `fire_and_forget`
-  children never get the tool. `tools/harness-test.mjs`'s hop suite and the simulator now
-  exercise the hand-back.
-- **`exec_command` has run types, and waiting is a tool.** The four `timeout_behavior`
-  values and the two command timeouts are gone. The schema is
-  `exec_command(command, cwd?, run_type?)` with `run_type` `foreground` (default),
-  `background` or `detached`; no job has a deadline any more, so the budget machinery
-  (`timeoutMs`, `deadlineAt`, `expireBudget`, `remainingBudgetMs`) is deleted with it. A
-  foreground command still running after `spinney.execForegroundSeconds` (default 30,
-  10…999999999999) is **always** moved to the background with a handle and instructions
-  instead of being killed or refused. Waiting is now a tool: `wait_for_command(id,
-  seconds?)` (default 30, at most 300) returns the moment the command ends and is a plain
-  "still running" answer when it does not, pointing at `check_command` (a status read) or
-  `kill_command` (then relaunch a quieter command); never `sleep` for a job again. The
-  three management tools are also exposed to writable sub-agents, which could already
-  start a job but not read it, and `npm run check:exec` (104 checks) pins the whole
-  matrix.
-- **A window-global terminal dock.** Every background command of the window, running or
-  finished, whatever session, is one list on every chat tab: `#term-dock`, fixed at the
-  top-right, with a collapsible `Terminals · N running` header and one row per job. A row
-  is the same card body the owning node renders (a shared builder, so the two views cannot
-  disagree) plus the session title, the live output tail, the elapsed chip, the kill
-  button while it runs and a ✕ when it is finished. The host broadcasts
-  `backgroundsGlobal` to every open panel on the same ~200 ms coalescing as the
-  per-session snapshot; a tab that comes up is sent one at once. Removing a job is a
-  field on its record (`bgDockDismissed`), persisted with the session, so a reload keeps
-  the dock clean while the tree card — the other view — stays; the tree's delete still
-  removes the record. `Clear finished` empties the dock for the whole window.
-- **A hard search budget, and a search that is not tied to the workspace.** `search_files`
-  and `search_transcripts` now share one hard wall clock, `spinney.searchTimeoutSeconds`
-  (default 10, 1…600), for the whole call; on timeout the answer is an `Error:` line with
-  no hits at all, telling the model to narrow the path, tighten the pattern, add a glob,
-  lower the context, or ask the user to raise the setting. The ripgrep child and the
-  fallback walk share that one budget instead of spending 20 s each. `search.exclude` /
-  `files.exclude` are applied only when the search root is inside the open workspace, the
-  build directories are passed to ripgrep as globs (they used to be pruned only by the
-  walk), the per-file cap rose from 1 MB to 8 MB, and ripgrep itself is now vendored for
-  five platforms (`media/vendor/ripgrep/<platform>-<arch>/`, with `PROVENANCE.md` and
-  hashes) and tried before VS Code's copy, with PATH last; `win32-arm64` has no upstream
-  ripgrep 14.1.1 build and falls through to VS Code's bundled binary. The tool
-  descriptions now say to prefer many small searches and to keep the shell for what is not
-  a search.
-- **`append_file`, and the verbatim frame is gone.** The `<<<RAW:key>>>` frame form is
-  removed from argument parsing, from the `write_file` / `replace_in_file` schemas and
-  from every doc; arguments are strict JSON. The one malformed shape agents kept
-  producing — the whole value wrapped in markers — is answered with one sentence telling
-  the model to send a plain JSON string, and nothing is written. For large files there is
-  now `append_file(path, content)`: write the first part with `write_file`, then append in
-  bounded chunks, preserving the file's line endings. `npm run check:args` pins both.
-- **One essay per turn.** The chat card is no longer a stack of blocks. Thinking renders
-  as one inline row: expanded as a dimmed italic paragraph while the turn runs, collapsed
-  to a single ellipsised line when it ends, and one click opens the full text with its
-  `[Prompt: … + Completion: …, Cache Hit …, Cache Miss …]` line. A tool call is one line
-  too: a bold, localized verb and a label, a status dot and the elapsed chip while it
-  runs, and a click expands the command, the result and the usage in place. Every tool
-  schema now takes an optional `title` — one short human label the model writes — which
-  the host reads into the display item so a clipped argument string cannot lose it; the
-  derived label is the fallback. The zone-2/zone-3 split, the answer promotion and the
-  work-log fold are deleted: the card has one flow and one scroller, and the final answer
-  is simply the last block.
-- **Alt + wheel pans the tree.** The wheel keeps its gestures (ctrl/cmd zooms, shift pans
-  sideways, a native scroll zone keeps its own wheel); Alt + wheel now pans the whole tree
-  vertically from anywhere, including over a card, a step detail or the composer.
-
-### Changed
-
-- **The reply language asks for the answer, and nothing else.** `## Language` carries one
-  bullet again. This release first packed the agent's reasoning (the thinking block) and
-  the short `exec_command` step title into the answer bullet, behind a semicolon, then
-  split them out into an imperative bullet of their own, and finally dropped both: neither
-  wording moved the model, and a chain whose frozen prompt carried the clause reasoned in
-  **English on every block** anyway. What ships is `languageLine()`'s answer sentence as
-  the template's only language placeholder, with the "code, file paths, command output and
-  identifiers verbatim" bullet after it. The step title keeps its requirement in that
-  argument's schema (the tool channel), not in the prompt. A template change is **harness
-  drift** for every existing chain (the epoch's `templateHash` no longer matches what the
-  window ships), and it reaches the model only in a **new epoch**.
-- **A step is italic, and a step is what is indented.** A tool line is now marked as a step
-  in two ways and no more: its own wording is *italic* (`.tool-verb` plus a prose
-  `.tool-label`), and the step line alone is inset 15 px under the `Ran N steps` header
-  (`.steps-body > .msg.tool`, which lands a row's text on the header's own label). The inset
-  is per row and never a block: the reasoning row that can ride the same group body keeps the
-  prose's left edge, and the group's body itself carries no padding and no rule down its side.
-  A monospace label (a derived command, path or pattern), the `.tool-elapsed` chip and
-  everything in `.tool-detail` stay upright: Consolas has no true italic, and an 11 px
-  synthesized oblique smears a command's glyphs, while the chip and the detail are metadata
-  and code rather than a step's wording. The expanded detail's own left margin drops from
-  12 px to 6 px, because the row it belongs to is already 15 px in and the two indents would
-  otherwise read as a staircase. **The reasoning is deliberately untouched and unindented**:
-  the italic and the inset both mark what the agent did, not what it thought. The two design
-  comments in `media/style.css`, `docs/agents/invariants/streaming-perf.md` (the three type
-  levels and the tool-row bullet), `docs/agents/file-map.md` (the log's styling and the steps
-  group) and the three manual pages now describe this instead of the old "nothing is italic"
-  rule.
-- **The system prompt says each thing once.** The main template dropped from 6491 to 4429
-  characters with no rule lost: the `exec_command` mechanism it used to restate (`run_type`
-  semantics, `wait_for_command` / `check_command` / `kill_command`, the foreground setting)
-  now lives only in that tool's schema, which the model reads on every request anyway. What
-  the prompt keeps is the rule a schema cannot carry as a prohibition: never hand work to a
-  process the harness does not own. The exec acceptance check holds the split in both
-  directions — the rule present, the mechanism not repeated.
-- **The green light means "follow", not "the scrollbar is locked".** While it is green you
-  can scroll; the log follows the newest content at the same time. Scrolling up releases
-  the follow (the dot dims), scrolling back to the end re-engages it, and clicking the dim
-  dot locks *and* jumps to the bottom. The rule is directional now — a programmatic pin or
-  a growing turn can never release it — which is what used to go wrong with a lot of
-  streaming content: the old "is it at the bottom" test read a stale offset and unlocked
-  itself. A live turn starts green; a finished card opens dim and stays at its newest
-  content.
-- **The card is 840 px high by default** (`--node-max-h`, was 1200); the drag-resize still
-  raises it.
-- **Three type levels** for visual clearance: the reasoning is the brightest text (13 px,
-  normal), the tool row is one grey line (the verb and the 12 px label both `--text-dim`,
-  11 px monospace only when the label is a derived command or pattern; its status dot is
-  gone and the ticking elapsed chip is the running cue), and the expanded detail is one
-  level further down (11 px `--text-dim`). The usage line stays the faintest.
-- **The steps tuck under one fold, and the final answer is plain flow text.** A turn
-  with tool calls now puts everything from its first tool call onward into one `.steps`
-  group under a `Ran N steps` header (or `Ran 1 step`): the reasoning, the tool lines,
-  the prose between them and the harness notes. The group is open while the turn runs
-  and folds when the reply finishes; a click toggles it and always wins over the resting
-  state. The final answer is lifted out of the group when the turn ends and is the
-  flow's last block, with no frame of its own (`.msg.assistant` lost its background and
-  border; the error variant keeps its tint). The reasoning line and the tool detail are
-  normal text — no dim, no italic — and an open reasoning line is capped at 240 px with
-  its own scrollbar, following its newest line unless the reader scrolled it. A cold card
-  with steps builds only the run-up, the header and the answer; the body is built on the
-  click that opens it, so the old scroll window now applies only to a tool-less long
-  turn.
-- Send is **disabled** on an empty box and on a full context window (a disabled Send also
-  means Enter does nothing); Stop still replaces it while the node runs or owns unfinished
-  work.
-- `check_background_terminal` / `join_background` / `kill_background` are now
-  `check_command` / `wait_for_command` / `kill_command`.
-- `spinney.commandDefaultTimeout` and `spinney.commandMaxForegroundDuration` are replaced
-  by `spinney.execForegroundSeconds` (30) and `spinney.subAgentSyncSeconds` (300, the sync
-  wait of `spawn_agents` / `send_agent_message`).
-- Every command still starts in the harness root and says so on its first line; a
-  foreground command that outlives the setting now says which id it became instead of
-  dying.
-
-### Removed
-
-- `spinney.foldThinking`, `spinney.foldToolCalls` and `spinney.foldWork` (the blocks they
-  folded no longer exist).
-- `spinney.commandDefaultTimeout`, `spinney.commandMaxForegroundDuration`, and the
-  `timeout` / `timeout_behavior` arguments of `exec_command` (a stale call is answered
-  with one sentence naming `run_type` and nothing is started).
-- The verbatim frame syntax and the `frame` argument.
-- The three old new-epoch entries: the card's `⧉`, the composer's harness-drift `⧉`, and
-  the setup modal (`askSetups` / `discardPendingSetup`).
-
-### Fixed
-
-- **The compaction entry only exists when there is something to compact.** With an
-  empty input box the new-epoch button now shows only when the focused chain's context is
-  `near` or `full`; a setup drift alone used to show it as `Compact and Continue` for a
-  window that was nowhere near full, where there was neither a message to carry nor a
-  window to compact.
-- **A reload carries its own continue.** `hvsc reboot --continue` lost its message
-  whenever the supervisor died with the reload — which a daemon started from inside the
-  window always did, because the extension host's teardown kills that process tree: the
-  window came back and nobody told it to continue, so the session had to be woken by
-  hand. `POST /reload-window` now accepts `{ continue: { message, sessionId?, nodeId? } }`,
-  the extension persists it (workspace-keyed, ten-minute freshness) before reloading and
-  answers `continueQueued: true`, and the next instance delivers it through the same
-  continue path once the window is idle and not held; hvsc sends it with the reload and
-  skips its own post-reload `/continue` when the reply says it was queued.
-- **A message that streams text and reasoning alternately is one row and one block.** The
-  webview routed each delta by the log's last child, so a reasoning delta that arrived
-  after the message's text had started began a second row after the text, and the next
-  text delta began a second block — one answer split into alternating fragments. A
-  reasoning delta now joins its own message's row (above the answer, in place, without
-  re-opening it), whatever order the provider streams them in.
-- **Applying a prompt snippet enables Send, like typing does.** `insertSnippet` wrote the
-  input's value directly and never refreshed the composer, so both composer buttons kept
-  the state of the old content until a key was pressed; `composerClear` had the same
-  omission. One helper now runs `autoGrow()` + `updateComposerButtons()` after any
-  programmatic write.
-- **A hop return waits for the child session to be idle, not just for its turn to
-  end.** The return trip fired on the child's *first* finished turn, even when that
-  session still owned work: a running node background terminal, a running sub-agent
-  batch, or a completion notice already queued for it. In the incident, hop 53 ended
-  its turn with the `G0..G6` gate run in the background, the origin got the receipt,
-  judged the child's `.nsw.lock` stale, cleared it, ran the gates itself and committed
-  743c0e82 — while the child was still working, so two sessions wrote one working tree
-  (the child then saw `G3–G6` blocked by the origin's own gate run). The hop now
-  records the finished turn's answer on `Hop.pendingReturn`, stays armed while
-  `runningNodes()` / `lockedNodes()` are non-empty (the same set that keeps the
-  composer on Stop), re-checks once a second, refreshes the answer at every later turn
-  end, and is retired only when the receipt is queued. A `start_detached` job is not
-  part of that set by design: it never reports back. `tools/harness-test.mjs`'s hop
-  suite now starts its child with a background job and asserts no receipt lands before
-  the child goes idle.
-- **The composer keeps its caret across a window reactivation.** With the caret in the
-  input, clicking another window and then clicking back into the input used to show the
-  caret for a few milliseconds and lose it. The cause is the platform, not a repaint: on
-  reactivation VS Code focuses the retained webview's **frame** (after a ~50 ms throttle),
-  not the element inside it, and VS Code closed the "restore focus inside the webview"
-  request as out of scope for extensions. The composer now tracks its own focus with
-  `focusin` / `focusout`, restores the caret (and the selection) after the platform's
-  focus on the next frame and again a tick later until it sticks, never steals focus when
-  the click was elsewhere, and logs one `composer-focus` trace per sequence.
-- **A single-line tool result can no longer kill a node.** An oversized result is
-  spilled to `.spinney/tool-output/` and the answer is a pointer with a preview, but
-  that preview used to be "the first 8 **lines**". A minified file is one line: a
-  `grep` for `splita` in an `ir.json` returned two lines and 7.75 MB, the whole thing
-  was inlined as the preview, and the next request asked for 2,781,817 tokens against
-  a 1,048,576-token window. The provider refused it with a 400, and every retry from
-  that node was refused the same way, because the tool message stays in `messages`.
-  The preview is now cut to **2048 characters** (byte-safe, `headByBytes` /
-  `tailByBytes` in `src/text.ts`), and when it had to be clipped the pointer says so,
-  names the first line's length and tells the model that a smaller line range will
-  not help. `read_file` — which had no cap at all — now answers a range over
-  **256 KiB** with an explicit `[TRUNCATED: …]` head/tail excerpt (never a silent
-  cut, and it warns against using it as `replace_in_file` `oldText`; the hint names
-  `search_files` when one line is wider than the excerpt). `Agent` also caps any one
-  tool result at **512 KiB** before it enters `messages`, so a tool that forgets
-  cannot brick a conversation. `npm run check:unicode` now pins both byte helpers.
 
 ## [0.6.0] - 2026-11-06
 
