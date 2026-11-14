@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **A new node repaints its own setup identity.** `beginTurn` posts `config` and `context`
+  right after the tree, so the composer's setup entry — and the drift decision behind
+  `#new-context-btn` — describes the node the view has just moved to. The checkout has
+  already moved by then (`attachNode`), and without the repaint both stayed at the previous
+  node's value until a click recomputed them: a window opened by a compression or a context
+  rollover offered a fork under the setup it had just been frozen from.
+
 ## [0.7.0] - 2026-11-14
 
 ### Added

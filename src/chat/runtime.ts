@@ -3217,6 +3217,14 @@ export class SessionRuntime {
     };
     this.runs.set(node.id, run);
     this.postTree();
+    // The checkout has already moved (`attachNode`), so the composer's setup identity —
+    // and the drift entry that decides whether `#new-context-btn` shows — must describe
+    // **this** node's chain, not the one the user was standing on a moment ago. Without
+    // this repaint both stay at the previous node's value until a click recomputes them,
+    // and the newest window would offer a fork under a setup it was just frozen from
+    // (`setupState()` compares the new node's own epoch, so it reads no drift).
+    this.postConfig();
+    this.postContext();
     if (opts?.pan !== false) {
       this.post({ type: 'panTo', id: node.id });
     }
