@@ -1745,6 +1745,10 @@
   function setActiveRow(row) {
     if (!row) return;
     row._active = true;
+    // The class is the one thing the stylesheet can see: a live row's verb carries the
+    // wave and its highlight (`makeThinkingRow` builds the tag out of one span per
+    // character, the same way a tool row's verb is built).
+    if (row.classList) row.classList.add('live');
     if (messagesEl) {
       const list = messagesEl._activeRows || (messagesEl._activeRows = []);
       if (list.indexOf(row) < 0) list.push(row);
@@ -1757,6 +1761,7 @@
   function clearActiveRow(row) {
     if (!row) return;
     row._active = false;
+    if (row.classList) row.classList.remove('live');
     const list = messagesEl ? messagesEl._activeRows : null;
     if (list) {
       const at = list.indexOf(row);
@@ -2590,7 +2595,11 @@
   function makeThinkingRow(thinking) {
     const row = el('div', 'msg thinking-row');
     row.dataset.kind = 'thinking';
-    row.appendChild(el('b', 'thinking-verb', tr('Thinking')));
+    // The tag is built like a step's verb, one span per character: a live row's tag is
+    // where the wave and its highlight are (`body.anim .msg.thinking-row.live`).
+    const tag = el('b', 'thinking-verb');
+    setVerbText(tag, tr('Thinking'));
+    row.appendChild(tag);
     const text = el('div', 'thinking-text');
     if (thinking) text.textContent = thinking;
     row.appendChild(text);
@@ -3353,15 +3362,44 @@
   }
 
   /**
+   * The verb's text, one `<span class="w">` per character. Godot's `[wave]` does the same
+   * thing per glyph: every character rides a sine and the phase advances with its place in
+   * the run, so the wave travels along the word. Each span carries its own index (`--i`),
+   * which `media/style.css` turns into the phase.
+   *
+   * The spans are plain **inline** boxes, so the word's shaping — its kerning, its
+   * ligatures — is exactly the one a `Text` node had; only the paint offset differs while
+   * the row runs. They are built whether the setting is on or off, so a `config` that
+   * flips at runtime never has to rebuild a row it already drew: the animation is the only
+   * thing gated, and it is gated in CSS.
+   */
+  function setVerbText(verbEl, text) {
+    if (!verbEl) return;
+    // `textContent = ''` empties a real element, but the guard's DOM stub keeps its own
+    // `children` list, so the children are removed one by one: both then agree, and a
+    // rewritten verb never accumulates the characters of the name it used to have.
+    while (verbEl.children && verbEl.children.length > 0) verbEl.removeChild(verbEl.children[0]);
+    verbEl.textContent = '';
+    const word = String(text || '');
+    for (let i = 0; i < word.length; i++) {
+      const ch = el('span', 'w', word[i]);
+      if (ch.style && typeof ch.style.setProperty === 'function') ch.style.setProperty('--i', String(i));
+      verbEl.appendChild(ch);
+    }
+  }
+
+  /**
    * The row's one line: the bold verb, the label and the elapsed chip. It is built once
    * per row and rewritten in place (a live call's label grows with its arguments), which
-   * is why it is its own small builder. There is no status dot: the ticking chip is what
-   * says a call is still running, and the row's `running` / `done` class still carries the
-   * state for anything that reads it.
+   * is why it is its own small builder. The verb is written through `setVerbText`, which is
+   * where the wave lives; the ticking chip is the row's clock, and its `running` / `done`
+   * class still carries the state for anything that reads it.
    */
   function toolRowHead(name, label, mono) {
     const head = el('div', 'tool-row');
-    head.appendChild(el('b', 'tool-verb', toolVerb(name)));
+    const verb = el('b', 'tool-verb');
+    setVerbText(verb, toolVerb(name));
+    head.appendChild(verb);
     if (label) head.appendChild(el('span', 'tool-label' + (mono ? ' mono' : ''), label));
     return head;
   }
@@ -4436,7 +4474,7 @@
       node = addLiveTool(index, id, nameDelta || '');
     } else if (nameDelta) {
       node._toolName = (node._toolName || '') + nameDelta;
-      if (node._verbEl) node._verbEl.textContent = toolVerb(node._toolName);
+      if (node._verbEl) setVerbText(node._verbEl, toolVerb(node._toolName));
     }
     if (id) node.dataset.id = id;
     followActive();
@@ -4470,7 +4508,7 @@
     node._title = title;
     if (name && node._rowEl) {
       const verb = byClass(node._rowEl, 'tool-verb');
-      if (verb) verb.textContent = toolVerb(name);
+      if (verb) setVerbText(verb, toolVerb(name));
     }
     const label = toolLabel(name, args, title);
     node._label = label;

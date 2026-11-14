@@ -118,12 +118,30 @@ safe when a repaint or a finalize already removed the span.
 `finalizeStreamingAnswer` settles everything **before** the markdown render, and
 `reset` / `tree` settle the words in flight before their cards are replaced. A new
 row (assistant text, tool, thinking, notice) arrives on one `.row-in` fade + 2 px rise
-that is removed again on `animationend`. **The verb of a step that is still working
-carries a glimmer**: a bright band (a clipped gradient, 15% of the word's width) crosses
-it in 1.8 s, which is the DOM form of Claude Code's `useShimmerAnimation` (one bright
-index walking the status message, its characters' colours interpolated around
-`index ± 1` on a 50 ms clock). It is scoped to `.msg.tool.running .tool-verb` and to
-`body.anim`, the class the `config` message sets, because that one is CSS-only. A tool
+that is removed again on `animationend`. **The verb of a step that is still working rides
+a wave**: Godot's `[wave]` moves a run of text up and down by giving every glyph a sine
+whose phase advances with its place in the run, and this is the same shape. `setVerbText`
+puts each character of the verb in its own `<span class="w">` with its index,
+`media/style.css` turns that index into a negative `animation-delay` (−90 ms per
+character) on one 1.2 s `ease-in-out` keyframe. **The offset is a `transform`, and it only
+goes up** (`0 → −2 px → 0`): a relative `top` is repainted per frame and its downward half
+grows the work log's scrollable overflow, so a following log re-pins itself every frame and
+the scrollbar is pushed over and over, while overflow above the box is not scrollable and
+leaves `scrollHeight` unchanged. A transform needs a box, so each character is
+`inline-block` (a non-replaced inline box ignores `transform`); the price is this one short
+word's kerning pairs. The spans exist whether the setting is on or off: only the animation
+is gated, in CSS, by
+`.msg.tool.running .tool-verb .w` and by `body.anim`, the class the `config` message
+sets. `tools/check-webview.js` pins the span-per-character shape, because a verb written
+as plain text reads the same and moves nothing. **A highlight travels along that verb at
+the same time**, and along the tag of a live thinking row (`.msg.thinking-row.live`, which
+`setActiveRow` marks): a second animation of `color` on the same spans, with its own slower
+phase step, so the crest of a brightness wave moves through the word. Nothing fades; a
+character at rest is the verb's own `--text-dim`. This is Claude Code's
+`useShimmerAnimation` in its own shape — it interpolates the colour of the characters around
+a moving index. The first attempt was a clipped gradient on the parent
+(`background-clip: text`) and it is deliberately gone: a `transform`ed child is painted in
+its own context, so the clip lost the glyphs and the whole word vanished while it ran. A tool
 call that is still being written is one fixed line (`Writing tool call...`, see below),
 so no label is rewritten per delta and there is no `.label-in` fade: the only text a
 composing call changes is its verb, and that changes on a name delta.

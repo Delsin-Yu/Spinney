@@ -524,10 +524,13 @@
   whitespace) briefly sits in a transient `.word-in` span that fades over 200 ms, and
   the script merges it back into the answer's (or the thinking row's) own `Text` node when
   that span's own `animationend` fires, oldest first; a new row arrives on `.row-in`, the
-  verb of a step that is still working carries a glimmer (a clipped gradient sweeping it,
-  `.msg.tool.running .tool-verb`), and a live tool row's label restarts `.label-in` in
+  verb of a step that is still working rides a wave and a highlight at once (`setVerbText`
+  puts each character in a `.w` span carrying its index; `body.anim .msg.tool.running
+  .tool-verb .w` and `body.anim .msg.thinking-row.live .thinking-verb .w` turn that index
+  into a phase, for the `transform` wave and for the `color` crest), and a live
+  tool row's label restarts `.label-in` in
   place — all of it off exactly when `spinney.streamAnimation` is false (`animationsOn`
-  in the animation block above the message rendering; the glimmer is CSS-only and hangs
+  in the animation block above the message rendering; the wave is CSS-only and hangs
   off `body.anim`, which the `config` message sets; the CSS is at the end of
   `media/style.css`, which carries no
   reduced-motion block: the browser's `prefers-reduced-motion` wish is deliberately not

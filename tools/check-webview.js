@@ -4388,6 +4388,37 @@ if (contextLabel !== 'ctx 50%') {
     const verb = row ? findByClass(row, 'tool-verb') : null;
     return verb ? textOf(verb) : null;
   };
+  /**
+   * The wave lives in the **structure**: one `<span class="w">` per character of the verb,
+   * with the animation gated in CSS. A verb written as plain text reads the same and moves
+   * nothing, so the shape is what the guard has to see, and the count says a rewritten verb
+   * did not keep the characters of the name it used to have.
+   */
+  const expectVerbWave = (row, what, className) => {
+    const verb = row ? findByClass(row, className || 'tool-verb') : null;
+    if (!verb) {
+      problems.push(`${what}: the row has no .${className || 'tool-verb'}`);
+      return;
+    }
+    const kids = verb.children || [];
+    const text = textOf(verb);
+    if (kids.length === 0 || kids.length !== text.length) {
+      problems.push(
+        `${what}: the verb ${JSON.stringify(text)} holds ${kids.length} child element(s), expected one \`.w\` span per ` +
+          'character — a verb written as plain text cannot wave',
+      );
+      return;
+    }
+    for (let i = 0; i < kids.length; i++) {
+      if (!hasClass(kids[i], 'w') || textOf(kids[i]) !== text[i]) {
+        problems.push(
+          `${what}: the verb's child ${i} is ${JSON.stringify(textOf(kids[i]))}, expected the character ` +
+            `${JSON.stringify(text[i])} in a \`.w\` span`,
+        );
+        return;
+      }
+    }
+  };
   const labelOf = (row) => {
     const label = row ? findByClass(row, 'tool-label') : null;
     return label ? textOf(label) : null;
@@ -4405,6 +4436,15 @@ if (contextLabel !== 'ctx 50%') {
       problems.push(
         `a thinking row's tag reads ${JSON.stringify(tag && textOf(tag))}, expected "Thinking" — the row starts with the ` +
           'same tag that a step gives its verb',
+      );
+    }
+    // The tag is a run of characters like a step's verb, and a live row carries the class
+    // the stylesheet hangs the wave and the highlight off (`setActiveRow`).
+    expectVerbWave(row, "a live thinking row's tag", 'thinking-verb');
+    if (row && !hasClass(row, 'live')) {
+      problems.push(
+        'a live thinking row is missing `.live` — the class is the only thing the stylesheet can see, so the wave ' +
+          'and its highlight would never reach the tag',
       );
     }
     if (row && findByClass(row, 'chev')) {
@@ -4531,6 +4571,7 @@ if (contextLabel !== 'ctx 50%') {
           `a drafting row's verb reads ${JSON.stringify(verbOf(row))} after the rest of its name arrived, expected "Read"`,
         );
       }
+      expectVerbWave(row, 'a drafting row whose verb was rewritten in place');
       if (labelOf(row) !== 'Writing tool call...') {
         problems.push('the draft label changed while the call was being written — it says the one thing that is true');
       }

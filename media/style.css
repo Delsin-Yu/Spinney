@@ -3511,12 +3511,13 @@ button.icon-btn {
                  notice): one 120 ms fade + 2 px rise, removed again on `animationend`;
      body.anim   the setting itself. It exists for the one CSS-only piece below, because
                  `animationsOn()` lives in the script;
-     .verb-…     the glimmer on the verb of a step that is still working.
+     .w / .verb-wave / .verb-glow  the wave and the highlight along the verb of a step,
+                 and along the tag of a live thinking row.
 
    A tool call still being written is one fixed line (`Writing tool call...`), so no label
    is rewritten per delta any more and there is no `.label-in` to restart: the only text
    that changes while a call composes is its verb, and that changes by a name delta that
-   arrives once. What moves on that row while it works is the glimmer above the verb.
+   arrives once. What moves on that row while it works is the wave through that verb.
 
    The durations are duplicated in media/main.js as the *fallback* timer
    (`ANIMATION_FALLBACK_MS`, 400 ms, past every delay plus its run) and the stagger's cap
@@ -3551,35 +3552,51 @@ button.icon-btn {
   animation: row-in 120ms ease-out;
 }
 
-/* ---- The running verb's glimmer ---------------------------------------------
-   Claude Code's `useShimmerAnimation` walks one bright index across the status message
-   and interpolates the colour of the characters inside `index ± 1`, on a 50 ms clock while
-   a request is open and 200 ms otherwise (`src/components/Spinner/` in its source). A DOM
-   text run gets the same read with one clipped gradient instead of a span per character:
-   the band is 15% of the word's width and takes 1.8 s to cross it, so the eye catches a
-   highlight moving through the verb, not a strobe.
+/* ---- The running verb's wave and its highlight -------------------------------
+   Two cues on one word, and both are per character.
 
-   It is scoped to `.running`, the class a tool row carries from its start to its end, and
-   to `body.anim`, which is `spinney.streamAnimation`: the setting turns this off with the
-   rest of the animation. */
-body.anim .msg.tool.running .tool-verb {
-  background-image: linear-gradient(
-    90deg,
-    var(--text-dim) 0%,
-    var(--text-dim) 35%,
-    var(--text) 50%,
-    var(--text-dim) 65%,
-    var(--text-dim) 100%
-  );
-  background-size: 250% 100%;
-  background-repeat: no-repeat;
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-  animation: verb-glimmer 1.8s linear infinite;
+   **The wave** is Godot's `[wave]` (RichTextLabel BBCode): every glyph rides a sine and
+   the phase advances with the glyph's place in the run, so what the eye sees is one small
+   wave travelling along the word. `setVerbText` in `media/main.js` gives each character its
+   own `<span class="w">` and its own index; the delay below turns that index into the
+   phase. The offset is a `transform`, never a relative `top`: `top` is repainted every frame
+   and its downward half grows the work log's scrollable overflow, so a following log
+   re-pins itself every frame and the scrollbar is pushed over and over. A `transform` is
+   composited and the wave only ever goes **up** (overflow above the box is not scrollable),
+   so `scrollHeight` never changes. A transform needs a box, so each character is
+   `inline-block`; the price is this one short word's kerning pairs.
+
+   **The highlight** is Claude Code's `useShimmerAnimation` in its own shape: one bright
+   crest walks the run and the characters it passes are interpolated towards the brighter
+   colour, on a per-character clock. Here that is a second animation on the same span, of
+   `color`, with its own slower phase step — the crest travels, nothing fades, and a
+   character at rest is the verb's own `--text-dim`. The first version of this was a clipped
+   gradient on the parent (`background-clip: text`), and it is deliberately gone: a
+   transformed child is painted in its own context, so the clip lost the glyphs and the
+   verb vanished instead of lighting up.
+
+   Both are scoped to a **live** row (`.msg.tool.running`, `.msg.thinking-row.live`) and to
+   `body.anim`, which is `spinney.streamAnimation`: the setting turns the animation off with
+   the rest, and the spans stay in the document either way. */
+.tool-verb .w,
+.thinking-verb .w {
+  display: inline-block;
 }
 
-@keyframes verb-glimmer {
-  from { background-position: 150% 0; }
-  to { background-position: -50% 0; }
+body.anim .msg.tool.running .tool-verb .w,
+body.anim .msg.thinking-row.live .thinking-verb .w {
+  animation: verb-wave 1.2s ease-in-out infinite, verb-glow 2s ease-in-out infinite;
+  animation-delay: calc(var(--i, 0) * -90ms), calc(var(--i, 0) * -150ms);
+  will-change: transform;
+}
+
+@keyframes verb-wave {
+  0% { transform: translateY(0); }
+  50% { transform: translateY(-2px); }
+  100% { transform: translateY(0); }
+}
+
+@keyframes verb-glow {
+  0%, 100% { color: var(--text-dim); }
+  50% { color: var(--text); }
 }
