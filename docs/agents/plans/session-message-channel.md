@@ -213,7 +213,7 @@ message and stay where they are for `POST /session/start` and `/continue`.
 
 ## 8. Landing record
 
-Landed 2026-11-14 (unreleased). This section records what was built, what was measured, and what
+Landed 2026-11-14, shipped in 0.7.0. This section records what was built, what was measured, and what
 is still open.
 
 ### 8.1 What landed

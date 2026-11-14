@@ -1,14 +1,14 @@
 # Plan: session addressing, the three-verb surface, and what it deletes
 
-**Status: landed (P0–P4).** Built on 0.7.0, unreleased. §8 is the landing record: what was
+**Status: landed (P0–P4), shipped in 0.7.0.** §8 is the landing record: what was
 built, what was measured, and what is still open. This page is a **replacement** for the
 node-addressed delivery in `plans/session-message-channel.md` §2, not an extension of it: the
 session prompt stops riding the completion-signal queue entirely, and the tools that existed to
 make that reuse work go away with it.
 
-**Version: no bump.** The developer is still grinding `0.7.0`. Everything lands under
-`[Unreleased]` in `CHANGELOG.md`; `version` in `package.json` / `package-lock.json` and any tag are
-the developer's call, and nothing in this plan writes them.
+**Version: no bump.** The slice shipped under `0.7.0`: everything landed under `[Unreleased]` in
+`CHANGELOG.md` and moved into `## [0.7.0]` when the release was cut. `version` in `package.json` /
+`package-lock.json` and the tag stayed the developer's call, and nothing in this plan wrote them.
 
 ## 1. Why: measured, on 0.7.0
 
@@ -250,7 +250,7 @@ setting and the manual pages.
 
 ## 8. Landing record
 
-### 8.1 What landed (0.7.0, unreleased)
+### 8.1 What landed (0.7.0)
 
 - `send_session_prompt` / `wait_for_session_idle` / `interrupt_session` replace
   `send_session_message` (`src/agent/tools/sendSessionPrompt.ts`, `waitForSessionIdle.ts`,
@@ -412,4 +412,4 @@ rewording of either result is a red guard rather than an empty card.
   notices must not open a turn.
 - `invariants/config-keys.md` — `spinney.sessionMaxRounds` stays, `spinney.sessionSendSeconds`
   goes.
-- `versioning` — no bump; `[Unreleased]` only.
+- `versioning` — no bump; `[Unreleased]` until the release cut it into `[0.7.0]`.

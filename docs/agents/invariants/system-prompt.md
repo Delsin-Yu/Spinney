@@ -109,7 +109,7 @@
   **not** asked for there. 0.7.0 put it after a semicolon behind the verb "answering",
   a revision after that gave it a bullet of its own, and neither moved the model — a
   chain whose frozen prompt carried either wording still reasoned in English on every
-  block, so both were removed (see `CHANGELOG.md`, Unreleased). The `exec_command` step title stays covered, in
+  block, so both were removed (see `CHANGELOG.md`, `0.7.0`). The `exec_command` step title stays covered, in
   the tool channel, by that argument's own schema description — which now **names** the
   language (`withToolTitleLanguage` fills its `{titleLanguage}` slot with the name and
   its tag, e.g. `Simplified Chinese (zh-Hans)`), rendered from the same pair the
