@@ -737,6 +737,13 @@ const document = {
   execCommand() {},
 };
 
+// The one media query the environment answers `true` to. It is empty (nothing matches)
+// unless a check says otherwise: the appear animation must **not** consult
+// `prefers-reduced-motion` — the OS toggle behind it also drives every other animation on
+// the machine, and `spinney.streamAnimation` is the one switch — so the animation block
+// below sets this to the reduced-motion query and asserts the animation still runs.
+let matchingMediaQuery = '';
+
 const window = {
   addEventListener(type, handler) {
     (listeners[type] ??= []).push(handler);
@@ -744,7 +751,11 @@ const window = {
   removeEventListener() {},
   requestAnimationFrame: (handler) => setTimeout(handler, 0),
   cancelAnimationFrame() {},
-  matchMedia: () => ({ matches: false, addEventListener() {}, removeEventListener() {} }),
+  matchMedia: (query) => ({
+    matches: !!matchingMediaQuery && String(query ?? '') === matchingMediaQuery,
+    addEventListener() {},
+    removeEventListener() {},
+  }),
   getComputedStyle: () => ({ getPropertyValue: () => '' }),
   innerWidth: 1280,
   innerHeight: 800,
@@ -7873,16 +7884,19 @@ if (contextLabel !== 'ctx 50%') {
 // --- the appear animation never holds the text --------------------------------
 // The animation of how characters and rows *appear* may never be load-bearing: the text
 // of a delta is **complete in the DOM** the moment it arrives, and only its opacity is
-// animated. Three statements, each of which would be a silent regression in a window:
+// animated. Four statements, each of which would be a silent regression in a window:
 //
 //   - a delta is fully readable at once — no rate-limited reveal, no queue, no flush:
 //     the answer reads the concatenation of its deltas straight after they were
 //     dispatched, with no timer and no frame in between;
-//   - the transient `.chunk-in` span holds **only the newest chunk**: the settled prefix
-//     is merged back into the answer's own `Text` node before the next span opens, which
-//     is what keeps the streaming surface one Text node and one `appendData`;
+//   - the transient `.word-in` spans hold the **unsettled tail** of the host's text, in
+//     document order, one span per token: the settled prefix is merged back into the
+//     answer's own `Text` node word by word, which is what keeps the streaming surface
+//     one Text node that settles text by `appendData`;
 //   - `streamAnimation: false` in the `config` message renders exactly what the webview
-//     rendered before the animation existed: no span, no class, the same text.
+//     rendered before the animation existed: no span, no class, the same text;
+//   - an environment that matches `prefers-reduced-motion: reduce` still animates: the
+//     OS wish is not this extension's setting, and the setting is the only switch.
 //
 // This block runs **last** of the synchronous checks (nothing below it reads the UI
 // state), and it puts the flag back to on at the end so a later block cannot inherit
@@ -7895,18 +7909,18 @@ if (contextLabel !== 'ctx 50%') {
     const card = cardEl();
     return card ? findByClass(card, 'node-work') : null;
   };
-  /** Every `.chunk-in` span inside an element — the transient form of a delta. */
-  const chunksIn = (root, into) => {
+  /** Every `.word-in` span inside an element — the transient form of a delta's token. */
+  const wordsIn = (root, into) => {
     const out = into || [];
     for (const child of (root && root.children) || []) {
-      if (hasClass(child, 'chunk-in')) out.push(child);
-      chunksIn(child, out);
+      if (hasClass(child, 'word-in')) out.push(child);
+      wordsIn(child, out);
     }
     return out;
   };
   /**
    * Everything an element reads as text: the stub's `textContent` is a plain property, so
-   * a live `Text` node and a fading chunk are both read off the subtree — which is also
+   * a live `Text` node and a rising word are both read off the subtree — which is also
    * what a browser shows on screen.
    */
   const textOf = (element) => {
@@ -7950,7 +7964,9 @@ if (contextLabel !== 'ctx 50%') {
   };
 
   // (a) Two deltas, read immediately. Nothing has fired `animationend` and no fallback
-  // timer has run, so this is exactly the state a reader sees mid-fade.
+  // timer has run, so this is exactly the state a reader sees mid-rise. The config carries
+  // the setting on explicitly: `body.anim` is set by that message, not by the default.
+  dispatch({ type: 'config', streamAnimation: true });
   boot();
   dispatch({ type: 'delta', nodeId: NODE, text: 'Hello ' });
   dispatch({ type: 'delta', nodeId: NODE, text: 'world' });
@@ -7966,15 +7982,55 @@ if (contextLabel !== 'ctx 50%') {
             '"Hello world" — the text has to be complete in the DOM at once, because only the appearance is animated',
         );
       }
-      const spans = chunksIn(answer);
-      if (spans.length > 1) {
-        problems.push(`the appear animation: the answer holds ${spans.length} .chunk-in spans, expected at most one`);
-      } else if (spans.length === 1 && textOf(spans[0]) !== 'world') {
+      const spans = wordsIn(answer);
+      const tail = spans.map((span) => textOf(span)).join('');
+      if (spans.length > 0 && tail !== 'world') {
         problems.push(
-          `the appear animation: the fading span holds ${JSON.stringify(textOf(spans[0]))}, expected only the newest ` +
-            'chunk ("world") — the settled prefix belongs to the answer\'s own Text node',
+          `the appear animation: the rising spans hold ${JSON.stringify(tail)}, expected only the unsettled tail ` +
+            '("world") — the settled prefix belongs to the answer\'s own Text node',
         );
       }
+      // The CSS half of the one switch: the running verb's glimmer hangs off `body.anim`,
+      // so a config that leaves it unset would silently drop a piece of the animation.
+      if (!hasClass(document.body, 'anim')) {
+        problems.push(
+          'the appear animation: the `config` message did not mark `body.anim` — the CSS-only piece (the running ' +
+            "verb's glimmer) could not be turned on or off",
+        );
+      }
+    }
+  }
+
+  // (a2) One delta with several words: one span per token, in order, staggered. This is the
+  // typing reveal, and the order is what makes the merge back into the `Text` node safe.
+  boot();
+  dispatch({ type: 'delta', nodeId: NODE, text: 'The ' });
+  dispatch({ type: 'delta', nodeId: NODE, text: 'quick brown fox' });
+  {
+    const answer = answerEl();
+    const spans = answer ? wordsIn(answer) : [];
+    const tokens = spans.map((span) => textOf(span));
+    const want = ['quick ', 'brown ', 'fox'];
+    if (!answer) {
+      problems.push('the appear animation (word tokens): two deltas rendered no answer bubble');
+    } else if (tokens.length === 0) {
+      problems.push(
+        'the appear animation: a delta of three words opened no `.word-in` span — the typing reveal is per token',
+      );
+    } else if (tokens.length !== want.length || tokens.join('') !== want.join('')) {
+      problems.push(
+        `the appear animation: the spans hold ${JSON.stringify(tokens.join(''))} in ${tokens.length} span(s), ` +
+          'expected "quick brown fox" in three — each token carries its own whitespace, in document order',
+      );
+    } else if (textOf(answer) !== 'The quick brown fox') {
+      problems.push(
+        `the appear animation: the answer reads ${JSON.stringify(textOf(answer))}, expected "The quick brown fox"`,
+      );
+    } else if (!hasClass(spans[1], 'd1') || !hasClass(spans[2], 'd2')) {
+      problems.push(
+        'the appear animation: the tokens of one delta are not staggered (expected `.d1` on the second span and ' +
+          '`.d2` on the third)',
+      );
     }
   }
 
@@ -7988,10 +8044,10 @@ if (contextLabel !== 'ctx 50%') {
     if (!answer) {
       problems.push('the appear animation (`streamAnimation: false`): two deltas rendered no answer bubble');
     } else {
-      const spans = chunksIn(answer);
+      const spans = wordsIn(answer);
       if (spans.length > 0) {
         problems.push(
-          `\`streamAnimation: false\` still wrapped ${spans.length} delta(s) in a .chunk-in span — the setting has to ` +
+          `\`streamAnimation: false\` still wrapped ${spans.length} delta(s) in a .word-in span — the setting has to ` +
             'render exactly what the webview rendered before the animation existed',
         );
       }
@@ -8007,13 +8063,50 @@ if (contextLabel !== 'ctx 50%') {
       if (last && last.classList.contains('row-in')) {
         problems.push('`streamAnimation: false` still marked the appended answer row with `.row-in`');
       }
+      if (hasClass(document.body, 'anim')) {
+        problems.push(
+          '`streamAnimation: false` still left `body.anim` on — the CSS half (the running verb\'s glimmer) has to go ' +
+            'off with the rest',
+        );
+      }
     }
   }
+  // (c) A webview whose environment matches `prefers-reduced-motion: reduce` still
+  // animates. That is the pin on the whole decision: the OS wish is not this extension's
+  // setting, the one switch is `spinney.streamAnimation`, and `media/style.css` carries no
+  // reduced-motion block for the same reason. Anyone who re-adds the gate fails here.
+  // The setting goes back to on first: block (b) left it off, and this one is about the
+  // environment, not about the switch.
+  matchingMediaQuery = '(prefers-reduced-motion: reduce)';
+  dispatch({ type: 'config', streamAnimation: true });
+  boot();
+  dispatch({ type: 'delta', nodeId: NODE, text: 'still ' });
+  dispatch({ type: 'delta', nodeId: NODE, text: 'animated' });
+  {
+    const answer = answerEl();
+    const spans = answer ? wordsIn(answer) : [];
+    if (!answer) {
+      problems.push('the appear animation (reduced motion): two deltas rendered no answer bubble');
+    } else if (spans.length === 0) {
+      problems.push(
+        'the appear animation: a webview that matches `prefers-reduced-motion: reduce` wrapped no delta in a ' +
+          '.word-in span — `spinney.streamAnimation` is the only switch, so the OS wish must not turn the ' +
+          'animation off',
+      );
+    } else if (textOf(spans[0]) !== 'animated' || textOf(answer) !== 'still animated') {
+      problems.push(
+        `the appear animation (reduced motion): the answer reads ${JSON.stringify(textOf(answer))} with ` +
+          `${JSON.stringify(textOf(spans[0]))} in the fading span, expected "still animated" / "animated"`,
+      );
+    }
+  }
+  matchingMediaQuery = '';
+
   // The flag goes back to on, the setting's own default: the block is the last one, but a
   // check added below it must not inherit "off" from a fixture.
   dispatch({ type: 'config', streamAnimation: true });
 
-  notes.push('appear animation: a delta is complete at once, one span holds only the newest chunk, and the setting off renders exactly the old shapes');
+  notes.push('appear animation: a delta is complete at once, the spans hold the unsettled tail in order and one per word with its stagger, the setting off renders exactly the old shapes, and a webview that asks for reduced motion is still animated');
 }
 
 // --- the shell document: where the new-epoch button sits, and what is gone -------

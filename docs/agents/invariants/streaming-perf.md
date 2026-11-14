@@ -91,27 +91,54 @@
 
 **The character / element appear animation never becomes the streaming surface.** The
 plain `Text` node is still what a streaming answer (and a thinking row) is painted
-into, and a delta is still one `appendData` — the text is **complete in the DOM the
-moment it arrives**, so nothing rate-limits the reveal and nothing queues it. What is
-animated is only its appearance: a delta's newest characters sit in a transient
-`<span class="chunk-in">` that fades for ~140 ms, and that span is merged back into the
-same `Text` node on `animationend` (with a 400 ms timer behind it, because an engine
-that never fires the event — the offline guard's stub does not — must still settle).
-**The span never holds more than the newest chunk**: a delta that arrives mid-fade
-merges the previous span first and opens a new one, so at most one span exists per
-answer, per thinking row, with the settled length (`_settled`) keeping the slice exact;
-the merge is idempotent and safe when a repaint or a finalize already removed the
-element, `finalizeStreamingAnswer` settles everything **before** the markdown render,
-and `reset` / `tree` settle the chunks in flight before their cards are replaced. A new
+into, and a delta's text is **complete in the DOM the moment it arrives**, so nothing
+rate-limits the reveal and nothing queues it. What is animated is only its appearance,
+**one word at a time**: each token of a delta (a word, or one CJK character, with its
+whitespace) sits in a transient `<span class="word-in">` that fades over 200 ms,
+staggered 6 ms per token up to 36 ms (`.d1`…`.d6`), and a span is merged back into the
+same `Text` node when **its own** `animationend` fires (with a 400 ms timer behind it,
+past every delay plus its run, because an engine that never fires the event — the
+offline guard's stub does not — must still settle). **The stagger has to stay far
+shorter than the fade**: `stagger × words` is how long a burst takes to light up end to
+end, and once it reaches the interval between two bursts the bursts overlap and the
+stream stops reading as one. That cadence is the one measured frame by frame from
+claude.ai (200 ms per word, a few milliseconds apart); it is opacity alone, with no
+rise — Claude Code's own CLI does not animate its answer text at all, its
+`StreamingMarkdown` only re-lexes the growing block. **The spans hold the unsettled
+tail of the host's text, in document order**, and only the oldest settled word may be
+merged: the `Text` node holds the settled *prefix*, so an out-of-order merge would put
+text in the wrong place. `_settled` counts the characters in that node and `_wordChars`
+the ones still in spans, which keeps the delta slice exact mid-fade. The span is an
+**inline** one, never `inline-block`, which would change line breaking and trim the
+token's trailing space; an opacity-only fade needs no position on it at all. A token's
+word is extended in place when the next delta continues a word the stream split (so no
+word is typed in fragments), the queue is capped at
+`MAX_PENDING_WORDS` (24) by merging the oldest at once, and a merge is idempotent and
+safe when a repaint or a finalize already removed the span.
+`finalizeStreamingAnswer` settles everything **before** the markdown render, and
+`reset` / `tree` settle the words in flight before their cards are replaced. A new
 row (assistant text, tool, thinking, notice) arrives on one `.row-in` fade + 2 px rise
-that is removed again on `animationend`. A tool call that is still being written is one
-fixed line (`Writing tool call...`, see below), so no label is rewritten per delta and
-there is no `.label-in` fade: the only text a composing call changes is its verb, and
-that changes on a name delta. `spinney.streamAnimation`
-(absent ⇒ on, in the `config` message) turns all of it off into exactly the old
-rendering, and `prefers-reduced-motion: reduce` is honoured in the script as well as in
-`media/style.css`; `tools/check-webview.js` pins that a delta is readable at once and
-that the setting off creates no span.
+that is removed again on `animationend`. **The verb of a step that is still working
+carries a glimmer**: a bright band (a clipped gradient, 15% of the word's width) crosses
+it in 1.8 s, which is the DOM form of Claude Code's `useShimmerAnimation` (one bright
+index walking the status message, its characters' colours interpolated around
+`index ± 1` on a 50 ms clock). It is scoped to `.msg.tool.running .tool-verb` and to
+`body.anim`, the class the `config` message sets, because that one is CSS-only. A tool
+call that is still being written is one fixed line (`Writing tool call...`, see below),
+so no label is rewritten per delta and there is no `.label-in` fade: the only text a
+composing call changes is its verb, and that changes on a name delta.
+`spinney.streamAnimation`
+(absent ⇒ on, in the `config` message) is the **only** switch, and it turns all of it off
+into exactly the old rendering (the glimmer included, through `body.anim`). The
+browser's `prefers-reduced-motion` wish is deliberately
+**not** consulted, neither in the script nor in `media/style.css` (there is no
+reduced-motion block at its end): the OS toggle behind it also drives every other
+animation on the machine, so a reader who keeps the system's animation effects off and
+still wants this one would have no way to say so, while the setting is explicit and per
+window. `tools/check-webview.js` pins that a delta is readable at once, that the spans
+hold the unsettled tail in order, one per token and staggered, that the `config` message
+marks and clears `body.anim`, that the setting off creates no span, and that a matching
+`prefers-reduced-motion` query still gets the animation.
 
 ### One card, one flow: `ask` + one log
 

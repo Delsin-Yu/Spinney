@@ -135,8 +135,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that node, so no argument can point it somewhere else, and the agent ends its turn right
   after the call.
 - **`spinney.streamAnimation`** turns the streaming animation off or on (the default is on):
-  new characters fade in and new rows fade in and move up, and every character is drawn at
-  once when it is off. The reduced-motion setting of the operating system also turns it off.
+  each new word of a delta fades in over 200 ms a few milliseconds after the one before
+  it, the verb of a step that is still working carries a moving highlight, and new rows
+  fade in and move up; all the text is drawn at once when it is off. It is the only
+  switch: the reduced-motion setting of the operating system does not turn it off.
 - **A session tool call has a card of its own.** The four session tools used to open onto their
   raw result, and a `send_session_prompt` row read `Prompted a session` with no target and
   opened the JSON receipt. The row now names the session it addressed (`#id`, or the title for

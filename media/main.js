@@ -2013,135 +2013,215 @@
   }
 
   // ---- The appear animation -------------------------------------------------
-  // **The text is complete in the DOM the moment a delta arrives; only its
-  // appearance is animated.** The newest characters of a delta go into a transient
-  // `<span class="chunk-in">` (a ~140 ms fade, CSS), and that span's text is moved
-  // into the answer's own persistent `Text` node on `animationend` — so the streaming
-  // surface is still one `Text` node and one `appendData`, never a per-character DOM,
-  // and nothing on this path reads layout.
+  // **The text is complete in the DOM the moment a delta arrives; only its appearance
+  // is animated, one word at a time.** A delta's new words each go into a transient
+  // `<span class="word-in">` (a 170 ms fade + 6 px rise, CSS), and a span's text is
+  // moved into the host's own persistent `Text` node when **its own** animation ends —
+  // so the streaming surface is still one `Text` node that settles text by
+  // `appendData`, and nothing on this path reads layout.
   //
-  // **One chunk per host at a time.** A delta that arrives before the previous
-  // animation ended merges the pending span first and opens a new one, so the span
-  // never holds more than the newest chunk. The bookkeeping is `_settled` — how many
-  // characters of the host's own text are already in its `Text` node — which is what
-  // makes the delta slice exact after a merge. The merge itself is idempotent (a
-  // second call finds nothing to do) and safe when the span was already removed by a
-  // repaint or a finalize.
+  // **A queue, and merges go in order.** A delta that arrives while earlier words are
+  // still rising opens its spans after them, and only the oldest settled word may be
+  // merged: the `Text` node holds the settled *prefix* of the host's text, so a merge
+  // out of order would put text in the wrong place. `_settled` counts the characters
+  // already in that node and `_wordChars` counts the ones still in spans, which is what
+  // makes the delta slice exact mid-animation.
+  //
+  // **A word split across deltas stays one span.** The stream ends mid-word often, so
+  // when the next delta continues the same Latin word its last token is extended in
+  // place instead of a second fragment opening right after it. A CJK character is
+  // always its own token (a Chinese sentence has no spaces, and one token per sentence
+  // would animate as one block).
+  //
+  // **The stagger is capped, and so is the queue.** Words of one delta rise in order on
+  // 25 ms steps up to 150 ms (`.d1`…`.d6` in `media/style.css`), so a long burst never
+  // queues a visible backlog; past `MAX_PENDING_WORDS` the oldest word is merged at
+  // once, which shows its text immediately instead of making the reveal fall behind.
   /** An engine that never fires `animationend` (the offline guard's stub) still settles. */
   const ANIMATION_FALLBACK_MS = 400;
 
-  // The hosts with a chunk in flight, so `reset` / a `tree` repaint can settle them
+  /** The most words one host may hold unsettled before the oldest are merged at once. */
+  const MAX_PENDING_WORDS = 24;
+
+  /** The stagger's last step: `.d1`…`.d6` are 25 ms each (150 ms at the cap). */
+  const MAX_STAGGER_STEP = 6;
+
+  // The hosts with words in flight, so `reset` / a `tree` repaint can settle them
   // without walking the DOM (on a 40-card session that walk would be the cost).
   const pendingChunks = new Set();
 
-  /** Computed once: the media query's answer is fixed for the life of the document. */
-  let reducedMotion;
-
   /**
-   * The OS' own reduced-motion wish, read in the script as well as in the stylesheet:
-   * with it on, no character is ever wrapped in a span and no row is given a class, so
-   * today's rendering is exactly what a reader gets.
-   */
-  function prefersReducedMotion() {
-    if (reducedMotion === undefined) {
-      try {
-        reducedMotion = !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches);
-      } catch (err) {
-        reducedMotion = false;
-      }
-    }
-    return reducedMotion;
-  }
-
-  /**
-   * Is the appear animation on? The setting (`spinney.streamAnimation`, sent in the
-   * `config` message) **and** the OS' own reduced-motion wish — the media query at the
-   * end of `media/style.css` says the same thing for the CSS half, and an element the
-   * script never wrapped stays the plain `Text` node.
+   * Is the appear animation on? **One switch: the setting** (`spinney.streamAnimation`,
+   * sent in the `config` message). The browser's `prefers-reduced-motion` wish is
+   * deliberately not consulted: the OS toggle behind it also drives every other
+   * animation on the machine, so a reader who keeps the system's animation effects off
+   * and still wants this one would have no way to say so. This setting is explicit and
+   * per window, and it is the whole decision — `media/style.css` carries no
+   * reduced-motion block for the same reason.
    */
   function animationsOn() {
-    return streamAnimation && !prefersReducedMotion();
+    return streamAnimation;
   }
 
-  /** A chunk's span leaves the document (its text has been merged back, or is moot). */
-  function removeChunkSpan(span) {
+  /** A token's span leaves the document (its text has been merged back, or is moot). */
+  function removeWordSpan(span) {
     if (!span) return;
     if (typeof span.remove === 'function') span.remove();
     else if (span.parentElement) span.parentElement.removeChild(span);
   }
 
+  // One delta's tokens: a run of Latin text, or one CJK character, or one whitespace run.
+  const WORD_TOKEN_RE =
+    /[\s\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]|[^\s\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]+/g;
+
   /**
-   * Forget a host's pending chunk **without** merging it: its characters are already in
-   * the host's own source text (`node._text` / the thinking row's own text), so whatever
-   * renders next takes them from there.
+   * The tokens of `text`, in document order. Whitespace never travels on its own: it is
+   * glued to the token before it, because only a token's own text may be appended to the
+   * settled prefix, and the queue's order has to be the document's order.
+   */
+  function wordTokens(text) {
+    const parts = String(text).match(WORD_TOKEN_RE) || [];
+    const out = [];
+    for (const part of parts) {
+      if (/^\s+$/.test(part) && out.length > 0) out[out.length - 1] += part;
+      else out.push(part);
+    }
+    return out;
+  }
+
+  /** Is `ch` part of a Latin word (so a word the stream split across deltas can resume)? */
+  function isWordChar(ch) {
+    return !!ch && !/\s/.test(ch) && !/[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]/.test(ch);
+  }
+
+  /** The word queue of a host, created on first use. */
+  function wordQueue(host) {
+    if (!host._words) host._words = [];
+    return host._words;
+  }
+
+  /**
+   * Forget a host's pending words **without** merging them: their characters are already
+   * in the host's own source text (`node._text` / the thinking row's own text), so
+   * whatever renders next takes them from there.
    */
   function dropChunk(host) {
     if (!host) return;
-    if (host._chunkTimer) {
-      clearTimeout(host._chunkTimer);
-      host._chunkTimer = null;
-    }
-    const span = host._chunk;
-    host._chunk = null;
-    host._chunkText = '';
-    host._chunkTn = null;
+    const queue = host._words;
+    host._words = [];
+    host._wordChars = 0;
+    host._wordTn = null;
     pendingChunks.delete(host);
-    removeChunkSpan(span);
+    if (!queue) return;
+    for (const entry of queue) {
+      if (entry.timer) {
+        clearTimeout(entry.timer);
+        entry.timer = null;
+      }
+      removeWordSpan(entry.span);
+    }
   }
 
   /**
-   * Merge the pending chunk into the host's persistent `Text` node and remove the span
-   * — the one way a chunk ends. It is **idempotent** (`_chunk` is cleared before
-   * anything else, so a second call is a no-op, which is what makes a late
-   * `animationend` after a finalize harmless) and it survives the span having been
-   * removed already: what is merged is the span's *text*, into the host's current node.
+   * Move one word's text into the host's `Text` node and drop its span. **Idempotent**
+   * (`merged` is set before anything else), and safe when the span was already removed by
+   * a repaint or a finalize: what is merged is the entry's *text*, into the host's
+   * current node.
+   */
+  function mergeWord(host, entry) {
+    if (!entry || entry.merged) return;
+    entry.merged = true;
+    if (entry.timer) {
+      clearTimeout(entry.timer);
+      entry.timer = null;
+    }
+    const tn = host._wordTn;
+    if (tn && entry.text) {
+      tn.appendData(entry.text);
+      if (typeof host._settled === 'number') host._settled += entry.text.length;
+    }
+    host._wordChars = Math.max(0, (host._wordChars || 0) - entry.text.length);
+    removeWordSpan(entry.span);
+  }
+
+  /**
+   * Merge from the head of the queue while the head has finished rising. Never out of
+   * order: the `Text` node holds the settled prefix of the host's text, so a later word
+   * may merge only after every earlier one has.
+   */
+  function drainWords(host) {
+    const queue = host._words;
+    if (!queue) return;
+    while (queue.length > 0 && queue[0].ended) mergeWord(host, queue.shift());
+    if (queue.length === 0) pendingChunks.delete(host);
+  }
+
+  /**
+   * Merge **every** pending word, in order, whether its rise ended or not — the one way a
+   * stream ends. A `reset`, a `tree` repaint, a finalize and the setting turned off all
+   * need the text back in the `Text` node before the DOM it lives in goes away.
    */
   function mergeChunk(host) {
     if (!host) return;
-    if (host._chunkTimer) {
-      clearTimeout(host._chunkTimer);
-      host._chunkTimer = null;
-    }
-    const span = host._chunk;
-    const text = host._chunkText || '';
-    const tn = host._chunkTn;
-    host._chunk = null;
-    host._chunkText = '';
-    host._chunkTn = null;
+    const queue = host._words || [];
+    host._words = [];
+    for (const entry of queue) mergeWord(host, entry);
+    host._wordChars = 0;
+    host._wordTn = null;
     pendingChunks.delete(host);
-    if (tn && text) {
-      tn.appendData(text);
-      if (typeof host._settled === 'number') host._settled += text.length;
-    }
-    removeChunkSpan(span);
   }
 
   /**
-   * Open one fading chunk on `host`, whose settled text lives in `tn`. Any chunk already
-   * in flight is merged first: **at most one span per host**.
+   * Open the spans of one delta on `host`, whose settled text lives in `tn`. A token
+   * carries its own whitespace, so appending the tokens in order builds the delta
+   * exactly, and the token's index within the delta is its stagger step.
    */
-  function openChunk(host, tn, text) {
+  function enqueueWords(host, tn, text) {
     if (!host || !text) return;
-    mergeChunk(host);
-    const span = el('span', 'chunk-in', text);
-    host._chunk = span;
-    host._chunkText = text;
-    host._chunkTn = tn;
-    pendingChunks.add(host);
-    // The fade is CSS; the merge back is this one event, with a timer behind it for an
-    // engine that never fires it — the merge must never depend on being told.
-    span.addEventListener('animationend', () => {
-      if (host._chunk === span) mergeChunk(host);
+    const queue = wordQueue(host);
+    host._wordTn = tn;
+    let rest = String(text);
+    // The previous delta may have ended mid-word: extend that token in place, so a word
+    // is never typed in fragments. A token that was already merged cannot be extended
+    // (its text is settled), so the continuation opens its own token then.
+    const last = queue.length > 0 ? queue[queue.length - 1] : null;
+    if (last && !last.merged && isWordChar(rest[0]) && isWordChar(last.text[last.text.length - 1])) {
+      const head = rest.match(/^[^\s]+/);
+      if (head) {
+        last.text += head[0];
+        host._wordChars = (host._wordChars || 0) + head[0].length;
+        if (last.span) last.span.textContent = last.text;
+        rest = rest.slice(head[0].length);
+        if (!rest) return;
+      }
+    }
+    wordTokens(rest).forEach((token, index) => {
+      const step = Math.min(index, MAX_STAGGER_STEP);
+      const span = el('span', 'word-in' + (step > 0 ? ' d' + step : ''), token);
+      const entry = { span, text: token, ended: false, merged: false, timer: null };
+      queue.push(entry);
+      host._wordChars = (host._wordChars || 0) + token.length;
+      pendingChunks.add(host);
+      // The rise is CSS; the merge back is this one event, with a timer behind it for an
+      // engine that never fires it — the merge must never depend on being told.
+      span.addEventListener('animationend', () => {
+        entry.ended = true;
+        drainWords(host);
+      });
+      entry.timer = setTimeout(() => {
+        entry.ended = true;
+        drainWords(host);
+      }, ANIMATION_FALLBACK_MS);
+      host.appendChild(span);
     });
-    host._chunkTimer = setTimeout(() => {
-      if (host._chunk === span) mergeChunk(host);
-    }, ANIMATION_FALLBACK_MS);
-    host.appendChild(span);
+    // A burst never queues an unbounded backlog: past the cap the oldest word is shown at
+    // once, which is the one place the reveal deliberately gives up its order.
+    while (queue.length > MAX_PENDING_WORDS) mergeWord(host, queue.shift());
   }
 
   /**
-   * Settle every chunk in flight. A `reset` or a `tree` repaint is about to replace the
-   * cards those chunks live in, so their text goes back into their `Text` node first.
+   * Settle everything in flight. A `reset` or a `tree` repaint is about to replace the
+   * cards those words live in, so their text goes back into their `Text` node first.
    */
   function flushChunks() {
     for (const host of Array.from(pendingChunks)) mergeChunk(host);
@@ -2162,7 +2242,7 @@
       row.classList.remove('row-in');
     };
     row.addEventListener('animationend', (event) => {
-      // A nested fade (the `.chunk-in` span inside an answer) bubbles up here: only the
+      // A nested rise (the `.word-in` span inside an answer) bubbles up here: only the
       // row's own animation ends the row's.
       if (event && event.target && event.target !== row) return;
       settle();
@@ -2674,19 +2754,19 @@
       answer._settled = full.length;
       return;
     }
-    // The delta's new characters: settled characters plus whatever the pending span
-    // still holds is the prefix already on screen, so the slice is exact even when a
-    // delta arrives mid-fade.
-    const have = (answer._settled || 0) + (answer._chunkText ? answer._chunkText.length : 0);
+    // The delta's new characters: settled characters plus whatever the pending spans
+    // still hold is the prefix already on screen, so the slice is exact even when a
+    // delta arrives mid-rise.
+    const have = (answer._settled || 0) + (answer._wordChars || 0);
     if (have >= full.length) return;
     if (!animationsOn()) {
-      // Exactly today's rendering, with the setting off: one `appendData`, no span.
+      // Exactly the old rendering, with the setting off: one `appendData`, no span.
       mergeChunk(answer);
       ensureStreamText(answer).appendData(full.slice(answer._settled || 0));
       answer._settled = full.length;
       return;
     }
-    openChunk(answer, ensureStreamText(answer), full.slice(have));
+    enqueueWords(answer, ensureStreamText(answer), full.slice(have));
   }
 
   function finalizeStreamingAnswer() {
@@ -2734,13 +2814,12 @@
    */
   function pushThinkingText(row, text) {
     if (!row || !row._textEl) return;
-    // The reasoning gets the same treatment as an answer's text: the delta's characters
-    // are in the row immediately, the newest chunk fades in, and the span's text is
-    // folded back into the row's own `Text` node within one animation. One span per row
-    // (`openChunk` merges the previous one first).
+    // The reasoning gets the same treatment as an answer's text: the delta's words are in
+    // the row immediately and each one is folded back into the row's own `Text` node when
+    // its rise ends (`enqueueWords`, the same queue an answer uses).
     const tn = textNodeOf(row._textEl);
     if (animationsOn()) {
-      openChunk(row._textEl, tn, text);
+      enqueueWords(row._textEl, tn, text);
     } else {
       mergeChunk(row._textEl);
       tn.appendData(text);
@@ -9057,10 +9136,15 @@ function addBackgroundNotice(item) {
         // exactly the old behaviour.
         SETUP = msg.setup && typeof msg.setup === 'object' ? msg.setup : null;
         renderSetupIdentity();
-        // The character / row appear animation (`spinney.streamAnimation`). A replay
-        // shape that predates the field sends nothing — then it is on, which is the
-        // setting's own default and what every fixture in `tools/check-webview.js` gets.
+        // The word / row appear animation (`spinney.streamAnimation`). A replay shape
+        // that predates the field sends nothing — then it is on, which is the setting's
+        // own default and what every fixture in `tools/check-webview.js` gets.
         streamAnimation = msg.streamAnimation !== false;
+        // The CSS half of the one switch: the running verb's glimmer is a stylesheet
+        // animation, so `body.anim` is how the setting reaches it.
+        if (document.body && document.body.classList) {
+          document.body.classList.toggle('anim', streamAnimation);
+        }
         break;
       }
       case 'state':

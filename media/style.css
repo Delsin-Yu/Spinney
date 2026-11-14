@@ -3489,30 +3489,42 @@ button.icon-btn {
 }
 
 /* ---- The appear animation ---------------------------------------------------
-   **The text is complete in the DOM the moment a delta arrives; only its
-   appearance is animated.** There is no rate-limited reveal and no typing loop, and
-   nothing here changes layout: the three keyframes move opacity only (plus the 2 px
-   rise of a new row, which is a transform).
+   **The text is complete in the DOM the moment a delta arrives; only its appearance is
+   animated, one word at a time.** There is no rate-limited reveal and no typing loop, and
+   nothing here changes layout: every keyframe moves opacity alone.
 
-   Three pieces, one vocabulary:
-     .chunk-in   the newest characters of a delta, in a transient span that the script
-                 folds back into the answer's own `Text` node on `animationend`. It sets
-                 no `white-space` of its own: it inherits the host's, so a chunk wraps and
-                 collapses exactly like the text node it is merged into and the merge
-                 itself is invisible;
+   The cadence is the one measured frame by frame from claude.ai (a third-party
+   reproduction of it, `longbridge/gpui-kit`): a word lights up over **200 ms**, and the
+   words of one burst start **a few milliseconds apart**, never as far apart as the fade.
+   The stagger has to stay far shorter than the fade, because `stagger × words` is how long
+   a burst takes to light up end to end: once it reaches the interval between two bursts,
+   the bursts overlap and the text stops reading as one steady stream.
+
+   Four pieces, one vocabulary:
+     .word-in    one token of a delta (a word, or a CJK character, with its whitespace) in
+                 a transient span that the script folds back into the host's own `Text`
+                 node when **its** animation ends: one 200 ms fade, staggered 6 ms per
+                 token up to 36 ms (`.d1`…`.d6`). It is an *inline* span, never
+                 `inline-block`: that would change line breaking and trim the token's
+                 trailing space;
      .row-in     a row that has just been appended (assistant text, tool, thinking,
-                 notice): one 120 ms fade + 2 px rise, removed again on `animationend`.
+                 notice): one 120 ms fade + 2 px rise, removed again on `animationend`;
+     body.anim   the setting itself. It exists for the one CSS-only piece below, because
+                 `animationsOn()` lives in the script;
+     .verb-…     the glimmer on the verb of a step that is still working.
 
    A tool call still being written is one fixed line (`Writing tool call...`), so no label
    is rewritten per delta any more and there is no `.label-in` to restart: the only text
    that changes while a call composes is its verb, and that changes by a name delta that
-   arrives once.
+   arrives once. What moves on that row while it works is the glimmer above the verb.
 
    The durations are duplicated in media/main.js as the *fallback* timer
-   (`ANIMATION_FALLBACK_MS`, 400 ms): an engine that never fires `animationend` still
-   gets its text merged back. Keep the classes and the media query below in step with
-   `animationsOn()` there — the script honours the same reduced-motion wish. */
-@keyframes chunk-in {
+   (`ANIMATION_FALLBACK_MS`, 400 ms, past every delay plus its run) and the stagger's cap
+   (`MAX_STAGGER_STEP`): an engine that never fires `animationend` still gets its text
+   merged back. Keep the classes below in step with `animationsOn()` there:
+   `spinney.streamAnimation` is the one switch, and this stylesheet deliberately carries
+   no `prefers-reduced-motion` block — the setting is the only thing that decides. */
+@keyframes word-in {
   from { opacity: 0; }
   to { opacity: 1; }
 }
@@ -3522,24 +3534,52 @@ button.icon-btn {
   to { opacity: 1; transform: translateY(0); }
 }
 
-.chunk-in {
-  /* An inline span, never a block: it sits inside the answer's own text run, and it
-     deliberately sets no `white-space` — it inherits the host's, so the chunk lays out
-     exactly like the `Text` node it is merged into. */
-  animation: chunk-in 140ms ease-out;
+.word-in {
+  /* `backwards` is load-bearing: a staggered token has to be invisible during its delay,
+     or it would stand at full opacity until its own animation starts. */
+  animation: word-in 200ms ease-out backwards;
 }
+
+.word-in.d1 { animation-delay: 6ms; }
+.word-in.d2 { animation-delay: 12ms; }
+.word-in.d3 { animation-delay: 18ms; }
+.word-in.d4 { animation-delay: 24ms; }
+.word-in.d5 { animation-delay: 30ms; }
+.word-in.d6 { animation-delay: 36ms; }
 
 .row-in {
   animation: row-in 120ms ease-out;
 }
 
-/* The OS' own wish wins, and it is also read in the script (`prefersReducedMotion`):
-   with it on, nothing is wrapped in a span at all, so these rules are the second half
-   of one decision — a stale class left over from before the wish changed must not
-   animate either. */
-@media (prefers-reduced-motion: reduce) {
-  .chunk-in,
-  .row-in {
-    animation: none;
-  }
+/* ---- The running verb's glimmer ---------------------------------------------
+   Claude Code's `useShimmerAnimation` walks one bright index across the status message
+   and interpolates the colour of the characters inside `index ± 1`, on a 50 ms clock while
+   a request is open and 200 ms otherwise (`src/components/Spinner/` in its source). A DOM
+   text run gets the same read with one clipped gradient instead of a span per character:
+   the band is 15% of the word's width and takes 1.8 s to cross it, so the eye catches a
+   highlight moving through the verb, not a strobe.
+
+   It is scoped to `.running`, the class a tool row carries from its start to its end, and
+   to `body.anim`, which is `spinney.streamAnimation`: the setting turns this off with the
+   rest of the animation. */
+body.anim .msg.tool.running .tool-verb {
+  background-image: linear-gradient(
+    90deg,
+    var(--text-dim) 0%,
+    var(--text-dim) 35%,
+    var(--text) 50%,
+    var(--text-dim) 65%,
+    var(--text-dim) 100%
+  );
+  background-size: 250% 100%;
+  background-repeat: no-repeat;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  animation: verb-glimmer 1.8s linear infinite;
+}
+
+@keyframes verb-glimmer {
+  from { background-position: 150% 0; }
+  to { background-position: -50% 0; }
 }
