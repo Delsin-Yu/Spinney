@@ -920,6 +920,14 @@ export class SessionRuntime {
   currentPromptTokens = 0;
   /** Aborts an in-flight image upload (attachment path) when the user stops. */
   uploadController: AbortController | null = null;
+  /**
+   * The node an in-flight image upload continues from. An upload runs **before**
+   * `beginTurn`, so no run exists yet and `runningNodes()` cannot see it: this is the one
+   * live thing in a session that no run is bound to. A branch deletion that took that node
+   * would make the pending send land as a fresh root instead of a continuation
+   * (`attachNode`'s parent-gone fallback), which is why `branchDeletionBlocked` reads it.
+   */
+  uploadBaseId: string | null = null;
 
   /**
    * One worker per node that has ever run a turn (P3, §2.3). Its `Agent`'s event
@@ -1475,6 +1483,15 @@ export class SessionRuntime {
   }
 
   /**
+   * The node an in-flight image upload continues from, or `null` when no upload is running.
+   * `uploadController` is the source of truth for "is there an upload at all": the id alone
+   * is never read as one, so a path that clears the controller cannot leave a stale lock.
+   */
+  uploadingNode(): string | null {
+    return this.uploadController ? this.uploadBaseId : null;
+  }
+
+  /**
    * What stops a prompt from starting on `basis` (absent = the session's active node)
    * right now, or `null` when it would start.
    *
@@ -1580,14 +1597,14 @@ export class SessionRuntime {
     return n;
   }
 
-  /** True while any node worker's agent is mid-turn (defensive; see `isRunning`). */
-  agentRunning(): boolean {
-    for (const worker of this.nodeWorkers.values()) {
-      if (worker.agent.running) {
-        return true;
-      }
-    }
-    return false;
+  /**
+   * True while one of `ids` still has a worker agent mid-turn although no run is registered
+   * for it. A turn's terminal event is delivered *before* its `finally` clears the run, so
+   * there is a window where the node streams nowhere and is still being written into; a
+   * branch deletion must not remove that node.
+   */
+  windingDown(ids: string[]): boolean {
+    return ids.some((id) => this.nodeWorkers.get(id)?.agent.running === true);
   }
 
   /** True while this session owns at least one running background job. */
@@ -3573,6 +3590,10 @@ export class SessionRuntime {
         this.setBusy(true);
         this.lastStatus = vscode.l10n.t('Uploading images…');
         this.post({ type: 'status', text: this.lastStatus });
+        // The node this send continues from, recorded beside the controller that marks the
+        // upload as live: until `beginTurn` runs there is no run to bind it to, and a branch
+        // deletion of that node would turn this send into a fresh root.
+        this.uploadBaseId = basis;
         this.uploadController = new AbortController();
         const uploadSignal = this.uploadController.signal;
         const failed: string[] = [];
@@ -3590,6 +3611,7 @@ export class SessionRuntime {
             if (uploadSignal.aborted) {
               // The user pressed Stop during upload: reset and do not send.
               this.uploadController = null;
+              this.uploadBaseId = null;
               // Another branch may still be streaming; only this session's own
               // upload is ending here.
               this.syncBusy();
@@ -3603,6 +3625,7 @@ export class SessionRuntime {
           }
         }
         this.uploadController = null;
+        this.uploadBaseId = null;
         if (failed.length > 0) {
           this.postNotice(
             'warning',
@@ -7020,6 +7043,7 @@ export class SessionRuntime {
     }
     this.runs.clear();
     this.uploadController = null;
+    this.uploadBaseId = null;
     // A pending pick belonged to a node of the tree that is about to go.
     this.pending = null;
     const session = this.session;

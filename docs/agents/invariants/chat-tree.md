@@ -140,8 +140,10 @@
   drops the removed nodes' workers + pending interruption notices + queued child
   notices, kills the background jobs they owned (`hub.removeNode(..., { kill: true })`),
   re-checks out the survivor and repaints (`tree` / `path`). It is always gated by a modal confirmation
-  (`deleteBranchInteractive`) and refuses while a turn or a sub-agent *inside the
-  branch* is running (a live turn must never lose its node). `session.updatedAt`
+  (`deleteBranchInteractive`) and refuses while a turn, an image upload or a sub-agent *inside the
+  branch* is running (a live turn must never lose its node). The scope is the branch and never the
+  session: another branch of the same session may stream meanwhile, so an idle branch stays
+  deletable while its sibling runs (`branchDeletionBlocked`). `session.updatedAt`
   is bumped, so the sidebar reorders — a deletion is a content change, unlike a
   rename.
 - `node.customSize` (optional `{w,h}`) persists a user-resized card; it survives

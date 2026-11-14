@@ -407,8 +407,14 @@
   *running* jobs asks a modal confirmation first — `confirmKillBackgrounds` for delete/clear,
   `deleteBranchInteractive` for a branch (its count comes from `runningBackgroundsForNodes`) —
   and only then kills the jobs (the process trees are torn down). Nothing is killed behind the
-  user's back. A *turn* still streaming refuses the delete/clear outright instead of confirming
-  (`rt.isRunning()`). Clearing drops the queue and the card index; detaching a branch drops the
+  user's back. A *turn* still streaming refuses the delete outright instead of confirming, but
+  **the scope follows the deletion**: deleting a session or clearing a conversation is
+  session-wide, so the gate is `rt.isRunning()`; deleting a branch reads the branch, never the
+  session — `branchDeletionBlocked` refuses a live run **inside** it (`runningNodes`), a worker
+  agent of that branch still winding down (`windingDown`, the window between a turn's terminal
+  event and its `finally`), and an image upload continuing from a node of the branch
+  (`uploadingNode` — an upload runs before `beginTurn`, so it owns no run). A sibling branch
+  streaming on its own is not a reason to refuse. Clearing drops the queue and the card index; detaching a branch drops the
   signals queued for the removed nodes, calls `hub.removeNode(..., { kill: true })` and forgets
   the cards whose nodes are gone. A `bg` card has no children, so its own delete button
   (`deleteBranch`) is equivalent to deleting that one record.

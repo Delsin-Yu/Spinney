@@ -230,6 +230,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Deleting one branch no longer waits for another branch's turn.** `branchDeletionBlocked` read
+  `rt.isRunning()`, which is session-wide, so a single streaming node made every other branch of
+  that session undeletable (`Cannot delete a branch while the agent is running`) — a rule left
+  from the one-turn-at-a-time design, and the opposite of what the docs describe
+  (`chat-tree.md` §"deleting a branch": *inside the branch*). The gate is now the branch: a live
+  run among its own nodes, a worker agent of that branch still winding down (`windingDown`, the
+  window between a turn's terminal event and its `finally`), or an image upload continuing from a
+  node of it (`uploadingNode` — an upload runs before `beginTurn`, so it owns no run and the
+  session-wide `isRunning()` was the only thing that had ever covered it). `agentRunning()` is
+  gone with its only caller. Deleting a **session** and clearing a conversation keep the
+  session-wide gate, because that deletion really does span the session.
 - **The handoff says what it is: a handoff, not a memory.** A fresh window whose only history
   was its handoff and one question answered "what did you do here" with a `git status`, a
   `git worktree list` and a `git branch --merged` it had never run — the brief's facts, reported

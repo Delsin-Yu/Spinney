@@ -54,7 +54,7 @@
   "Calling {0}…": "正在呼叫 {0}…",
   "Cannot clear the conversation while a turn is running. Wait for it to finish (or stop it) first.": "回合執行期間無法清除對話。請先等它結束（或停止它）。",
   "Cannot delete a branch that contains a running sub-agent. Kill it first.": "無法刪除包含正在執行的子代理的分支。請先終止它。",
-  "Cannot delete a branch while the agent is running. Wait for the turn to finish.": "代理執行期間無法刪除分支。請等該回合結束。",
+  "Cannot delete a branch while a turn inside it is running. Wait for it to finish (or stop it) first.": "分支內有回合執行時無法刪除分支。請先等它結束（或停止它）。",
   "Cannot delete a session while a turn is running. Wait for it to finish (or stop it) first.": "回合執行期間無法刪除工作階段。請先等它結束（或停止它）。",
   "Card \"{0}\": a name is required.": "卡片「{0}」：必須填寫名稱。",
   "Card \"{0}\": concurrency must be 0 or a positive integer.": "卡片「{0}」：並行數必須是 0 或正整數。",

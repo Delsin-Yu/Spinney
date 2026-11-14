@@ -182,8 +182,10 @@ The palette command `Spinney: Delete Branch at Checked-out Turn` does the same f
 
 Spinney refuses the delete in two cases:
 
-- A turn runs in the session: `Cannot delete a branch while the agent is running. Wait for the turn to finish.`
+- A turn runs inside the branch: `Cannot delete a branch while a turn inside it is running. Wait for it to finish (or stop it) first.`
 - A sub-agent runs inside the branch: `Cannot delete a branch that contains a running sub-agent. Kill it first.`
+
+A turn in another branch does not prevent the delete. Each branch of a session runs independently.
 
 After the delete, the checkout moves to the parent of the branch. Deletion is permanent. Transcript dumps leave the disk too, so `search_transcripts` no longer finds them.
 

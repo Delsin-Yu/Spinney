@@ -4424,10 +4424,25 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    * Why this branch cannot be deleted right now ('' when it can). A turn (main
    * or sub-agent) that is still running must never lose the node it is writing
    * into.
+   *
+   * The scope is the **branch**, never the session: another branch of this session may
+   * stream while this one is idle (P3, `multi-session.md`), so a session-wide gate here
+   * made a sibling's run look like a reason to refuse. What follows from that is a
+   * positive list of what does block — a live run inside the branch, a worker agent of
+   * the branch still winding down (a run is cleared *after* its terminal event), an
+   * image upload continuing from a node of the branch (an upload owns no run yet), and a
+   * sub-agent running inside it.
    */
   private branchDeletionBlocked(session: AgentSession, rt: SessionRuntime, nodeId: string): string {
-    if (rt.isRunning() || rt.agentRunning()) {
-      return vscode.l10n.t('Cannot delete a branch while the agent is running. Wait for the turn to finish.');
+    const ids = branchIds(session, nodeId);
+    const live = new Set(rt.runningNodes());
+    const upload = rt.uploadingNode();
+    const busy =
+      ids.some((id) => live.has(id)) || rt.windingDown(ids) || (upload !== null && ids.includes(upload));
+    if (busy) {
+      return vscode.l10n.t(
+        'Cannot delete a branch while a turn inside it is running. Wait for it to finish (or stop it) first.',
+      );
     }
     // A **resume** window is the result of a compression, and deleting it on its own would
     // leave the compression node holding a handoff nobody can read. It is removed with its
@@ -4438,7 +4453,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         'This window is the result of a compression — delete the compression node above it instead, which removes this window with it.',
       );
     }
-    if (branchIds(session, nodeId).some((id) => rt.hasRunningSubAgent(id))) {
+    if (ids.some((id) => rt.hasRunningSubAgent(id))) {
       return vscode.l10n.t('Cannot delete a branch that contains a running sub-agent. Kill it first.');
     }
     return '';
