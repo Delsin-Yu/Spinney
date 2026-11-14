@@ -170,7 +170,7 @@ The new turn becomes a sibling branch. Spinney deletes nothing. The old line sta
 
 A checkout is free. You can check out another turn while a turn streams. The checkout moves the view, not the running turn.
 
-You can also branch from a prompt that you sent before. Click the pencil at the top right of the question in the card. The question becomes an input box. Change the text, then press **Enter**. Spinney sends the changed text as a new branch from the turn above the card. The original turn stays in the tree as a sibling branch. Press **Shift+Enter** to add a line. Press `Escape` to cancel, or click away. The images of the original prompt stay with the changed prompt. You can do this while the turn runs. The new branch starts from the turn above the card, and the running turn does not change.
+You can also branch from a prompt that you sent before. Move the pointer over the question in the card. A pencil appears at the top right corner of the question. Click the pencil. The question becomes an input box. Change the text, then press **Enter**. Spinney sends the changed text as a new branch from the turn above the card. The original turn stays in the tree as a sibling branch. Press **Shift+Enter** to add a line. Press `Escape` to cancel, or click the **✕** at the top right corner of the box, or click away. The images of the original prompt stay with the changed prompt. You can do this while the turn runs. The new branch starts from the turn above the card, and the running turn does not change.
 
 ### 4.2 Delete a branch
 

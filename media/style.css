@@ -2819,10 +2819,10 @@ button.icon-btn {
      cap generously and scroll instead of clipping. */
   max-height: 260px;
   overflow-y: auto;
-  /* The ask's edit pencil is positioned against this box (`.node-ask-edit`). */
-  position: relative;
-  /* Room for that pencil at the top-right, so a long first line never runs under it. */
-  padding-right: 26px;
+  /* No gutter is reserved for the ask's edit pencil: the pencil floats over the
+     corner of the message bubble (`div.msg.user.prompt`, whose own box is the
+     positioning context — see the `.node-ask .msg.user.prompt` rule), so the
+     message keeps the strip's full width. */
 }
 
 .node-ask.hidden {
@@ -2830,17 +2830,25 @@ button.icon-btn {
 }
 
 /* The edit pencil on the pinned ask (`syncAskEdit` in media/main.js): it swaps the ask
-   for an editor of the card's **own** prompt. Hover/focus-revealed like `.node-del`,
-   because it changes the card rather than doing the obvious thing on a stray click.
-   The host decides whether the edit is allowed; this only says where it sits. */
+   for an editor of the card's **own** prompt. It is a child of the ask's **bubble**
+   (`div.msg.user.prompt`) and floats over that bubble's top-right corner, inside its
+   own `6px 9px` padding: `top: 2px` / `right: 4px` on a 16px chip. That is the whole
+   reason the ask reserves no gutter any more, and the price of it — while the chip is
+   shown it covers the tail of the first line, and it is opaque (`--bg3`), so the text
+   under it is hidden rather than mixed with it. The overlap is deliberate; a chip that
+   took no corner would have to take a column of the message.
+   It is revealed by hovering the **bubble** (the message is the thing being edited) and
+   by keyboard focus (`:focus-visible`), because it changes the card rather than doing
+   the obvious thing on a stray click. The host decides whether the edit is allowed;
+   this only says where it sits. */
 .node-ask-edit {
   position: absolute;
-  top: 4px;
-  right: 5px;
-  width: 18px;
-  height: 18px;
+  top: 2px;
+  right: 4px;
+  width: 16px;
+  height: 16px;
   padding: 0;
-  font-size: 11px;
+  font-size: 10px;
   line-height: 1;
   color: var(--text-dim);
   background: var(--bg3);
@@ -2851,8 +2859,9 @@ button.icon-btn {
   transition: opacity 0.12s;
 }
 
-.node:hover .node-ask-edit,
-.node.active .node-ask-edit,
+/* The message itself is the hover target, not the card: the pencil belongs to *that*
+   bubble, and a card-wide reveal would show it on every card the pointer crosses. */
+.node-ask .msg.user.prompt:hover .node-ask-edit,
 .node-ask-edit:focus-visible {
   opacity: 1;
 }
@@ -2863,11 +2872,21 @@ button.icon-btn {
 }
 
 /* The open editor: a plain textarea (never Markdown — the ask body's `.answer` is what
-   the editor replaces) and one hint line about Enter / Shift+Enter / Esc. */
+   the editor replaces) and one hint line about Enter / Shift+Enter / Esc. It is also the
+   `✕` cancel's positioning context: the same button the bubble carries moves in here
+   (`beginAskEdit`). */
 .ask-edit {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 4px;
+}
+
+/* The cancel is never hover-revealed — an `opacity: 0` way out is a way out nobody can
+   find — and the editor keeps its first line clear of it: this is a transient box, so a
+   gutter here reads as padding rather than as a notch out of the message. */
+.ask-edit .node-ask-edit {
+  opacity: 1;
 }
 
 .ask-edit-input {
@@ -2875,7 +2894,9 @@ button.icon-btn {
   width: 100%;
   min-height: 64px;
   max-height: 220px;
-  padding: 6px 8px;
+  /* The right gutter is the `✕` cancel's room (it floats at the box's top-right corner):
+     a textarea's text can reach the corner, so the first line is kept clear of it. */
+  padding: 6px 24px 6px 8px;
   font: inherit;
   font-size: 12px;
   line-height: 1.45;
@@ -2891,7 +2912,10 @@ button.icon-btn {
   color: var(--text-dim);
 }
 
+/* The message bubble is also the pencil's positioning context (`.node-ask-edit` floats
+   over its top-right corner) — which is what lets the ask strip reserve no gutter. */
 .node-ask .msg.user.prompt {
+  position: relative;
   max-width: 100%;
   align-self: stretch;
   background: var(--user-bg);

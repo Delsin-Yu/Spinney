@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The prompt editor has a cancel.** While a card's question is being edited, the pencil that
+  opened the editor becomes an **✕** in the same top-right corner of the box, and a click on it
+  puts the question back exactly as `Esc` does — nothing is sent. It is one element, not two:
+  `setAskEditMode` swaps its glyph, its tooltip and its role, so a cancelled edit never leaves
+  an `✕` sitting on a rendered question. The hint line reads `Esc or ✕ cancels` now, and the
+  cancel is never hover-revealed: an invisible way out is no way out.
 - **A compress button of its own, beside Send.** Compression used to live behind the composer's
   one new-epoch entry, which only appeared when there was a setup drift or a nearly full window,
   so it was invisible exactly when a user wanted to try it. A **Compress…** button now sits
@@ -149,6 +155,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The prompt pencil takes no width from the question.** The pencil on a card's pinned question
+  sat at the top right of the pin strip with a 26 px gutter reserved for it, so a prompt wrapped
+  26 px early — a visible notch in every card, for a 16 px button. It is now a child of the
+  message bubble itself, floating over that bubble's top-right corner, and it is revealed by the
+  bubble's hover (or by keyboard focus) instead of the whole card's. The gutter is gone, so the
+  message keeps the strip's full width, and the price is the overlap: the chip is an opaque
+  panel-coloured square, so it covers the last characters of the first line while it is shown.
 - **Every tag a card wears is a word, and it is translated.** The head badges were Latin
   initials (`SUB`, `CTX`, `CMP`, `global`), and the status pill wrote the raw protocol value, so
   a Chinese window still read `Running` and `Done` on every card. The badges now say

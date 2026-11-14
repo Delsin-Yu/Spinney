@@ -8337,6 +8337,11 @@ if (contextLabel !== 'ctx 50%') {
 // the edited node's parent with the edited text (`editUserMessage`; nothing is edited
 // in place, and the composer is not involved at all), Shift+Enter is the textarea's own
 // newline, and Esc puts the rendered ask back. What is pinned here:
+//   - the pencil lives **inside the message bubble** (`div.msg.user.prompt`), over the
+//     bubble's top-right corner and not on the ask strip: the ask reserves no right
+//     gutter for it, so the message keeps the strip's full width;
+//   - one button, two modes: while the editor is open that same pencil is the `✕` cancel,
+//     and a click on it puts the rendered ask back exactly as Esc does (and posts nothing);
 //   - the pencil exists on every turn card that has a prompt — **including a card whose
 //     turn is still running** — and on no sidecar card, and nothing `state` reports about
 //     running or locked nodes takes it away: the edit branches from the edited node's
@@ -8389,6 +8394,22 @@ if (contextLabel !== 'ctx 50%') {
   const askOf = (id) => findByClass(cardOf(id), 'node-ask');
   const pencilOf = (id) => findByClass(askOf(id), 'node-ask-edit');
   const editorOf = (id) => findByClass(askOf(id), 'ask-edit-input');
+  /**
+   * The ask's chip by the **role** it is playing: `dataset.role`, not a class — the one
+   * element is `ask-edit` on a rendered ask and `ask-edit-cancel` in the open editor
+   * (`setAskEditMode` in `media/main.js`).
+   */
+  const chipOf = (id, role) => {
+    const find = (root) => {
+      for (const child of (root && root.children) || []) {
+        if (child.dataset && child.dataset.role === role) return child;
+        const nested = find(child);
+        if (nested) return nested;
+      }
+      return null;
+    };
+    return find(askOf(id));
+  };
   const click = (element) => {
     const handler = element && element._listeners && element._listeners.click;
     if (typeof handler !== 'function') return false;
@@ -8434,6 +8455,19 @@ if (contextLabel !== 'ctx 50%') {
   }
   if (pencilOf(SUB)) {
     problems.push('a sub-agent card offers the edit pencil (it has no prompt of its own)');
+  }
+  // (a1) The chip's home is the ask's **bubble** (`div.msg.user.prompt`), where it floats
+  // over that bubble's own corner and takes no column of the message — the ask strip
+  // reserves no right gutter for it any more. A chip that went back to being a child of
+  // the ask would force the gutter back, so where it sits is pinned here.
+  const askBubble = findByClass(askOf(ROOT), 'prompt');
+  if (!askBubble) {
+    problems.push('the pinned ask renders no message bubble (`.msg.user.prompt`) for the pencil to float in');
+  } else if (!findByClass(askBubble, 'node-ask-edit')) {
+    problems.push(
+      "the edit pencil is not inside the ask's message bubble — it must float over the bubble's top-right corner " +
+        '(that is what lets the ask reserve no gutter), not sit on the ask strip',
+    );
   }
   // The host's `state` is the other authority the pencil used to read, and it arrives without
   // a repaint: a node that still owns unfinished work stays editable, and so does a running one.
@@ -8574,8 +8608,49 @@ if (contextLabel !== 'ctx 50%') {
         }
       }
     }
+
+    // (f) The ✕: while the editor is open the pencil **is** the cancel — same element, same
+    // corner, one mode — so a click on it takes the path Esc takes. It is the one button
+    // that survives the ask's wipe, and it must not survive as a `✕` once the ask is
+    // rendered again: a cancel chip for an edit that is not open would be a dead end.
+    if (!click(pencilOf(ROOT))) {
+      problems.push('the pencil did not open an editor for the ✕ check');
+    } else {
+      const cancel = chipOf(ROOT, 'ask-edit-cancel');
+      if (!cancel) {
+        problems.push('the open editor carries no ✕ cancel — the pencil must become one while the edit is open');
+      } else {
+        if (String(cancel.textContent) !== '✕') {
+          problems.push(`the editor's chip reads ${JSON.stringify(cancel.textContent)}, expected "✕"`);
+        }
+        if (findByClass(askOf(ROOT), 'prompt')) {
+          problems.push('the ask still renders its message bubble while the editor is open — the editor replaces it');
+        }
+        posted.length = 0;
+        click(cancel);
+        if (editorOf(ROOT)) {
+          problems.push('clicking the ✕ left the prompt editor open');
+        }
+        if (!findByClass(askOf(ROOT), 'answer')) {
+          problems.push('the ✕ did not put the rendered ask back');
+        }
+        if (editPosts().length > 0) {
+          problems.push(`the ✕ posted ${JSON.stringify(editPosts())} — cancelling sends nothing`);
+        }
+        const back = pencilOf(ROOT);
+        if (!back) {
+          problems.push('the pencil did not come back after the ✕ closed the editor');
+        } else if (String(back.textContent) !== '✎') {
+          problems.push(`the pencil reads ${JSON.stringify(back.textContent)} after a cancel, expected "✎"`);
+        }
+        const bubble = findByClass(askOf(ROOT), 'prompt');
+        if (!bubble || !findByClass(bubble, 'node-ask-edit')) {
+          problems.push("the pencil did not go back into the ask's bubble after a cancel");
+        }
+      }
+    }
   }
-  notes.push('prompt edit: the pencil on any turn card with a prompt (a running one included) and never a sidecar, Enter posts the node and the edited text, a repaint leaves no textarea, Esc restores the ask');
+  notes.push('prompt edit: the pencil floats in the ask\'s message bubble (over its top-right corner, so the ask reserves no gutter) on any turn card with a prompt (a running one included) and never a sidecar, Enter posts the node and the edited text, the pencil turns into an ✕ that cancels the edit like Esc does, a repaint leaves no textarea, Esc restores the ask');
 }
 
 // --- report ------------------------------------------------------------------

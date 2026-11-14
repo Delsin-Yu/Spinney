@@ -2300,8 +2300,8 @@
       node.appendChild(body);
     }
     promptEl.appendChild(node);
-    // The pencil belongs to the ask, so it is put back with it — a render that wiped
-    // the ask's children took the button with them.
+    // The pencil lives in the bubble just built, so it is put back here — a render that
+    // wiped the ask's children took the chip with them.
     syncAskEdit(card);
     return node;
   }
@@ -2326,7 +2326,24 @@
   }
 
   /**
-   * The pencil beside a card's pinned ask, created lazily and kept on the card
+   * One button, two modes — and it is never in two places at once. On a rendered ask it is
+   * the `✎` that opens the editor, at the bubble's top-right corner; inside the open editor
+   * it is the `✕` that cancels it, at the same corner of the box. Every path that moves it
+   * (a repaint putting it back into the bubble, `beginAskEdit` taking it into the box) goes
+   * through here, so a cancelled edit can never leave a `✕` on a card that is no longer
+   * being edited.
+   */
+  function setAskEditMode(btn, editing) {
+    if (!btn) return;
+    btn.textContent = editing ? '✕' : '✎';
+    btn.dataset.role = editing ? 'ask-edit-cancel' : 'ask-edit';
+    btn.title = editing
+      ? tr('Cancel the edit — Escape puts the question back')
+      : tr('Edit this prompt — the answer starts a new branch from the same point');
+  }
+
+  /**
+   * The pencil on a card's pinned ask, created lazily and kept on the card
    * (`_askEditBtn`) so a repaint puts the **same** element back instead of stacking a
    * second one. It is offered wherever editing can go through: a non-sidecar card that has
    * a prompt. **A running turn is not in the way** — the edit branches from the edited
@@ -2334,6 +2351,12 @@
    * `ChatViewProvider`), so a reader fixing a typo never has to wait a turn out. The ask's
    * own `hidden` class is what keeps it out of sight on a collapsed card or a monitor
    * window; there is nothing to edit without a prompt.
+   *
+   * It lives **inside the ask's bubble** (`div.msg.user.prompt`), not on the ask strip:
+   * the chip floats over the bubble's top-right corner (CSS `.node-ask-edit`), so the
+   * message keeps the strip's full width — the ask reserves no gutter for it — and the
+   * bubble's own hover is what reveals it. A repaint of the ask wipes the bubble's
+   * children, which is why this puts the same chip back every time it runs.
    */
   function syncAskEdit(card) {
     if (!card || !card.querySelector) return;
@@ -2350,28 +2373,39 @@
       }
       return;
     }
-    // The open editor owns the ask: a pencil inside it would be a second way to
-    // cancel the same edit.
+    // The bubble is the chip's home. `byClass` rather than a compound `querySelector`:
+    // a miss has to be observably a miss (the offline checker's stub DOM answers any
+    // selector with a shared stub).
+    const bubble = byClass(ask, 'prompt');
+    if (!bubble) return;
+    // While the editor is open the ask's body **is** the editor and the button lives in
+    // it as the `✕` cancel (`beginAskEdit`): there is no bubble to put a second one back
+    // into, and no second way to cancel the same edit.
     if (ask._askEditing) return;
     if (btn) {
-      ask.appendChild(btn);
+      setAskEditMode(btn, false);
+      bubble.appendChild(btn);
       return;
     }
-    const button = el('button', 'node-ask-edit', '✎');
-    button.title = tr('Edit this prompt — the answer starts a new branch from the same point');
-    button.dataset.role = 'ask-edit';
+    const button = el('button', 'node-ask-edit');
     button.addEventListener('click', (ev) => {
       ev.stopPropagation();
-      beginAskEdit(card);
+      // One button, two meanings. Cancelling takes the same path Esc takes, so the two
+      // ways out of an edit can never diverge.
+      const open = card.querySelector('.node-ask');
+      if (open && open._askEditing) renderAsk(card);
+      else beginAskEdit(card);
     });
     card._askEditBtn = button;
-    ask.appendChild(button);
+    setAskEditMode(button, false);
+    bubble.appendChild(button);
   }
 
   /**
    * Swap the rendered ask for an editor: a textarea pre-filled with the node's **full**
    * prompt text — the stored text, never the Markdown the ask body shows, because the
-   * editor must not render Markdown — plus one hint line. Esc restores the rendered ask;
+   * editor must not render Markdown — plus one hint line. Esc restores the rendered ask,
+   * and so does the `✕` the pencil becomes in this state;
    * Enter asks the host to branch with the edited text and leaves the editor open until
    * the host answers (a repaint closes it, a refusal does not eat the typing);
    * Shift+Enter is the textarea's own newline.
@@ -2385,7 +2419,7 @@
     const box = el('div', 'ask-edit');
     const input = el('textarea', 'ask-edit-input');
     input.value = typeof card._askText === 'string' ? card._askText : '';
-    const hint = el('div', 'ask-edit-hint', tr('Enter sends, Shift+Enter adds a newline, Esc cancels'));
+    const hint = el('div', 'ask-edit-hint', tr('Enter sends, Shift+Enter adds a newline, Esc or ✕ cancels'));
     input.addEventListener('keydown', (ev) => {
       if (ev.key === 'Escape') {
         ev.preventDefault();
@@ -2403,6 +2437,14 @@
     });
     box.appendChild(input);
     box.appendChild(hint);
+    // The pencil becomes the cancel: the same element, moved into the editor's own corner
+    // because the wipe above took it off the bubble. CSS keeps it visible there — the
+    // bubble's hover rule can never reach a bubble that does not exist, and an `opacity:
+    // 0` button would be a cancel nobody can click.
+    if (card._askEditBtn) {
+      setAskEditMode(card._askEditBtn, true);
+      box.appendChild(card._askEditBtn);
+    }
     ask.appendChild(box);
     // The caret goes where the user is about to type. A card that is not on screen
     // (a hidden ask) cannot take it, and that is fine — the editor is still open.
@@ -2410,7 +2452,8 @@
   }
 
   /**
-   * Put the rendered ask back: the way out of the editor, for Esc and for a repaint.
+   * Put the rendered ask back: the way out of the editor, for Esc, for the `✕` and for a
+   * repaint.
    * It renders from the card's stored prompt, so what comes back is exactly what was
    * there before the edit — Markdown, image attachments and the pencil included.
    */

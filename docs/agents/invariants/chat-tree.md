@@ -116,7 +116,10 @@
   node's parent, so the streaming node's `messages`, `displayItems` and prompt are touched by
   nothing, and `beginTurn` refuses only a second run on the **basis** node — two branches of
   one session may run at once. The pencil is therefore offered on every turn card that has a
-  prompt (a sidecar has none), whatever its status.
+  prompt (a sidecar has none), whatever its status. It sits **inside the ask's message bubble**
+  (`div.msg.user.prompt`) and floats over that bubble's top-right corner, revealed by the
+  bubble's hover: the ask reserves no gutter for it, so the message keeps the pin strip's full
+  width and the chip overlaps the tail of the first line instead.
 - `attachNode` repairs a missing parent by attaching the node to the **root**
   instead of leaving it unreachable (an orphan would still become the checkout
   point and silently blank the history); `leafOf` skips both sidecar kinds via
