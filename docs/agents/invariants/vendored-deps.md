@@ -1,6 +1,6 @@
 # Invariant: vendored dependencies are pinned forever
 
-Three assets under `media/vendor/` are **vendored, frozen** copies of published
+Six assets under `media/vendor/` are **vendored, frozen** copies of published
 artifacts, shipped inside the `.vsix`:
 
 | Asset | Vendored copy | Pin record |
@@ -8,10 +8,13 @@ artifacts, shipped inside the `.vsix`:
 | tree layout engine `non-layered-tidy-tree-layout@2.0.2` (MIT) | `media/vendor/non-layered-tidy-tree-layout/` | that directory's `PROVENANCE.md` |
 | Markdown renderer `markdown-it@14.3.1` (MIT) | `media/vendor/markdown-it/` | that directory's `PROVENANCE.md` |
 | ripgrep `14.1.1` binary, one per platform-architecture (MIT) | `media/vendor/ripgrep/<platform>-<arch>/rg` | `media/vendor/ripgrep/PROVENANCE.md` |
+| TextMate tokenizer `vscode-textmate@9.3.2` (MIT) | `media/vendor/vscode-textmate/` | that directory's `PROVENANCE.md` |
+| its regex engine `vscode-oniguruma@2.0.1` (MIT, wasm = oniguruma BSD-2) | `media/vendor/vscode-oniguruma/` | that directory's `PROVENANCE.md` |
+| the grammars: `microsoft/vscode` @ 1.146.0 plus `tm-grammars@1.32.22` | `media/vendor/textmate-grammars/` | that directory's `PROVENANCE.md` + `SHA256SUMS` |
 
 ## Rules
 
-1. **Do not add either browser bundle to `package.json`.** Neither is a dependency, a
+1. **Do not add any of them to `package.json`.** None is a dependency, a
    `devDependency` or a `file:` link, and nothing is resolved from npm at
    install/build/package time, so no install script, no registry compromise and no
    version drift can reach the shipped webview payload. One caveat that does **not**
@@ -43,7 +46,34 @@ artifacts, shipped inside the `.vsix`:
    `grep -c "eval(\|new Function" media/vendor/non-layered-tidy-tree-layout/dist/*.js`
    and `grep -c "eval(\|new Function" media/vendor/markdown-it/markdown-it.min.js`
    (both must print `0`). The ripgrep binary is outside the webview and outside the
-   CSP entirely: it is the tool's child process.
+   CSP entirely: it is the tool's child process. The colouring engine is host-side for
+   the same reason — see the next section — but its two bundles are still audited as
+   eval-free, and `npm run check:highlight` enforces that.
+
+## The syntax-colouring engine: host-side, so no CSP token
+
+Fenced code blocks are coloured by the same tokenizer the editor uses
+(`vscode-textmate` over `vscode-oniguruma`), and it runs in the **extension host**, not
+in the webview. The reason is the CSP: oniguruma is wasm, and compiling wasm needs
+`'wasm-unsafe-eval'` in `script-src`, which `src/chat/webviewShell.ts` does not grant.
+The host has no CSP at all, Node compiles the module from the vendored `onig.wasm`, and
+`tokenizeLine` is synchronous — so the webview keeps its own synchronous renderer and
+only ever receives finished, escaped HTML.
+
+- The engine is started at activation (`ChatViewProvider`'s constructor calls
+  `warmUpCodeHighlight`), never awaited: a failure leaves every fence plain text.
+- The protocol is a **pull**: the webview's `highlight` hook returns `''` for a block it
+  cannot colour, records `{ lang, text }`, and the host answers `hlEntries` keyed by a
+  content hash both sides compute (`highlightKey` / `hlKey`, FNV-1a plus the length).
+  The webview then swaps the HTML into the `<code>` elements already on screen, so no
+  answer is re-rendered for colour alone and streaming never waits for a grammar.
+- The colours are our own two palettes (`media/style.css`, `.tm-*`), derived from the
+  editor's Dark+ and Light+ defaults and split on the theme kind VS Code puts on `body`.
+  A webview cannot read the token colours of the user's actual theme, so matching it
+  exactly is not attempted.
+- `npm run check:highlight` loads the engine the way the host does, asserts the two
+  bundles stay eval-free, that every scope in `index.json` has its file, that 42 promise
+  words still resolve, and that the webview's key still matches the host's.
 
 ## ripgrep: the third asset, and why it is vendored
 

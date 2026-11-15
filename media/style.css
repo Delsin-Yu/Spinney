@@ -586,6 +586,62 @@ button.icon-btn {
   color: var(--text);
 }
 
+/* ---- Code colouring ----
+ * The spans come from the extension host (`src/chat/codeHighlight.ts`), which runs the
+ * same TextMate engine the editor does. The colours are the editor's default Dark+ and
+ * Light+ palettes, split on the theme kind VS Code puts on `body` — the same split the
+ * scrollbars above use. A webview cannot read the token colours of whichever theme the
+ * user actually picked, so this is our palette and not theirs; anything a grammar leaves
+ * unscoped keeps the surrounding `--text`. */
+body {
+  --tm-comment: #6a9955;
+  --tm-keyword: #569cd6;
+  --tm-string: #ce9178;
+  --tm-regexp: #d16969;
+  --tm-number: #b5cea8;
+  --tm-type: #4ec9b0;
+  --tm-function: #dcdcaa;
+  --tm-variable: #9cdcfe;
+  --tm-operator: #d4d4d4;
+  --tm-escape: #d7ba7d;
+  --tm-add: #b5cea8;
+  --tm-del: #f48771;
+  --tm-chg: #569cd6;
+  --tm-invalid: #f44747;
+}
+body.vscode-light,
+body.vscode-high-contrast-light {
+  --tm-comment: #008000;
+  --tm-keyword: #0000ff;
+  --tm-string: #a31515;
+  --tm-regexp: #811f3f;
+  --tm-number: #098658;
+  --tm-type: #267f99;
+  --tm-function: #795e26;
+  --tm-variable: #001080;
+  --tm-operator: #000000;
+  --tm-escape: #ee0000;
+  --tm-add: #098658;
+  --tm-del: #cd3131;
+  --tm-chg: #0000ff;
+  --tm-invalid: #cd3131;
+}
+.tm-c { color: var(--tm-comment); }
+.tm-k { color: var(--tm-keyword); }
+.tm-s { color: var(--tm-string); }
+.tm-r { color: var(--tm-regexp); }
+.tm-n { color: var(--tm-number); }
+.tm-t { color: var(--tm-type); }
+.tm-f { color: var(--tm-function); }
+.tm-v { color: var(--tm-variable); }
+.tm-o { color: var(--tm-operator); }
+.tm-e { color: var(--tm-escape); }
+.tm-b { color: var(--tm-escape); }
+.tm-add { color: var(--tm-add); }
+.tm-del { color: var(--tm-del); }
+.tm-chg { color: var(--tm-chg); }
+.tm-i { color: var(--tm-invalid); }
+
 .answer table {
   display: block;
   overflow-x: auto;

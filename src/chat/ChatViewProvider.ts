@@ -82,6 +82,7 @@ import {
 import { SessionTreeItem } from './SessionsProvider';
 import { ModelTreeController, apiKeySecretName, searchKeySecretName } from './modelTree';
 import { resolvePromptSnippets } from './promptSnippets';
+import { highlightEntries, warmUpCodeHighlight } from './codeHighlight';
 import {
   removeTranscriptDir,
   removeTranscriptFile,
@@ -687,6 +688,11 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       this.stampLine(line),
     );
     this.openPerfTee();
+    // The syntax-colouring engine (vendored TextMate + oniguruma) starts here, i.e. when
+    // the extension is activated: the wasm compile and the grammar index cost a few
+    // milliseconds that no finished answer should pay for, and a failure only means every
+    // fence stays plain text (see `codeHighlight.ts`).
+    warmUpCodeHighlight((line) => this.output.appendLine(`[highlight] ${line}`));
     // The output channel is the primary sink; the tee only copies what is already
     // written there (dev-only, and off unless `SPINNEY_PERF_LOG` names a file).
     setPerfSink((line) => {
@@ -6214,6 +6220,12 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         void vscode.commands.executeCommand('vscode.open', uri);
         return;
       }
+      case 'hl':
+        // Colour the fences this webview could not colour itself. The request carries
+        // `{ lang, text }` pairs the renderer kept as plain text; the answer is one
+        // escaped fragment per fence, keyed the same way on both sides.
+        void this.answerHighlights(session.id, message);
+        return;
       case 'imageUrl':
         // A `read_image` viewer asked for pixels. The webview cannot read a file, so the
         // host answers with bytes; the answering itself is asynchronous, and this handler
@@ -6243,6 +6255,26 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         return;
       default:
         return;
+    }
+  }
+
+  /**
+   * Colour the fences one render could not, and hand them back in one message.
+   *
+   * A pull, not a push: the webview asks on the render it believes complete (a finished
+   * answer, a card shown after a checkout), so streaming never pays for colouring and no
+   * turn-lifecycle hook is involved. At most 64 fences per request — a report with more
+   * than that keeps the rest plain, which is what this build does for a language it has
+   * no grammar for anyway.
+   */
+  private async answerHighlights(sessionId: string, message: any): Promise<void> {
+    const items = Array.isArray(message?.items) ? message.items.slice(0, 64) : [];
+    if (!items.length) {
+      return;
+    }
+    const entries = await highlightEntries(items, (line) => this.output.appendLine(`[highlight] ${line}`));
+    if (Object.keys(entries).length) {
+      this.postTo(sessionId, { type: 'hlEntries', entries });
     }
   }
 

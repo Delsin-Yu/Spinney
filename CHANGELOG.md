@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Fenced code blocks are syntax-coloured.** The colouring runs in the extension host on
+  the same tokenizer the editor uses (`vscode-textmate` over `vscode-oniguruma`), so no
+  CSP token had to be granted: the webview's `highlight` hook renders a fence plain, asks
+  the host once, and swaps the returned spans into the `<code>` element already on screen,
+  keyed by a content hash both sides compute. 96 vendored grammars cover the TIOBE top 20
+  minus its tail (no Fortran, MATLAB, Assembly, Delphi or VB.NET) plus the conversation set
+  (TypeScript, bash, PowerShell, JSON, YAML, XML, HTML, CSS, Markdown, Dockerfile,
+  Makefile) and twelve languages VS Code does not ship (diff, TOML, Kotlin, Scala, Haskell,
+  Elixir, GraphQL, protobuf, Terraform/HCL, CMake, NGINX). Colours are our own Dark+ and
+  Light+ derived palettes; the user's theme tokens are not readable from a webview. New
+  guard `npm run check:highlight` loads the engine the way the host does and fails
+  packaging on a missing grammar, a lost language, an eval-tainted bundle or a drifted key.
+
 ### Fixed
 
 - **A new node repaints its own setup identity.** `beginTurn` posts `config` and `context`

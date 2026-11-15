@@ -1,12 +1,12 @@
 # Third-Party Notices
 
 Spinney (the `spinney` VS Code extension) is licensed under the MIT License — see
-`LICENSE`. The published extension (`.vsix`) additionally redistributes the three
+`LICENSE`. The published extension (`.vsix`) additionally redistributes the six
 third-party assets listed below. All are vendored: byte-exact copies of published
-artifacts (two npm tarballs and, for ripgrep, the official release binaries), pinned
-at a fixed version, with the archive integrity and the per-file sha256 recorded next to
-them. Nothing is resolved from the npm registry or the network at install, build or
-package time.
+artifacts (npm tarballs, grammar files from two pinned repositories, and, for ripgrep,
+the official release binaries), pinned at a fixed version, with the archive integrity and
+the per-file sha256 recorded next to them. Nothing is resolved from the npm registry or
+the network at install, build or package time.
 
 ## 1. markdown-it 14.3.1
 
@@ -68,9 +68,59 @@ PCRE2 (`BSD-3-Clause`) is statically linked inside the x86_64 Windows build, whi
 compiled with ripgrep's `pcre2` feature; no other third-party code is added by these
 binaries, and nothing is loaded at runtime.
 
----
+## 4. vscode-textmate 9.3.2
 
-No other third-party code is redistributed in the extension package. The three bundled
+The TextMate tokenizer behind the chat's code colouring. It runs in the extension host,
+never in the webview (`src/chat/codeHighlight.ts`).
+
+- Package: `vscode-textmate`, version `9.3.2`
+- License: MIT — `Copyright (c) Microsoft Corporation`
+- Upstream: https://github.com/microsoft/vscode-textmate
+- License text: [`media/vendor/vscode-textmate/LICENSE.md`](media/vendor/vscode-textmate/LICENSE.md)
+- Shipped file: `media/vendor/vscode-textmate/release/main.js`
+- Pin record: [`media/vendor/vscode-textmate/PROVENANCE.md`](media/vendor/vscode-textmate/PROVENANCE.md)
+
+## 5. vscode-oniguruma 2.0.1
+
+The regex engine `vscode-textmate` needs, as a WebAssembly module plus a loader. Also
+host-side only.
+
+- Package: `vscode-oniguruma`, version `2.0.1`
+- License: MIT — `Copyright (c) Microsoft Corporation`
+- Upstream: https://github.com/microsoft/vscode-oniguruma
+- License text: [`media/vendor/vscode-oniguruma/LICENSE.txt`](media/vendor/vscode-oniguruma/LICENSE.txt)
+- Shipped files: `media/vendor/vscode-oniguruma/release/main.js`,
+  `media/vendor/vscode-oniguruma/release/onig.wasm`
+- Pin record: [`media/vendor/vscode-oniguruma/PROVENANCE.md`](media/vendor/vscode-oniguruma/PROVENANCE.md)
+
+The WebAssembly module is a build of **oniguruma** `v6.9.5_rev1`, which is separately
+licensed:
+
+- License: BSD-2-Clause — `Copyright (c) 2002-2023 K.Kosako`
+- Upstream: https://github.com/kkos/oniguruma
+- License text: [`media/vendor/vscode-oniguruma/NOTICES.txt`](media/vendor/vscode-oniguruma/NOTICES.txt)
+
+## 6. TextMate grammars (96 files)
+
+The grammars that colour fenced code blocks, from two upstreams: everything the
+built-in language extensions of `microsoft/vscode` @ `1.146.0` ship (84 files), and the
+twelve languages VS Code does not ship, taken from `tm-grammars` `1.32.22`
+(shikijs/textmate-grammars-themes, MIT collection). Licences are per file and are
+recorded verbatim in the two notices shipped beside the grammars:
+
+- `media/vendor/textmate-grammars/vscode-ThirdPartyNotices.txt` — the upstream
+  `ThirdPartyNotices.txt` of `microsoft/vscode` `1.146.0`, verbatim. Only the grammar
+  files are redistributed from that repository, and this is their authoritative notice.
+- `media/vendor/textmate-grammars/tm-grammars-NOTICE.txt` — tm-grammars' own notice,
+  verbatim, listing each of the twelve files' upstream, SPDX id and full licence text
+  (MIT, Apache-2.0, and MPL-2.0 for `terraform`).
+- `media/vendor/textmate-grammars/tm-grammars-LICENSE.txt` — that collection's MIT text.
+- Index and per-file sha256: [`media/vendor/textmate-grammars/PROVENANCE.md`](media/vendor/textmate-grammars/PROVENANCE.md),
+  `media/vendor/textmate-grammars/SHA256SUMS`.
+
+No other third-party code is redistributed in the extension package. The six bundled
 `LICENSE`/`PROVENANCE` records carry the full MIT text for `markdown-it`, for
-`non-layered-tidy-tree-layout` and for `ripgrep`; the attributions for the five
-libraries inlined in the Markdown bundle (all MIT, except `entities`) are listed above.
+`non-layered-tidy-tree-layout`, for `ripgrep`, for `vscode-textmate` and for
+`vscode-oniguruma`, plus oniguruma's BSD-2 text and the two grammar notices; the
+attributions for the five libraries inlined in the Markdown bundle (all MIT, except
+`entities`) are listed above.

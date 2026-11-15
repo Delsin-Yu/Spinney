@@ -1305,13 +1305,103 @@
     return chip;
   }
 
+  // ---- Code colouring ----
+  // The colouring itself happens in the **host**: a TextMate engine on top of wasm, which
+  // this webview cannot compile under its own CSP (`script-src` has no
+  // `'wasm-unsafe-eval'`), and whose grammar loads are asynchronous while `renderMarkdown`
+  // is not. What lives here is a cache and a request cycle: a fence renders plain, is
+  // remembered, and is asked for once. The answer arrives as escaped HTML keyed the same
+  // way on both sides, and every `<code>` already on screen that matches is upgraded in
+  // place, so no answer is ever re-rendered just to gain colour.
+  const hlCache = new Map(); // key -> html
+  const hlAsked = new Set(); // keys already sent to the host
+  const hlPending = new Map(); // key -> { lang, text }
+  let hlTimer = 0;
+  // The host refuses past the same size; asking is pointless and the payload is large.
+  const HL_MAX_CHARS = 200000;
+
+  /**
+   * The key the host computes too: FNV-1a over the language and the code, plus the
+   * length. `crypto.subtle` is asynchronous, and keying by the code itself would put a
+   * second copy of every block in every payload.
+   */
+  function hlKey(lang, text) {
+    const all = String(lang || '').toLowerCase() + '\u0000' + text;
+    let h = 0x811c9dc5;
+    for (let i = 0; i < all.length; i++) {
+      h = Math.imul(h ^ all.charCodeAt(i), 0x01000193) >>> 0;
+    }
+    return h.toString(16) + ':' + all.length;
+  }
+
+  /**
+   * One `hl` request per tick, not one per fence: a long answer can hold several blocks
+   * and a repaint can render several answers at once.
+   */
+  function flushHighlightRequests() {
+    hlTimer = 0;
+    if (!hlPending.size) return;
+    const items = [];
+    for (const [key, item] of hlPending) {
+      hlAsked.add(key);
+      items.push(item);
+    }
+    hlPending.clear();
+    vscode.postMessage({ type: 'hl', items });
+  }
+
+  function requestHighlight(lang, key, text) {
+    if (hlAsked.has(key) || hlPending.has(key)) return;
+    hlPending.set(key, { lang, text });
+    if (!hlTimer) hlTimer = setTimeout(flushHighlightRequests, 40);
+  }
+
+  /**
+   * markdown-it's `highlight` option. Returning `''` leaves the block exactly as it was
+   * (markdown-it escapes the code itself and keeps its `language-*` class), which is what
+   * an uncoloured, an unknown and a not-yet-answered fence all get.
+   */
+  function highlightFence(text, lang) {
+    const name = String(lang || '').trim().toLowerCase();
+    // `js {1,3}` and `ts title="a.ts"` reach us as the attrs argument, so `lang` is the
+    // bare word already; a fence with no info string is never coloured.
+    if (!name) return '';
+    const key = hlKey(name, text);
+    const hit = hlCache.get(key);
+    if (hit !== undefined) return hit;
+    if (text.length <= HL_MAX_CHARS) requestHighlight(name, key, text);
+    return '';
+  }
+
+  /** Store what the host answered and upgrade every matching block already on screen. */
+  function applyHighlights(entries) {
+    if (!entries) return;
+    for (const key of Object.keys(entries)) hlCache.set(key, entries[key]);
+    const blocks = document.querySelectorAll('code[class*="language-"]');
+    for (const code of blocks) {
+      const match = /language-([^\s]+)/.exec(code.className || '');
+      if (!match) continue;
+      const key = hlKey(match[1], code.textContent || '');
+      const html = hlCache.get(key);
+      if (html === undefined || code._hlKey === key) continue;
+      code.innerHTML = html;
+      code._hlKey = key;
+    }
+  }
+
   // ---- Markdown ----
   // `linkify` is OFF: it turned a bare `AGENTS.md` (and any `file.ext`, version number or
   // dotted identifier) into a web link, which is wrong far more often than it is right in a
   // coding conversation. Explicit `[text](url)` links still work, and so do the result URLs
   // the web-search viewer builds itself; a real autolink is a separate, later question.
   const md = window.markdownit
-    ? window.markdownit({ html: false, breaks: true, linkify: false, typographer: false })
+    ? window.markdownit({
+        html: false,
+        breaks: true,
+        linkify: false,
+        typographer: false,
+        highlight: highlightFence,
+      })
     : null;
 
   function escapeHtml(text) {
@@ -9333,6 +9423,11 @@ function addBackgroundNotice(item) {
         break;
       case 'toolStart':
         routeTo(msg.nodeId, () => { finalizeStreamingAnswer(); finalizeLiveTool(msg.index, msg.id, msg.name, msg.args, msg.startedAt, null, msg.title); }, 'toolStart');
+        break;
+      case 'hlEntries':
+        // The host's answer to one `hl` request (see `applyHighlights`): blocks that
+        // match an entry are upgraded in place, so nothing is re-rendered for colour.
+        applyHighlights(msg.entries);
         break;
       case 'imageUrlAnswer': {
         // The host's answer to one `imageUrl` request: a data URL, or the reason there is
