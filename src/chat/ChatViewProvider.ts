@@ -4395,7 +4395,6 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       jobs > 0
         ? vscode.l10n.t('Background: {0} running terminal(s) owned by this branch will be killed.', jobs)
         : '',
-      vscode.l10n.t('The checked-out node moves to the parent of the deleted branch.'),
       vscode.l10n.t('This cannot be undone.'),
     ]
       .filter(Boolean)
