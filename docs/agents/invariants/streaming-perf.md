@@ -117,7 +117,7 @@ word is typed in fragments), the queue is capped at
 safe when a repaint or a finalize already removed the span.
 `finalizeStreamingAnswer` settles everything **before** the markdown render, and
 `reset` / `tree` settle the words in flight before their cards are replaced. A new
-row (assistant text, tool, thinking, notice) arrives on one `.row-in` fade + 2 px rise
+row (assistant text, tool, thinking, notice) arrives on one 120 ms `.row-in` fade
 that is removed again on `animationend`. **The verb of a step that is still working rides
 a wave**: Godot's `[wave]` moves a run of text up and down by giving every glyph a sine
 whose phase advances with its place in the run, and this is the same shape. `setVerbText`

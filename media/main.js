@@ -2110,7 +2110,7 @@
   // ---- The appear animation -------------------------------------------------
   // **The text is complete in the DOM the moment a delta arrives; only its appearance
   // is animated, one word at a time.** A delta's new words each go into a transient
-  // `<span class="word-in">` (a 170 ms fade + 6 px rise, CSS), and a span's text is
+  // `<span class="word-in">` (a 200 ms fade, CSS), and a span's text is
   // moved into the host's own persistent `Text` node when **its own** animation ends —
   // so the streaming surface is still one `Text` node that settles text by
   // `appendData`, and nothing on this path reads layout.
@@ -2128,8 +2128,8 @@
   // always its own token (a Chinese sentence has no spaces, and one token per sentence
   // would animate as one block).
   //
-  // **The stagger is capped, and so is the queue.** Words of one delta rise in order on
-  // 25 ms steps up to 150 ms (`.d1`…`.d6` in `media/style.css`), so a long burst never
+  // **The stagger is capped, and so is the queue.** Words of one delta fade in order on
+  // 6 ms steps up to 36 ms (`.d1`…`.d6` in `media/style.css`), so a long burst never
   // queues a visible backlog; past `MAX_PENDING_WORDS` the oldest word is merged at
   // once, which shows its text immediately instead of making the reveal fall behind.
   /** An engine that never fires `animationend` (the offline guard's stub) still settles. */
@@ -2297,7 +2297,7 @@
       queue.push(entry);
       host._wordChars = (host._wordChars || 0) + token.length;
       pendingChunks.add(host);
-      // The rise is CSS; the merge back is this one event, with a timer behind it for an
+      // The fade is CSS; the merge back is this one event, with a timer behind it for an
       // engine that never fires it — the merge must never depend on being told.
       span.addEventListener('animationend', () => {
         entry.ended = true;
@@ -2323,7 +2323,7 @@
   }
 
   /**
-   * A row that has just been appended arrives with one fade + 2 px rise (`.row-in`).
+   * A row that has just been appended arrives on one 120 ms fade (`.row-in`).
    * The class is removed on `animationend` — or by the fallback timer — so no row keeps
    * a running animation (or a compositing layer) alive after it has arrived.
    */
@@ -2337,7 +2337,7 @@
       row.classList.remove('row-in');
     };
     row.addEventListener('animationend', (event) => {
-      // A nested rise (the `.word-in` span inside an answer) bubbles up here: only the
+      // A nested fade (the `.word-in` span inside an answer) bubbles up here: only the
       // row's own animation ends the row's.
       if (event && event.target && event.target !== row) return;
       settle();

@@ -22,6 +22,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   guard `npm run check:highlight` loads the engine the way the host does and fails
   packaging on a missing grammar, a lost language, an eval-tainted bundle or a drifted key.
 
+### Changed
+
+- **A new row no longer slides up as it appears.** The row's appear animation is its 120 ms
+  fade alone: the 2 px rise under `.row-in` is gone, so a new line of the work log fades in
+  place instead of moving while it fades. `spinney.streamAnimation` is still the one switch,
+  and the per-word fade, the wave along a running step's verb and its highlight are
+  unchanged.
+
 ### Fixed
 
 - **A new node repaints its own setup identity.** `beginTurn` posts `config` and `context`

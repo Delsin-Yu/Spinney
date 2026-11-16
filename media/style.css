@@ -3588,7 +3588,7 @@ body.vscode-high-contrast-light {
                  `inline-block`: that would change line breaking and trim the token's
                  trailing space;
      .row-in     a row that has just been appended (assistant text, tool, thinking,
-                 notice): one 120 ms fade + 2 px rise, removed again on `animationend`;
+                 notice): one 120 ms fade, removed again on `animationend`;
      body.anim   the setting itself. It exists for the one CSS-only piece below, because
                  `animationsOn()` lives in the script;
      .w / .verb-wave / .verb-glow  the wave and the highlight along the verb of a step,
@@ -3605,14 +3605,11 @@ body.vscode-high-contrast-light {
    merged back. Keep the classes below in step with `animationsOn()` there:
    `spinney.streamAnimation` is the one switch, and this stylesheet deliberately carries
    no `prefers-reduced-motion` block — the setting is the only thing that decides. */
+/* One keyframe, two durations: a row and a token of a delta fade by the same rule, and
+   only the length differs — 120 ms for `.row-in`, 200 ms for `.word-in`. */
 @keyframes word-in {
   from { opacity: 0; }
   to { opacity: 1; }
-}
-
-@keyframes row-in {
-  from { opacity: 0; transform: translateY(2px); }
-  to { opacity: 1; transform: translateY(0); }
 }
 
 .word-in {
@@ -3629,7 +3626,7 @@ body.vscode-high-contrast-light {
 .word-in.d6 { animation-delay: 36ms; }
 
 .row-in {
-  animation: row-in 120ms ease-out;
+  animation: word-in 120ms ease-out;
 }
 
 /* ---- The running verb's wave and its highlight -------------------------------
