@@ -94,6 +94,7 @@ import {
 } from './transcript';
 import { ControlHost, ControlResult, ControlServer, ControlState, WaitForFinishOptions } from '../http/controlServer';
 import { SessionStore, SessionSummary, defaultDataRoot, looksLikeStoreRoot, workspaceKeyFor } from './sessionStore';
+import { PerfFixtureSpec, buildPerfFixture, readPerfFixtureSpec } from './perfFixture';
 import { diagnosticsHeader, newestDiagnosticsLog, prepareDiagnosticsLog } from './diagnosticsLog';
 import { nodeDigest } from './persistDigest';
 import {
@@ -1815,7 +1816,23 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     if (sessions.length === 0) {
       return false;
     }
-    this.sessions = sessions;
+    // **An id already in memory keeps the object this window is holding.** A `SessionRuntime`
+    // owns one session *object*; replacing it with a fresh copy read from disk leaves the
+    // runtime writing into an orphan, so the next persists serialize the disk snapshot and
+    // every turn since the refresh is lost (measured: a fixture import refreshed the array,
+    // two turns ran afterwards, and neither ever reached their files — `persist-done` still
+    // said `nodes=107` while the runtime had 108 and 109). Only ids this window has never
+    // seen are taken from the store, and a session that exists only in memory (a write still
+    // queued) is kept too.
+    const live = new Map(this.sessions.map((session) => [session.id, session]));
+    const merged: AgentSession[] = sessions.map((session) => live.get(session.id) ?? session);
+    const known = new Set(sessions.map((session) => session.id));
+    for (const session of this.sessions) {
+      if (!known.has(session.id)) {
+        merged.push(session);
+      }
+    }
+    this.sessions = merged;
     // The sessions in front of the user changed wholesale: so did what the dock lists.
     this.rebuildBgDismissed();
     if (!this.sessions.some((s) => s.id === this.activeSessionId)) {
@@ -1910,6 +1927,15 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     if (!source) {
       return;
     }
+    // A **diagnostic fixture** (a debug-build path, see `perfFixture.ts`): a folder whose
+    // marker file says so is a spec, not a store, and it is turned into a session of a
+    // controlled size — the one thing a stutter that only appears on a long conversation
+    // cannot otherwise offer without hours of use.
+    const fixture = readPerfFixtureSpec(source);
+    if (fixture) {
+      await this.createPerfFixture(fixture);
+      return;
+    }
     if (!looksLikeStoreRoot(source)) {
       void vscode.window.showWarningMessage(
         vscode.l10n.t('Spinney: that folder does not hold Spinney session data.'),
@@ -1938,6 +1964,35 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       );
     }
   }
+  /**
+   * Build a **diagnostic fixture** session and open it — the debug-build half of
+   * `importSessionData` (see `perfFixture.ts`).
+   *
+   * The write goes through `store.writeSession`, so the fixture is an ordinary session in
+   * every respect (index entry, files, deletion) and nothing else has to know it was
+   * generated. `refreshSessionsFromStore` is what makes it appear without a window reload,
+   * exactly like an import.
+   */
+  private async createPerfFixture(spec: PerfFixtureSpec): Promise<void> {
+    const store = this.store;
+    if (!store) {
+      return;
+    }
+    const { session, summary } = buildPerfFixture(spec);
+    store.writeSession(session.id, session, summary);
+    await store.flush();
+    try {
+      await store.rebuildIndex();
+    } catch {
+      /* the index is a cache; `refreshSessionsFromStore` reads the files themselves */
+    }
+    this.refreshSessionsFromStore();
+    this.openSession(session.id);
+    this.output.appendLine(
+      `[perf] fixture session=${session.id} nodes=${summary.nodeCount} title=${summary.title}`,
+    );
+  }
+
   /**
    * A `SessionRuntime` reporting that its own session's content changed (see
    * `RuntimeHost.markSessionDirty`). Called on every one of its writes, so this set is the

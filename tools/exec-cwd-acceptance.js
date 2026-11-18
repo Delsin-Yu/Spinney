@@ -42,6 +42,7 @@ const OUT = path.join(ROOT, 'out');
 const WIN = process.platform === 'win32';
 const DRIVE = ROOT[0].toUpperCase(); // 'd:\Repos\x' -> 'D'
 const WIN_ROOT = `${DRIVE}:${ROOT.slice(2)}`; // -> 'D:\Repos\x'
+const MSYS_DRIVE = `/${ROOT[0].toLowerCase()}`; // -> '/d'
 const MSYS_ROOT = `/${ROOT[0].toLowerCase()}${ROOT.slice(2).split(path.sep).join('/')}`; // -> '/d/Repos/x'
 
 /** Slash-fold and lower case: one spelling for a path, whichever dialect wrote it. */
@@ -89,7 +90,14 @@ const cwdLine = (s) => fold(firstLine(s)).includes('· cwd ') && saysRoot(firstL
   check('a relative path resolves against the root', resolvePath('src') === path.join(ROOT, 'src'), resolvePath('src'));
   if (WIN) {
     check('resolvePath maps /d/Repos/x onto D:\\Repos\\x', resolvePath(MSYS_ROOT) === WIN_ROOT, resolvePath(MSYS_ROOT));
-    check('resolvePath maps a bare /d onto the drive root', resolvePath('/d') === `${DRIVE}:\\`, resolvePath('/d'));
+    // The bare drive form has to be this checkout's own drive: `/d` is only `D:\` on a
+    // checkout that lives on D:, and this guard runs on whatever drive the folder is on
+    // (measured on an H: checkout, where a hard-coded `/d` failed the gate).
+    check(
+      `resolvePath maps a bare ${MSYS_DRIVE} onto the drive root`,
+      resolvePath(MSYS_DRIVE) === `${DRIVE}:\\`,
+      resolvePath(MSYS_DRIVE),
+    );
   } else {
     check(
       'an MSYS-looking path is left alone off Windows (a real directory there)',
@@ -122,11 +130,15 @@ const cwdLine = (s) => fold(firstLine(s)).includes('· cwd ') && saysRoot(firstL
   const file = await call('exec_command', { command: 'echo hi', cwd: 'package.json', title: 'A file as cwd' });
   check('a file as cwd is reported as not-a-directory', /is not a directory/.test(file), file.trim());
   if (WIN) {
-    const missingMsys = await call('exec_command', { command: 'echo hi', cwd: '/d/no-such-repo', title: 'A missing /d cwd' });
+    const missingMsys = await call('exec_command', {
+      command: 'echo hi',
+      cwd: `${MSYS_DRIVE}/no-such-repo`,
+      title: 'A missing /d cwd',
+    });
     check(
       'a missing /d path is reported against the drive path',
       /does not exist/.test(missingMsys) &&
-        missingMsys.includes('"/d/no-such-repo"') &&
+        missingMsys.includes(`"${MSYS_DRIVE}/no-such-repo"`) &&
         fold(missingMsys).includes(`${DRIVE.toLowerCase()}:/no-such-repo`) &&
         !/ENOENT/.test(missingMsys),
       missingMsys.trim(),

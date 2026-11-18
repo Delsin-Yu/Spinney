@@ -383,6 +383,9 @@
     perfMessages++;
     if (!msg || typeof msg !== 'object') return;
     try {
+      // A host message that arrives mid-gesture is the third suspect, next to a slow
+      // frame and a slow handler: a tree/path repaint landing under a finger or a caret.
+      perfGestureHost(typeof msg.type === 'string' ? msg.type : '');
       if (msg.traceId !== undefined && msg.traceId !== null) {
         perfTraceMessage(msg, ms);
       } else if (ms >= SLOW_HANDLER_MS) {
@@ -392,6 +395,568 @@
     } catch (err) {
       /* a probe must never break the UI */
     }
+  }
+
+  // ---- Gesture probes (pan / typing) ------------------------------------------
+  // The two interactions a reader judges the UI by, and the two the lines above cannot
+  // describe: `webview-handler` only measures *host messages*, and a pan handler is three
+  // assignments — so a slow gesture cannot be the handler, and what is left is the
+  // engine (layout, raster, a repaint that lands under the finger). Each gesture is
+  // therefore measured as a whole: the handler itself, the wait from an event to the next
+  // frame, the frames, the engine's own long tasks, and whatever the tree did meanwhile.
+  // One line per gesture (`webview-gesture`), bounded by how many gestures a person makes.
+  const TYPING_IDLE_MS = 500;  // keystrokes closer than this are one burst
+  const LONG_TASK_MS = 50;     // Chromium's own definition of a blocking task
+  let perfPan = null;          // the pan gesture in flight
+  let perfTyping = null;       // the typing burst in flight
+  let perfTypingTimer = null;
+  let perfWheelTimer = null;   // ends a wheel-driven pan after the wheel goes quiet
+  let perfFrameLoop = false;
+
+  /** The surface a gesture runs on: what a slow frame would have to repaint. */
+  function perfGestureSurface() {
+    let canvas = '0x0';
+    let canvasDev = '0x0';
+    let z = 1;
+    let dpr = 1;
+    try {
+      const w = Math.round(treeCanvas.offsetWidth);
+      const h = Math.round(treeCanvas.offsetHeight);
+      canvas = w + 'x' + h;
+      z = Math.round(zoom * 100) / 100;
+      dpr = Math.round((window.devicePixelRatio || 1) * 100) / 100;
+      canvasDev = Math.round(w * z * dpr) + 'x' + Math.round(h * z * dpr);
+    } catch (err) {
+      /* a booting document has no canvas yet */
+    }
+    let cards = 0;
+    let skip = 0;
+    let nodes = 0;
+    let expanded = 0;
+    try {
+      cards = Object.keys(nodeEls).length;
+      skip = cvSkipped.size;
+      nodes = Object.keys(treeNodes).length;
+      for (const id in nodeEls) {
+        if (nodeEls[id] && nodeEls[id].classList.contains('expanded')) expanded++;
+      }
+    } catch (err) {
+      /* not built yet */
+    }
+    return {
+      dom: perfDomCount(),
+      cards,
+      skip,
+      nodes,
+      expanded,
+      canvas,
+      canvasDev,
+      zoom: z,
+      dpr,
+    };
+  }
+
+  /**
+   * One frame per animation frame while a gesture runs: the gaps between frames (a
+   * stutter *is* a long frame) and the wait an event served by that frame paid. The loop
+   * exists only while a gesture does, so it can never keep an idle window from idling.
+   */
+  function perfGestureTick() {
+    const g = perfPan || perfTyping;
+    if (!g) {
+      perfFrameLoop = false;
+      return;
+    }
+    g.raf = requestAnimationFrame(() => {
+      if (perfPan !== g && perfTyping !== g) {
+        perfGestureTick();
+        return;
+      }
+      const now = perfNow();
+      const gap = now - g.last;
+      g.last = now;
+      g.frames++;
+      if (gap > g.worst) g.worst = gap;
+      if (g.pendingAt != null) {
+        const latency = now - g.pendingAt;
+        g.pendingAt = null;
+        g.latencyN++;
+        g.latencySum += latency;
+        if (latency > g.latencyMax) g.latencyMax = latency;
+      }
+      perfGestureTick();
+    });
+  }
+
+  /** Open a gesture record, with the two observers this kind of lag needs. */
+  function perfGestureOpen(kind) {
+    const g = {
+      kind,
+      t0: perfNow(),
+      last: perfNow(),
+      events: 0,
+      handlerSum: 0,
+      handlerMax: 0,
+      autoGrowMs: 0,
+      buttonsMs: 0,
+      latencySum: 0,
+      latencyMax: 0,
+      latencyN: 0,
+      pendingAt: null,
+      frames: 0,
+      worst: 0,
+      longTasks: 0,
+      longTaskMs: 0,
+      mutations: 0,
+      host: Object.create(null),
+      mutationObserver: null,
+      longObserver: null,
+      loaf: null,
+      loafObserver: null,
+    };
+    // What the *tree* did while the gesture ran: a repaint under a finger is a different
+    // defect from a slow frame, and only this counter can tell the two apart.
+    try {
+      if (typeof MutationObserver === 'function') {
+        g.mutationObserver = new MutationObserver((records) => {
+          g.mutations += records.length;
+        });
+        g.mutationObserver.observe(treeCanvas, {
+          childList: true,
+          subtree: true,
+          characterData: true,
+        });
+      }
+    } catch (err) {
+      /* diagnostics only */
+    }
+    // Chromium's own long-task entries: the one reading that says the main thread was
+    // *blocked* rather than merely slow, and it costs nothing while nothing is long.
+    try {
+      if (typeof PerformanceObserver === 'function') {
+        g.longObserver = new PerformanceObserver((list) => {
+          for (const entry of list.getEntries()) {
+            g.longTasks++;
+            g.longTaskMs += entry.duration;
+          }
+        });
+        g.longObserver.observe({ entryTypes: ['longtask'] });
+      }
+    } catch (err) {
+      /* not every engine exposes longtask */
+    }
+    // A long task says *that* a frame was blocked; a long animation frame says *where* it
+    // went, split into script, style/layout and render, with the script that was running.
+    // That split is the whole question here: the gesture handlers measure ~0 ms, so a
+    // 280 ms entry is either the engine's own layout or something neither of our handlers
+    // owns, and nothing else in this document can tell those apart.
+    try {
+      if (typeof PerformanceObserver === 'function') {
+        const types = PerformanceObserver.supportedEntryTypes;
+        if (Array.isArray(types) && types.indexOf('long-animation-frame') >= 0) {
+          g.loafObserver = new PerformanceObserver((list) => {
+            for (const entry of list.getEntries()) {
+              if (!g.loaf || entry.duration > g.loaf.duration) g.loaf = entry;
+            }
+          });
+          g.loafObserver.observe({ entryTypes: ['long-animation-frame'] });
+        }
+      }
+    } catch (err) {
+      /* an older engine has no long animation frames */
+    }
+    if (!perfFrameLoop) {
+      perfFrameLoop = true;
+      // The caller assigns the record to `perfPan` / `perfTyping` *after* this returns, so
+      // the first tick has to be a frame later: a synchronous one would find no gesture and
+      // stop the loop before it ever counted a frame.
+      requestAnimationFrame(perfGestureTick);
+    }
+    return g;
+  }
+
+  /** Count one measured event of the gesture (`handlerMs` is the work it did). */
+  function perfGestureEvent(g, handlerMs) {
+    if (!g) return;
+    const ms = handlerMs || 0;
+    g.events++;
+    g.handlerSum += ms;
+    if (ms > g.handlerMax) g.handlerMax = ms;
+    // The oldest event still waiting is the one the next frame answers, and that wait is
+    // what the user feels. A `requestAnimationFrame` per event would measure the same
+    // thing while adding frames of its own to the burst being measured.
+    if (g.pendingAt == null) g.pendingAt = perfNow();
+  }
+
+  /** One host message that arrived while a gesture was in flight, counted by type. */
+  function perfGestureHost(type) {
+    const g = perfPan || perfTyping;
+    if (!g || !type || type === 'perfDiag') return;
+    g.host[type] = (g.host[type] || 0) + 1;
+  }
+
+  /**
+   * The worst long animation frame of a gesture, split the way the engine measures it:
+   * script (before rendering began), style/layout (after it did), and the blocking part.
+   * `loafTop` names the one script that held the frame longest, when there is one.
+   */
+  function perfLoafFields(g) {
+    let worst = g.loaf;
+    try {
+      if (g.loafObserver) {
+        for (const entry of g.loafObserver.takeRecords()) {
+          if (!worst || entry.duration > worst.duration) worst = entry;
+        }
+        g.loafObserver.disconnect();
+      }
+    } catch (err) {
+      /* diagnostics only */
+    }
+    if (!worst) return {};
+    let top = '';
+    try {
+      let best = 0;
+      for (const script of worst.scripts || []) {
+        if (script.duration > best) {
+          best = script.duration;
+          top =
+            (script.sourceFunctionName || script.invoker || '?') + ':' + Math.round(script.duration);
+        }
+      }
+    } catch (err) {
+      /* no scripts at all means the engine itself held the frame */
+    }
+    return {
+      loafMs: Math.round(worst.duration),
+      loafScript: Math.round(
+        worst.renderStart ? worst.renderStart - worst.startTime : worst.duration,
+      ),
+      loafLayout: Math.round(
+        worst.styleAndLayoutStart
+          ? worst.startTime + worst.duration - worst.styleAndLayoutStart
+          : 0,
+      ),
+      loafBlock: Math.round(worst.blockingDuration || 0),
+      loafTop: top,
+    };
+  }
+
+  /** Close the gesture: one line, its observers disconnected. */
+  function perfGestureClose(g, extra) {
+    if (!g) return;
+    const loaf = perfLoafFields(g);
+    try {
+      if (g.mutationObserver) {
+        g.mutations += g.mutationObserver.takeRecords().length;
+        g.mutationObserver.disconnect();
+      }
+    } catch (err) {
+      /* diagnostics only */
+    }
+    try {
+      if (g.longObserver) {
+        for (const entry of g.longObserver.takeRecords()) {
+          g.longTasks++;
+          g.longTaskMs += entry.duration;
+        }
+        g.longObserver.disconnect();
+      }
+    } catch (err) {
+      /* diagnostics only */
+    }
+    const host = Object.keys(g.host)
+      .map((type) => type + ':' + g.host[type])
+      .join(',');
+    perfPost(
+      'gesture',
+      Object.assign(
+        {
+          gesture: g.kind,
+          ms: Math.round(perfNow() - g.t0),
+          events: g.events,
+          handler: Math.round(g.handlerSum) + '/' + Math.round(g.handlerMax),
+          latency:
+            (g.latencyN ? Math.round(g.latencySum / g.latencyN) : 0) + '/' + Math.round(g.latencyMax),
+          frames: g.frames,
+          worstFrame: Math.round(g.worst),
+          longTasks: g.longTasks,
+          longTaskMs: Math.round(g.longTaskMs),
+          mutations: g.mutations,
+          host,
+        },
+        loaf,
+        perfGestureSurface(),
+        extra || {},
+      ),
+    );
+  }
+
+  /** End the pan gesture (pointer release, cancellation, or the autoscroll stop). */
+  function perfPanEnd() {
+    if (perfWheelTimer != null) {
+      clearTimeout(perfWheelTimer);
+      perfWheelTimer = null;
+    }
+    if (!perfPan) return;
+    const g = perfPan;
+    perfPan = null;
+    perfGestureClose(g);
+    // A release postponed for the gesture can run now (see `flushCv`, `pumpUnloads`).
+    flushCv();
+    flushLayout();
+    pumpUnloads();
+  }
+
+  /** A wheel-driven camera move: counted as a gesture, ended after a quarter second of quiet. */
+  function perfWheelMove() {
+    // Only an input-driven camera move holds the expensive work; a camera move the app makes
+    // itself (the initial pan to the active card, a follow step) must not.
+    noteViewMove();
+    if (!perfPan) perfPan = perfGestureOpen('wheel');
+    perfGestureEvent(perfPan, 0);
+    if (perfWheelTimer != null) clearTimeout(perfWheelTimer);
+    perfWheelTimer = setTimeout(() => {
+      perfWheelTimer = null;
+      perfPanEnd();
+    }, VIEW_MOVE_MS);
+  }
+
+  /** End a typing burst: the keystrokes have been quiet for `TYPING_IDLE_MS`. */
+  function perfTypingEnd() {
+    perfTypingTimer = null;
+    const g = perfTyping;
+    perfTyping = null;
+    if (!g) {
+      pumpUnloads();
+      return;
+    }
+    perfGestureClose(g, {
+      autoGrow: Math.round(g.autoGrowMs),
+      buttons: Math.round(g.buttonsMs),
+    });
+    pumpUnloads();
+  }
+
+  // ---- The document's own record (surface, long frames, lifetime) --------------
+  // A reload destroys the renderer that had the problem, and every measurement used to die
+  // with it: each line was tied to an operation (a switch, a gesture), so a document that
+  // had been degrading for hours wrote nothing while it degraded — and the natural fix,
+  // reloading, erased exactly the state that made it slow. These reports are the other
+  // half: a surface sample on a timer, a long frame as it happens, and one final line on
+  // the way out. The slow run then leaves a curve of its own, and a reload is only the
+  // boundary between two documents rather than the loss of the evidence.
+  const SURFACE_SAMPLE_MS = 30000;    // one sample per half minute, on screen only
+  const LONG_FRAME_MS = 250;          // a frame this long is what a reader feels as a stutter
+  const LONG_FRAME_REPEAT_MS = 5000;  // keep a busy document from flooding the log
+  const docStartedAt = perfNow();
+  let surfaceTimer = null;
+  let surfaceSamples = 0;
+  let docLoaf = null;        // the worst long animation frame since this document loaded
+  let docLoafAge = -1;       // when it happened, as an offset from that document's start
+  let docLoafCount = 0;
+  let intervalLoafN = 0;
+  let intervalLoafMs = 0;
+  let longFrameReportedAt = 0;
+  let fatCache = '';         // the last sample's per-card element counts, reused by a report
+  let lifetimePosted = false;
+
+  /** The one script that held a long animation frame longest, as `name:ms`. */
+  function perfTopScript(entry) {
+    try {
+      let best = 0;
+      let top = '';
+      for (const script of entry.scripts || []) {
+        if (script.duration > best) {
+          best = script.duration;
+          top =
+            (script.sourceFunctionName || script.invoker || '?') + ':' + Math.round(script.duration);
+        }
+      }
+      return top;
+    } catch (err) {
+      return '';
+    }
+  }
+
+  /** Heap in MiB, when the engine reports it (a bucketed value is still a curve). */
+  function perfHeapMb() {
+    try {
+      const memory = performance.memory;
+      if (!memory || typeof memory.usedJSHeapSize !== 'number') return undefined;
+      return Math.round(memory.usedJSHeapSize / (1024 * 1024));
+    } catch (err) {
+      return undefined;
+    }
+  }
+
+  /** The three cards holding the most elements, as `id:n,id:n,id:n`. */
+  function perfFatCards() {
+    try {
+      const fat = [];
+      for (const id in nodeEls) {
+        const card = nodeEls[id];
+        if (!card) continue;
+        fat.push([id, card.getElementsByTagName('*').length]);
+      }
+      fat.sort((a, b) => b[1] - a[1]);
+      return fat
+        .slice(0, 3)
+        .map((row) => row[0] + ':' + row[1])
+        .join(',');
+    } catch (err) {
+      return '';
+    }
+  }
+
+  /** Judge one long animation frame: keep the worst, and report a real stutter at once. */
+  function perfNoteLongFrame(entry) {
+    docLoafCount++;
+    intervalLoafN++;
+    intervalLoafMs += entry.duration;
+    if (!docLoaf || entry.duration > docLoaf.duration) {
+      docLoaf = entry;
+      docLoafAge = Math.round(perfNow() - docStartedAt);
+    }
+    if (entry.duration < LONG_FRAME_MS || !perfOnScreen()) return;
+    const now = perfNow();
+    if (now - longFrameReportedAt < LONG_FRAME_REPEAT_MS) return;
+    longFrameReportedAt = now;
+    // The stutter itself, with no gesture to end and nothing asked of the user: the split
+    // says whether script, layout or render held the frame, `top` names the script, and
+    // `fat` says which cards the DOM cost is concentrated in.
+    perfPost(
+      'longframe',
+      Object.assign(
+        {
+          ms: Math.round(entry.duration),
+          block: Math.round(entry.blockingDuration || 0),
+          script: Math.round(
+            entry.renderStart ? entry.renderStart - entry.startTime : entry.duration,
+          ),
+          layout: Math.round(
+            entry.styleAndLayoutStart
+              ? entry.startTime + entry.duration - entry.styleAndLayoutStart
+              : 0,
+          ),
+          top: perfTopScript(entry),
+          fat: fatCache,
+        },
+        { heap: perfHeapMb() },
+        perfGestureSurface(),
+      ),
+    );
+  }
+
+  /** One sample of the document: what grows, and the long frames since the previous one. */
+  function perfSampleSurface() {
+    try {
+      if (!perfOnScreen()) return;
+      surfaceSamples++;
+      // The one expensive read in this file: it walks every card's elements. It runs here,
+      // once per sample, and every report that is not a sample reuses the cached answer —
+      // a report must never add the very hitch it is describing.
+      fatCache = perfFatCards();
+      const worst = docLoaf
+        ? {
+            docLoafMs: Math.round(docLoaf.duration),
+            docLoafAt: docLoafAge,
+            docLoafTop: perfTopScript(docLoaf),
+          }
+        : {};
+      perfPost(
+        'surface',
+        Object.assign(
+          {
+            life: Math.round(perfNow() - docStartedAt),
+            samples: surfaceSamples,
+            frames: frameCount,
+            loafN: intervalLoafN,
+            loafMs: Math.round(intervalLoafMs),
+            docLoafN: docLoafCount,
+            fat: fatCache,
+          },
+          { heap: perfHeapMb() },
+          worst,
+          perfGestureSurface(),
+        ),
+      );
+      intervalLoafN = 0;
+      intervalLoafMs = 0;
+    } catch (err) {
+      /* a sample must never break the UI */
+    }
+  }
+
+  function perfStartSurfaceSampler() {
+    if (surfaceTimer != null || !perfOnScreen()) return;
+    surfaceTimer = setInterval(perfSampleSurface, SURFACE_SAMPLE_MS);
+  }
+
+  function perfStopSurfaceSampler() {
+    if (surfaceTimer == null) return;
+    clearInterval(surfaceTimer);
+    surfaceTimer = null;
+  }
+
+  /**
+   * The document is going away (a window reload, a `Reload Chat Webview`, a closed tab):
+   * one last line, best effort. The post may be dropped with the document — which is why
+   * the timer above exists as well — but when it lands, it is the degraded renderer's own
+   * account of itself, dated, at the reload boundary.
+   */
+  function perfPostLifetime(reason) {
+    // `pagehide` and `beforeunload` can both fire for one teardown: one document is one
+    // lifetime, so only the first one writes the line.
+    if (lifetimePosted) return;
+    lifetimePosted = true;
+    try {
+      perfPost(
+        'lifetime',
+        Object.assign(
+          {
+            reason,
+            life: Math.round(perfNow() - docStartedAt),
+            samples: surfaceSamples,
+            frames: frameCount,
+            docLoafN: docLoafCount,
+            docLoafMs: docLoaf ? Math.round(docLoaf.duration) : 0,
+            docLoafAt: docLoafAge,
+          },
+          { heap: perfHeapMb() },
+          perfGestureSurface(),
+        ),
+      );
+    } catch (err) {
+      /* the document is leaving; nothing here may throw on the way out */
+    }
+  }
+
+  /** Arm the document-level record: the long-frame observer and the surface sampler. */
+  function perfStartDocumentRecord() {
+    try {
+      if (typeof PerformanceObserver === 'function') {
+        const types = PerformanceObserver.supportedEntryTypes;
+        if (Array.isArray(types) && types.indexOf('long-animation-frame') >= 0) {
+          const observer = new PerformanceObserver((list) => {
+            for (const entry of list.getEntries()) perfNoteLongFrame(entry);
+          });
+          observer.observe({ entryTypes: ['long-animation-frame'] });
+        }
+      }
+    } catch (err) {
+      /* an older engine has no long animation frames */
+    }
+    perfStartSurfaceSampler();
+    try {
+      // `pagehide` is the one a torn-down webview still gets; `beforeunload` is the belt
+      // behind it, and neither is allowed to be required for the line to exist.
+      window.addEventListener('pagehide', () => perfPostLifetime('pagehide'));
+      window.addEventListener('beforeunload', () => perfPostLifetime('beforeunload'));
+    } catch (err) {
+      /* no window to listen to */
+    }
+    // The fresh baseline: the line a reload's first sample is compared against.
+    perfPost('boot', Object.assign({ life: 0, samples: 0 }, { heap: perfHeapMb() }, perfGestureSurface()));
   }
 
   // ---- The frame sampler (the probe behind `stall`) ----------------------------
@@ -506,12 +1071,15 @@
   function perfStartSampler() {
     if (frameTimer != null || !perfOnScreen()) return;
     frameTimer = setInterval(perfSampleFrame, FRAME_SAMPLE_MS);
+    perfStartSurfaceSampler();
   }
 
   function perfStopSampler() {
-    if (frameTimer == null) return;
-    clearInterval(frameTimer);
-    frameTimer = null;
+    if (frameTimer != null) {
+      clearInterval(frameTimer);
+      frameTimer = null;
+    }
+    perfStopSurfaceSampler();
   }
 
   /**
@@ -1804,6 +2372,9 @@
       // A virtualised viewer paints from its own measured height, which only exists
       // once the detail is on screen — so opening is where it gets asked again.
       if (row._open && detail._paint) detail._paint();
+      // A path is fitted to a width, and a folded detail has none: opening is the moment
+      // its paths get one (`refitPathsIn` forgets the widths the last pass recorded).
+      if (row._open) refitPathsIn(detail);
     }
   }
 
@@ -3207,6 +3778,21 @@
   ]);
 
   /**
+   * The tools whose label is the **file path** they acted on. Such a label is fitted the
+   * way the path above a viewer is (`registerPathFit`): the file name stays whole and the
+   * directories give way, because the name is the one part of the line that says what the
+   * step was about. A `title` replaces the label with prose, and prose is never fitted.
+   */
+  const PATH_LABEL_TOOLS = new Set([
+    'read_file',
+    'write_file',
+    'replace_in_file',
+    'append_file',
+    'read_image',
+    'list_dir',
+  ]);
+
+  /**
    * The argument that names what a **session** tool acted on, because such a tool has no
    * path and no command: it has a conversation. Its row's label is that value —
    * `#sessionId` for everything that addresses an existing session, the quoted title for
@@ -3274,6 +3860,12 @@
       value = m ? (m[1] || m[2] || '') : '';
     }
     value = String(value).replace(/\s+/g, ' ').trim();
+    // A path is never cut here: it is what `registerPathFit` shortens, from the width the
+    // row leaves it, and it can only do that if the whole path arrives. A cut string has
+    // no separators left to shorten and no file name to keep whole. A command or a
+    // pattern keeps the 60-character cap: it is quoted text that no fit can improve, and
+    // a row is more useful with its beginning than with a wall of it.
+    if (PATH_LABEL_TOOLS.has(name)) return value;
     return value.slice(0, 60);
   }
 
@@ -3286,6 +3878,27 @@
   function toolLabel(name, args, title) {
     const given = typeof title === 'string' ? title.trim() : '';
     return given || toolBrief(name, args);
+  }
+
+  /**
+   * Whether a row's label is the **file path** the call acted on — the one label a row
+   * reads from its end, so it is shortened differently from a command or a pattern. A
+   * `title` means the model named the step, so the label is its prose, not a path.
+   */
+  function labelIsPath(name, title) {
+    return !title && PATH_LABEL_TOOLS.has(name);
+  }
+
+  /**
+   * Keep a row's label fitted as a path, or stop doing so. One row is a draft with a prose
+   * label first, then a path once its arguments settle — and a `title` can replace that
+   * path with prose — so this runs on every relabel rather than once at build time.
+   */
+  function syncPathLabel(name, labelEl, label, title) {
+    if (!labelEl) return;
+    const row = labelEl.parentElement || labelEl;
+    if (label && labelIsPath(name, title)) registerPathFit(labelEl, label, row, { mono: false, spare: LABEL_GAP });
+    else clearPathFit(labelEl);
   }
 
   // ---- The detail: one presentation per kind of tool --------------------------
@@ -3528,13 +4141,436 @@
    * where the wave lives; the ticking chip is the row's clock, and its `running` / `done`
    * class still carries the state for anything that reads it.
    */
-  function toolRowHead(name, label, mono) {
+  function toolRowHead(name, label, mono, asPath) {
     const head = el('div', 'tool-row');
     const verb = el('b', 'tool-verb');
     setVerbText(verb, toolVerb(name));
     head.appendChild(verb);
-    if (label) head.appendChild(el('span', 'tool-label' + (mono ? ' mono' : ''), label));
+    if (label) {
+      const labelEl = el('span', 'tool-label' + (mono ? ' mono' : ''), label);
+      head.appendChild(labelEl);
+      // A path label is fitted to the width the row leaves it. That width is read from the
+      // **row**, minus the parts that are not text (the verb, the chips): a label sized by
+      // its own content would make every fit read its own last answer, and the row grows a
+      // little shorter each pass.
+      if (asPath) registerPathFit(labelEl, label, head, { mono: false, spare: LABEL_GAP });
+    }
     return head;
+  }
+
+  // ---- Fitting a path to the width it is given ------------------------------
+  // A path is read from its end: the file name says what the card is showing, and the
+  // directories above it only say where. So a path that does not fit keeps its file name
+  // whole and gives up its directory names first — each one cut to its own beginning
+  // (`Attachments` -> `Att…`), and then dropped from the left, which is the shape
+  // `…\Att…\BulletEndAttachments.cs`. CSS can only cut the **end** of a line
+  // (`text-overflow`), or its start with `direction: rtl`, which scrambles the punctuation
+  // of what it keeps — so the string is computed here, from the width the element was
+  // actually given, and recomputed when that width changes.
+
+  /** What a shortened path element ends with. One cell in a monospace font. */
+  const PATH_MARK = '…';
+  /** A directory name keeps at least this many characters before `PATH_MARK`. */
+  const PATH_MIN_SEG = 3;
+  /**
+   * The cell width assumed when the font cannot be measured at all — the offline webview
+   * checker's DOM stub, and a window the platform has hidden. A window that can measure
+   * never sees this number.
+   */
+  const PATH_FALLBACK_CELL = 6;
+  /**
+   * The most of a hit row its path may take. A hit is a path, a line number **and** the
+   * matched text, so the path is the one of the three that gives way.
+   */
+  const HITS_PATH_SHARE = 0.45;
+  /** `.tool-row`'s `gap`: what separates a row's label from the verb and the chips. */
+  const LABEL_GAP = 6;
+
+  /** The separator a path is written with: the one it uses most, `\` winning a tie. */
+  function pathSeparator(text) {
+    const back = (text.match(/\\/g) || []).length;
+    return back > 0 && back >= (text.match(/\//g) || []).length ? '\\' : '/';
+  }
+
+  /** The end of `text` that `budget` characters can hold, marked with `PATH_MARK`. */
+  function pathTail(text, budget) {
+    if (budget >= text.length) return text;
+    if (budget <= 1) return PATH_MARK;
+    return PATH_MARK + pathSliceTail(text, budget - 1);
+  }
+
+  /** `text` cut to its first `n` units, never through a surrogate pair (an emoji in a name). */
+  function pathSliceHead(text, n) {
+    if (n >= text.length) return text;
+    if (n <= 0) return '';
+    const code = text.charCodeAt(n - 1);
+    return text.slice(0, code >= 0xd800 && code <= 0xdbff ? n - 1 : n);
+  }
+
+  /** `text` cut to its last `n` units, never through a surrogate pair. */
+  function pathSliceTail(text, n) {
+    if (n >= text.length) return text;
+    if (n <= 0) return '';
+    const start = text.length - n;
+    const code = text.charCodeAt(start);
+    return text.slice(code >= 0xdc00 && code <= 0xdfff ? start + 1 : start);
+  }
+
+  /** One directory name at its shortest: its beginning, then the mark. */
+  function pathSegment(name) {
+    return name.length <= PATH_MIN_SEG ? name : pathSliceHead(name, PATH_MIN_SEG) + PATH_MARK;
+  }
+
+  /** One character more of a directory name (`Att…` -> `Atta…` -> … -> `Attachments`). */
+  function pathGrow(shown, name) {
+    if (shown === name) return shown;
+    const kept = shown.endsWith(PATH_MARK) ? shown.length - 1 : shown.length;
+    const next = pathSliceHead(name, kept + 1);
+    return next.length >= name.length ? name : next + PATH_MARK;
+  }
+
+  /**
+   * The path in at most `budget` characters, read from its own end: the file name whole,
+   * the directory names shortened and then dropped from the left, and — for a budget too
+   * small even for the name — the name's own end, which is where its extension is.
+   * Deterministic: one path and one budget always give the same string.
+   */
+  function fitPathText(full, budget) {
+    const text = String(full === undefined || full === null ? '' : full);
+    if (!text || budget <= 0 || text.length <= budget) return text;
+    const sep = pathSeparator(text);
+    const lead = /^[\\/]+/.exec(text);
+    const trail = /[\\/]+$/.exec(text);
+    const names = text.split(/[\\/]+/).filter(Boolean);
+    const tail = trail ? trail[0] : '';
+    if (names.length < 2) return pathTail(text, budget);
+    const last = names[names.length - 1];
+    const dirs = names.slice(0, -1);
+    // The file name comes first: a budget that cannot hold it keeps its end instead.
+    if (PATH_MARK.length + sep.length + last.length + tail.length > budget) {
+      return pathTail(last, budget) + tail;
+    }
+    // The shortest form that still names every directory: each one at `PATH_MIN_SEG`, then
+    // the leftmost ones dropped for a single leading mark. `from` is the index of the first
+    // directory name still shown.
+    let from = 0;
+    let kept = dirs.map(pathSegment);
+    const render = (pieces, start) => {
+      const head = start > 0 ? PATH_MARK + sep : lead ? lead[0] : '';
+      return head + pieces.map((piece) => piece + sep).join('') + last + tail;
+    };
+    while (kept.length && render(kept, from).length > budget) {
+      kept = kept.slice(1);
+      from++;
+    }
+    // What is left over goes back into the names one character at a time each, and then
+    // into the names that were dropped (the one nearest the file first): a wider card shows
+    // the whole of what it can rather than one name in full and the rest gone.
+    for (let grew = true; grew; ) {
+      grew = false;
+      for (let i = 0; i < kept.length; i++) {
+        const before = kept[i];
+        const grown = pathGrow(before, dirs[from + i]);
+        if (grown === before) continue;
+        kept[i] = grown;
+        if (render(kept, from).length <= budget) grew = true;
+        else kept[i] = before;
+      }
+      if (from > 0) {
+        const restored = [pathSegment(dirs[from - 1])].concat(kept);
+        if (render(restored, from - 1).length <= budget) {
+          kept = restored;
+          from--;
+          grew = true;
+        }
+      }
+    }
+    return render(kept, from);
+  }
+
+  /** A 2d context for measuring text, or null when the platform has none. */
+  let textMeasureCtx;
+  function measureContext() {
+    if (textMeasureCtx !== undefined) return textMeasureCtx;
+    textMeasureCtx = null;
+    try {
+      const ctx = document.createElement('canvas').getContext('2d');
+      if (ctx && typeof ctx.measureText === 'function') textMeasureCtx = ctx;
+    } catch {
+      textMeasureCtx = null;
+    }
+    return textMeasureCtx;
+  }
+
+  /** The hidden span a font is measured with when the canvas will not say (`probeWidthPx`). */
+  let textProbe = null;
+
+  /**
+   * How wide `text` is in the font `reference` is drawn with, in px; 0 when unmeasurable.
+   * The canvas is the cheap answer and the usual one; a hidden span wearing the same font
+   * is the answer of last resort, because a canvas that refuses a font string reports
+   * widths for the *wrong* font without saying so, and a fitted path a few characters too
+   * wide is cut by the label's own CSS ellipsis, which eats the file name.
+   */
+  function textWidthPx(reference, text) {
+    const value = String(text === undefined || text === null ? '' : text);
+    if (!value) return 0;
+    return canvasWidthPx(reference, value) || probeWidthPx(reference, value);
+  }
+
+  function canvasWidthPx(reference, text) {
+    const ctx = measureContext();
+    if (!ctx || typeof getComputedStyle !== 'function') return 0;
+    try {
+      const style = getComputedStyle(reference) || {};
+      const font = [
+        style.fontStyle || 'normal',
+        style.fontWeight || '400',
+        style.fontSize || '12px',
+        style.fontFamily || 'monospace',
+      ].join(' ');
+      // A refused font string leaves the previous one in place: assigning a known font
+      // first is what turns that silence into a 0 the caller can see.
+      ctx.font = '10px monospace';
+      ctx.font = font;
+      if (ctx.font === '10px monospace') return 0;
+      const measured = ctx.measureText(text).width;
+      return measured > 0 ? measured : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  function probeWidthPx(reference, text) {
+    try {
+      if (typeof getComputedStyle !== 'function') return 0;
+      const style = getComputedStyle(reference) || {};
+      if (!textProbe) {
+        textProbe = el('span');
+        textProbe.style.position = 'absolute';
+        textProbe.style.left = '0';
+        textProbe.style.top = '-1000px';
+        textProbe.style.visibility = 'hidden';
+        textProbe.style.pointerEvents = 'none';
+        textProbe.style.whiteSpace = 'pre';
+        if (document.body && document.body.appendChild) document.body.appendChild(textProbe);
+      }
+      textProbe.style.fontFamily = style.fontFamily || '';
+      textProbe.style.fontSize = style.fontSize || '';
+      textProbe.style.fontStyle = style.fontStyle || '';
+      textProbe.style.fontWeight = style.fontWeight || '';
+      textProbe.style.letterSpacing = style.letterSpacing || '';
+      textProbe.textContent = text;
+      const rect = textProbe.getBoundingClientRect ? textProbe.getBoundingClientRect() : null;
+      const width = rect && rect.width ? rect.width : textProbe.offsetWidth || 0;
+      return width > 0 ? width : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * The paths waiting to be fitted. `span` carries the text, `full` is the whole path, and
+   * `target` is the element the flex layout sizes on its own — the point of the three is
+   * that a re-fit never reads its own last answer, which would make a path shrink a little
+   * on every pass. One `ResizeObserver` re-fits them: a card is dragged wider and narrower
+   * and a path that was cut has to grow back.
+   */
+  const pathFits = new Set();
+  let pathFitObserver = null;
+  let pathFitFrame = 0;
+
+  function schedulePathFit() {
+    if (pathFitFrame) return;
+    pathFitFrame = requestAnimationFrame(fitPaths);
+  }
+
+  /**
+   * One path, fitted to `avail` px: the whole string kept when it fits, else the file name
+   * whole and the directories shortened, else the file name's own end.
+   */
+  function paintPathFit(entry, avail) {
+    const span = entry.span;
+    const full = entry.full;
+    if (entry.share < 1) span.style.maxWidth = avail + 'px';
+    // A monospace cell is everything the arithmetic needs (every character is the same
+    // width), so one division gives the budget, and there is nothing left to check.
+    if (entry.mono) {
+      const cell = textWidthPx(span, '0123456789') / 10;
+      const text = fitPathText(full, Math.max(1, Math.floor(avail / (cell || PATH_FALLBACK_CELL))));
+      if (span.textContent !== text) span.textContent = text;
+      return;
+    }
+    // A proportional font has no such thing as a cell: the kept capitals of a file name are
+    // wider than the lower case of the directories a fit drops, so an average is wrong in
+    // both directions — too wide and the label's CSS ellipsis eats the **file name**, too
+    // narrow and the row leaves width unused. The budget is bisected against the fitted
+    // string's own width, and then the span's own box has the last word: a string still
+    // wider than it is the one CSS cuts.
+    //
+    // One pixel is held back from the box on purpose: a string that lands exactly on the
+    // edge is one subpixel of layout away from the ellipsis, and the CSS cut takes the last
+    // characters of the file name (`.cs`) with it.
+    const room = Math.max(1, avail - 1);
+    let text = fitPathToWidth(span, full, room);
+    span.textContent = text;
+    for (let guard = 0; guard < 6 && text.length > 1; guard++) {
+      // The **fractional** width against the box: `scrollWidth` is integer-rounded, so a
+      // string that overflows by half a pixel reports "equal" there while the label's CSS
+      // ellipsis still fires and eats the end of the file name.
+      const want = textWidthPx(span, text) || 0;
+      const box = span.clientWidth || 0;
+      if (!want || !box || want <= box - 1) break;
+      const over = want - box + 1;
+      const cell = want / Math.max(1, text.length);
+      text = fitPathText(full, Math.max(1, text.length - Math.max(1, Math.ceil(over / (cell || 6)))));
+      span.textContent = text;
+    }
+    if (span.textContent !== text) span.textContent = text;
+  }
+
+  /**
+   * The most of `full` that is at most `avail` px wide in `span`'s own font, found by
+   * bisection: a fitted path only ever grows with its budget (a name gains characters, a
+   * dropped one comes back), so the widest string that fits is the largest budget that
+   * fits. No measurement to be had (the offline checker's DOM stub, a hidden window) falls
+   * back to the nominal cell, exactly as the monospace half does.
+   */
+  function fitPathToWidth(span, full, avail) {
+    const whole = fitPathText(full, full.length);
+    const wholeWidth = textWidthPx(span, whole);
+    if (!wholeWidth) return fitPathText(full, Math.max(1, Math.floor(avail / PATH_FALLBACK_CELL)));
+    if (wholeWidth <= avail) return whole;
+    let low = 1;
+    let high = full.length;
+    let best = fitPathText(full, 1);
+    while (low <= high) {
+      const mid = (low + high) >> 1;
+      const candidate = fitPathText(full, mid);
+      if ((textWidthPx(span, candidate) || 0) <= avail) {
+        best = candidate;
+        low = mid + 1;
+      } else {
+        high = mid - 1;
+      }
+    }
+    return best;
+  }
+
+  function fitPaths() {
+    pathFitFrame = 0;
+    const ready = [];
+    for (const entry of pathFits) {
+      const span = entry.span;
+      if (!span || span.isConnected === false) {
+        pathFits.delete(entry);
+        continue;
+      }
+      const avail = pathFitWidth(entry);
+      if (avail <= 0 || avail === entry.width) continue;
+      entry.width = avail;
+      ready.push([entry, avail]);
+    }
+    // Every width is read before the first text is written: a list of hit rows would
+    // otherwise force one layout per row.
+    for (const [entry, avail] of ready) paintPathFit(entry, avail);
+  }
+
+  /**
+   * The px one entry may use: a share of its target's width (a hit row), or the target's
+   * width minus the parts that are not this text (a label's verb and chips, at
+   * `entry.spare` per seam). The label's own box is the floor, so a build that reports no
+   * sibling widths still fits it against what it was given.
+   */
+  function pathFitWidth(entry) {
+    const target = entry.target;
+    const share = Math.floor((target.clientWidth || 0) * entry.share);
+    if (!entry.spare) return share;
+    let used = 0;
+    let seams = 0;
+    for (const child of target.children || []) {
+      if (child === entry.span) continue;
+      used += child.offsetWidth || 0;
+      seams++;
+    }
+    const room = Math.floor((target.clientWidth || 0) - used - entry.spare * seams);
+    // The row's own arithmetic is the target, never the label's box: a box that follows its
+    // text would make every fit read its own last answer. The box is only the fallback for a
+    // build that reports no sibling width.
+    return room > 0 ? room : Math.floor(entry.span.clientWidth || 0);
+  }
+
+  /**
+   * Register one path element: fitted now, or as soon as it has a width, and again every
+   * time its box changes size. The full path stays on the element as its `title`, so the
+   * hover of a shortened path still says where the file is.
+   */
+  function registerPathFit(span, full, target, opts) {
+    if (!span) return;
+    // One entry per element: a row is re-labelled in place, and two entries for the same
+    // span would paint it twice and leak the one nothing points at.
+    const previous = span._pathFit;
+    if (previous) pathFits.delete(previous);
+    const entry = {
+      span,
+      full: String(full === undefined || full === null ? '' : full),
+      target: target || span,
+      share: opts && opts.share ? opts.share : 1,
+      spare: (opts && opts.spare) || 0,
+      mono: !!(opts && opts.mono),
+      width: 0,
+    };
+    span._pathFit = entry;
+    span.title = entry.full;
+    pathFits.add(entry);
+    if (!pathFitObserver && typeof ResizeObserver !== 'undefined') {
+      pathFitObserver = new ResizeObserver(schedulePathFit);
+    }
+    if (pathFitObserver) {
+      try {
+        if (previous && previous.target && previous.target !== entry.target) pathFitObserver.unobserve(previous.target);
+        pathFitObserver.observe(entry.target);
+      } catch {
+        /* a target this build cannot observe is fitted once, and never again */
+      }
+    }
+    schedulePathFit();
+  }
+
+  /** Stop fitting an element — its text is prose now, not a path. */
+  function clearPathFit(span) {
+    if (!span || !span._pathFit) return;
+    const entry = span._pathFit;
+    pathFits.delete(entry);
+    delete span._pathFit;
+    span.title = '';
+    if (pathFitObserver) {
+      try {
+        pathFitObserver.unobserve(entry.target || span);
+      } catch {
+        /* an observer that has nothing to forget is not a problem */
+      }
+    }
+  }
+
+  /**
+   * Forget the recorded widths under `root`, so the next pass fits them again: a folded
+   * detail has no width at all, and the row that has just been opened has one for the
+   * first time.
+   */
+  function refitPathsIn(root) {
+    let any = false;
+    const walk = (node) => {
+      for (const child of (node && node.children) || []) {
+        if (child._pathFit) {
+          child._pathFit.width = 0;
+          any = true;
+        }
+        walk(child);
+      }
+    };
+    walk(root);
+    if (any) schedulePathFit();
   }
 
   // ---- The viewers -----------------------------------------------------------
@@ -3590,10 +4626,14 @@
       // A jump: the card is showing a file, so its path opens that file. The path travels
       // as the call wrote it (usually workspace-relative) and the **host** resolves it — the
       // webview has no root to resolve against. No line: a read carries no "that line".
+      // The box is what the flex layout sizes, so a fitted path cannot feed its own width
+      // back in; the span inside it carries the text and is the jump.
+      const box = el('span', 'path-fit');
       const pathEl = el('span', 'code-path jump', opts.path);
-      pathEl.title = opts.path;
       pathEl.addEventListener('click', () => vscode.postMessage({ type: 'openFile', path: opts.path }));
-      head.appendChild(pathEl);
+      box.appendChild(pathEl);
+      head.appendChild(box);
+      registerPathFit(pathEl, opts.path, box, { mono: true });
     }
     if (opts.note) head.appendChild(el('span', 'code-note', opts.note));
     head.appendChild(el('span', 'code-count', lines.length === 1 ? tr('1 line') : tr('{0} lines', lines.length)));
@@ -3678,7 +4718,20 @@
     const dir = parsed ? parsed[1].replace(/\s+\(recursive\)$/, '') : '';
     const view = el('div', 'entries-view');
     const head = el('div', 'entries-head');
-    if (parsed) head.appendChild(el('span', 'entries-path', parsed[1]));
+    if (parsed) {
+      // The head shows the directory it listed. `(recursive)` is a mark on that listing,
+      // not part of the path, so it stands beside the fitted path instead of inside it: a
+      // shortened directory must never spend its width on it, and the mark must stay
+      // glued to the path it marks (the count takes the rest of the head, right-aligned).
+      const line = el('span', 'entries-head-path');
+      const box = el('span', 'path-fit');
+      const pathEl = el('span', 'entries-path', dir);
+      box.appendChild(pathEl);
+      line.appendChild(box);
+      if (parsed[1] !== dir) line.appendChild(el('span', 'entries-mark', parsed[1].slice(dir.length)));
+      head.appendChild(line);
+      registerPathFit(pathEl, dir, box, { mono: true });
+    }
     // The count is filled in once the rows are known, so the element is kept rather than
     // read back off the head (a `lastChild` lookup is a second guess at what was appended).
     const countEl = el('span', 'entries-count', '');
@@ -3846,10 +4899,13 @@
     const head = el('div', 'diff-head');
     if (opts.path) {
       // A jump, like the code surface: the change is in this file, so its path opens it.
+      // Fitted the same way, and for the same reason (`registerPathFit`).
+      const box = el('span', 'path-fit');
       const pathEl = el('span', 'diff-path jump', opts.path);
-      pathEl.title = opts.path;
       pathEl.addEventListener('click', () => vscode.postMessage({ type: 'openFile', path: opts.path }));
-      head.appendChild(pathEl);
+      box.appendChild(pathEl);
+      head.appendChild(box);
+      registerPathFit(pathEl, opts.path, box, { mono: true });
     }
     if (opts.note) head.appendChild(el('span', 'diff-note', opts.note));
     head.appendChild(el('span', 'diff-count-add', '+' + (opts.add || 0)));
@@ -3957,13 +5013,17 @@
     for (const hit of hits) {
       const row = el('div', 'hits-row' + (hit.ctx ? ' ctx' : ''));
       const path = el('span', 'hits-path', hit.path);
-      path.title = hit.path;
       row.appendChild(path);
       row.appendChild(el('span', 'hits-line', hit.line));
       row.appendChild(el('span', 'hits-text', hit.text));
       row.addEventListener('click', () => {
         vscode.postMessage({ type: 'openFile', path: hit.path, line: Number(hit.line) });
       });
+      // The row is what is watched: a hit's path is one of three parts that share the row,
+      // so its own width depends on the other two and a fit read back from it would chase
+      // itself. The row's width is the layout's, and the path takes at most `HITS_PATH_SHARE`
+      // of it.
+      registerPathFit(path, hit.path, row, { mono: true, share: HITS_PATH_SHARE });
       list.appendChild(row);
     }
     view.appendChild(list);
@@ -4298,9 +5358,11 @@
     const view = el('div', 'image-view');
     const head = el('div', 'image-head');
     if (a.path) {
+      const box = el('span', 'path-fit');
       const pathEl = el('span', 'image-path', a.path);
-      pathEl.title = a.path;
-      head.appendChild(pathEl);
+      box.appendChild(pathEl);
+      head.appendChild(box);
+      registerPathFit(pathEl, a.path, box, { mono: true });
     }
     // The transform's own sentence (`1920x1080, rect 10,20 200x150 -> 200x150`) carries the
     // size that was actually sent, which is the one fact worth repeating.
@@ -4470,7 +5532,7 @@
     node.dataset.id = id;
     node.dataset.kind = 'tool';
     const mono = !opts.title && MONO_LABEL_TOOLS.has(name);
-    const head = toolRowHead(name, toolLabel(name, args, opts.title), mono);
+    const head = toolRowHead(name, toolLabel(name, args, opts.title), mono, labelIsPath(name, opts.title));
     // The line diff of a file-modifying call, before the elapsed chip (the head reads
     // verb, label, `+12 -3`, time).
     syncDiff(head, opts.diff);
@@ -4657,6 +5719,9 @@
         labelEl.textContent = label;
         labelEl.classList.toggle('mono', mono);
       }
+      // The draft's prose label has just become the path the call acts on (or a `title`
+      // has replaced it with prose): the label is fitted, or stops being fitted, here.
+      syncPathLabel(name, labelEl, label, title);
       // The arguments are settled, so the call is *running* now: that is the moment
       // its elapsed chip is born.
       syncElapsed(node._rowEl, 'tool-elapsed', start, ms);
@@ -4952,6 +6017,17 @@ function addBackgroundNotice(item) {
     const workEl = card.querySelector('.node-work');
     const askEl = card.querySelector('.node-ask');
     if (!workEl || !askEl) return;
+    // What this card now holds, for the unload decision (`virtMayUnload`), and the fact
+    // that it no longer needs a reload — a summary render counts, because something is on
+    // screen again.
+    card._itemCount = (items || []).length;
+    card._itemsUnloaded = false;
+    // The settle stamp of this render (see `virtMayUnload`), and the decay of a hold the
+    // card has outlived: escalation is a brake on a ping-pong, not a permanent sentence.
+    card._virtFilledAt = perfNow();
+    if (card._virtReloads && perfNow() - (card._virtReloadedAt || 0) > VIRT_RELOAD_HOLD_MAX_MS) {
+      card._virtReloads = 0;
+    }
     // A full render clears the log, which is the one way a position can be thrown away
     // with nothing to be said for it: keep what the log remembers and hand it back once
     // the items are in. On a card's *first* render there is nothing to hand back
@@ -5909,6 +6985,10 @@ function addBackgroundNotice(item) {
     card._nodeId = id;
     treeCanvas.appendChild(card);
     if (cvObserver) cvObserver.observe(card);
+  // The unload/watch pair (see `virtObserver`): a card far off screen gives its content
+  // back and asks for it again on the way in.
+  if (virtLoadObserver) virtLoadObserver.observe(card);
+  if (virtUnloadObserver) virtUnloadObserver.observe(card);
     // Every card is watched by the one card observer as well (see `cardResizeObserver`):
     // any card that grows after the last layout pass leaves the tree with stale boxes,
     // whatever grew it. Observed after `_nodeId` is set, because the observer reads a
@@ -5969,6 +7049,42 @@ function addBackgroundNotice(item) {
   // gone with the old tree.
   const ITEMS_CONCURRENCY = 3;
 
+  // ---- The view is moving: nothing expensive happens under the gesture ---------
+  // A free-spinning wheel (a G502's turbo scroll with alt) sends dozens of events a second,
+  // and every card that crosses the viewport used to turn into a fetch *and* a synchronous
+  // render: a transcript laid out, the tree re-placed, then the next answer. That is the
+  // stutter the wheel produces, and none of it is needed while the reader is still moving —
+  // a card flying past is not being read. So the camera records when it last moved, and
+  // while it moves the answers are held (the card keeps its loading strip) and the unloads
+  // wait; one timer, a quarter second after the last movement, lets everything resume.
+  const VIEW_MOVE_MS = 250;
+  const DEFERRED_RENDER_BATCH = 3;
+  let lastViewMoveAt = -1e9;
+  let viewIdleTimer = null;
+  let deferredItemsTimer = null;
+
+  /** Is the camera still settling from a move? */
+  function viewMoving() {
+    return perfNow() - lastViewMoveAt < VIEW_MOVE_MS;
+  }
+
+  /** The camera moved (drag, wheel, autoscroll or pinch): hold the expensive work. */
+  function noteViewMove() {
+    lastViewMoveAt = perfNow();
+    if (viewIdleTimer != null) clearTimeout(viewIdleTimer);
+    viewIdleTimer = setTimeout(() => {
+      viewIdleTimer = null;
+      // The moment the camera is quiet: the work the move postponed, in one batch. The
+      // skip/wake transitions come first — they change card heights, and the layout pass
+      // that follows is what puts the tree back in place around them.
+      flushCv();
+      flushLayout();
+      pumpItems();
+      flushDeferredItems();
+      pumpUnloads();
+    }, VIEW_MOVE_MS + 50);
+  }
+
   let itemsQueue = [];
   let itemsInFlight = 0;
   /** Cards queued *and* on screen — the ones the queue promotes. */
@@ -6014,6 +7130,12 @@ function addBackgroundNotice(item) {
       card._itemsTimer = null;
       card.classList.remove('items-loading');
       card.removeAttribute('aria-busy');
+      // An unloaded card whose answer never came must not stay invisible: give its box
+      // back (it is empty, but it is there) instead of keeping a placeholder forever.
+      if (card._itemsUnloaded) {
+        card._itemsUnloaded = false;
+        cvWake(card);
+      }
     }, ITEMS_WAIT_MS);
   }
 
@@ -6050,10 +7172,41 @@ function addBackgroundNotice(item) {
     return true;
   }
 
+  /**
+   * The state a card should be in once the camera is quiet. Waking a card lays it out and
+   * paints it, and skipping one measures it — both are main-thread work that must not happen
+   * under a moving camera: with a G502's free-spinning wheel this is what the 100 to 170 ms
+   * frames were made of (14 long tasks in a 10 s wheel, no host message, no item render and
+   * no slow layout pass: just cards crossing the skip margin).
+   */
+  const cvPending = new Set();
+
   /** Render this card again, whatever the observer last decided (see `cvObserver`). */
   function cvWake(card) {
     try {
       if (!card || !cvSkipped.has(card)) return;
+      // An unloaded card is still skipped on purpose: its placeholder height IS its box
+      // until the content is back. Waking it early would collapse a card the reader has
+      // not reached yet, and the layout would re-place the tree around a hole.
+      if (card._itemsUnloaded) return;
+      // The card is 1,000 px away while the camera moves: it can wait for the settle, and
+      // the layout it would cost then lands on a still screen.
+      if (viewMoving() && treeActiveId !== card._nodeId) {
+        card._cvWant = 'wake';
+        cvPending.add(card);
+        return;
+      }
+      cvWakeNow(card);
+    } catch (err) {
+      /* a layout aid must never break the UI */
+    }
+  }
+
+  /** Wake immediately: the camera is quiet, or the card is the one the reader is in. */
+  function cvWakeNow(card) {
+    try {
+      if (!card || !cvSkipped.has(card)) return;
+      if (card._itemsUnloaded) return;
       cvSkipped.delete(card);
       card.classList.remove('cv-skip');
       card.style.containIntrinsicSize = '';
@@ -6071,10 +7224,147 @@ function addBackgroundNotice(item) {
           continue;
         }
         if (!cvMaySkip(card)) continue;
-        // Measured while it is still rendered — this is the height the layout will read back.
-        const w = card.offsetWidth || 0;
-        const h = card.offsetHeight || 0;
-        if (!w || !h) continue;
+        // Measuring a card forces a layout, so the skip waits for the settle too.
+        if (viewMoving()) {
+          card._cvWant = 'skip';
+          cvPending.add(card);
+          continue;
+        }
+        cvSkipNow(card);
+      }
+    } catch (err) {
+      /* a layout aid must never break the UI */
+    }
+  }
+
+  /** Measure this card while it still has a box, then let the engine skip it. */
+  function cvSkipNow(card) {
+    try {
+      if (!card || cvSkipped.has(card) || !cvMaySkip(card)) return;
+      const w = card.offsetWidth || 0;
+      const h = card.offsetHeight || 0;
+      if (!w || !h) return;
+      card.style.containIntrinsicSize = w + 'px ' + h + 'px';
+      card.classList.add('cv-skip');
+      cvSkipped.add(card);
+    } catch (err) {
+      /* a layout aid must never break the UI */
+    }
+  }
+
+  /** Apply the skip/wake transitions a moving camera postponed, in one pass. */
+  function flushCv() {
+    if (cvPending.size === 0 || viewMoving()) return;
+    const cards = [...cvPending];
+    cvPending.clear();
+    for (const card of cards) {
+      if (!card || !card._nodeId) continue;
+      const want = card._cvWant;
+      card._cvWant = null;
+      if (want === 'wake') cvWakeNow(card);
+      else if (want === 'skip') cvSkipNow(card);
+    }
+  }
+
+  // ---- Cards far off screen: their content is unloaded (card virtualization) ---
+  // The skip above stops the engine from *rastering* a far card; this one gives the card's
+  // content back to the browser entirely. Measured in a real session: visiting five
+  // sub-agent cards took the document from 8,660 elements to 57,455, and every pan frame
+  // from ~30 ms to ~300 ms — because a lazy load was a one-way door. `loadNodeItems` /
+  // `loadAgentItems` fetched a transcript when a card came near, and nothing ever released
+  // it, so a reader who browsed the tree kept every transcript they had looked at for the
+  // life of the document, and a reload (which empties the DOM) was the only cure.
+  //
+  // The card's **element** stays: its head, its box, its connector edge and its place in
+  // the tidy-tree layout are unchanged. Only its ask and its log go, and the height it had
+  // is kept as a placeholder so the layout does not re-place itself for content nobody can
+  // see.
+  //
+  // **Two margins, not one, and a dwell.** A single boundary is an oscillator: a reader who
+  // stops right on it (or pans back and forth across it) makes a card load and unload on
+  // every frame of the gesture, which is more work than never unloading at all (measured:
+  // the same transcripts arriving four and five times in half a minute). So coming back and
+  // going away are two different distances — 2,000 px to ask again, 6,000 px to hand the
+  // content back — and a card must stay beyond the far one for a moment before it is
+  // released. A fast pan across a card therefore costs nothing, and a card flicked away and
+  // back is never reloaded. Releases are batched too: a zoom-out can put a hundred cards
+  // beyond the margin at once, and tearing a hundred subtrees down in one callback would be
+  // a stutter of its own.
+  const VIRT_LOAD_MARGIN = '2000px';
+  const VIRT_UNLOAD_MARGIN = '6000px';
+  const VIRT_UNLOAD_DWELL_MS = 900;
+  const VIRT_UNLOAD_BATCH = 4;
+  const VIRT_UNLOAD_TICK_MS = 200;
+  /** A card keeps whatever a render just gave it for this long, whoever asked for the render. */
+  const VIRT_SETTLE_MS = 5000;
+  /** The hold a reloaded card earns before it may be released again, doubling per reload. */
+  const VIRT_RELOAD_HOLD_MS = 15000;
+  const VIRT_RELOAD_HOLD_MAX_MS = 120000;
+  /** A card holding fewer rows than this costs less than the round trip to get them back. */
+  const VIRT_UNLOAD_MIN_ITEMS = 24;
+  const virtLoadObserver =
+    typeof IntersectionObserver === 'function'
+      ? new IntersectionObserver(onCardNear, { root: null, rootMargin: VIRT_LOAD_MARGIN, threshold: 0 })
+      : null;
+  const virtUnloadObserver =
+    typeof IntersectionObserver === 'function'
+      ? new IntersectionObserver(onCardFar, { root: null, rootMargin: VIRT_UNLOAD_MARGIN, threshold: 0 })
+      : null;
+  /** Cards that left the far margin and have not come back: the release queue. */
+  const unloadQueue = [];
+  let unloadTimer = null;
+
+  /**
+   * The hold this card has earned: 15 s after its first reload, then doubling for a card
+   * that keeps coming back, capped at two minutes. Distance margins cannot stop a reader
+   * who keeps turning around inside the dead band; time can.
+   */
+  function virtHoldMs(card) {
+    const reloads = card._virtReloads || 0;
+    if (reloads <= 0) return 0;
+    const hold = VIRT_RELOAD_HOLD_MS * Math.pow(2, Math.min(reloads - 1, 3));
+    return Math.min(VIRT_RELOAD_HOLD_MAX_MS, hold);
+  }
+
+  /**
+   * May this card's content be handed back? Everything a reader could be interacting with
+   * answers no: the checked-out card, a running turn, the card the composer lives in, the
+   * card being resized, and any card holding the document's focus or a selection.
+   */
+  function virtMayUnload(card) {
+    const id = card && card._nodeId;
+    if (!id) return false;
+    // Only a real log is worth a round trip: a summary or an empty card is already cheap,
+    // and unloading it would put a loading strip on a card that shows nothing anyway.
+    if (!card._itemsRendered || card._itemsSummary) return false;
+    if ((card._itemCount || 0) < VIRT_UNLOAD_MIN_ITEMS) return false;
+    const now = perfNow();
+    // Time, not distance: a card a render just filled keeps its content for a moment, and a
+    // card that has already been asked for again is held far longer, so a reader moving
+    // back and forth settles on whichever cards they are actually using.
+    if (now - (card._virtFilledAt || 0) < VIRT_SETTLE_MS) return false;
+    if (now - (card._virtReloadedAt || 0) < virtHoldMs(card)) return false;
+    if (treeActiveId === id) return false;
+    if (runningNodes.has(id)) return false;
+    if (composerHost === card) return false;
+    if (resizing && resizing.id === id) return false;
+    try {
+      if (document.activeElement && card.contains(document.activeElement)) return false;
+      const selection = typeof window.getSelection === 'function' ? window.getSelection() : null;
+      if (selection && selection.anchorNode && card.contains(selection.anchorNode)) return false;
+    } catch (err) {
+      /* no selection API: the other guards still hold */
+    }
+    return true;
+  }
+
+  /** Hand one card's ask and log back to the browser, keeping its box. */
+  function unloadCardItems(card) {
+    // Measured before the content goes: this is the height the layout will keep reading.
+    try {
+      const w = card.offsetWidth || 0;
+      const h = card.offsetHeight || 0;
+      if (w && h) {
         card.style.containIntrinsicSize = w + 'px ' + h + 'px';
         card.classList.add('cv-skip');
         cvSkipped.add(card);
@@ -6082,6 +7372,130 @@ function addBackgroundNotice(item) {
     } catch (err) {
       /* a layout aid must never break the UI */
     }
+    renderNodeItems(card, [], false);
+    card._itemsRendered = false;
+    card._itemsSummary = false;
+    card._itemsRequested = false;
+    // An answer that arrived while the view was moving, and was still waiting when the card
+    // left the margin, goes with the content it was going to replace.
+    card._itemsDeferred = null;
+    card._itemCount = 0;
+    card._itemsUnloaded = true;
+    setCardLoading(card, false);
+    if (itemsObserver && card) itemsObserver.unobserve(card);
+    scheduleLayout();
+  }
+
+  /**
+   * Ask for an unloaded card's content again, from the same message type it came from.
+   * The request is queued as if the card were visible: it is 2,000 px away at the moment it
+   * comes near again, which is close enough that waiting for the viewport observer would let
+   * the reader arrive before the answer did.
+   */
+  function reloadCardItems(card) {
+    const id = card._nodeId;
+    if (!id || !card._itemsUnloaded || card._itemsRequested) return;
+    card._itemsRequested = true;
+    // The hold this reload earns (see `virtHoldMs`), and the count that doubles it.
+    card._virtReloads = (card._virtReloads || 0) + 1;
+    card._virtReloadedAt = perfNow();
+    if (!card._itemsMessage) {
+      const meta = treeNodes[id] || {};
+      card._itemsMessage = meta.kind === 'agent' ? 'loadAgentItems' : 'loadNodeItems';
+    }
+    setCardLoading(card, true);
+    if (itemsObserver) {
+      itemsQueue.push(id);
+      itemsVisible.add(id);
+      itemsObserver.observe(card);
+      pumpItems();
+      return;
+    }
+    postItems(id, card);
+  }
+
+  /** A card came back inside the load margin: it is near again, so it must not be released. */
+  function onCardNear(entries) {
+    try {
+      for (const entry of entries) {
+        const card = entry.target;
+        if (!entry.isIntersecting) continue;
+        cancelUnload(card);
+        if (card._itemsUnloaded) reloadCardItems(card);
+      }
+    } catch (err) {
+      /* a memory bound must never break the UI */
+    }
+  }
+
+  /** A card crossed the far margin: start (or cancel) its dwell before it is released. */
+  function onCardFar(entries) {
+    try {
+      for (const entry of entries) {
+        const card = entry.target;
+        if (entry.isIntersecting) {
+          cancelUnload(card);
+          continue;
+        }
+        scheduleUnload(card);
+      }
+    } catch (err) {
+      /* a memory bound must never break the UI */
+    }
+  }
+
+  /** The card is back near: forget the pending release, wherever it had got to. */
+  function cancelUnload(card) {
+    card._virtFar = false;
+    if (card._unloadTimer) {
+      clearTimeout(card._unloadTimer);
+      card._unloadTimer = null;
+    }
+    const at = unloadQueue.indexOf(card);
+    if (at >= 0) unloadQueue.splice(at, 1);
+  }
+
+  /** It went far away: release it only if it is still there after the dwell. */
+  function scheduleUnload(card) {
+    card._virtFar = true;
+    if (card._unloadTimer) return;
+    card._unloadTimer = setTimeout(() => {
+      card._unloadTimer = null;
+      if (!card._virtFar || !virtMayUnload(card)) return;
+      if (unloadQueue.indexOf(card) < 0) unloadQueue.push(card);
+      pumpUnloads();
+    }, VIRT_UNLOAD_DWELL_MS);
+  }
+
+  /**
+   * Release the queue a few cards per tick, and never while the reader is dragging or
+   * typing: the teardown of a long transcript is real main-thread work, and it must not
+   * land in the middle of a gesture (it runs the moment the gesture ends).
+   */
+  function pumpUnloads() {
+    if (unloadTimer != null || unloadQueue.length === 0) return;
+    // The reader is dragging, typing or wheel-scrolling: the teardown of a long transcript
+    // is real main-thread work and must not land in the middle of that. It resumes on its
+    // own tick once the view is quiet.
+    if (perfPan || perfTyping || viewMoving()) {
+      unloadTimer = setTimeout(() => {
+        unloadTimer = null;
+        pumpUnloads();
+      }, VIRT_UNLOAD_TICK_MS);
+      return;
+    }
+    unloadTimer = setTimeout(() => {
+      unloadTimer = null;
+      let done = 0;
+      while (unloadQueue.length > 0 && done < VIRT_UNLOAD_BATCH) {
+        const card = unloadQueue.shift();
+        done++;
+        if (!card || !card._nodeId || !card._virtFar) continue;
+        if (!virtMayUnload(card)) continue;
+        unloadCardItems(card);
+      }
+      if (unloadQueue.length > 0) pumpUnloads();
+    }, VIRT_UNLOAD_TICK_MS);
   }
 
   /** Does this card still want (and may still receive) its items? */
@@ -6143,6 +7557,9 @@ function addBackgroundNotice(item) {
 
   /** Fill the free slots, the cards in the viewport first; stop when none is. */
   function pumpItems() {
+    // The camera is moving: ask for nothing new until it settles (see `viewMoving`). The
+    // queue keeps its place and the idle timer pumps it again.
+    if (viewMoving()) return;
     for (let i = 0; i < itemsQueue.length; i++) {
       if (!itemsWanted(itemsQueue[i])) forgetItems(itemsQueue[i--]);
     }
@@ -6261,6 +7678,26 @@ function addBackgroundNotice(item) {
       if (card) setCardLoading(card, false);
       return;
     }
+    // The camera is still moving: hold the answer and render it when the view settles. The
+    // card keeps its loading strip, which is the honest state — its content really is on
+    // its way, and the wait now has a visible reason instead of being a stutter.
+    if (viewMoving()) {
+      card._itemsDeferred = items || [];
+      if (deferredItemsTimer == null) {
+        deferredItemsTimer = setTimeout(flushDeferredItems, VIEW_MOVE_MS + 50);
+      }
+      return;
+    }
+    renderFetchedItems(card, items || []);
+  }
+
+  /**
+   * Render the items one answer brought, and re-place the tree around the new box. The
+   * tail of `applyFetchedItems`, split out so a deferred answer can run later through
+   * exactly the same path.
+   */
+  function renderFetchedItems(card, items) {
+    const id = card._nodeId;
     // The work log is the scroller this path opens at its end; the answer zone
     // is filled — and opened at its top — by `renderNodeItems` itself.
     const itemsEl = card.querySelector('.node-work');
@@ -6271,6 +7708,9 @@ function addBackgroundNotice(item) {
     // written together because every render gate reads them as a pair: leaving this set
     // would make the next repaint fetch the same node all over again.
     card._itemsSummary = false;
+    // An unloaded card kept its box as a placeholder: the content is back, so wake it
+    // now (`cvWake` drops the placeholder) rather than waiting for the skip observer.
+    cvWake(card);
     setCardLoading(card, false);
     // Same finished-node default as in `expandedCard` / `renderPath`.
     if (finished) {
@@ -6290,6 +7730,42 @@ function addBackgroundNotice(item) {
     // feeds the layout, so re-place the tree like any other card that changed
     // size (debounced, so a burst of answers coalesces into one relayout).
     scheduleLayout();
+  }
+
+  /**
+   * Render the answers that arrived while the view was moving, a few per tick: a burst of
+   * them must not turn one frame into the layout of ten transcripts. Anything still held
+   * comes back on the next tick, and the queue is pumped once the view is quiet.
+   */
+  function flushDeferredItems() {
+    deferredItemsTimer = null;
+    if (viewMoving()) {
+      deferredItemsTimer = setTimeout(flushDeferredItems, VIEW_MOVE_MS);
+      return;
+    }
+    let done = 0;
+    let more = false;
+    for (const id in nodeEls) {
+      const card = nodeEls[id];
+      if (!card || !card._itemsDeferred) continue;
+      if (done >= DEFERRED_RENDER_BATCH) {
+        more = true;
+        break;
+      }
+      const items = card._itemsDeferred;
+      card._itemsDeferred = null;
+      done++;
+      // The card may have been answered elsewhere, filled by a repaint or unloaded while
+      // the answer waited: the same gates `applyFetchedItems` uses decide again.
+      if (card._itemsRendered && !card._itemsSummary) {
+        setCardLoading(card, false);
+        continue;
+      }
+      if (card._itemsUnloaded) continue;
+      renderFetchedItems(card, items);
+    }
+    if (more) deferredItemsTimer = setTimeout(flushDeferredItems, 16);
+    pumpItems();
   }
 
   /**
@@ -6815,10 +8291,20 @@ function addBackgroundNotice(item) {
   // every tick.
   let cardRelayoutRaf = null;
   function scheduleCardRelayout() {
+    // The camera is moving: a card that changed its own box (one crossing the skip margin,
+    // a log unfolding, an image that landed) must not re-place the whole tree under the
+    // gesture. This is the path that made a free-spinning wheel stutter: every frame the
+    // skip observer changed a card's size, the ResizeObserver asked for a pass, and
+    // `relayout()` rebuilt the edges SVG and measured every card on each animation frame.
+    // The pass runs once, when the view settles (`flushLayout`).
+    if (viewMoving()) {
+      layoutWanted = true;
+      return;
+    }
     if (cardRelayoutRaf != null) return;
     cardRelayoutRaf = requestAnimationFrame(() => {
       cardRelayoutRaf = null;
-      relayout();
+      measuredRelayout();
     });
   }
 
@@ -7017,7 +8503,27 @@ function addBackgroundNotice(item) {
     relayout();
   }
 
-  function relayout() {
+  /**
+ * `relayout()` with one diagnostic: a pass that takes 40 ms or more says so, and whether the
+ * camera was moving when it ran (see `scheduleLayout`). The wheel stutter is a question of
+ * *which* main-thread work a long frame is made of, and the tidy-tree layout of a large
+ * session is the natural suspect.
+ */
+function measuredRelayout() {
+  const t0 = perfNow();
+  relayout();
+  const ms = perfNow() - t0;
+  if (ms >= 40) {
+    perfPost('phase', {
+      phase: 'layout',
+      ms: Math.round(ms),
+      moving: viewMoving() ? 1 : 0,
+      cards: Object.keys(nodeEls).length,
+    });
+  }
+}
+
+function relayout() {
     // Nothing has to be cleared before the measurement any more: the layout writes no
     // inline size onto a card (media/tree.js hands out no rendered height), so every
     // pass already measures the cards' own, natural heights.
@@ -7639,12 +9145,34 @@ function addBackgroundNotice(item) {
   }
 
   let layoutDebounce = null;
+  let layoutWanted = false;
+
   function scheduleLayout() {
+    // The camera is moving: re-placing the whole tree is exactly what must not happen under
+    // a gesture. A card that grew during the scroll keeps its old box for the moment; one
+    // pass runs when the view settles (`flushLayout`), which is what removes the relayout
+    // churn the wheel used to cause (a card crossing the skip margin changes its box, the
+    // `ResizeObserver` fires, and the old code re-placed the tree every 150 ms throughout).
+    if (viewMoving()) {
+      layoutWanted = true;
+      return;
+    }
     if (layoutDebounce != null) return;
     layoutDebounce = setTimeout(() => {
       layoutDebounce = null;
-      relayout();
+      measuredRelayout();
     }, 150);
+  }
+
+  /** Run the pass a moving camera postponed, once it is quiet. */
+  function flushLayout() {
+    if (!layoutWanted || viewMoving()) return;
+    layoutWanted = false;
+    if (layoutDebounce != null) {
+      clearTimeout(layoutDebounce);
+      layoutDebounce = null;
+    }
+    measuredRelayout();
   }
 
   // ---- One ResizeObserver, every card ----------------------------------------
@@ -7678,6 +9206,12 @@ function addBackgroundNotice(item) {
   /** Stop watching a card that leaves the tree (removed, or the session reset). */
   function cardUnobserve(card) {
     if (cardResizeObserver && card) cardResizeObserver.unobserve(card);
+    if (card) {
+      cancelUnload(card);
+      card._itemsDeferred = null;
+      if (virtLoadObserver) virtLoadObserver.unobserve(card);
+      if (virtUnloadObserver) virtUnloadObserver.unobserve(card);
+    }
   }
 
   /**
@@ -7883,29 +9417,39 @@ function addBackgroundNotice(item) {
       dragging = { startX: e.clientX, startY: e.clientY, px: pan.x, py: pan.y };
       e.preventDefault();
       try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* noop */ }
+      // A wheel-driven camera move may still be open (its idle timer has not fired): close
+      // it before this drag owns the pan slot, or its record would never be reported.
+      perfPanEnd();
+      perfPan = perfGestureOpen('pan');
     }
   });
   window.addEventListener('pointermove', (e) => {
     if (resizing) { onResizeMove(e); return; }
     if (!dragging) return;
+    const perfT0 = perfPan ? perfNow() : 0;
     pan.x = dragging.px + (e.clientX - dragging.startX);
     pan.y = dragging.py + (e.clientY - dragging.startY);
     applyTransform();
     setFollow(false);
+    noteViewMove();
+    if (perfT0) perfGestureEvent(perfPan, perfNow() - perfT0);
   });
   window.addEventListener('pointerup', () => {
     if (resizing) { endResize(true); return; }
     dragging = null;
+    perfPanEnd();
   });
   window.addEventListener('pointercancel', () => {
     if (resizing) { endResize(false); return; }
     dragging = null;
+    perfPanEnd();
   });
   // Safety: if the pointer capture is released without a clean pointerup (e.g. the
   // cursor left the webview mid-drag), end the gesture so it never gets stuck.
   window.addEventListener('lostpointercapture', () => {
     if (resizing) { endResize(false); return; }
     dragging = null;
+    perfPanEnd();
   });
   window.addEventListener('auxclick', (e) => {
     if (e.button === 1) e.preventDefault();
@@ -7976,6 +9520,8 @@ function addBackgroundNotice(item) {
     // auto-pan fights the gesture frame by frame.
     setFollow(false);
     try { treeWrap.setPointerCapture(e.pointerId); } catch { /* noop */ }
+    perfPanEnd();
+    perfPan = perfGestureOpen('autoscroll');
     autoscroll.raf = requestAnimationFrame(autoscrollStep);
   }
 
@@ -7996,12 +9542,14 @@ function addBackgroundNotice(item) {
     pan.x -= (dx / dist) * speed * dt;
     pan.y -= (dy / dist) * speed * dt;
     applyTransform();
+    noteViewMove();
   }
 
   function stopAutoscroll() {
     if (!autoscroll) return;
     if (autoscroll.raf != null) cancelAnimationFrame(autoscroll.raf);
     autoscroll = null;
+    perfPanEnd();
     if (autoscrollEl) { autoscrollEl.remove(); autoscrollEl = null; }
     treeWrap.classList.remove('autoscrolling');
   }
@@ -8173,6 +9721,7 @@ function addBackgroundNotice(item) {
     // a node (so zooming stays possible while hovering content).
     if (e.ctrlKey || e.metaKey) {
       e.preventDefault();
+      perfWheelMove();
       zoomAt(e.clientX, e.clientY, e.deltaY < 0 ? 1.1 : 0.9);
       setFollow(false);
       return;
@@ -8187,6 +9736,7 @@ function addBackgroundNotice(item) {
     // to move the tree from inside a scroller, where a plain wheel is the zone's own.
     if (e.altKey) {
       e.preventDefault();
+      perfWheelMove();
       pan.y -= e.deltaY;
       applyTransform();
       setFollow(false);
@@ -8194,6 +9744,7 @@ function addBackgroundNotice(item) {
     }
     if (e.shiftKey) {
       e.preventDefault();
+      perfWheelMove();
       pan.x -= e.deltaY;
       applyTransform();
       setFollow(false);
@@ -8206,6 +9757,7 @@ function addBackgroundNotice(item) {
       return; // native scroll
     }
     e.preventDefault();
+    perfWheelMove();
     zoomAt(e.clientX, e.clientY, e.deltaY < 0 ? 1.1 : 0.9);
     setFollow(false);
   }, { passive: false });
@@ -9117,8 +10669,19 @@ function addBackgroundNotice(item) {
    * call the same thing.
    */
   function afterComposerWrite() {
+    // The split exists for the typing probe: `autoGrow()` forces a synchronous layout (it
+    // writes the height, then reads `scrollHeight`) and `updateComposerButtons()` touches
+    // two buttons. Which of the two a keystroke pays for is exactly what "typing is laggy"
+    // has to be attributed to, and it costs two `perfNow()` calls only during a burst.
+    const probe = perfTyping;
+    const t0 = probe ? perfNow() : 0;
     autoGrow();
+    const t1 = probe ? perfNow() : 0;
     updateComposerButtons();
+    if (probe) {
+      probe.autoGrowMs += t1 - t0;
+      probe.buttonsMs += perfNow() - t1;
+    }
   }
 
   // ---- Composer prompt snippets ----
@@ -9947,7 +11510,12 @@ function addBackgroundNotice(item) {
   inputEl.addEventListener('input', () => {
     // Typing changes "has content", which both composer buttons read — the same
     // refresh a programmatic write (a snippet, `composerClear`) makes for itself.
+    const t0 = perfNow();
+    if (!perfTyping) perfTyping = perfGestureOpen('typing');
     afterComposerWrite();
+    perfGestureEvent(perfTyping, perfNow() - t0);
+    if (perfTypingTimer != null) clearTimeout(perfTypingTimer);
+    perfTypingTimer = setTimeout(perfTypingEnd, TYPING_IDLE_MS);
   });
 
   // The caret's own intent, tracked where it happens (see the composer focus block):
@@ -10041,4 +11609,7 @@ function addBackgroundNotice(item) {
   // No `config` yet means no snippet list: the button stays out of the way until
   // one arrives (it always does, and it always carries at least the shipped rows).
   updateSnippetsButton();
+  // The document's own record starts with the shell in place: its first line is the
+  // baseline a degraded document is compared against after a reload.
+  perfStartDocumentRecord();
 })();

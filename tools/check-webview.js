@@ -72,6 +72,14 @@ const scriptPath = process.argv[2] ? path.resolve(process.argv[2]) : path.join(r
 
 const problems = [];
 const notes = [];
+/**
+ * The fitted paths the sample section gives a width to, and what each must read once the
+ * fit has run (one frame later, in the deferred step at the bottom of this file). A path is
+ * fitted to the width its **box** has, so the sample writes that width into the stub's box
+ * rather than hoping a layout pass puts one there — the stub has no layout, and a fit that
+ * reads 0 must leave the text alone (which is also what a folded card gets).
+ */
+const pathFitCases = [];
 
 /**
  * One message per type `ChatViewProvider.post()` sends, in the order a session
@@ -4936,6 +4944,96 @@ if (contextLabel !== 'ctx 50%') {
         }
       }
     }
+    // A path is fitted to the width its box is given, not to a fixed length: the file name
+    // is what the card is showing, so it stays whole while the directories above it are
+    // shortened and then dropped from the left (`…/Att…/BulletEndAttachments.cs`). The
+    // widths are written into the stub's boxes here and read back in the deferred step at
+    // the bottom of this file: a fit runs from a `requestAnimationFrame`, and the whole
+    // sample section is one synchronous task.
+    {
+      const LONG = 'src/chat/Attachments/BulletEndAttachments.cs';
+      const row = endRow(
+        11,
+        'rows-path',
+        'read_file',
+        JSON.stringify({ path: LONG }),
+        `File: ${LONG} (1 lines, LF)\nx`,
+      );
+      const view = row ? findByClass(row, 'code-view') : null;
+      const box = view ? findByClass(view, 'path-fit') : null;
+      const head = box ? findByClass(box, 'code-path') : null;
+      const label = row ? findByClass(row, 'tool-label') : null;
+      if (!box || !head || !label) {
+        problems.push('a read_file row has no fitted path (`path-fit` / `code-path` / `tool-label`) to measure');
+      } else {
+        // The stub cannot measure a font, so the fit falls back to 6px a character:
+        // 204px is 34 of them, and 120px is 19 (a proportional label holds a pixel back
+        // from its box, so the string can never land on the edge).
+        box.clientWidth = 204;
+        label.clientWidth = 120;
+        pathFitCases.push({
+          what: "a code card's head path",
+          span: head,
+          want: '…/Attachm…/BulletEndAttachments.cs',
+          title: LONG,
+        });
+        pathFitCases.push({
+          what: 'a row label that is a path',
+          span: label,
+          want: '…tEndAttachments.cs',
+          title: LONG,
+        });
+      }
+      // A path longer than the label's old 60-character cut: `toolBrief` used to slice a
+      // path there, which left the fit nothing to shorten and no file name to keep. The
+      // label must arrive whole, so what is asserted here is the file name at its **end**
+      // — a truncated label cannot end in `.cs`.
+      const DEEP =
+        'pkg/knowledge/base/utils/debugging/console/panels/Attachments/BulletEndAttachments.cs';
+      const deepRow = endRow(
+        13,
+        'rows-path-deep',
+        'read_file',
+        JSON.stringify({ path: DEEP }),
+        `File: ${DEEP} (1 lines, LF)\nx`,
+      );
+      const deepLabel = deepRow ? findByClass(deepRow, 'tool-label') : null;
+      if (!deepLabel) {
+        problems.push('a long read_file row has no label to fit');
+      } else {
+        deepLabel.clientWidth = 300; // 50 characters
+        pathFitCases.push({
+          what: 'a row label whose path is longer than 60 characters',
+          span: deepLabel,
+          endsWith: 'BulletEndAttachments.cs',
+          title: DEEP,
+        });
+      }
+      // A hit's path is fitted to a **share of its row**, never to its own width: it shares
+      // the row with the line number and the matched text, so a fit that read its own box
+      // would shrink itself on every pass.
+      const hit = endRow(
+        12,
+        'rows-path-hit',
+        'search_files',
+        '{"pattern":"bullet","path":"src"}',
+        `${LONG}:12: the matched line`,
+      );
+      const hitsView = hit ? findByClass(hit, 'hits-view') : null;
+      const hitPath = hitsView ? findByClass(hitsView, 'hits-path') : null;
+      const hitRow = hitPath && hitPath.parentElement;
+      if (!hitPath || !hitRow) {
+        problems.push('a search_files row has no hit path to fit');
+      } else {
+        hitRow.clientWidth = 400; // 400 × 0.45 = 180px, i.e. 30 characters
+        pathFitCases.push({
+          what: "a hit row's path",
+          span: hitPath,
+          want: '…/Att…/BulletEndAttachments.cs',
+          title: LONG,
+        });
+      }
+    }
     {
       const row = endRow(
         5,
@@ -9131,6 +9229,38 @@ setTimeout(async () => {
         }
       }
     }
+  }
+
+  // The fitted paths: each was given a width in the sample section and the fit has run by
+  // now. What is asserted is the rule -- the file name whole, the directories shortened and
+  // then dropped from the left, and the whole path still on the element as its `title`, so a
+  // shortened path still says where the file is.
+  if (!pathFitCases.length) {
+    problems.push('the path-fitting fixture produced no path to check');
+  }
+  for (const probe of pathFitCases) {
+    const shown = String(probe.span.textContent || '');
+    if (probe.want !== undefined && shown !== probe.want) {
+      problems.push(`${probe.what} reads ${JSON.stringify(shown)}, expected ${JSON.stringify(probe.want)}`);
+    }
+    if (probe.endsWith && !shown.endsWith(probe.endsWith)) {
+      problems.push(
+        `${probe.what} reads ${JSON.stringify(shown)}, expected it to end with ${JSON.stringify(probe.endsWith)} ` +
+          '— the file name is the part a fit keeps',
+      );
+    }
+    if (probe.span.title !== probe.title) {
+      problems.push(
+        `${probe.what} keeps ${JSON.stringify(probe.span.title)} as its title, expected the whole path ` +
+          `${JSON.stringify(probe.title)}`,
+      );
+    }
+  }
+  if (pathFitCases.length) {
+    notes.push(
+      'paths fitted to the width they are given: the file name whole, the directories shortened and then dropped ' +
+        "from the left, the whole path kept as the title (a code head, a row's label, a hit row's share)",
+    );
   }
 
   notes.push(`perf probes: ${diagnostics.length} report(s): ${seen.join(', ') || 'none'}`);

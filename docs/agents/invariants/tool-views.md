@@ -41,6 +41,29 @@
   `jump` class (a pointer, and a hover), so plain text never looks clickable, and a
   **directory** row is never one: opening a folder opens a second window, which is not what a
   click on a line of text means.
+- **A path is fitted to the width it is given, and the file name is the part that survives.**
+  Every path a file tool shows — a code card's head, a diff's, a listing's, an image's, a hit
+  row's, and the row's own label when the label *is* the path — is shortened by
+  `fitPathText` / `registerPathFit` in `media/main.js`, never by CSS: the file name stays
+  whole, each directory name is cut to its own beginning and marked (`Attachments` → `Att…`,
+  at least `PATH_MIN_SEG` characters), and then the leftmost names are dropped for one leading
+  mark, which is the shape `…/Att…/BulletEndAttachments.cs`. A budget too small even for the
+  name keeps the name's **end** (its extension). What is left over grows the names back one
+  character each, then restores the dropped ones from the right, so a wider card shows more of
+  the same path instead of a different one. The fit reads a width the text cannot change — the
+  `.path-fit` box, a label's **row** minus its verb and chips (each a seam of `LABEL_GAP`), or
+  a hit row's width times `HITS_PATH_SHARE` — because a fit measured off its own last answer
+  shrinks a little on every pass; it re-runs on a `ResizeObserver` and again when a folded
+  detail is opened (`setToolOpen` calls `refitPathsIn`), and a box with no width yet (folded,
+  detached) leaves the text alone. A **proportional** label is bisected against the fitted
+  string's own width (`fitPathToWidth`), never against an average character: the capitals a
+  fit keeps are wider than the directories it drops, and a string a pixel too wide is cut by
+  the label's own CSS ellipsis, which eats the **file name**. A path label arrives **whole**:
+  `toolBrief` does not apply its 60-character cut to a path (only to a command or a pattern),
+  because a cut path has no separators left to shorten and no file name left to keep. The
+  whole path stays on the element as its `title`, and the click still posts the **whole** path
+  — only the string that is drawn changes. `npm run check:webview` pins one shape per surface
+  (a code head, a row label, a hit row's share) by writing the width into the stub's box.
 - **The line diff is computed in the webview, from the call's own arguments.** `diffRows` (the
   edit script, hunks and gaps) runs in `media/main.js`, not in the tool: `replace_in_file`
   diffs `oldText` → `newText`, `append_file` builds pure additions and derives their numbers

@@ -1033,6 +1033,36 @@ body.vscode-high-contrast-light {
   font-family: "Consolas", "Courier New", monospace;
 }
 
+/* The box a fitted path sits in: the element the flex layout sizes on its own, so the
+   width a fit reads cannot be changed by the text that fit just wrote (`registerPathFit`
+   in `media/main.js` does the fitting, because CSS can only cut the end of a line — or
+   its start with `direction: rtl`, which scrambles the punctuation it keeps). The text
+   inside never wraps, and the clipping is the backstop for the one frame before the
+   first fit has run. */
+.path-fit {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+/* A listing's head: the fitted path and the `(recursive)` mark stay together on the left
+   while the count takes the rest of the line. The mark is never part of the path being
+   fitted — a shortened directory must not spend its width on it. */
+.entries-head-path {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.entries-mark {
+  flex: 0 0 auto;
+  opacity: 0.7;
+}
+
 .code-note {
   flex: 0 0 auto;
   color: var(--warn);
@@ -1427,13 +1457,15 @@ body.vscode-high-contrast-light {
   opacity: 0.7;
 }
 
+/* A hit's path, fitted to at most `HITS_PATH_SHARE` of the row (the fit sets the
+   `max-width` in px): a hit is a path, a line number and the matched text, and the path
+   is the one of the three that gives way. It used to cut its own start with
+   `direction: rtl`, which kept the file name but scrambled the punctuation around it. */
 .hits-path {
   flex: 0 1 auto;
   min-width: 40px;
   overflow: hidden;
   text-overflow: ellipsis;
-  direction: rtl;
-  text-align: left;
   color: var(--text);
 }
 
@@ -1592,6 +1624,7 @@ body.vscode-high-contrast-light {
 
 .image-size {
   flex: 0 0 auto;
+  margin-left: auto;
   opacity: 0.7;
   font-variant-numeric: tabular-nums;
 }
@@ -2514,6 +2547,14 @@ body.vscode-high-contrast-light {
   transform-origin: 0 0;
   user-select: none;
   -webkit-user-select: none;
+  /* Its own composited layer, so a pan is a transform the compositor applies instead of a
+     main-thread repaint of everything under it. Measured on a 111-card session: a
+     free-spinning wheel (alt + wheel, 639 events in 22 s) still cost 26 long tasks and
+     4.4 s of blocked main thread with every JS-side deferral in place, no DOM mutation
+     and no slow layout pass in the log — the frame's work was the paint of the canvas the
+     transform moved. The layer is tiled by the compositor, and `.node.cv-skip` below keeps
+     the tiles a pan is not looking at cheap. */
+  will-change: transform;
 }
 
 /* Node content is selectable/copiable (the head + background stay non-selectable so

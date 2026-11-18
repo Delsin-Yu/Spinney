@@ -2449,7 +2449,7 @@ export class SessionRuntime {
     });
     // No `reset`/`tree`: the structure is unchanged, so the webview just repaints
     // the active path in place (no tear-down → no blink), then pans to it.
-    this.postPath();
+    this.postPath('checkout');
     this.post({ type: 'panTo', id: nodeId });
     // The model selection is per node, so the checkout **is** a config change: both
     // dropdowns and the context-usage indicator follow the node that was clicked
@@ -2520,8 +2520,18 @@ export class SessionRuntime {
    *
    * The message is built by {@link treeMessage} and posted unchanged.
    */
-  postTree(): void {
+  postTree(why = 'other'): void {
+    const t0 = Date.now();
     const message = this.treeMessage();
+    // Always-on, never only inside a traced op: a repaint that lands while the user is
+    // typing or dragging is exactly the event no op covers (an op wraps a switch, a
+    // checkout or a cold repaint, never a keystroke), and without this line the host's
+    // half of that stutter is invisible on the wire.
+    perf(
+      () =>
+        `tree-post why=${why} session=${this.sessionId} build=${Date.now() - t0}ms ` +
+        `bytes=${this.payloadBytes(message)} nodes=${Object.keys(this.session.nodes).length}`,
+    );
     opPayload('post-tree', message);
     this.post(message);
   }
@@ -2617,7 +2627,8 @@ export class SessionRuntime {
    * every node's whole transcript, and one node's full log now crosses only when its card is
    * expanded (`loadNodeItems` → `nodeItems`, `onNodeItems`).
    */
-  postPath(): void {
+  postPath(why = 'other'): void {
+    const t0 = Date.now();
     const session = this.session;
     const ids = pathIds(session, session.activeNodeId);
     const nodes = ids.map((id) => {
@@ -2629,8 +2640,33 @@ export class SessionRuntime {
       };
     });
     const message = { type: 'path', ids, nodes, ...opTag(this.sessionId) };
+    let items = 0;
+    for (const node of nodes) {
+      items += (node.items || []).length;
+    }
+    perf(
+      () =>
+        `path-post why=${why} session=${this.sessionId} build=${Date.now() - t0}ms ` +
+        `bytes=${this.payloadBytes(message)} ids=${ids.length} items=${items}`,
+    );
     opPayload('post-path', message);
     this.post(message);
+  }
+
+  /**
+   * The byte size of one outbound payload, for the always-on repaint lines.
+   *
+   * A `JSON.stringify` of the payload being posted: it is the only honest size (the
+   * `bytes=` an op carries is the same measurement), and it exists only while a perf sink
+   * is installed. `-1` is "could not be serialized", which is a bug elsewhere and not this
+   * line's job.
+   */
+  private payloadBytes(message: unknown): number {
+    try {
+      return JSON.stringify(message)?.length ?? 0;
+    } catch {
+      return -1;
+    }
   }
 
   /**
@@ -2943,8 +2979,8 @@ export class SessionRuntime {
       this.currentPromptTokens = this.getLatestPromptTokens();
       this.post({ type: 'reset', ...opTag(this.sessionId) });
       this.postState();
-      this.postTree();
-      this.postPath();
+      this.postTree('post-all-state');
+      this.postPath('post-all-state');
       this.postConfig();
       this.postContext();
       this.postSessionStats();
@@ -3216,7 +3252,7 @@ export class SessionRuntime {
       ...settlePair(),
     };
     this.runs.set(node.id, run);
-    this.postTree();
+    this.postTree('turn-start');
     // The checkout has already moved (`attachNode`), so the composer's setup identity —
     // and the drift entry that decides whether `#new-context-btn` shows — must describe
     // **this** node's chain, not the one the user was standing on a moment ago. Without
@@ -4719,7 +4755,7 @@ export class SessionRuntime {
       `[epoch] forked ${sourceRootId} -> ${newRootId} nodes=${ids.length} card=${cardId} effort=${effort}`,
     );
     this.persistTurnNow();
-    this.postTree();
+    this.postTree('fork');
     if (session.activeNodeId) {
       this.post({ type: 'panTo', id: session.activeNodeId });
     }
@@ -5047,7 +5083,7 @@ export class SessionRuntime {
       // …and the interrupt travels with the next request instead of starting one.
       node.messages = [...node.messages, { role: 'user', content: combineSignalText(batch) }];
       this.persistTurn();
-      this.postTree();
+      this.postTree('signal-cards');
       this.postState();
     }
     if (deferred) {
@@ -5637,7 +5673,7 @@ export class SessionRuntime {
     if (!node.delivered) {
       node.delivered = true;
       this.persistTurn();
-      this.postTree();
+      this.postTree('agent-resume');
     }
     return JSON.stringify({
       resumed: true,
@@ -5761,7 +5797,7 @@ export class SessionRuntime {
     if (session.activeNodeId !== prevActive) {
       session.activeNodeId = prevActive;
     }
-    this.postTree();
+    this.postTree('spawn-agents');
 
     // One promise per job, built **once**: the array feeds the bounded wait below and —
     // when that wait escapes — the delivery callback, because a promise may be awaited
@@ -5832,7 +5868,7 @@ export class SessionRuntime {
       }
     }
     this.persistTurn();
-    this.postTree();
+    this.postTree('spawn-agents-sync');
     return JSON.stringify({
       results: results.map((r, i) => ({
         agentNodeId: jobs[i].node.id,
@@ -6605,7 +6641,7 @@ export class SessionRuntime {
     this.session.activeNodeId = prevActive;
     this.bgNodes.set(task.id, node.id);
     this.persistTurn();
-    this.postTree();
+    this.postTree('bg-register');
     this.postBackgrounds();
   }
 
@@ -6679,7 +6715,7 @@ export class SessionRuntime {
     node.bgOutputTail = out.length > 800 ? `…${tailText(out, 800)}` : out;
     node.status = task.killed ? 'interrupted' : 'done';
     this.persistTurn();
-    this.postTree();
+    this.postTree('bg-complete');
   }
 
   /** The `kind:'bg'` node mirroring a task (undefined when its branch is gone). */
@@ -6889,7 +6925,7 @@ export class SessionRuntime {
       // spawn may have left the webview pinned to a sub-agent card, and this injected
       // turn has no `path`/`tree` round-trip of its own. postPath follows the view
       // focus, so the reply cannot leak into a sub-agent card.
-      this.postPath();
+      this.postPath('injected-turn');
       run.agent.sendUserMessage(combineSignalText(batch));
     }
     if (retry) {
@@ -7006,7 +7042,7 @@ export class SessionRuntime {
     }
     if (touched) {
       this.persistTurn();
-      this.postTree();
+      this.postTree('deliver');
       // `delivered` is also what the window-global dock says (`Delivered`, and "pending
       // delivery" against the job's own exit code), and no background snapshot otherwise
       // announces it: the dock is reposted together with the cards.
@@ -7077,7 +7113,7 @@ export class SessionRuntime {
     this.postBackgrounds();
     this.postContext();
     this.postSessionStats();
-    this.postTree();
+    this.postTree('clear');
   }
 
   /**
@@ -7115,8 +7151,8 @@ export class SessionRuntime {
     this.postBackgrounds();
     this.checkoutNode(this.session, this.session.activeNodeId);
     this.currentPromptTokens = this.getLatestPromptTokens();
-    this.postTree();
-    this.postPath();
+    this.postTree('branch-delete');
+    this.postPath('branch-delete');
     if (this.session.activeNodeId) {
       this.post({ type: 'panTo', id: this.session.activeNodeId });
     }
