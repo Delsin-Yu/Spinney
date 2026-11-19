@@ -667,6 +667,15 @@ export interface RuntimeHost {
    * finished turn, a sub-agent's transcript, a deletion).
    */
   persistNow(): void;
+  /**
+   * Remember a session's **view focus**, lite: one small-key write, never a content
+   * write. `session.activeNodeId` is only stored together with the content, so a
+   * checkout would be lost on the next reload (the header would still name whatever
+   * node the last content write held, which is the finished turn's own node). This is
+   * the record that survives that gap; the provider prefers it at load when the node
+   * it names still exists.
+   */
+  noteFocus(sessionId: string, nodeId: string | null): void;
   stateChanged(): void;
   /**
    * Remember an explicit dropdown pick as the **default for future sessions**: the
@@ -2398,6 +2407,21 @@ export class SessionRuntime {
       this.pending = null;
     }
     session.activeNodeId = nodeId;
+    // A checkout moves a pointer, not a conversation, so it pays no content write — it
+    // records the move in the lite focus record instead (`RuntimeHost.noteFocus`), which
+    // is what a reload reads back.
+    this.noteFocus();
+  }
+
+  /**
+   * Record the view focus after it moved. The lite record is the only copy of the focus
+   * that a reload can trust: the store header's `activeNodeId` travels with the content,
+   * so it is as fresh as the last content write and no fresher. Called at exactly the
+   * sites that move the focus — a checkout, the attach a send makes, the handoff card, a
+   * fork and a clear — and cheap by contract (one small-key write).
+   */
+  private noteFocus(): void {
+    this.host.noteFocus(this.session.id, this.session.activeNodeId);
   }
 
   /**
@@ -3210,6 +3234,9 @@ export class SessionRuntime {
       node.contextBaseId = node.id;
     }
     attachNode(session, node);
+    // A send moves the view focus onto the node it creates (`attachNode`), and that move
+    // is what the next reload has to find again (see `noteFocus`).
+    this.noteFocus();
     // Only a send that **applied** the pick consumes it: that is the first turn of a
     // chain, where the dropdown's choice really became `node.model`. A pick made on a
     // node that already has an epoch is not applied by a send — it is the drift the
@@ -4193,6 +4220,9 @@ export class SessionRuntime {
     node.contextBaseId = node.id;
     node.handoffNote = note;
     attachNode(this.session, node);
+    // The card takes the view focus (it is where the composer docks), so the move is
+    // recorded like a checkout's (see `noteFocus`).
+    this.noteFocus();
     // The window this card opens is written by a send, so the old line stays killed.
     this.stoppedLines.add(previous.id);
     node.displayItems.push({ kind: 'harness', text: note });
@@ -4761,6 +4791,8 @@ export class SessionRuntime {
     session.rootIds.push(newRootId);
     session.activeNodeId = idMap.get(nodeId) ?? newRootId;
     session.updatedAt = Date.now();
+    // The fork checks the copy out, so the record follows it (see `noteFocus`).
+    this.noteFocus();
     this.host.output.appendLine(
       `[epoch] forked ${sourceRootId} -> ${newRootId} nodes=${ids.length} card=${cardId} effort=${effort}`,
     );
@@ -7117,6 +7149,9 @@ export class SessionRuntime {
     session.activeNodeId = null;
     session.orphanItems.length = 0;
     session.updatedAt = Date.now();
+    // A cleared conversation has no focus left to restore: the record drops its entry
+    // rather than naming a node nothing points at any more (`noteFocus`).
+    this.noteFocus();
     // A cleared conversation drops its background jobs too: the provider asks
     // for a confirmation first, so anything still running here is killed here.
     this.hub.removeSession(this.sessionId, { kill: true });

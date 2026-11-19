@@ -180,6 +180,12 @@
   `path` describes the **view** (`pathIds(session, session.activeNodeId)`) while `tree` carries
   structure. Checkout re-sends `path` + `panTo` (no `reset`/`tree`) so the tree never tears down,
   and already-rendered nodes are skipped (`_itemsRendered`) to avoid re-running markdown.
+- **A checkout is persisted as a pointer, not as content.** It moves `session.activeNodeId`,
+  which lives in the session header and is therefore written only when the content is — so
+  `checkoutNode` also records the focus in the lite `spinney.focusNodes` key
+  (`RuntimeHost.noteFocus`, one small write). `loadSessions` applies that record over the
+  header's value, or a reload lands on the last finished turn's node instead of the card the
+  user was standing on (see `session-persistence.md`).
 - Migrating v1 `{messages, displayItems}` splits at each `user` message; items are
   re-attached by walking both lists (best effort) and the original state is backed
   up to `spinney.state.v1backup`.

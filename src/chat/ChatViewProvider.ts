@@ -130,6 +130,19 @@ const STORAGE_KEY = 'spinney.state';
  */
 const ACTIVE_SESSION_KEY = 'spinney.activeSession';
 /**
+ * The **last view focus** of every session, in its own small key: one
+ * `{ sessionId: nodeId }` map.
+ *
+ * A checkout is view-only, so it must not go through `persist()` (a card click would then
+ * serialize a whole conversation to store one id) — but `session.activeNodeId` inside the
+ * session header is written only **with** the content, so without this record a reload
+ * lands on whatever node the last content write happened to hold, which is the finished
+ * turn's own node rather than the card the user was standing on. Written on every focus
+ * move (`RuntimeHost.noteFocus`) and read before the first repaint; an entry whose node is
+ * gone from its session is dropped, and the stored header's own value stands.
+ */
+const FOCUS_KEY = 'spinney.focusNodes';
+/**
  * How long a content write may be coalesced away. State changes arrive in bursts
  * (a turn with a dozen tool calls, a stream of background updates) and each write
  * costs ~1 s of blocked extension host in a real profile, so a burst pays once.
@@ -488,6 +501,12 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   private lastPersist: Promise<void> = Promise.resolve();
   /** Pointer last written to its own key, so a switch writes it exactly once. */
   private lastActiveWritten = '';
+  /**
+   * The lite focus record as memory holds it (see {@link FOCUS_KEY}): the node each
+   * session was last standing on. Kept beside the Memento copy so a move is one small-key
+   * write, and so the load can heal the record without reading it back per session.
+   */
+  private focusNodes: Record<string, string> = Object.create(null);
   /** A content change is waiting for the coalescing window (see `persist`). */
   private dirty = false;
   /** When the oldest un-written change happened (bounds how stale state may get). */
@@ -1508,6 +1527,10 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     // pre-forest `rootId` into `rootIds` — is exactly once per session, and the loaded
     // tree is always API-valid on activation.
     this.sessions = sessions;
+    // The lite focus record wins over the header's own `activeNodeId` (see `FOCUS_KEY`):
+    // a checkout is view-only, so the header can lag behind the card the user was on.
+    this.loadFocus();
+    this.applyFocus();
     // The dock's removal list is a view of `bgDockDismissed` on every `kind:'bg'`
     // record, so it is rebuilt from exactly the sessions that were just loaded.
     this.rebuildBgDismissed();
@@ -1833,6 +1856,11 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       }
     }
     this.sessions = merged;
+    // A session this window has never seen may still have a focus recorded for it; the
+    // ones already in memory carry their own (and are skipped, `applyFocus` finds them
+    // already standing there). Nothing is pruned here — this list can be missing a
+    // session for a reason that says nothing about the focus.
+    this.applyFocus(false);
     // The sessions in front of the user changed wholesale: so did what the dock lists.
     this.rebuildBgDismissed();
     if (!this.sessions.some((s) => s.id === this.activeSessionId)) {
@@ -2126,6 +2154,84 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     const t0 = Date.now();
     this.trackWrite(this.writeSmall(ACTIVE_SESSION_KEY, this.activeSessionId));
     perf(() => `persist-active session=${this.activeSessionId} ${Date.now() - t0}ms`);
+  }
+
+  /**
+   * RuntimeHost: a session's **view focus** moved (see {@link FOCUS_KEY}). One small-key
+   * write and no content write: this runs on every card click and on every send, so it has
+   * to cost what the active-session pointer costs, not what a conversation write costs.
+   *
+   * A read-only window does not write it. The store lock is about content, but a second
+   * window must not move the owner's view either — it renders what the owner recorded.
+   */
+  noteFocus(sessionId: string, nodeId: string | null): void {
+    if (this.readOnly || !sessionId) {
+      return;
+    }
+    if ((this.focusNodes[sessionId] ?? null) === nodeId) {
+      return;
+    }
+    if (nodeId) {
+      this.focusNodes[sessionId] = nodeId;
+    } else {
+      delete this.focusNodes[sessionId];
+    }
+    this.writeFocus();
+  }
+
+  /** Put the focus record on disk: a copy of it, so a later move cannot mutate a queued value. */
+  private writeFocus(): void {
+    this.trackWrite(this.writeSmall(FOCUS_KEY, { ...this.focusNodes }));
+  }
+
+  /** Read the focus record once, at load (see {@link FOCUS_KEY}). Anything malformed is dropped. */
+  private loadFocus(): void {
+    const stored = this.readSmall<Record<string, string>>(FOCUS_KEY);
+    this.focusNodes = Object.create(null);
+    if (!stored || typeof stored !== 'object') {
+      return;
+    }
+    for (const [id, nodeId] of Object.entries(stored)) {
+      if (id && typeof nodeId === 'string' && nodeId) {
+        this.focusNodes[id] = nodeId;
+      }
+    }
+  }
+
+  /**
+   * Put each session's own focus back in front of the user, and heal the record on the way:
+   * an entry whose session is gone, or whose node that session no longer has (a deleted
+   * branch), is dropped, which leaves the stored header's `activeNodeId` standing exactly
+   * as the tree healing left it.
+   *
+   * `prune` is off for a re-read of the store (`refreshSessionsFromStore`): that list can
+   * be missing a session for a reason that has nothing to do with the focus (a node file
+   * that failed to read), and a record this window cannot judge is kept, never written away.
+   */
+  private applyFocus(prune = true): void {
+    const before = Object.keys(this.focusNodes).length;
+    const kept: Record<string, string> = prune ? Object.create(null) : { ...this.focusNodes };
+    let restored = 0;
+    for (const session of this.sessions) {
+      const nodeId = this.focusNodes[session.id];
+      if (!nodeId || !session.nodes[nodeId]) {
+        continue;
+      }
+      if (session.activeNodeId !== nodeId) {
+        session.activeNodeId = nodeId;
+        restored++;
+      }
+      kept[session.id] = nodeId;
+    }
+    this.focusNodes = kept;
+    const dropped = before - Object.keys(kept).length;
+    if (dropped > 0 && !this.readOnly) {
+      // A stale entry is a leftover, not a pointer: it is written away, never kept.
+      this.writeFocus();
+    }
+    if (restored > 0 || dropped > 0) {
+      perf(() => `focus-restored sessions=${restored} dropped=${dropped}`);
+    }
   }
 
   /** Track the newest write(s): the control plane awaits this before a reboot. */
@@ -4317,6 +4423,12 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     // Drop the session's transcript dumps too (turns + sub-agent runs).
     removeTranscriptDir(this.transcriptDir(id));
     this.sessions.splice(idx, 1);
+    // Its focus record goes with it: an entry for a session that no longer exists is a
+    // leftover, and the next load would drop it anyway (`applyFocus`).
+    if (id in this.focusNodes) {
+      delete this.focusNodes[id];
+      this.writeFocus();
+    }
     // Its `kind:'bg'` records are gone with it, so its dock handles are too.
     this.forgetBgDismissed(id);
     if (!deferFinish) {

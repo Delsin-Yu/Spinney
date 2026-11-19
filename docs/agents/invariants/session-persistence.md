@@ -14,6 +14,7 @@
 - Storage keys in the **small** Memento scope (`context.globalState`, or the same
   object in no-repo mode):
   `spinney.activeSession` (the focused tab's session id, **on its own** — see below),
+  `spinney.focusNodes` (the `{ sessionId: nodeId }` **view focus** record — see below),
   `spinney.runtimeConfig` (the
   **default** `model` + `thinkingEffort` record, used by sessions with no pick),
   `spinney.transcriptBackfill` (the one-time historical-dump marker) and
@@ -30,7 +31,7 @@
   - **content Memento** (`workspaceState`, or `globalState` in no-repo mode):
     `spinney.state` only;
   - **`context.globalState`** (`smallStorage`): `spinney.activeSession`,
-    `spinney.runtimeConfig`, `spinney.transcriptBackfill`,
+    `spinney.focusNodes`, `spinney.runtimeConfig`, `spinney.transcriptBackfill`,
     `spinney.sessionTitleBackfill` — all tiny, all written often.
   A value found only in the content row (state written before this split) is adopted
   on read and written small for next time; the stale copy is deliberately left behind
@@ -62,6 +63,20 @@
   and `persist()` calls it too so the two can never disagree. The read path
   (`loadSessions`) prefers the key and falls back to the blob's `activeSessionId`
   field; a pointer naming a session that no longer exists self-heals to `sessions[0]`.
+- **The view focus has its own key too** (`spinney.focusNodes`, a `{ sessionId: nodeId }`
+  map in the small scope). `session.activeNodeId` lives in the session **header**, which is
+  written only with the content — so without this record a checkout survives exactly as
+  long as nothing else writes: the next reload lands on whatever node the last content
+  write held, i.e. the finished turn's own node. `RuntimeHost.noteFocus` is the only writer
+  and `SessionRuntime.noteFocus()` the one place that calls it, at every site that moves the
+  focus (a checkout, the attach a send makes, the handoff card, a fork, a clear). One small
+  write per move, no content write, no node digest, no index rewrite — a card click must
+  never cost a conversation write. `loadSessions` applies the record **over** the header's
+  `activeNodeId` (`applyFocus`), and an entry whose node that session no longer has is
+  dropped, so a deleted branch falls back to the header's healed value. A read-only window
+  never writes it (the store lock is about content, but a second window must not move the
+  owner's view either); the record also does not travel with an exported session, which
+  then simply falls back to the header.
 - **The pre-tree (v1) copy is a file, not a memento key**: `moveV1BackupOut` parks
   `spinney.state.v1backup` as `<globalStorage>/state-v1-backup.json` and drops
   the key — it was ~20 M chars (~15%) of *every* memento write and nothing ever read

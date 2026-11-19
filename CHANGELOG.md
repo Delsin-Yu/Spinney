@@ -64,6 +64,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A reload puts the tab back on the card you were standing on.** A checkout is view-only, so
+  it never wrote anything: `session.activeNodeId` lives in the session header, which is written
+  only together with the content, so the stored focus was always the node of the last content
+  write — the turn that finished last, whatever card was checked out afterwards. The focus now
+  has its own small key (`spinney.focusNodes`, one `{ sessionId: nodeId }` map in the
+  `context.globalState` scope), written on every focus move — a checkout, a send, the handoff
+  card, a fork, a clear — and applied over the header's value at load, so a card click costs one
+  tiny write instead of a conversation write. An entry whose node its session no longer has is
+  dropped (a deleted branch falls back to the header), a deleted session's entry goes with it,
+  and a read-only window never writes the record.
 - **Text no longer stays soft after a pan or a zoom.** The canvas held a composited layer for
   its whole life once the wheel was made smooth, and the compositor reused the tiles it had
   rastered at an older scale: a card's text stayed blurry until something invalidated that one
