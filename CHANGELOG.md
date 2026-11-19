@@ -55,6 +55,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no tinted connector. The state colours stay (`agent-done` / `agent-error` on the card, and
   their connectors); the ready compression card's green is the same `--success` the done chip
   already used.
+- **A card waiting for its history keeps the size it had.** A card's finished height is
+  remembered by node (and kept in `localStorage` across a window reload), and while the card
+  waits it is pinned to that height, so the transcript landing no longer re-places the tree
+  and moves the view. The waiting card is also the wait and nothing else: its head and the
+  `Loading…` label animated with the same per-character wave a running step's verb uses. The
+  ask and the log box appear with the content.
 
 ### Fixed
 

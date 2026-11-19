@@ -7057,7 +7057,10 @@ function addBackgroundNotice(item) {
     // card says it is waiting rather than done. It is created with the card and never
     // rebuilt, its label is the one user-visible string this adds, and the CSS shows it
     // only on an *expanded* card that is loading — a collapsed card is its preview.
-    const loading = el('div', 'node-loading', tr('Loading…'));
+    const loading = el('div', 'node-loading');
+    // The same per-character wave a running step's verb uses (see `.node-loading .w` in
+    // the stylesheet): the wait reads as work in progress rather than as a dead screen.
+    setVerbText(loading, tr('Loading…'));
     // Order matters: loading, log, the docked bar, the collapsed preview — the preview is
     // what a collapsed card shows *instead* of the log and the bar.
     body.appendChild(loading);
@@ -7202,6 +7205,81 @@ function addBackgroundNotice(item) {
     }, VIEW_MOVE_MS + 50);
   }
 
+  // ---- A card's finished size, so a load never moves the tree -------------------
+  // A waiting card's box is nothing like the one it ends up with, and when the answer
+  // lands the whole tree re-places and the view under the reader jumps. A card's finished
+  // height is stable (it is the same transcript every time), so it is remembered by node
+  // id, kept in `localStorage` across a window reload, and pinned on the card while it
+  // waits (`setCardLoading`). The waiting card is then exactly as tall as the card it is
+  // about to become.
+  const CARD_SIZE_KEY = 'spinney.cardSizes';
+  const CARD_SIZE_LIMIT = 4000;
+  const cardSizes = (() => {
+    try {
+      const raw = window.localStorage.getItem(CARD_SIZE_KEY);
+      const parsed = raw ? JSON.parse(raw) : {};
+      const map = new Map();
+      for (const [id, h] of Object.entries(parsed || {})) {
+        if (typeof h === 'number' && h >= 20 && h <= 20000) map.set(id, h);
+      }
+      return map;
+    } catch (err) {
+      return new Map();
+    }
+  })();
+  let cardSizesDirty = false;
+  let cardSizesTimer = null;
+
+  /** Write the table out, keeping the newest `CARD_SIZE_LIMIT` entries. */
+  function persistCardSizes() {
+    cardSizesTimer = null;
+    if (!cardSizesDirty) return;
+    cardSizesDirty = false;
+    try {
+      const out = Object.create(null);
+      let drop = cardSizes.size - CARD_SIZE_LIMIT;
+      for (const [id, height] of cardSizes) {
+        if (drop-- > 0) continue;
+        out[id] = height;
+      }
+      window.localStorage.setItem(CARD_SIZE_KEY, JSON.stringify(out));
+    } catch (err) {
+      /* a full or disabled store costs the placeholder, never the card */
+    }
+  }
+
+  /** Remember a card's finished height, rounded, and only when it actually moved. */
+  function rememberCardSize(id, height) {
+    if (!id || !(height >= 20)) return;
+    const next = Math.round(height);
+    if (cardSizes.get(id) === next) return;
+    cardSizes.set(id, next);
+    cardSizesDirty = true;
+    if (cardSizesTimer == null) cardSizesTimer = setTimeout(persistCardSizes, 1500);
+  }
+
+  /** Pin a waiting card to the height it finished at last time. */
+  function applyLoadingSize(card) {
+    if (!card || card._loadingHeight != null) return;
+    const height = card._nodeId ? cardSizes.get(card._nodeId) : undefined;
+    if (!height) return;
+    card._loadingHeight = height;
+    card.style.height = height + 'px';
+  }
+
+  /** Let the content decide the height again. */
+  function clearLoadingSize(card) {
+    if (!card || card._loadingHeight == null) return;
+    card._loadingHeight = null;
+    card.style.height = '';
+  }
+
+  try {
+    window.addEventListener('pagehide', persistCardSizes);
+  } catch (err) {
+    /* no window to listen to */
+  }
+
   let itemsQueue = [];
   let itemsInFlight = 0;
   /** Cards queued *and* on screen — the ones the queue promotes. */
@@ -7240,13 +7318,19 @@ function addBackgroundNotice(item) {
     card.classList.toggle('items-loading', !!on);
     if (!on) {
       card.removeAttribute('aria-busy');
+      // The content is here (or the wait is over): it decides the height again.
+      clearLoadingSize(card);
       return;
     }
     card.setAttribute('aria-busy', 'true');
+    // Hold the box the card had when it finished last time, so the tree does not re-place
+    // itself when this load lands.
+    applyLoadingSize(card);
     card._itemsTimer = setTimeout(() => {
       card._itemsTimer = null;
       card.classList.remove('items-loading');
       card.removeAttribute('aria-busy');
+      clearLoadingSize(card);
       // An unloaded card whose answer never came must not stay invisible: give its box
       // back (it is empty, but it is there) instead of keeping a placeholder forever.
       if (card._itemsUnloaded) {
@@ -7485,6 +7569,7 @@ function addBackgroundNotice(item) {
         card.style.containIntrinsicSize = w + 'px ' + h + 'px';
         card.classList.add('cv-skip');
         cvSkipped.add(card);
+        rememberCardSize(card._nodeId, h);
       }
     } catch (err) {
       /* a layout aid must never break the UI */
@@ -8613,6 +8698,17 @@ function relayout() {
       if (!card) continue;
       heights[id] = card.offsetHeight || 120;
       widths[id] = card.offsetWidth || NODE_W;
+      // A card that is showing its whole log is the size it will be next time: remember
+      // that box for the waiting card of a later load (`applyLoadingSize`). A summary, an
+      // unloaded card and a waiting one are all *not* that size.
+      if (
+        card._itemsRendered &&
+        !card._itemsSummary &&
+        !card._itemsUnloaded &&
+        !card.classList.contains('items-loading')
+      ) {
+        rememberCardSize(id, heights[id]);
+      }
       // …and the log's follow light is placed from the boxes this pass just laid out: its
       // `right` is the scroll gutter's own centre, never a fixed offset (`lockDotRight`).
       // The write is a style-only change on an absolutely positioned 8px box, so it changes

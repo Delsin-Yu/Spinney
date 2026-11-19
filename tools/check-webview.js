@@ -2746,7 +2746,11 @@ if (contextLabel !== 'ctx 50%') {
       );
     }
     const strip = findByClass(root, 'node-loading');
-    if (!strip || String(strip.textContent || '').length === 0) {
+    // The label is one span per character now (the running-verb wave), so the stub's own
+    // `textContent` stays empty: a strip with children is a strip with a label.
+    const stripLabel =
+      !!strip && (String(strip.textContent || '').length > 0 || (strip.children && strip.children.length > 0));
+    if (!stripLabel) {
       problems.push(
         'a waiting card has no `.node-loading` strip with a label: nothing on screen says the content is on its ' +
           'way (the one string this adds, written as a `tr()` literal so `check:l10n` can see it)',

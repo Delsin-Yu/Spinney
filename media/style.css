@@ -2776,25 +2776,30 @@ body.panning #tree-canvas {
 .node-loading {
   display: none;
   align-items: center;
-  gap: 7px;
-  padding: 8px 10px;
+  justify-content: center;
   color: var(--text-dim);
-  font-size: 12px;
+  /* The wait reads as one step of the turn: the step's own weight and slant (bold, italic),
+     a size up from the prose so a card that is otherwise empty still has a mark on it. */
+  font-size: 14px;
+  font-weight: 600;
+  font-style: italic;
+  letter-spacing: 0.02em;
 }
 
+/* The waiting card is **only** the wait: the ask and the log box are not rendered until
+   the content arrives, which is both the smallest thing to build and the clearest thing to
+   read. The card's own height is pinned to the one it finished at last time (see
+   `cardSizes` in main.js), so the tree does not re-place itself when the content lands. */
 .node.expanded.items-loading .node-loading {
   display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
-.node-loading::before {
-  content: '';
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--accent);
-  /* The same pulse the status dot uses for "working" (`@keyframes pulse` above), so a
-     card that is waiting and a session that is waiting read as one state. */
-  animation: pulse 1s ease-in-out infinite;
+.node.expanded.items-loading .node-ask,
+.node.expanded.items-loading .node-work-wrap,
+.node.expanded.items-loading .node-excerpt {
+  display: none;
 }
 
 /* The log's box. It is **not** a scroller — the log inside it is the card's only one —
@@ -3725,12 +3730,22 @@ body.panning #tree-canvas {
    `body.anim`, which is `spinney.streamAnimation`: the setting turns the animation off with
    the rest, and the spans stay in the document either way. */
 .tool-verb .w,
-.thinking-verb .w {
+.thinking-verb .w,
+.node-loading .w {
   display: inline-block;
 }
 
 body.anim .msg.tool.running .tool-verb .w,
 body.anim .msg.thinking-row.live .thinking-verb .w {
+  animation: verb-wave 1.2s ease-in-out infinite, verb-glow 2s ease-in-out infinite;
+  animation-delay: calc(var(--i, 0) * -90ms), calc(var(--i, 0) * -150ms);
+  will-change: transform;
+}
+
+/* The waiting card speaks the same way a running step does: the same wave and glimmer
+   along the word, per character, so "the content is on its way" reads as work in
+   progress rather than as a spinner that could be a dead screen. */
+body.anim .node.expanded.items-loading .node-loading .w {
   animation: verb-wave 1.2s ease-in-out infinite, verb-glow 2s ease-in-out infinite;
   animation-delay: calc(var(--i, 0) * -90ms), calc(var(--i, 0) * -150ms);
   will-change: transform;
