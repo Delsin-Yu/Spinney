@@ -18,7 +18,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { AgentSession, DisplayItem, TreeNode } from './tree';
-import { ChatMessage } from '../agent/types';
+import { ChatMessage, Usage } from '../agent/types';
 import { SessionSummary } from './sessionStore';
 
 /** The marker file a picked folder must hold to be read as a fixture spec. */
@@ -36,6 +36,16 @@ export interface PerfFixtureSpec {
   toolChars?: number;
   /** Title prefix; the node count is appended to it (default `PERF FIXTURE`). */
   title?: string;
+  /**
+   * Prompt-cache hit rates to cycle over the turns, in percent (100 = every token came out
+   * of the provider's cache). Each turn gets one `usage` on its closing answer, the shape a
+   * real turn leaves behind, so the card's ring can be read without a provider
+   * (`docs/agents/invariants/chat-tree.md`). A `null` entry is a turn whose provider
+   * reported no cache fields at all — the "unknown rate, keep the accent" half of the same
+   * rule. Absent or empty leaves every turn without usage, which is what every fixture did
+   * before this existed.
+   */
+  cacheRates?: (number | null)[];
 }
 
 const ID_ALPHABET = 'abcdefghijklmnopqrstuvwxyz0123456789';
@@ -103,6 +113,39 @@ export function buildPerfFixture(spec: PerfFixtureSpec): {
   const answerChars = Math.max(400, Math.floor(spec.answerChars ?? 6000));
   const toolsPerTurn = Math.max(0, Math.min(40, Math.floor(spec.toolsPerTurn ?? 6)));
   const toolChars = Math.max(0, Math.floor(spec.toolChars ?? 20000));
+  // The cache rates a fixture cycles over its turns: clamped, and `null` kept as "the
+  // provider reported nothing" (`nodeCacheRate` returns undefined for those).
+  const cacheRates = (Array.isArray(spec.cacheRates) ? spec.cacheRates : [])
+    .filter((rate) => rate === null || (typeof rate === 'number' && Number.isFinite(rate)))
+    .map((rate) => (rate === null ? null : Math.max(0, Math.min(100, rate))));
+  /**
+   * The `usage` one turn leaves behind when a cache rate is asked for: the closing answer
+   * item carries it, the way a real turn's last item does. `prompt_tokens` is hit + miss,
+   * which is what the provider's own numbers add up to, and the prompt grows along the chain
+   * so the sizes stay believable. A `null` rate is a response with no cache fields at all —
+   * the counter-case the ring must leave unpainted.
+   */
+  const cacheUsage = (index: number): { usage?: Usage } => {
+    if (cacheRates.length === 0) {
+      return {};
+    }
+    const rate = cacheRates[index % cacheRates.length];
+    if (rate === null) {
+      const prompt = 15000 + index * 1000;
+      return { usage: { prompt_tokens: prompt, completion_tokens: 300, total_tokens: prompt + 300 } };
+    }
+    const prompt = 15000 + index * 1000;
+    const hit = Math.round((prompt * rate) / 100);
+    return {
+      usage: {
+        prompt_tokens: prompt,
+        completion_tokens: 300,
+        total_tokens: prompt + 300,
+        prompt_cache_hit_tokens: hit,
+        prompt_cache_miss_tokens: prompt - hit,
+      },
+    };
+  };
   const now = Date.now();
   const sessionId = makeId('perf');
   const title = `${spec.title ?? 'PERF FIXTURE'} (${count} nodes)`;
@@ -131,7 +174,7 @@ export function buildPerfFixture(spec: PerfFixtureSpec): {
         ms: 12 + step,
       });
     }
-    displayItems.push({ kind: 'assistant', text: answer });
+    displayItems.push({ kind: 'assistant', text: answer, ...cacheUsage(index) });
     // The API history stays a clean user/assistant pair: a tool row in the *display* items
     // needs no matching `tool_calls` exchange, and a fixture whose history a later prompt
     // could not send would be worse than one with no tool rows at all.

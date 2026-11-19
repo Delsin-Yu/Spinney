@@ -1,0 +1,7 @@
+{
+  "title": "CACHE RING CHECK",
+  "nodes": 9,
+  "answerChars": 600,
+  "toolsPerTurn": 0,
+  "cacheRates": [100, 75, 50, 25, 0, null, 90, 40, 10]
+}

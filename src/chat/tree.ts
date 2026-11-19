@@ -777,6 +777,81 @@ export function nodeUsage(node: TreeNode): Usage | undefined {
   return undefined;
 }
 
+/**
+ * The **prompt-cache hit rate** of one node's own requests, as a percentage: every `usage`
+ * the turn attached, combined (`hit / (hit + miss)`) — never the last one alone, because a
+ * turn with a tool loop made several requests and all of them are this card's.
+ *
+ * `undefined` when **no** request of the node reported the two DeepSeek cache fields: an
+ * endpoint that sends none (OpenAI's `prompt_tokens_details.cached_tokens` is a different
+ * key this build does not read, and a local server often sends only `prompt_tokens`), a turn
+ * that never completed (a Stop or a failure before the first usage landed), a `kind:'bg'`
+ * job card, or a compression card whose `Simple` answer ran no turn at all.
+ *
+ * That is **not** 0%: a request that reported `hit = 0` beside a full miss is known, and
+ * reads as 0. The caller therefore has to tell the two apart — the card's outline keeps the
+ * theme's accent when this is undefined, and goes red when it is a real 0
+ * (`docs/agents/invariants/chat-tree.md`, the card's outline colour).
+ */
+export function nodeCacheRate(node: Pick<TreeNode, 'displayItems'>): number | undefined {
+  const total = nodeUsageTotal(node);
+  const hit = total?.prompt_cache_hit_tokens ?? 0;
+  const miss = total?.prompt_cache_miss_tokens ?? 0;
+  const denom = hit + miss;
+  return denom > 0 ? (hit / denom) * 100 : undefined;
+}
+
+/**
+ * The node's **own** token totals: every `usage` its turn attached, summed field by field.
+ * This is what the card's docked bar reads (`meta.usage`), so the bar counts the whole card
+ * rather than the last request — a tool loop made several, and the bar and its rate must speak
+ * about the same set of requests.
+ *
+ * The two cache fields are summed only from the usages that reported them, and are **left out**
+ * of the result when none did — `nodeCacheRate` reads that absence as "unknown", which is not
+ * 0 %. `undefined` when the node has no usage at all (a turn that has not been counted yet, a
+ * `kind:'bg'` card).
+ *
+ * This is deliberately **not** `nodeUsage`, which answers "the last request", and is what the
+ * window-fill estimate (`chainPromptTokens`) and the transcript dumps want.
+ */
+export function nodeUsageTotal(node: Pick<TreeNode, 'displayItems'>): Usage | undefined {
+  let prompt = 0;
+  let completion = 0;
+  let total = 0;
+  let hit = 0;
+  let miss = 0;
+  let any = false;
+  let cache = false;
+  for (const item of node.displayItems) {
+    const usage = item.usage;
+    if (!usage) {
+      continue;
+    }
+    any = true;
+    prompt += usage.prompt_tokens ?? 0;
+    completion += usage.completion_tokens ?? 0;
+    total += usage.total_tokens ?? 0;
+    if (typeof usage.prompt_cache_hit_tokens === 'number' || typeof usage.prompt_cache_miss_tokens === 'number') {
+      cache = true;
+      hit += usage.prompt_cache_hit_tokens ?? 0;
+      miss += usage.prompt_cache_miss_tokens ?? 0;
+    }
+  }
+  if (!any) {
+    return undefined;
+  }
+  return cache
+    ? {
+        prompt_tokens: prompt,
+        completion_tokens: completion,
+        total_tokens: total,
+        prompt_cache_hit_tokens: hit,
+        prompt_cache_miss_tokens: miss,
+      }
+    : { prompt_tokens: prompt, completion_tokens: completion, total_tokens: total };
+}
+
 /** Follow the newest child chain from `fromId` down to a leaf. Sidecars
  * (`kind === 'agent'` / `'bg'`) are skipped: they are display-only and must never
  * become the checked-out node (their history is not in the API path). */

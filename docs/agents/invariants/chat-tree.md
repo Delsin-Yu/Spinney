@@ -184,3 +184,41 @@
   re-attached by walking both lists (best effort) and the original state is backed
   up to `spinney.state.v1backup`.
 
+- **The checked-out card's ring shows its prompt-cache hit rate.** The only coloured surface
+  a card has is the 2 px `outline` of `.node.active`, and its colour comes from the
+  `--cache-color` custom property `syncCacheColor` writes (`media/main.js`); the rule in
+  `media/style.css` is `outline-color: var(--cache-color, var(--accent))`, so a card with no
+  rate keeps the theme accent. The number is **the card's own requests combined**:
+  `nodeCacheRate(node)` (`tree.ts`) sums `prompt_cache_hit_tokens` and
+  `prompt_cache_miss_tokens` over every `usage` the turn attached — a tool loop makes several
+  requests and all of them are that card's — and divides hit by `hit + miss`. It divides by
+  those two, never by `prompt_tokens`: the total includes tokens the provider was never given
+  a choice about. `nodeCacheRate` returns `undefined` when **no** request reported the two
+  fields (another endpoint's `prompt_tokens_details.cached_tokens` is a key this build does
+  not read, a turn that never completed has no usage, a `kind:'bg'` card has none at all),
+  and that `undefined` is shipped as `cachePct: null`, never as 0: a real 0 % (a request that
+  reported `hit = 0` beside a full miss) is a known number and reads red, while an unknown
+  rate must not be drawn as a bad one. The host computes it at payload build time
+  (`treeMessage` and `nodeStatePatch`) and stores nothing, so there is no percentage that
+  could go stale, and the rate travels with the same patch that ends the turn. The webview
+  maps it to a colour in `cacheColor`: `t = clamp(pct / 100, 0, 1)`, a red → purple → blue
+  two-stop ramp (`#fc4d5f` at 0 %, `#f14dfc` at 50 %, `#4daafc` at 100 %), because a direct
+  red → blue lerp passes through grey in the middle and a grey ring says nothing. Only `.node.active` reads the property, so switching the checkout moves the ring
+  to the new card's own rate; a focused sub-agent card shows its own too. **The same number sits
+  in the card's docked usage bar**: `.node-usage` (which also carries `.usage-line`'s type) is
+  pinned between the log and the composer, so the token line never scrolls away with the log
+  and one place per card holds it instead of one per open fold. It shows the card's **totals**,
+  not its last request: `tree` and every `nodeUpdate` ship `usage: nodeUsageTotal(node)` (every
+  `usage` item summed, the cache fields only from the items that reported them), the live
+  `usage` message carries those running totals **and** the rate after that request
+  (`cachePct`, `appendUsage` → `setCardUsage`), so the bar moves with the turn instead of only
+  when it ends — and that live rate also repaints the card's colour (`paintCacheColor`, the one
+  property the ring and the segment both read), so both are the right colour while the turn
+  runs. **A running card that has not been counted yet still shows the bar**, every number `~`
+  (`showUsagePlaceholder`), because "nothing yet" must not look like "nothing to show": the dock
+  is there from the first thinking row and the first usage replaces the placeholders. The bar
+  itself is `Prompt: {0} / Completion: {1}, Cache Hit: {2} / Miss: {3}` — no brackets, the card's
+  totals — followed by a `.usage-rate` segment `Cache Hit Rate: {0}%` when the card has a rate,
+  coloured with the card's `--cache-color`, so the number and the outline tell one story. A card
+  whose provider reports no cache fields keeps the counts and no segment at all. A collapsed
+  card is its head and its preview, so the bar is hidden there.

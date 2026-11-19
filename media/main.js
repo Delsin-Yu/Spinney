@@ -2158,10 +2158,17 @@
     dot.style.right = value;
   }
 
-  /** Measure and apply in one step, for a single dot outside a layout pass. */
+  /**
+   * Measure and apply in one step, for a single dot outside a layout pass. It also answers
+   * the one question the card's **bottom strip** depends on: a log that fits its box has
+   * nothing to scroll, so the room reserved under it for the light is dead space — the host
+   * drops it and the light goes with it (`.node-work-wrap.fits` in `media/style.css`).
+   */
   function syncLockDot(container, host, dot) {
     const value = lockDotRight(container, host, dot);
     applyLockDot(dot, value);
+    const fits = (container.scrollHeight || 0) <= (container.clientHeight || 0) + 1;
+    if (host && host.classList) host.classList.toggle('fits', fits);
     return value !== null;
   }
 
@@ -2337,8 +2344,6 @@
     const wasOpen = !!row._open;
     row._open = !!open;
     row.classList.toggle('open', row._open);
-    const usage = row.querySelector('.usage-line');
-    if (usage) usage.classList.toggle('hidden', !row._open);
     if (!row._scroll || !row._lockDot) return;
     if (row._open && !wasOpen) {
       // The light belongs to the open form: it goes into the row as the box opens, and
@@ -3304,12 +3309,10 @@
     const text = el('div', 'thinking-text');
     if (thinking) text.textContent = thinking;
     row.appendChild(text);
-    // The usage line is the row's own tail, shown only in the open form (the closed
-    // form is one line of text, and a usage line under it would be a second line).
-    const usage = el('div', 'usage-line hidden');
-    row.appendChild(usage);
+    // The turn's usage is not the row's tail any more: it is the card's docked bar
+    // (`setCardUsage`), which is one place per card instead of one per open fold. The row
+    // keeps only its reasoning text, so its open form is exactly the thoughts.
     row._textEl = text;
-    row._usageEl = usage;
     row._open = false;
     // The open form scrolls inside itself, so it follows (and can be released) on its own:
     // `attachRowLock` gives the row its own green dot, which `setThinkingOpen` puts in the
@@ -3376,8 +3379,8 @@
     node._text = text || '';
     node._answerEl = answer;
     node._streaming = false;
-    // The usage line of this item lives in the row's open form (`usageHostOf`), so the
-    // bubble keeps the row it belongs to.
+    // The row this answer's reasoning lives in. The turn's usage is not tied to either of
+    // them any more: it is the card's docked bar (`setCardUsage`).
     node._thinkingRow = row;
     renderAnswer(node, true);
     messagesEl.appendChild(node);
@@ -3597,17 +3600,15 @@
   }
 
   /**
-   * The one usage line of a step: `[Prompt: … + Completion: …, Cache Hit: …,
-   * Cache Miss: …]`. It is a bracket, because it is a footnote on the line above it
-   * (a thinking row's open form, a tool row's detail, an answer's last line), not a
-   * readout of its own. Every number comes from the provider verbatim; the two cache
-   * fields read `0` when a provider reports none.
+   * The one usage line of a step: `Prompt: … / Completion: …, Cache Hit: … / Miss: …`. It is
+   * the card's docked bar (`setCardUsage`), below the log. Every number comes from the
+   * provider verbatim; the two cache fields read `0` when a provider reports none.
    */
   function formatUsage(usage) {
     const hit = orElse(usage.prompt_cache_hit_tokens, 0);
     const miss = orElse(usage.prompt_cache_miss_tokens, 0);
     return tr(
-      '[Prompt: {0} + Completion: {1}, Cache Hit: {2}, Cache Miss: {3}]',
+      'Prompt: {0} / Completion: {1}, Cache Hit: {2} / Miss: {3}',
       usage.prompt_tokens,
       usage.completion_tokens,
       hit,
@@ -3616,75 +3617,41 @@
   }
 
   /**
-   * Where a step's usage line lives: the message that concluded the turn. The host
-   * attaches usage to the last tool or assistant item, so this finds that item's
-   * element and writes the line *inside* its own fold — a thinking row's open form
-   * or a tool row's detail — rather than appending a line to the flow (which was a
-   * third kind of block in a card that is meant to be one essay). A message with
-   * neither (plain text, no reasoning) keeps the line under its answer.
+   * Write a usage line into `host`. When the **card** has a prompt-cache rate (the same
+   * number its outline is painted from, `meta.cachePct`), the rate follows the bracket as a
+   * segment of its own, coloured with the card's `--cache-color` (`media/style.css`,
+   * `.usage-rate`); the hit and miss counts inside the bracket stay the one request's, the
+   * rate is the card's requests combined. No rate, no segment: an unknown one is not shown.
    */
-  function usageHostOf(message) {
-    if (!message) return null;
-    // A reasoning row owns its own usage line (part of its open form).
-    if (message._usageEl) return message._usageEl;
-    if (message._thinkingRow) return message._thinkingRow._usageEl;
-    if (message.classList && message.classList.contains('tool')) {
-      const detail = byClass(message, 'tool-detail');
-      if (detail) return byClass(detail, 'usage-line') || detail.appendChild(el('div', 'usage-line'));
-    }
-    return byClass(message, 'usage-line');
-  }
-
-  /**
-   * Write one step's usage line where that step keeps it. A reasoning row's line is
-   * part of its *open* form, so only the row decides whether it shows; every other host
-   * shows it whenever its own fold is open (a tool row's detail, an answer's tail).
-   */
-  function paintUsage(message, usage) {
-    if (!message) return null;
-    let host = usageHostOf(message);
-    if (!host) {
-      host = el('div', 'usage-line');
-      message.appendChild(host);
+  function usageLineInto(host, usage, pct) {
+    host._usage = usage;
+    host._cachePct = pct;
+    // Clear the bar explicitly instead of leaning on `textContent =` doing it: the previous
+    // write may have been the `~` placeholder (or an older rate segment), and a node list left
+    // behind would stack a second segment on the next write.
+    if (host.children) {
+      for (const child of Array.from(host.children)) {
+        host.removeChild(child);
+      }
     }
     host.textContent = formatUsage(usage);
-    const row = message._usageEl ? message : message._thinkingRow;
-    if (row) setThinkingOpen(row, isRowOpen(row));
-    else host.classList.remove('hidden');
+    if (typeof pct === 'number') {
+      const rate = el('span', 'usage-rate');
+      rate.textContent = tr('Cache Hit Rate: {0}%', pct.toFixed(1));
+      host.appendChild(rate);
+    }
     return host;
   }
 
   /**
-   * The live `usage` message: the host attaches the turn's usage to the item that
-   * concluded it (the last assistant or tool item), so this finds that item's element
-   * and writes the line inside its own fold — a reasoning row's open form or a tool
-   * row's detail — rather than appending a line to the flow (which was a third kind of
-   * block in a card that is meant to be one essay). A turn whose only item is its
-   * reasoning writes into that row.
+   * The live `usage` message: the card's docked bar is written straight away, so a turn
+   * still in progress shows its token line as soon as the provider reports one. The host
+   * carries the card's rate **after that request** on the same message (`cachePct`), which
+   * is what makes the bar live rather than end-of-turn; a `null` there is a known answer
+   * ("this provider reports no cache fields"), and a missing one means "use the card's own".
    */
-  function appendUsage(usage) {
-    if (!messagesEl) return;
-    let target = logTail().lastElementChild;
-    let row = null;
-    while (target) {
-      const kind = target.dataset.kind;
-      if (kind === 'thinking') {
-        row = target;
-        target = target.previousElementSibling;
-        continue;
-      }
-      if (kind === 'tool' || (kind === 'assistant' && !target.classList.contains('error'))) break;
-      target = target.previousElementSibling;
-    }
-    if (!target) {
-      if (row) {
-        paintUsage(row, usage);
-        followActive();
-        return;
-      }
-      target = addAssistant('', false);
-    }
-    paintUsage(target, usage);
+  function appendUsage(usage, cachePct) {
+    setCardUsage(logCard(), usage, cachePct);
     followActive();
   }
 
@@ -5503,7 +5470,6 @@
     detail.classList.toggle('has-viewer', !!opts.content && !!kind);
     if (opts.content) detail.appendChild(buildToolViewer(kind, name, opts.args, opts.content, opts.since));
     if (opts.error) detail.appendChild(el('div', 'tool-error', opts.error));
-    if (opts.usage) detail.appendChild(el('div', 'usage-line', formatUsage(opts.usage)));
     detail._paint = () => {
       for (const child of detail.children || []) {
         if (child._paint) child._paint();
@@ -6285,10 +6251,9 @@ function addBackgroundNotice(item) {
     } else if (item.kind === 'harness') {
       addHarnessNote(item.text);
     } else if (item.kind === 'assistant') {
-      const message = addAssistant(item.text, item.error, item.thinking);
-      // The same writer the live `usage` message uses: one item, one usage line, in the
-      // same place.
-      if (item.usage) paintUsage(message, item.usage);
+      // The usage of the turn is not painted per item any more: it is the card's docked
+      // bar, written once from the node's own last usage (`syncUsageBar`).
+      addAssistant(item.text, item.error, item.thinking);
     } else if (item.kind === 'notice') {
       // A notice the host keeps updating in place carries its identity with it, so a
       // repaint re-tags the element and the next message with that id rewrites this
@@ -6874,6 +6839,128 @@ function addBackgroundNotice(item) {
     card.classList.toggle('handoff-ready', !!(meta && meta.role === 'compress' && meta.handoffReady));
   }
 
+  /**
+   * The **prompt-cache** colour of one card: `#4daafc` when every token of its requests came
+   * out of the provider's cache, `#fc4d5f` when none did, and `#f14dfc` halfway — a red →
+   * purple → blue two-stop ramp over the whole range, because a direct red → blue lerp
+   * passes through grey in the middle and a grey outline says nothing.
+   *
+   * The stop positions are the specified ones: 100 % blue, 50 % purple, 0 % red. The
+   * percentage itself is the **host's** number (`nodeCacheRate`, shipped as `cachePct`, all of
+   * the card's own requests combined); this function only paints it. `null` is not a colour: a
+   * card whose provider reports no cache fields keeps the theme's accent, because an unknown
+   * rate must not be drawn as a bad one.
+   */
+  const CACHE_BLUE = [0x4d, 0xaa, 0xfc];
+  const CACHE_PURPLE = [0xf1, 0x4d, 0xfc];
+  const CACHE_RED = [0xfc, 0x4d, 0x5f];
+  function cacheColor(pct) {
+    const t = Math.max(0, Math.min(1, pct / 100));
+    // Above the midpoint the ramp is purple → blue, below it red → purple; both halves are
+    // a plain channel lerp in the 0-255 space, which is what the hex stops above describe.
+    const [from, to, k] = t >= 0.5 ? [CACHE_PURPLE, CACHE_BLUE, (t - 0.5) / 0.5] : [CACHE_RED, CACHE_PURPLE, t / 0.5];
+    const channel = (i) =>
+      Math.round(from[i] + (to[i] - from[i]) * k)
+        .toString(16)
+        .padStart(2, '0');
+    return '#' + channel(0) + channel(1) + channel(2);
+  }
+
+  /**
+   * Paint the colour a card's **meta** says. A render, a reload and a `nodeUpdate` all come
+   * through here; a live `usage` message paints the property directly from the rate it
+   * carries (`setCardUsage`), so the two write the same one value.
+   */
+  function syncCacheColor(card, meta) {
+    paintCacheColor(card, meta && typeof meta.cachePct === 'number' ? meta.cachePct : undefined);
+  }
+
+  /**
+   * Write the colour onto the card itself. It is one property (`--cache-color`) that both the
+   * checked-out card's outline (`.node.active`) and its docked usage bar's rate segment
+   * (`.usage-rate`) read, and it is painted from whatever rate is current: a live `usage`
+   * message repaints it mid-turn as well (`setCardUsage`), so the ring and the segment are the
+   * right colour **while the turn runs**, not only once the `nodeUpdate` ending it has arrived.
+   * No property at all when the rate is unknown — the outline falls back to the accent and the
+   * bar shows no segment.
+   */
+  function paintCacheColor(card, pct) {
+    if (!card || !card.style || !card.style.setProperty) return;
+    if (typeof pct !== 'number') {
+      if (card.style.removeProperty) card.style.removeProperty('--cache-color');
+      return;
+    }
+    card.style.setProperty('--cache-color', cacheColor(pct));
+  }
+
+  /**
+   * The card's **docked usage bar**: the token line of the turn that concluded the card,
+   * pinned between the log and the composer rather than scrolling away inside the log. It is
+   * written from the node's own last usage (`meta.usage`, the same number the host ships), so
+   * a reload, a summarised render and a live turn all end up with the same bar; the rate
+   * segment comes from the card's `cachePct`, or from the rate a live `usage` message carries
+   * — and that live rate is painted onto the card too, so the segment is coloured the moment
+   * the request is counted.
+   */
+  function setCardUsage(card, usage, pct) {
+    if (!card) return null;
+    const bar = byClass(card, 'node-usage');
+    if (!bar) return null;
+    if (!usage) {
+      bar._usage = undefined;
+      bar.textContent = '';
+      bar.classList.add('hidden');
+      return bar;
+    }
+    const id = card.dataset ? card.dataset.id : '';
+    const meta = id ? treeNodes[id] : null;
+    // A live `usage` message carries the rate after that request; a render reads it from the
+    // card's own meta. `undefined` means "not given", `null` means "the provider reports none".
+    const rate = pct === undefined ? (meta && typeof meta.cachePct === 'number' ? meta.cachePct : undefined) : pct;
+    const known = typeof rate === 'number' ? rate : undefined;
+    // The one property both the outline and the segment read, from the rate that is current
+    // right now: mid-turn this is the live one, on a render it is the card's own.
+    paintCacheColor(card, known);
+    bar.classList.remove('hidden');
+    usageLineInto(bar, usage, known);
+    return bar;
+  }
+
+  /**
+   * What the bar reads **before the first request of a turn is counted**: every number is
+   * `~`, because the provider has not said anything yet, and the rate has no colour to take.
+   * It is shown while the card's turn runs (`syncUsageBar`), so the dock is there from the
+   * first thinking row onwards instead of appearing out of nowhere when the usage lands.
+   */
+  function showUsagePlaceholder(card) {
+    const bar = card && byClass(card, 'node-usage');
+    if (!bar) return null;
+    bar._usage = undefined;
+    bar.classList.remove('hidden');
+    bar.textContent = tr('Prompt: {0} / Completion: {1}, Cache Hit: {2} / Miss: {3}', '~', '~', '~', '~');
+    const rate = el('span', 'usage-rate');
+    rate.textContent = tr('Cache Hit Rate: ~');
+    bar.appendChild(rate);
+    // Nothing is known, so the ring and the segment keep the neutral colour.
+    paintCacheColor(card, undefined);
+    return bar;
+  }
+
+  /** Put the card's own totals in its bar, or its `~` placeholder, or take the bar away. */
+  function syncUsageBar(card, meta) {
+    if (!card) return;
+    const usage = meta && meta.usage;
+    if (usage) {
+      setCardUsage(card, usage);
+      return;
+    }
+    if (meta && meta.status === 'running') {
+      showUsagePlaceholder(card);
+      return;
+    }
+    setCardUsage(card, undefined);
+  }
+
   function pathIdsFromTree(nodes, activeId) {
     const out = [];
     const seen = new Set();
@@ -6934,6 +7021,8 @@ function addBackgroundNotice(item) {
     // handoff is already in starts green for the same reason.
     syncCtxBadge(card, meta);
     syncHandoffCard(card, meta);
+    syncCacheColor(card, meta);
+    syncUsageBar(card, meta);
     syncAgentBadge(card, meta);
 
     // The pinned user ask (sticky at the top of an expanded card).
@@ -6959,17 +7048,25 @@ function addBackgroundNotice(item) {
     workWrap.appendChild(work);
     const excerpt = el('div', 'node-excerpt');
     excerpt.textContent = meta.preview || meta.title || '';
+    // The **docked usage bar** (see `setCardUsage`): the token line of the turn that
+    // concluded this card, pinned between the log and the composer so it never scrolls out of
+    // sight with the log. It carries `.usage-line` for the type and the colour dot, and keeps
+    // its own name because it is placed differently from the footnotes it grew out of.
+    const usageBar = el('div', 'usage-line node-usage hidden');
     // The "its content is on its way" strip (see `setCardLoading`): the one place a
     // card says it is waiting rather than done. It is created with the card and never
     // rebuilt, its label is the one user-visible string this adds, and the CSS shows it
     // only on an *expanded* card that is loading — a collapsed card is its preview.
     const loading = el('div', 'node-loading', tr('Loading…'));
-    // Order matters: loading, log, collapsed preview — the preview is what a collapsed
-    // card shows *instead* of the log.
+    // Order matters: loading, log, the docked bar, the collapsed preview — the preview is
+    // what a collapsed card shows *instead* of the log and the bar.
     body.appendChild(loading);
     body.appendChild(workWrap);
+    body.appendChild(usageBar);
     body.appendChild(excerpt);
     card.appendChild(body);
+    // The bar is written from the node's own last usage, the same number the host ships.
+    syncUsageBar(card, meta);
 
     // Drag handle to resize the card (bottom-right).
     const handle = el('div', 'node-resize');
@@ -8062,9 +8159,19 @@ function addBackgroundNotice(item) {
       // card's whole behaviour turns on that fact: it hosts the composer from then on
       // (`setActiveLeaf`) and wears the green ready border.
       if (typeof msg.handoffReady === 'boolean') treeNodes[msg.id].handoffReady = msg.handoffReady;
+      // The prompt-cache rate of the card's own requests: the host recomputes it from the
+      // items it now holds (a turn that just ended is what changes it), and the checked-out
+      // card paints it on its outline. `null` is a known answer too — it means the provider
+      // reported no cache fields, and the outline must go back to the accent.
+      if (typeof msg.cachePct === 'number' || msg.cachePct === null) treeNodes[msg.id].cachePct = msg.cachePct;
+      // The turn's last usage is what the docked bar shows; it arrives with the same patch
+      // that ends the turn (`nodeStatePatch.usage`).
+      if (msg.usage !== undefined) treeNodes[msg.id].usage = msg.usage;
     }
     if (card) {
       syncHandoffCard(card, treeNodes[msg.id]);
+      syncCacheColor(card, treeNodes[msg.id]);
+      syncUsageBar(card, treeNodes[msg.id]);
       syncContinueButton(card, treeNodes[msg.id] || { id: msg.id, status: msg.status, children: [] });
     }
     // The pencil on the ask is offered by the render (`syncAskEdit`), and nothing a `node`
@@ -8822,6 +8929,8 @@ function relayout() {
         // in a streaming patch: the head exists once).
         syncCtxBadge(card, n);
         syncHandoffCard(card, n);
+        syncCacheColor(card, n);
+        syncUsageBar(card, n);
         syncAgentBadge(card, n);
       }
     }
@@ -10935,7 +11044,7 @@ function relayout() {
         routeTo(msg.nodeId, () => appendThinking(msg.text), 'thinkingDelta');
         break;
       case 'usage':
-        routeTo(msg.nodeId, () => appendUsage(msg.usage), 'usage');
+        routeTo(msg.nodeId, () => appendUsage(msg.usage, msg.cachePct), 'usage');
         break;
       case 'toolCallDelta':
         // The host sends the call's index, id and name and **not its arguments** (see

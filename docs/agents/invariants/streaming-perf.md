@@ -223,9 +223,9 @@ not italic either, because what the agent *said* is not a step and the italic ma
 - **a thinking row** (`.msg.thinking-row`, `data-kind="thinking"`) — no header, no
   chevron, no label: the row *is* the control. Open (while its turn runs) it is the
   paragraph in the same type as the prose (no dim, no italic), capped at **240 px** with
-  its own scrollbar so a long reasoning cannot push the turn below the fold, and its tail
-  is the turn's usage line
-  (`[Prompt: {0} + Completion: {1}, Cache Hit: {2}, Cache Miss: {3}]`). The box follows its
+  its own scrollbar so a long reasoning cannot push the turn below the fold. The turn's
+  token line is not the row's tail any more: it is the card's **docked bar**
+  (`.node-usage`, `chat-tree.md`), one place per card. The box follows its
   own stream — it carries its **own green dot** while it is open, and the same direction
   rule as the log (`appendThinking` calls the row's `scrollToBottom()`; a reader who
   scrolled the box up released it, and the next delta does not take it back). Closed it is

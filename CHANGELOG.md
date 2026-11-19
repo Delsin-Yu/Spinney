@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The checked-out card's outline shows its prompt-cache hit rate.** The 2 px ring around
+  the current card is now a red → purple → blue colour over the whole range: `#4daafc` when
+  every prompt token of the card's requests came out of the provider's cache, `#fc4d5f` when
+  none did, `#f14dfc` halfway, which is why the ramp goes through purple instead of the grey a
+  direct red → blue lerp would pass through. The rate is the card's own requests combined (a
+  tool loop makes several, and all of them are that card's), divided by hit + miss rather than
+  by `prompt_tokens`, computed at payload time and never stored. The same number sits in the
+  card's **docked usage bar**: the token line is pinned between the log and the composer
+  (`.node-usage`) instead of scrolling away inside the log, written from the node's own last
+  usage, closing the bracket with a coloured `Cache Hit Rate: 83.3%` segment in the ring's
+  colour — one place per card instead of one per open fold, and it moves while the turn runs
+  (the live `usage` message carries the rate after each request, and that rate also repaints
+  the card's colour, so the ring and the segment are coloured mid-turn). The bar reads
+  `Prompt: … / Completion: …, Cache Hit: … / Miss: …`, without brackets, and it shows the
+  card's **totals** — every request its turn made — rather than the last one, matching what the
+  rate is computed from; a running card that has not been counted yet still shows the bar with
+  `~` in every place, so the dock is there from the first thinking row. A card whose provider
+  reports no cache fields keeps the theme's accent outline and the plain counts, with no
+  segment: an unknown rate is not drawn as a bad one, while a real 0 % is red.
 - **A compression card is where the continuation starts.** `Compress` now puts a **compression
   card** below the window it compresses and stops there: `Simple` creates the card ready, with
   the harness-written pointer handoff and **no turn at all**, and `Agentic` runs the compression
@@ -26,6 +45,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **A card whose log fits no longer keeps the strip under it.** The 20 px margin under the log
+  plus the wrapper's bottom padding existed to hold the green follow light below the
+  scrollbar. When the log has nothing to scroll that room is dead space, so `syncLockDot`
+  marks the wrapper `fits` on every layout pass, the card drops the strip and the light with
+  it, and a short card ends flush with its composer.
 - **Sub-agent and terminal cards use the default card colour.** The fixed-seed family hue is
   gone entirely: no left stripe, no family-coloured border or outline on the focused card, and
   no tinted connector. The state colours stay (`agent-done` / `agent-error` on the card, and

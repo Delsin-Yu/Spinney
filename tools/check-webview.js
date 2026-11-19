@@ -4086,6 +4086,155 @@ if (contextLabel !== 'ctx 50%') {
   );
 }
 
+// --- The checked-out card's outline shows the prompt-cache rate ---------------
+// `docs/agents/invariants/chat-tree.md`: `--cache-color` is painted from the host's
+// `cachePct` (the card's **own** requests combined, `nodeCacheRate`), and only
+// `.node.active` reads it, so exactly the focused card is coloured. Three stops: 100 % the
+// accent blue, 50 % purple, 0 % red. `null` is not 0 %: a provider that reports no cache
+// fields leaves the ring at the theme accent, never a false red.
+//
+// The style object the DOM stub hands out does not keep a value, so the block swaps in a
+// recording pair on each card it asks about.
+{
+  const ROOT = 'cache-root';
+  const HOT = 'cache-hot';   // focused, every token from the cache
+  const MID = 'cache-mid';   // the midpoint
+  const COLD = 'cache-cold'; // a known 0 %, which is not the same as "unknown"
+  const NONE = 'cache-none'; // the provider reported nothing
+  const RUN = 'cache-running'; // a turn that has not been counted yet
+  const node = (id, parentId, children, extra) =>
+    Object.assign(
+      { id, parentId, children, title: id, status: 'done', createdAt: 0, preview: id, usage: null, size: null },
+      extra || {},
+    );
+  const tree = {
+    type: 'tree',
+    viewId: HOT,
+    activeId: null,
+    rootId: ROOT,
+    rootIds: [ROOT],
+    nodes: [
+      node(ROOT, null, [HOT, MID, COLD, NONE, RUN], { cachePct: null }),
+      node(HOT, ROOT, [], { cachePct: 100 }),
+      node(MID, ROOT, [], { cachePct: 50 }),
+      node(COLD, ROOT, [], { cachePct: 0 }),
+      node(NONE, ROOT, [], { cachePct: null }),
+      node(RUN, ROOT, [], { status: 'running' }),
+    ],
+  };
+  dispatch({ type: 'reset' });
+  dispatch({ type: 'state', busy: false, status: '', sessionId: 'smoke-session', runningNodes: [] });
+  dispatch(tree);
+  const cards = new Map();
+  for (const child of elementById('tree-canvas').children) {
+    if (child.dataset && child.dataset.id) cards.set(child.dataset.id, child);
+  }
+  const recorded = new Map();
+  for (const [id, card] of cards) {
+    if (!card.style) continue;
+    card.style.setProperty = (name, value) => recorded.set(id, value);
+    card.style.removeProperty = () => recorded.set(id, null);
+  }
+  // A repaint is what re-runs the sync for every card: the same tree causes no other change.
+  dispatch(tree);
+  const expected = new Map([
+    [HOT, '#4daafc'],
+    [MID, '#f14dfc'],
+    [COLD, '#fc4d5f'],
+    [NONE, null],
+  ]);
+  for (const [id, want] of expected) {
+    const got = recorded.has(id) ? recorded.get(id) : '(never synced)';
+    if (got !== want) {
+      problems.push(`card ${id} painted --cache-color ${JSON.stringify(got)}, expected ${JSON.stringify(want)}`);
+    }
+  }
+  // The coloured ring belongs to the checked-out card, and only to it: the class is what
+  // `media/style.css` keys the colour rule on.
+  if (!cards.get(HOT).classList.contains('active')) {
+    problems.push('the focused card does not wear `.active`, so its cache ring would never show');
+  }
+  // A `nodeUpdate` is the one event a finished turn produces, so it has to repaint the ring:
+  // the clamps (below 0 → red, above 100 → blue) are asserted through it too.
+  const patch = (id, cachePct) =>
+    dispatch({ type: 'nodeUpdate', id, status: 'done', cachePct, context: 'ok', contextPct: 0 });
+  patch(MID, 0);
+  if (recorded.get(MID) !== '#fc4d5f') {
+    problems.push(`a nodeUpdate at 0 % painted ${JSON.stringify(recorded.get(MID))}, expected the red stop`);
+  }
+  patch(MID, -20);
+  if (recorded.get(MID) !== '#fc4d5f') {
+    problems.push(`a nodeUpdate at -20 % painted ${JSON.stringify(recorded.get(MID))}, expected the red stop (clamped)`);
+  }
+  patch(MID, 140);
+  if (recorded.get(MID) !== '#4daafc') {
+    problems.push(`a nodeUpdate at 140 % painted ${JSON.stringify(recorded.get(MID))}, expected the blue stop (clamped)`);
+  }
+  // …and it can take the colour away again: the provider reporting nothing is not 0 %.
+  patch(MID, null);
+  if (recorded.get(MID) !== null) {
+    problems.push(`a nodeUpdate with no cache rate left the ring painted ${JSON.stringify(recorded.get(MID))}`);
+  }
+  // The token line is the card's **docked bar**, not a footnote inside the log: it must not
+  // be in the scrolling panel, it carries the bar's own class, and the rate in the bracket
+  // is the card's (the hit and miss counts stay the one request's).
+  const use = {
+    prompt_tokens: 100,
+    completion_tokens: 10,
+    total_tokens: 110,
+    prompt_cache_hit_tokens: 100,
+    prompt_cache_miss_tokens: 0,
+  };
+  // A repaint with the usage on the node's own meta is what a reload and a turn end both
+  // produce; the bar is written from it (`syncUsageBar`).
+  const withUsage = (id) =>
+    Object.assign({}, tree, {
+      nodes: tree.nodes.map((n) => (n.id === id ? Object.assign({}, n, { usage: use }) : n)),
+    });
+  dispatch(withUsage(HOT));
+  const hotBar = findByClass(cards.get(HOT), 'node-usage');
+  if (!hotBar) {
+    problems.push('a card with a usage has no docked usage bar');
+  } else {
+    if (!/^Prompt: 100 \/ Completion: 10, Cache Hit: 100 \/ Miss: 0$/.test(String(hotBar.textContent || ''))) {
+      problems.push(`the docked bar reads ${JSON.stringify(hotBar.textContent)}, expected the one request's counts`);
+    }
+    const rate = findByClass(hotBar, 'usage-rate');
+    if (!rate || !/^Cache Hit Rate: 100\.0%$/.test(String(rate.textContent || ''))) {
+      problems.push(
+        `the bar's rate segment reads ${JSON.stringify(rate && rate.textContent)}, expected the card's cache hit rate`,
+      );
+    }
+    const work = findByClass(cards.get(HOT), 'node-work');
+    if (work && findByClass(work, 'usage-line')) {
+      problems.push('the usage line is still inside the scrolling log (it must be docked, not scrolled away)');
+    }
+  }
+  // A card whose provider reports nothing keeps the plain bracket and no rate segment — the
+  // segment would be inventing a number.
+  dispatch(withUsage(NONE));
+  const noneBar = findByClass(cards.get(NONE), 'node-usage');
+  if (noneBar) {
+    if (findByClass(noneBar, 'usage-rate')) {
+      problems.push('a card with no cache rate shows a rate segment in its bar');
+    }
+  }
+  const runBar = findByClass(cards.get(RUN), 'node-usage');
+  if (!runBar || runBar.classList.contains('hidden')) {
+    problems.push('a running card with no usage hides the dock (it should show the `~` placeholder)');
+  } else {
+    const runRate = findByClass(runBar, 'usage-rate');
+    const compact = (String(runBar.textContent || '') + (runRate ? String(runRate.textContent || '') : '')).replace(/\s+/g, '');
+    if (compact !== 'Prompt:~/Completion:~,CacheHit:~/Miss:~CacheHitRate:~') {
+      problems.push(`a running card's placeholder bar reads ${JSON.stringify(runBar.textContent)} + ${JSON.stringify(runRate && runRate.textContent)}`);
+    }
+    if (!runRate) {
+      problems.push('the placeholder bar has no rate segment to replace when the rate arrives');
+    }
+  }
+  notes.push('the card ring: the focused card paints the prompt-cache rate (blue 100 %, purple 50 %, red 0 %), clamps both ends, leaves an unknown rate unpainted, repeats it in a coloured segment of its docked token bar, and shows that bar with `~` while a turn has not been counted');
+}
+
 // --- A node-scoped notice updates ONE block, and belongs to its node -----------
 // A run that keeps saying the same thing while its state advances — the silent-retry
 // marker the host posts per re-issue — must not grow one block per message. So a notice
@@ -4432,7 +4581,7 @@ if (contextLabel !== 'ctx 50%') {
     handler({ stopPropagation() {} });
     return true;
   };
-  /** A thinking row's two states, read as one statement (class, flag and usage line). */
+  /** A thinking row's two states, read as one statement (class and flag). */
   const expectThinkingOpen = (row, open, what) => {
     if (!row) {
       problems.push(`${what}: the card renders no .thinking-row`);
@@ -4445,17 +4594,6 @@ if (contextLabel !== 'ctx 50%') {
     }
     if (!!row._open !== open) {
       problems.push(`${what}: the row's own \`_open\` flag is ${JSON.stringify(row._open)}, expected ${open}`);
-    }
-    const usage = findByClass(row, 'usage-line');
-    if (!usage) {
-      problems.push(`${what}: the thinking row has no .usage-line to open with`);
-      return;
-    }
-    if (usage.classList.contains('hidden') === open) {
-      problems.push(
-        `${what}: the usage line is ${open ? 'hidden' : 'shown'} while the row is ${open ? 'open' : 'closed'} — it is part ` +
-          'of the open form only',
-      );
     }
   };
   /** A tool row's folded state (its detail is `hidden`, never removed). */
@@ -4595,24 +4733,61 @@ if (contextLabel !== 'ctx 50%') {
     }
   }
 
-  // (c) The usage line is the bracket format, written where its step keeps it — a
-  // hosted `usage` message and a repainted item produce the same line.
+  // (c) The usage line is the bracket format, and it is **docked**: a hosted `usage`
+  // message writes the card's bar between the log and the composer, never inside a row and
+  // never inside the scrolling log.
   {
+    dispatch({
+      type: 'usage',
+      nodeId: NODE,
+      usage: { prompt_tokens: 1200, completion_tokens: 340, prompt_cache_hit_tokens: 1000, prompt_cache_miss_tokens: 200 },
+    });
+    const card = cardOf();
+    const bar = card ? findByClass(card, 'node-usage') : null;
+    const text = bar ? textOf(bar) : null;
+    // No cache rate on this node, so the plain counts and no rate segment.
+    if (!/^Prompt: 1200 \/ Completion: 340, Cache Hit: 1000 \/ Miss: 200$/.test(String(text).trim())) {
+      problems.push(
+        `a turn's usage bar reads ${JSON.stringify(text)}, expected "Prompt: 1200 / Completion: 340, Cache Hit: 1000 / ` +
+          'Miss: 200"',
+      );
+    }
+    if (bar && findByClass(bar, 'usage-rate')) {
+      problems.push('a node with no cache rate shows a rate segment in its usage bar');
+    }
+    // A `usage` message that carries the rate writes it **immediately** — the bar is live,
+    // not end-of-turn — and the colour follows it mid-turn too: the property both the outline
+    // and the segment read is repainted from that same live rate, with no `nodeUpdate` in sight.
+    const painted = new Map();
+    if (card && card.style) {
+      card.style.setProperty = (name, value) => painted.set(name, value);
+      card.style.removeProperty = (name) => painted.set(name, null);
+    }
+    dispatch({
+      type: 'usage',
+      nodeId: NODE,
+      usage: { prompt_tokens: 1200, completion_tokens: 340, prompt_cache_hit_tokens: 1000, prompt_cache_miss_tokens: 200 },
+      cachePct: 50,
+    });
+    const liveRate = bar ? findByClass(bar, 'usage-rate') : null;
+    if (!liveRate || !/^Cache Hit Rate: 50\.0%$/.test(String(liveRate.textContent || ''))) {
+      problems.push(
+        `a live usage message at 50 % left the bar reading ${JSON.stringify(liveRate && liveRate.textContent)}, ` +
+          'expected the rate segment "Cache Hit Rate: 50.0%" without waiting for the turn to end',
+      );
+    }
+    if (painted.get('--cache-color') !== '#f14dfc') {
+      problems.push(
+        `a live usage message at 50 % painted ${JSON.stringify(painted.get('--cache-color'))}, expected the midpoint ` +
+          'colour while the turn is still running',
+      );
+    }
+    if (bar && (bar.classList.contains('hidden') || logOf() === bar)) {
+      problems.push('the usage bar is hidden or inside the log (it has to be docked under the log)');
+    }
     const row = lastOf('thinking');
-    if (clickOf(row, 'a thinking row')) {
-      dispatch({
-        type: 'usage',
-        nodeId: NODE,
-        usage: { prompt_tokens: 1200, completion_tokens: 340, prompt_cache_hit_tokens: 1000, prompt_cache_miss_tokens: 200 },
-      });
-      const usage = row ? findByClass(row, 'usage-line') : null;
-      const text = usage ? textOf(usage) : null;
-      if (!/^\[Prompt: 1200 \+ Completion: 340, Cache Hit: 1000, Cache Miss: 200\]$/.test(String(text))) {
-        problems.push(
-          `a turn's usage line reads ${JSON.stringify(text)}, expected "[Prompt: 1200 + Completion: 340, Cache Hit: 1000, ` +
-            'Cache Miss: 200]"',
-        );
-      }
+    if (row && findByClass(row, 'usage-line')) {
+      problems.push('a thinking row still carries a usage line of its own (the bar is the one place)');
     }
   }
 
@@ -5476,12 +5651,8 @@ if (contextLabel !== 'ctx 50%') {
     }
     const thinking = lastOf('thinking');
     expectThinkingOpen(thinking, false, 'a repainted thinking row (its turn is over)');
-    const usage = thinking ? findByClass(thinking, 'usage-line') : null;
-    if (!usage || String(usage.textContent || '').indexOf('[Prompt: 1200') !== 0) {
-      problems.push(
-        `a repainted thinking row's usage line reads ${JSON.stringify(usage && usage.textContent)}, expected the stored ` +
-          '"[Prompt: 1200 …]" bracket',
-      );
+    if (thinking && findByClass(thinking, 'usage-line')) {
+      problems.push('a repainted thinking row carries a usage line of its own (the bar is the one place)');
     }
   }
 

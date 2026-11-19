@@ -14,7 +14,9 @@
  * self-equality test — so a foreign/stale stored value must be a *provable* no-op
  * rather than a repair pass.
  *
- * Needs `out/` (run `npm run compile` first: it requires the compiled modules).
+ * Needs `out/` (run `npm run compile` first: it requires the compiled modules). It also pins
+ * `nodeCacheRate`, the per-card prompt-cache rate the checked-out card's ring is painted
+ * from (`chat-tree.md`), because `tree.ts` is the module this guard already loads.
  *
  * Run: npm run check:rollover   /   node tools/check-context-rollover.js
  */
@@ -274,6 +276,51 @@ ok('a stalled stream is not', P('Stream stalled: no data for 60000ms mid-answer.
 ok('a 401 body is not', P('{"error":{"message":"Authentication Fails, Your api key is invalid","type":"authentication_error","code":"invalid_api_key"}}') === undefined);
 ok('the max_tokens 400 is not', P('Invalid max_tokens value, the valid range of max_tokens is [1, 393216]') === undefined);
 ok('empty text is not', P('') === undefined);
+
+console.log('-- the prompt-cache rate of one card --');
+// `nodeCacheRate` is the number the checked-out card's ring is painted from
+// (`docs/agents/invariants/chat-tree.md`): it combines **every** request the turn made, it
+// divides by `hit + miss` (never by `prompt_tokens`, which counts tokens the provider never
+// gave it a choice about), and a request that reported no cache fields leaves it undefined
+// rather than scoring it 0 %.
+{
+  const withUse = (text, usage) => ({ kind: 'assistant', text, usage });
+  const use = (prompt, hit, miss) => ({ prompt_tokens: prompt, completion_tokens: 1, total_tokens: prompt + 1, prompt_cache_hit_tokens: hit, prompt_cache_miss_tokens: miss });
+  const rate = (items) => T.nodeCacheRate({ displayItems: items });
+  ok(
+    'every request of the turn is combined, not just the last one',
+    rate([withUse('a', use(100, 60, 40)), withUse('b', use(100, 40, 60))]) === 50,
+    String(rate([withUse('a', use(100, 60, 40)), withUse('b', use(100, 40, 60))])),
+  );
+  ok(
+    '  … and the denominator is hit + miss, not prompt_tokens',
+    rate([withUse('a', use(5000, 90, 10))]) === 90,
+    String(rate([withUse('a', use(5000, 90, 10))])),
+  );
+  ok('a request that hit nothing is a known 0 %, never "unknown"', rate([withUse('a', use(100, 0, 100))]) === 0);
+  ok('a provider that reports no cache fields leaves it undefined', rate([withUse('a', { prompt_tokens: 100, completion_tokens: 1, total_tokens: 101 })]) === undefined);
+  ok('  … and so does a turn with no usage at all', rate([{ kind: 'user', text: 'hi' }]) === undefined);
+  ok('  … an item without usage does not poison the ones that have it', rate([{ kind: 'user', text: 'hi' }, withUse('a', use(100, 75, 25))]) === 75);
+  // The bar shows the card's **totals**, so the same walk has to add every field up — and the
+  // cache fields only from the usages that reported them.
+  const total = (items) => T.nodeUsageTotal({ displayItems: items });
+  ok(
+    'the card totals add every request up, field by field',
+    JSON.stringify(total([withUse('a', use(100, 60, 40)), withUse('b', use(50, 25, 25))])) ===
+      JSON.stringify({ prompt_tokens: 150, completion_tokens: 2, total_tokens: 152, prompt_cache_hit_tokens: 85, prompt_cache_miss_tokens: 65 }),
+    JSON.stringify(total([withUse('a', use(100, 60, 40)), withUse('b', use(50, 25, 25))])),
+  );
+  ok('  … and the rate is the same totals\' share', T.nodeCacheRate({ displayItems: [withUse('a', use(100, 60, 40)), withUse('b', use(50, 25, 25))] }) === (85 / 150) * 100);
+  ok(
+    'a provider that reports no cache fields still totals its counts, with no cache fields',
+    JSON.stringify(total([withUse('a', { prompt_tokens: 10, completion_tokens: 1, total_tokens: 11 })])) ===
+      JSON.stringify({ prompt_tokens: 10, completion_tokens: 1, total_tokens: 11 }),
+    JSON.stringify(total([withUse('a', { prompt_tokens: 10, completion_tokens: 1, total_tokens: 11 })])),
+  );
+  ok('  … and one usage with them does not invent them for the other', total([withUse('a', use(100, 60, 40)), withUse('b', { prompt_tokens: 10, completion_tokens: 1, total_tokens: 11 })]) !== undefined);
+  ok('a turn that has not been counted has no totals at all', total([]) === undefined);
+  ok('  … which is not a zero total', total([{ kind: 'user', text: 'hi' }]) === undefined);
+}
 
 console.log('');
 if (problems.length) {

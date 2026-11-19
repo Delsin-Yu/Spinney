@@ -751,16 +751,6 @@ body.vscode-high-contrast-light {
    and taken back out — the model's reasoning is not a document, and Markdown's own rules
    (four spaces = a code block, a leading dash = a list, a blank line = a paragraph gap)
    made it read taller than it was written. */
-/* The usage line is part of the *open* form only (main.js adds/removes `hidden`), so
-   the closed row stays one line. Its right end keeps clear of the light below the box. */
-.thinking-row .usage-line.hidden {
-  display: none;
-}
-
-.thinking-row.open > .usage-line {
-  padding-right: 16px;
-}
-
 /* The reasoning box's own light. The open form is a 240 px scroller inside a row that is
    itself inside the log, so it follows (and is released) on its own: a smaller dot in the
    row's bottom-right corner, over the box's last line and inside the strip its
@@ -1911,8 +1901,9 @@ body.vscode-high-contrast-light {
   word-break: break-word;
 }
 
-/* The usage line: a footnote on the line above it (the open thinking row, the tool
-   row's detail, the end of an answer), never a block of its own. */
+/* The token line's type: monospace, dim, small. It used to be a footnote inside a step's
+   open form; the one place it is drawn now is the card's docked bar (`.node-usage`), which
+   adds the divider and the padding and drops the footnote inset. */
 .usage-line {
   margin-top: 6px;
   padding-top: 6px;
@@ -1920,6 +1911,36 @@ body.vscode-high-contrast-light {
   font-size: 10px;
   font-family: "Consolas", "Courier New", monospace;
   color: var(--text-dim);
+}
+
+/* The card's **docked usage bar**: the token line of the turn that concluded the card,
+   pinned between the log and the composer instead of scrolling away inside the log. It
+   keeps `.usage-line`'s type and colour and drops its footnote inset — the bar owns the
+   divider and the padding — and it is one per card, so no fold has to be open to read it.
+   A collapsed card is its head and its preview: the bar belongs to the reading card. */
+.node-usage {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 6px 10px;
+  border-top: 1px dashed var(--border);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.node:not(.expanded) .node-usage {
+  display: none;
+}
+
+/* The card's prompt-cache rate, as the last segment of its usage bar: the bar's bracket
+   keeps the one request's counts, and this segment repeats the card's own combined rate in
+   the same `--cache-color` the checked-out card's outline is painted from, so the number and
+   the ring tell one story. A card whose rate is unknown carries no segment at all
+   (`usageLineInto` in media/main.js). */
+.usage-rate {
+  margin-left: 8px;
+  color: var(--cache-color, var(--text-dim));
+  font-weight: 600;
 }
 
 .usage-line.hidden {
@@ -2662,6 +2683,14 @@ body.panning #tree-canvas {
 
 .node.active {
   outline: 2px solid var(--accent);
+  /* The focused card's ring is the one surface that shows the **prompt-cache hit rate** of
+     the card's own requests (`syncCacheColor` in media/main.js): blue when every token came
+     out of the provider's cache, red under half, purple at the midpoint. A card whose
+     provider reports no cache fields carries no `--cache-color`, so the ring is the theme's
+     accent — an unknown rate is never drawn as a bad one.
+     `docs/agents/invariants/chat-tree.md` states the rule; only the colour is set here, so
+     the width, style and offset stay the base rule's. */
+  outline-color: var(--cache-color, var(--accent));
   outline-offset: -2px;
   z-index: 3;
 }
@@ -2781,6 +2810,23 @@ body.panning #tree-canvas {
   min-height: 0;
   flex: 1 1 auto;
   padding: 10px;
+}
+
+/* A log that **fits** its box has nothing to scroll, so the strip reserved under it for the
+   light (the log's own bottom margin, plus this wrapper's bottom padding) is dead space: the
+   card drops it, and the light goes with it because a follow light over content that cannot
+   scroll is a control with nothing to control. `syncLockDot` toggles the class on every
+   layout pass, from the one measurement the light already needed. */
+.node-work-wrap.fits {
+  padding-bottom: 0;
+}
+
+.node-work-wrap.fits .node-work {
+  margin-bottom: 0;
+}
+
+.node-work-wrap.fits > .scroll-lock-dot {
+  display: none;
 }
 
 /* The card's **one scroller**, holding the whole turn in order: the thinking rows,

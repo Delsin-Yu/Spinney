@@ -121,7 +121,9 @@ The row under the input box shows the state of the session.
 | `bal …` | The wallet of the answering provider. `bal –` means that no number exists, for example on a provider with the `none` balance dialect. Spinney reads the wallet once and never retries. |
 | `tok/s` | The output speed. It is a local estimate, not the count of the provider. |
 
-Each step carries its own token line: `[Prompt: 1200 + Completion: 340, Cache Hit: 1000, Cache Miss: 200]`. It shows the prompt tokens, the completion tokens, the cache hits and the cache misses of that request.
+The outline of the checked-out card shows the prompt-cache hit rate of that card. It combines all requests of the card. Blue means that every prompt token came out of the provider's cache. Red means that none of them did. Purple is the middle, at half. A card whose provider reports no cache numbers keeps the usual outline colour.
+
+The token line of a step is a bar docked at the bottom of the card, just above the input box. It does not scroll with the log, so it stays in view. It shows the totals of the card: `Prompt: 1200 / Completion: 340, Cache Hit: 1000 / Miss: 200`. The totals come from all requests of the card. When the card has a cache rate, the bar also shows it, in the colour of the rate: `Cache Hit Rate: 83.3%`. The rate is all requests of the card. The bar changes while the turn runs. When the turn starts, the bar shows `~` in place of every number until the provider reports the first one. A card whose provider reports no cache numbers shows no rate. A collapsed card does not show the bar.
 
 A `HARNESS` block holds the exact text that the harness sent to the model. The `HARNESS` blocks sit in the work log with the other steps.
 

@@ -106,7 +106,9 @@ import {
   isCompressNode,
   messageText,
   newId,
+  nodeCacheRate,
   nodeUsage,
+  nodeUsageTotal,
   pathIds,
   pathMessages,
   sessionModelPick,
@@ -2509,16 +2511,23 @@ export class SessionRuntime {
     contextFull: boolean;
     context: 'ok' | 'near' | 'full';
     contextPct: number;
+    cachePct: number | null;
     handoffReady: boolean;
   } {
     return {
       id: node.id,
       status: node.status,
       title: node.title,
-      usage: nodeUsage(node),
+      // The card bar reads **this card's totals**, not its last request (`nodeUsageTotal`):
+      // a tool loop made several and the bar counts all of them.
+      usage: nodeUsageTotal(node),
       contextFull: nodeContextFull(node),
       context: this.contextState(node),
       contextPct: this.contextPercent(node),
+      // The card's own prompt-cache hit rate, recomputed from the items it now holds: a turn
+      // that just ended is exactly the event that changes it, and the checked-out card's
+      // outline is where it shows (`docs/agents/invariants/chat-tree.md`).
+      cachePct: nodeCacheRate(node) ?? null,
       // A compression card that just wrote its handoff becomes ready without any other
       // change on the card, so the flag has to ride in every patch — not only in `tree`.
       handoffReady: hasHandoff(node),
@@ -2559,7 +2568,9 @@ export class SessionRuntime {
       status: node.status,
       createdAt: node.createdAt,
       preview: this.nodePreview(node),
-      usage: nodeUsage(node),
+      // The card's **totals** (every request its turn made), which is what the docked bar
+      // shows; `nodeUsage` answers "the last request" and is not this.
+      usage: nodeUsageTotal(node),
       // The webview never re-derives a model fact from error text: the provider's
       // refusal is judged once, here, and shipped as a boolean. `contextBaseId` is
       // what it draws the dashed edge and the `CTX` badge from.
@@ -2570,6 +2581,11 @@ export class SessionRuntime {
       // never disagree about when a new node is worth offering.
       context: this.contextState(node),
       contextPct: this.contextPercent(node),
+      // The **prompt-cache hit rate** of this card's own requests, or `null` when none of
+      // them reported the cache fields (`nodeCacheRate`). The one card in the tree that is
+      // checked out wears it on its outline; it is computed here, at payload time, so there
+      // is no stored percentage that could go stale.
+      cachePct: nodeCacheRate(node) ?? null,
       contextBaseId: node.contextBaseId,
       // The epoch this node starts, when it starts one: it is what a new tree is copied
       // from and what a diagnostic names.
@@ -5164,7 +5180,17 @@ export class SessionRuntime {
           if (last && (last.kind === 'assistant' || last.kind === 'tool') && !last.error) {
             last.usage = event.usage;
           }
-          this.post({ type: 'usage', usage: event.usage, nodeId: run.nodeId });
+          this.post({
+            type: 'usage',
+            // The card's **running totals**, so the docked bar counts the whole card rather
+            // than the request that just finished.
+            usage: nodeUsageTotal(run.node),
+            nodeId: run.nodeId,
+            // The card's rate **as it stands after this request**, so the docked bar updates
+            // live with the counts rather than waiting for the `nodeUpdate` that ends the
+            // turn (`docs/agents/invariants/chat-tree.md`).
+            cachePct: nodeCacheRate(run.node) ?? null,
+          });
           // Recompute the session totals after this turn's usage is attached to
           // the display items, so the cumulative counters include the turn just
           // finished.
@@ -6157,7 +6183,7 @@ export class SessionRuntime {
         break;
       case 'usage':
         this.commitSubUsage(items, event.usage);
-        this.post({ type: 'usage', usage: event.usage, nodeId: id });
+        this.post({ type: 'usage', usage: nodeUsageTotal({ displayItems: items }), nodeId: id, cachePct: nodeCacheRate({ displayItems: items }) ?? null });
         break;
       case 'status':
         break;
