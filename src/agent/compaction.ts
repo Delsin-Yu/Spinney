@@ -733,7 +733,7 @@ export function buildContextRolloverMessage(input: PointerFacts & {
   /** One entry per sub-agent node it killed: its dump path once its finish handler wrote it. */
   killedSubAgents: KilledAgentLine[];
   /**
-   * A **compression node's** answer (`compressAndContinue`). When it is here the window is a
+   * A **compression card's** answer (`compressHandoff`). When it is here the window is a
    * compressed one: the answer replaces the pointer's own story, and the facts that cannot
    * be handed over in prose follow it.
    */

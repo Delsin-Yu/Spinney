@@ -241,35 +241,51 @@ export interface TreeNode {
    */
   epoch?: Epoch;
   /**
-   * The handoff this node's window was opened with (`rolloverContext` /
-   * `compressAndContinue`), when it was not the plain pointer the harness writes itself.
+   * The handoff this node's window was opened with (`startPointerHandoff` /
+   * `compressHandoff` and the send below their card), when it was not the plain pointer the
+   * harness writes itself.
    *
-   * `'summary'` — the window was opened from a **compression node's** answer
-   * (`docs/agents/invariants/compress-node.md`): its first message starts with the
-   * handoff a real turn wrote, not with the pointer. Only ever set on a `role:'resume'`
+   * `'summary'` — the window was opened from a **compression card's** handoff
+   * (`docs/agents/invariants/compress-node.md`): its first message starts with the handoff
+   * a real turn wrote, not with the pointer. Only ever set on a `role:'resume'`
    * node, whose `handoffSummary` holds the same text. A value this build does not know is
    * simply ignored (no migration, no repair pass).
    */
   handoff?: 'summary';
   /**
    * The **handoff** this window was opened with, verbatim, when a compression turn wrote it
-   * (`compressAndContinue`). It is the same text the window's harness block carries —
+   * (`compressHandoff`). It is the same text the window's harness block carries —
    * stored here so a reload, and any later feature, can read the handoff as data instead
-   * of parsing that block. Absent on a `Simple` (pointer) rollover, which carries the
-   * harness' own pointer text instead.
+   * of parsing that block. Absent on a `Simple` (pointer) handoff, which carries the
+   * harness' own pointer text instead — and absent on the card itself, which keeps its copy
+   * in `handoffNote` until a send below it opens the window.
    */
   handoffSummary?: string;
   /**
+   * `role:'compress'` only: the harness text the window below must receive **before** the
+   * user's own message. Stored on the compression card because that window is no longer
+   * opened by the compression itself: the card is created up front (Simple, no turn) or
+   * filled by the compression turn (Agentic), and a later send below it opens the window
+   * (`docs/agents/invariants/compress-node.md`). Non-empty means the card is **ready**: it
+   * turns green and hosts the composer. Validate by value at load, like `handoffSummary`.
+   */
+  handoffNote?: string;
+  /**
    * What this node is in a **compression chain** (`docs/agents/invariants/compress-node.md`).
    *
-   * `'compress'` — a compression node C: a real turn node that reads the window above it
-   * (its transcript and the workspace) and answers with the handoff the window below will
-   * start from. It runs on its own frozen envelope (the compression template, the
-   * read-only tool set) and shows no composer.
+   * `'compress'` — a compression card C, one per Compress press, and a **boundary** between
+   * two windows rather than a window of its own. In the `Agentic` answer it is a real turn
+   * node: it reads the window above it (its transcript and the workspace) and answers with
+   * the handoff the window below will start from, on its own frozen envelope (the
+   * compression template, the read-only tool set). In the `Simple` answer **no turn runs at
+   * all**: the harness writes its pointer handoff into `handoffNote` up front. Either way
+   * the card is sealed until it carries that handoff (`hasHandoff`) and hosts the composer
+   * from then on — the window below it is opened by a send, not by the compression.
    *
-   * `'resume'` — a resume node R: the window that continues from C. It inherits **P's**
-   * envelope (the window being compressed), not C's, and its first message is C's answer.
-   * A resume node is deleted with its compression node, never on its own.
+   * `'resume'` — a resume node R: a window that continues from a card C. It inherits
+   * **P's** envelope (the window being compressed), not C's, and its first message is C's
+   * handoff. Several windows may hang below one card (one per send, each a sibling resume
+   * node); a resume node is deleted with its compression card, never on its own.
    *
    * Validated by value at load: an unknown role is dropped, and an old state — which has
    * no roles at all — reads as an ordinary turn node. No version bump.
@@ -793,10 +809,19 @@ export function isCompressNode(node: TreeNode | undefined): boolean {
 }
 
 /**
- * The window a compression node produced, when it has one. A compression node delivers
- * **once**: from the moment its resume child exists it is sealed — no ▶ Continue, and no
- * second handoff — because two windows would otherwise claim to continue the same one
- * (`docs/agents/invariants/compress-node.md` §4).
+ * A compression card that already carries the handoff its window starts from. From this
+ * moment the card is **ready**: it shows the composer and a send below it opens the window.
+ */
+export function hasHandoff(node: TreeNode | undefined): boolean {
+  return node?.role === 'compress' && typeof node.handoffNote === 'string' && node.handoffNote.length > 0;
+}
+
+/**
+ * The **first** window a compression card produced, when it has one. A card is not sealed by
+ * it: several windows may hang below one card, one per send, each a sibling resume node
+ * (`docs/agents/invariants/compress-node.md`). What every send needs is the card's
+ * `handoffNote` (`hasHandoff`), and this helper only names the oldest window for the places
+ * that report on the chain.
  */
 export function resumeChildOf(session: AgentSession, nodeId: string): TreeNode | undefined {
   const node = session.nodes[nodeId];
@@ -1196,6 +1221,10 @@ function normalizeTreeSession(raw: AgentSession & { rootId?: string | null }): A
       // new window was given, and so a later feature can read the summary without parsing
       // the harness block. String-only validation: anything else is dropped, never repaired.
       handoffSummary: typeof node.handoffSummary === 'string' && node.handoffSummary ? node.handoffSummary : undefined,
+      // The handoff a compression card carries for the window below it. Same string-only
+      // validation as `handoffSummary`: a value that is not a non-empty string is a card that
+      // is not ready, never a repaired one — an empty note would open a window on nothing.
+      handoffNote: typeof node.handoffNote === 'string' && node.handoffNote ? node.handoffNote : undefined,
       // What this node is in a compression chain — by value, like every other optional
       // field: an unknown role is dropped, and a state stored before compression existed
       // (no roles at all) reads as an ordinary turn node.

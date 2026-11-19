@@ -2646,36 +2646,6 @@ body.vscode-high-contrast-light {
   border-color: var(--accent-dim);
 }
 
-/* Sub-agent family colours (`applySubColor` in media/main.js): the stripe on the left edge
-   carries the colour of the FAMILY a window belongs to, and each level down is more saturated and
-   darker — so the windows a window spawned read as the same family, one step deeper. The two
-   classes never share an arc of the wheel: a sub-agent window is WARM, a background job card is
-   COLD. `data-sub-level` is what says "this card is a sidecar"; the colour itself arrives as ONE
-   custom property (`--sub-color`) on the same element, which the stripe, the focused card's
-   border and its outline all read. The stripe sits on the left edge on purpose: that is the edge
-   a parent's connector leaves from. */
-.node[data-sub-level] {
-  border-left: 3px solid var(--sub-color, hsl(210, 44%, 64%));
-}
-
-/* The focused card wears its family's colour on its OUTLINE — and nowhere else. `--sub-color` is
-   the card's one colour property (`applySubColor` in media/main.js), so a window's outline, its
-   left stripe and its connector are one value; nothing else about the card changes, and its lift
-   is still the plain `.node.expanded` shadow. A turn card carries no `data-sub-level` and is left
-   alone. */
-.node[data-sub-level].expanded,
-.node[data-sub-level].active {
-  border-color: var(--sub-color, hsl(210, 44%, 64%));
-}
-
-/* The ring around the focused card is `.node.active`'s `outline` (2px `--accent`, the app's
-   blue), NOT its border — so the family colour has to reach the outline too, or the ring keeps
-   the blue whatever the border does. Only the COLOUR is set here: the width, the style and the
-   `-2px` offset stay the base rule's. */
-.node[data-sub-level].active {
-  outline-color: var(--sub-color, hsl(210, 44%, 64%));
-}
-
 .node.expanded {
   /* An expanded node opens as a wider window (content scrolls inside). */
   width: 560px;
@@ -3449,6 +3419,12 @@ body.vscode-high-contrast-light {
   background: var(--bg3);
   border: 1px solid var(--border);
 }
+
+/* A compression card that already carries the handoff its window starts from: green, so the
+   card that can be continued reads as ready at a glance. `--success` is the same colour the
+   done chip and a finished sub-agent use. */
+.node.handoff-ready { border-color: var(--success); }
+.node.handoff-ready .node-ctx-badge { color: var(--success); border-color: var(--success); }
 
 /* A sub-agent head's caption. `flex: 0 1 auto`, not `0 0 auto`: this is the one head item
    that may give way, and in a 320px head nothing else can — the title is the only other

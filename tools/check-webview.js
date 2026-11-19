@@ -1655,6 +1655,20 @@ if (contextLabel !== 'ctx 50%') {
   if (!/Compress/.test(String(compressBtn.textContent || ''))) {
     problems.push(`the compress button reads ${JSON.stringify(compressBtn.textContent)}, expected "Compress"`);
   }
+  // …and the label follows the box: with text in it the click both compresses and sends that
+  // text into the window the card opens (`docs/agents/invariants/compress-node.md`).
+  typeInto('a message');
+  if (String(compressBtn.textContent || '') !== 'Compress and send') {
+    problems.push(
+      `the compress button reads ${JSON.stringify(compressBtn.textContent)} with text in the box, expected "Compress and send"`,
+    );
+  }
+  typeInto('');
+  if (String(compressBtn.textContent || '') !== 'Compress') {
+    problems.push(
+      `the compress button reads ${JSON.stringify(compressBtn.textContent)} with an empty box, expected "Compress"`,
+    );
+  }
   // Two short buttons (Send + Compress) are not a row: the action line is for three.
   if (elementById('actions').classList.contains('stacked')) {
     problems.push('the action row takes its own line for Send and Compress alone');
@@ -3804,24 +3818,27 @@ if (contextLabel !== 'ctx 50%') {
 }
 
 // --- the compression chain: CMP badge, no 🗑 on the window it produced, its own Stop ---
-// `docs/agents/invariants/compress-node.md` §1/§2/§4/§5. Three marks no ordinary card has:
+// `docs/agents/invariants/compress-node.md` §1/§2/§4/§5. The marks no ordinary card has:
 //
-//  - the node that compresses a window wears `CMP` (not `CTX`) and starts a window of its
+//  - the card that compresses a window wears `CMP` (not `CTX`) and starts a window of its
 //    own between two others, so its connector is **dotted** (`edge-compress`) rather than
 //    dashed like an ordinary window break;
-//  - it has **no composer** — its one turn was written by the harness — so its card's own ⏹
-//    Stop is the only way to end a running compression turn, and once it has produced its
-//    window it shows no ▶ Continue at all (a second handoff from the same source would be a
-//    second window claiming to continue the same one);
-//  - the window it produced (the **resume** node) is an ordinary `CTX` card **without** a 🗑:
-//    deleting it alone would leave a compression node holding a handoff nobody can read, so
-//    it is removed with its compression node.
+//  - a card that does **not** carry its handoff yet (`handoffReady: false`: a turn still
+//    running, one that was stopped, or one that wrote nothing) has **no composer** — its one
+//    request was written by the harness — so its card's own ⏹ Stop is the only way to end a
+//    running compression turn, and a stopped one keeps its ▶ Continue;
+//  - a card that **does** carry its handoff is an ordinary card to continue from: green, the
+//    composer shown, no ▶ (a send below it opens the window), and no Compress entry, because
+//    the card *is* the handoff;
+//  - the window a card opened (a **resume** node) is an ordinary `CTX` card **without** a 🗑:
+//    deleting it alone would leave a compression card holding a handoff nobody can read.
 {
   const ROOT = 'cmp-root';
   const P = 'cmp-p';
-  const C = 'cmp-c';         // compress, streaming now
-  const CINT = 'cmp-cint';   // compress, interrupted, no window yet → ▶ Continue
-  const CPROD = 'cmp-cprod'; // compress, done, with its window → sealed
+  const C = 'cmp-c';         // compress, streaming now → no composer, ⏹ Stop
+  const CINT = 'cmp-cint';   // compress, interrupted, no handoff → ▶ Continue, no composer
+  const CRDY = 'cmp-crdy';   // compress, done, handoff ready → green + composer
+  const CPROD = 'cmp-cprod'; // compress, ready, already opened a window → no ▶
   const RPROD = 'cmp-rprod'; // the window it produced → CTX, no 🗑, no ▶
   const node = (id, parentId, children, status, extra) =>
     Object.assign(
@@ -3848,10 +3865,16 @@ if (contextLabel !== 'ctx 50%') {
     rootIds: [ROOT],
     nodes: [
       node(ROOT, null, [P], 'done'),
-      node(P, ROOT, [C, CINT, CPROD], 'done'),
+      node(P, ROOT, [C, CINT, CRDY, CPROD], 'done'),
       node(C, P, [], 'running', { role: 'compress', compressedFrom: P, contextBaseId: C }),
       node(CINT, P, [], 'interrupted', { role: 'compress', compressedFrom: P, contextBaseId: CINT }),
-      node(CPROD, P, [RPROD], 'done', { role: 'compress', compressedFrom: P, contextBaseId: CPROD }),
+      node(CRDY, P, [], 'done', { role: 'compress', compressedFrom: P, contextBaseId: CRDY, handoffReady: true }),
+      node(CPROD, P, [RPROD], 'done', {
+        role: 'compress',
+        compressedFrom: P,
+        contextBaseId: CPROD,
+        handoffReady: true,
+      }),
       node(RPROD, CPROD, [], 'done', { role: 'resume', contextBaseId: RPROD }),
     ],
   };
@@ -3900,6 +3923,24 @@ if (contextLabel !== 'ctx 50%') {
   if (cont(CPROD)) {
     problems.push('a compression node that already delivered its window still shows a continue button');
   }
+  if (cont(CRDY)) {
+    problems.push('a ready compression card shows a continue button (the way on is a send below it)');
+  }
+  // A ready card is green, and it hosts the composer: the two facts that say "this card can be
+  // continued". A card that is not ready is neither.
+  for (const [id, ready] of [
+    [CRDY, true],
+    [CPROD, true],
+    [C, false],
+    [CINT, false],
+  ]) {
+    const green = !!(cards.get(id) && cards.get(id).classList.contains('handoff-ready'));
+    if (green !== ready) {
+      problems.push(
+        `${id} is ${green ? 'marked' : 'not marked'} green, but its handoff is ${ready ? 'there' : 'missing'}`,
+      );
+    }
+  }
   if (delOf(RPROD)) {
     problems.push('the window a compression produced carries its own delete button (it is removed with the compression node)');
   }
@@ -3947,12 +3988,26 @@ if (contextLabel !== 'ctx 50%') {
     }
   }
 
-  // The composer: a compression node has no request to type, so the pane hides; its window
-  // has one again.
+  // The composer: a card that does not carry its handoff yet has no request to type, so the
+  // pane hides; a card that does carry it is an ordinary card to continue from, and so is the
+  // window it opened. The Compress entry disappears on a card, because the card *is* the
+  // handoff (`docs/agents/invariants/compress-node.md` §2).
   const composerHidden = () => elementById('composer').classList.contains('hidden');
+  const compressHidden = () => elementById('compress-btn').classList.contains('hidden');
   dispatch(Object.assign({}, tree, { viewId: C }));
   if (!composerHidden()) {
-    problems.push('a checked-out compression node still shows the composer (its turn was written by the harness)');
+    problems.push('a running compression card shows the composer (its turn was written by the harness)');
+  }
+  dispatch(Object.assign({}, tree, { viewId: CINT }));
+  if (!composerHidden()) {
+    problems.push('a compression card without a handoff shows the composer (there is nothing to send below it)');
+  }
+  dispatch(Object.assign({}, tree, { viewId: CRDY }));
+  if (composerHidden()) {
+    problems.push('a ready compression card does not show the composer (that is where the user continues)');
+  }
+  if (!compressHidden()) {
+    problems.push('a compression card offers the Compress entry (the card is the handoff already)');
   }
   dispatch(Object.assign({}, tree, { viewId: RPROD }));
   if (composerHidden()) {
@@ -3962,6 +4017,23 @@ if (contextLabel !== 'ctx 50%') {
   if (composerHidden()) {
     problems.push('an ordinary turn node hides the composer');
   }
+
+  // A `nodeUpdate` that carries the handoff is what has to bring the box back: the turn that
+  // writes it ends before the card is ready, so the patch is the only event the webview gets.
+  dispatch(Object.assign({}, tree, { viewId: CINT }));
+  if (!composerHidden()) {
+    problems.push('a card without a handoff showed the composer before the patch');
+  }
+  dispatch({ type: 'nodeUpdate', id: CINT, status: 'done', handoffReady: true, context: 'ok', contextPct: 0 });
+  if (composerHidden()) {
+    problems.push('a `nodeUpdate` carrying the handoff did not bring the composer back');
+  }
+  if (!cards.get(CINT).classList.contains('handoff-ready')) {
+    problems.push('a `nodeUpdate` carrying the handoff did not turn the card green');
+  }
+  // Back to an ordinary card for the right-click test below (a compression card is a no-op
+  // there, which that test asserts at the end).
+  dispatch(Object.assign({}, tree, { viewId: P }));
 
   // The Send button's own right-click is the deliberate compression entry
   // (`compressNow`, §1): the modal is the menu, so nothing is drawn — the same content a
@@ -3998,10 +4070,20 @@ if (contextLabel !== 'ctx 50%') {
       if (others.length > 0) {
         problems.push(`the right-click also posted ${JSON.stringify(others)}`);
       }
+      // …and on a compression card it is a no-op: there is nothing to compress there.
+      dispatch(Object.assign({}, tree, { viewId: CRDY }));
+      posted.length = 0;
+      ctx({ preventDefault() {}, stopPropagation() {} });
+      if (posted.length > 0) {
+        problems.push(`the Send right-click on a compression card posted ${JSON.stringify(posted)}, expected nothing`);
+      }
+      dispatch(Object.assign({}, tree, { viewId: P }));
     }
     input.value = '';
   }
-  notes.push('compression: Context compression badge, no 🗑 on the produced window, its own Stop, no composer, and the Send right-click');
+  notes.push(
+    'compression: Context compression badge, no 🗑 on the produced window, its own Stop, the composer only once the handoff exists (green border), no Compress on a card, and the Send right-click',
+  );
 }
 
 // --- A node-scoped notice updates ONE block, and belongs to its node -----------

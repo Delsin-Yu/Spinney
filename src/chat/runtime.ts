@@ -101,6 +101,7 @@ import {
   UserAttachment,
   attachNode,
   createNode,
+  hasHandoff,
   isSidecar,
   isCompressNode,
   messageText,
@@ -108,7 +109,6 @@ import {
   nodeUsage,
   pathIds,
   pathMessages,
-  resumeChildOf,
   sessionModelPick,
   titleFromPrompt,
 } from './tree';
@@ -622,12 +622,11 @@ export interface TurnRun {
   /**
    * Resolves when {@link finishTurn} closed this run — the one fact an orchestrator needs.
    *
-   * `compressAndContinue` starts a compression turn and must wait for its **real** end
-   * before it can read the answer and open the window below it; a timer would race the
-   * model, and the agent's own events are delivered into a handler that knows nothing
-   * about a caller. `finishTurn` resolves it exactly once, whatever the turn's status
-   * (done / interrupted / error), so a Stop is a normal outcome here — the chain simply
-   * stops.
+   * `compressHandoff` starts a compression turn and must wait for its **real** end before it
+   * can read the answer and store it on the card as the handoff; a timer would race the model,
+   * and the agent's own events are delivered into a handler that knows nothing about a caller.
+   * `finishTurn` resolves it exactly once, whatever the turn's status (done / interrupted /
+   * error), so a Stop is a normal outcome here — the card simply stays not-ready.
    */
   settled: Promise<void>;
   /** The resolver behind {@link settled}; called once, by `finishTurn` (or `dispose`). */
@@ -1997,18 +1996,24 @@ export class SessionRuntime {
    * The new-window entry asks its second question only when they do: with no drift, "inherit the
    * old envelope" and "freeze the live one" are the same bytes, so a modal could not change the
    * outcome (`confirmHandoffSetup` in `ChatViewProvider`).
+   *
+   * `nodeId` asks the question about **that** card's chain instead of the view focus: the
+   * setup question belongs to a compression card the user may have navigated away from
+   * (`docs/agents/invariants/compress-node.md`).
    */
-  hasSetupDrift(): boolean {
-    return this.setupState().drift !== false;
+  hasSetupDrift(nodeId?: string): boolean {
+    return this.setupState(nodeId).drift !== false;
   }
 
-  private setupState(): {
+  private setupState(nodeId?: string): {
     node: { cardId: string; cardLabel: string; effort: ThinkingEffort; language: string } | null;
     live: { cardId: string; cardLabel: string; effort: ThinkingEffort; language: string };
     drift: false | 'user' | 'harness';
     reasons: string[];
   } {
-    const view = this.viewNode();
+    // `nodeId` overrides the view focus so the question can be asked about a specific card —
+    // the compression card a send below it is about. Absent means the checked-out chain.
+    const view = nodeId ? this.session.nodes[nodeId] : this.viewNode();
     const liveCard = this.card;
     const liveEffort = this.thinkingEffort;
     const live = {
@@ -2488,8 +2493,9 @@ export class SessionRuntime {
 
   /**
    * The one `nodeUpdate` patch shape: the card's status/title/usage plus the derived
-   * fact the webview cannot compute for itself — `contextFull`, which decides the
-   * button variant (`⧉ Continue in a new window` vs `↻ Retry`). It is built in one
+   * facts the webview cannot compute for itself — `contextFull`, which decides the
+   * button variant (`⧉ Continue in a new window` vs `↻ Retry`), and `handoffReady`, which
+   * decides whether a compression card is green and hosts the composer. It is built in one
    * place because hand-built payloads drift apart, and a turn that ends **after** the
    * tree was drawn only ever arrives as a `nodeUpdate`: a patch that forgot the flag
    * would leave the card offering a retry of the very request the provider just
@@ -2503,6 +2509,7 @@ export class SessionRuntime {
     contextFull: boolean;
     context: 'ok' | 'near' | 'full';
     contextPct: number;
+    handoffReady: boolean;
   } {
     return {
       id: node.id,
@@ -2512,6 +2519,9 @@ export class SessionRuntime {
       contextFull: nodeContextFull(node),
       context: this.contextState(node),
       contextPct: this.contextPercent(node),
+      // A compression card that just wrote its handoff becomes ready without any other
+      // change on the card, so the flag has to ride in every patch — not only in `tree`.
+      handoffReady: hasHandoff(node),
     };
   }
 
@@ -2567,10 +2577,14 @@ export class SessionRuntime {
       size: node.customSize ?? null,
       kind: node.kind,
       // What this node is in a compression chain: the card draws `CMP` for a compression
-      // node, hides its 🗑 for a resume window, and hides ▶ once a compression has been
-      // delivered (`docs/agents/invariants/compress-node.md` §4/§5).
+      // node and hides its 🗑 for a resume window. A compression card is not sealed by its
+      // window any more: `handoffReady` says whether it already carries the handoff, and
+      // that is what turns it green and gives it the composer
+      // (`docs/agents/invariants/compress-node.md`).
       role: node.role,
       compressedFrom: node.compressedFrom,
+      // Ready = the card carries the handoff a send below it opens the window with.
+      handoffReady: hasHandoff(node),
       delivered: node.delivered === true,
       agentDepth: node.agentDepth,
       agentStatus: node.agentStatus,
@@ -3397,8 +3411,8 @@ export class SessionRuntime {
     if (node && session.nodes[node.id]) {
       this.post({ type: 'nodeUpdate', ...this.nodeStatePatch(node) });
     }
-    // The run is closed: whatever was awaiting it (a compression chain, whose next step is
-    // the window below it) may look at `node.status` now.
+    // The run is closed: whatever was awaiting it (a compression card, which stores the
+    // handoff it just wrote) may look at `node.status` now.
     run.resolveSettled();
   }
 
@@ -3478,6 +3492,13 @@ export class SessionRuntime {
       from?: { sessionId: string; nodeId: string };
       rounds?: number;
       quiet?: boolean;
+      /**
+       * Which envelope the window opened below a **compression card** sends with (the setup
+       * question the provider asks at send time): `'current'` inherits the compressed window's
+       * frozen bytes, `'latest'` freezes the live setup on the new node. Ignored by an ordinary
+       * send, which has no boundary to cross.
+       */
+      handoffSetup?: 'current' | 'latest';
     },
   ): Promise<
     | { ok: true; nodeId: string }
@@ -3505,19 +3526,19 @@ export class SessionRuntime {
     const quiet = opts?.quiet === true;
     const basis =
       opts && 'basisNodeId' in opts ? opts.basisNodeId ?? null : this.session.activeNodeId;
-    // A compression node hands over **once**: from the moment its window exists, no message of
-    // its own may start a second line under it (`docs/agents/invariants/compress-node.md` §4).
-    // The composer cannot reach this (a compression node has no input dock) and ▶ is refused in
-    // `continueFrom`; this closes the one entry left — an inter-session prompt addressed at a
-    // checked-out compression node, which would otherwise grow a normal child under it.
+    // A **compression card** is a boundary, not a conversation: a send from it opens the window
+    // below it, led by the handoff the card carries (`docs/agents/invariants/compress-node.md`).
+    // A card that does not carry one yet has nothing to lead with, so the send is refused
+    // instead of growing a plain child under it. The composer cannot reach this (a card without
+    // a handoff shows no input dock) and ▶ is refused in `continueFrom`; this closes the one
+    // entry left — an inter-session prompt addressed at a not-ready card.
     const basisNode = basis ? this.session.nodes[basis] : undefined;
-    if (basisNode && isCompressNode(basisNode) && resumeChildOf(this.session, basisNode.id)) {
+    const handoffCard = basisNode && isCompressNode(basisNode) ? basisNode : undefined;
+    if (handoffCard && !hasHandoff(handoffCard)) {
       if (!quiet) {
         this.postNotice(
           'warning',
-          vscode.l10n.t(
-            'This compression has already been delivered to the window below it. To redo it, start again from the window above.',
-          ),
+          vscode.l10n.t('This compression has not written its handoff yet. Continue it on its card, then send.'),
         );
       }
       return { ok: false, code: 'refused', nodeId: basis };
@@ -3528,7 +3549,17 @@ export class SessionRuntime {
     // the upload can await: the transport an image travels in is a property of that
     // one card, so a checkout that lands mid-upload must not build the request for
     // one card and then run it on another.
-    const sendCard = this.card;
+    //
+    // A send below a **compression card** runs on the card the window it opens will
+    // actually send with — `epochFrom` plants P's frozen card (`'current'`), and `'latest'`
+    // freezes the live one — never on the dropdown alone, or an image could be uploaded for
+    // the wrong provider and handed to a window running on another (`vision-images.md`).
+    const windowCardId =
+      handoffCard && opts?.handoffSetup !== 'latest'
+        ? epochForNode(this.session, handoffCard.compressedFrom ?? null)?.cardId ??
+          this.requestCardId(basis ? this.session.nodes[basis] : undefined)
+        : this.card.id;
+    const sendCard = handoffCard ? this.cardForCardId(windowCardId) : this.card;
     // **One predicate decides whether this turn may start** (`promptBlocker`): an
     // absent node, a live run, unfinished work the basis still owns, or a reload hold.
     // The composer is told which one in a notice; an inter-session prompt gets the same
@@ -3685,6 +3716,9 @@ export class SessionRuntime {
         }
       }
       content = parts;
+      // A send below a compression card leads with the handoff block, so the user's message —
+      // the one these images belong to — is message 1, not 0.
+      const leadCount = handoffCard ? 1 : 0;
       // Remember where each image came from, addressed by its position in the message
       // this turn stores: a `file_id` is one provider's handle and nothing else in the
       // history can turn it back into bytes (`docs/agents/plans/session-epoch.md` §6). The
@@ -3695,7 +3729,7 @@ export class SessionRuntime {
         const prepared = sent.get(part);
         if (part.type === 'image_url') {
           sources.push({
-            messageIndex: 0,
+            messageIndex: leadCount,
             partIndex,
             // Inline, the wire cost is the URL itself — the same thing `bytesOf` measures for
             // a live `image_url` part, so the record and the accounting agree.
@@ -3708,7 +3742,7 @@ export class SessionRuntime {
           });
         } else if (part.type === 'file') {
           sources.push({
-            messageIndex: 0,
+            messageIndex: leadCount,
             partIndex,
             source: {
               kind: 'upload',
@@ -3747,9 +3781,50 @@ export class SessionRuntime {
     // pinned to the node `basis` captured above, so the card decision this request
     // was built with (`sendCard`, and therefore the shape its images travel in) is
     // the card `beginTurn` records on the new node.
-    const run = this.beginTurn(titleFromPrompt(userText || attachments[0]?.name || ''), { parentId: basis });
+    //
+    // A send **below a compression card** is not an ordinary child: it opens a new context
+    // window (`freshContext`), titled after the window it is, and takes its envelope from the
+    // user's setup answer — `'current'` plants P's frozen bytes (`epochFrom`), `'latest'` freezes
+    // the live setup (`epochFrom: null`, `freshEpoch`). C's own envelope never travels into the
+    // conversation that way. Every send below the same card is a new sibling window, which is
+    // why the number counts the ones already produced.
+    const windowNo = handoffCard ? this.producedWindowNumber(handoffCard) : 0;
+    const run = handoffCard
+      ? this.beginTurn(vscode.l10n.t('Context window {0}', windowNo), {
+          parentId: basis,
+          freshContext: true,
+          role: 'resume',
+          ...(opts?.handoffSetup === 'latest'
+            ? { epochFrom: null, freshEpoch: true }
+            : { epochFrom: handoffCard.compressedFrom }),
+        })
+      : this.beginTurn(titleFromPrompt(userText || attachments[0]?.name || ''), { parentId: basis });
     if (!run) {
+      if (handoffCard && !quiet) {
+        this.postNotice('warning', vscode.l10n.t('Could not open the new context window here — try again.'));
+      }
       return { ok: false, code: 'refused' };
+    }
+    // The handoff goes first, as the window's own harness block: it describes the window being
+    // left, and the user's message below it is this turn's request. `handoff` / `handoffSummary`
+    // on the new node are copied from the card only when the card holds a real compression
+    // answer — a Simple (pointer) card has no summary, and its window must not claim one.
+    if (handoffCard) {
+      run.items.push({ kind: 'harness', text: handoffCard.handoffNote! });
+      this.post({ type: 'harnessNote', nodeId: run.node.id, text: handoffCard.handoffNote! });
+      if (handoffCard.handoffSummary) {
+        run.node.handoff = 'summary';
+        run.node.handoffSummary = handoffCard.handoffSummary;
+      }
+      // A diagnostic, not a safety net: the envelope is planted by `beginTurn`, and this line
+      // says which bytes the window really sends, so a log can prove the window inherited P and
+      // not the card's C — and that a card with several windows opened the right one.
+      const fromEpoch = epochForNode(this.session, handoffCard.compressedFrom ?? null);
+      this.host.output.appendLine(
+        `[compression] ${handoffCard.compressedFrom ?? '?'} -> ${handoffCard.id} -> ${run.node.id} ` +
+          `(window ${windowNo}, envelope ${run.node.epoch?.kind ?? 'main'}` +
+          `${fromEpoch && opts?.handoffSetup !== 'latest' ? `, inherited ${fromEpoch.kind ?? 'main'} from ${handoffCard.compressedFrom}` : ', frozen from the live setup'})`,
+      );
     }
     // Inter-session provenance and allowance live on the node this prompt created:
     // `from=` is what `list_nodes` shows, and `roundsAllowance` is what the answer's
@@ -3769,7 +3844,7 @@ export class SessionRuntime {
     this.setBusy(true);
     this.lastStatus = vscode.l10n.t('Thinking…');
     this.post({ type: 'status', text: this.lastStatus });
-    void run.agent.sendUserMessage(content);
+    void run.agent.sendUserMessage(content, undefined, handoffCard ? handoffCard.handoffNote : undefined);
     return { ok: true, nodeId: run.node.id };
   }
 
@@ -3805,16 +3880,14 @@ export class SessionRuntime {
     if (!node || isSidecar(node)) {
       return false;
     }
-    // A compression node delivers **once**: from the moment its window exists it is sealed,
-    // and a second handoff from the same window would leave two windows claiming to continue
-    // the same one (`docs/agents/invariants/compress-node.md` §4). The card's ▶ hides for the
-    // same reason; this is the host's half of the rule.
-    if (isCompressNode(node) && resumeChildOf(this.session, node.id)) {
+    // A compression card whose handoff is already written has nothing left for ▶ to do: the way
+    // on is a send **below** it, which is what opens the window (`onUserMessage`). Running the
+    // compression again from here would overwrite a handoff the user may already be using
+    // (`docs/agents/invariants/compress-node.md`).
+    if (isCompressNode(node) && hasHandoff(node)) {
       this.postNotice(
         'info',
-        vscode.l10n.t(
-          'This compression has already been delivered to the window below it. To redo it, start again from the window above.',
-        ),
+        vscode.l10n.t('This compression already wrote its handoff; send a message below it to continue in the new window.'),
       );
       return false;
     }
@@ -3856,8 +3929,9 @@ export class SessionRuntime {
    * `null` when the checked-out chain is exactly on the setup and size it was built for.
    *
    * - `'context'` — the chain's window is `near` or `full` (`contextState`): the only
-   *   answer is a new context window (`rolloverContext`), because a request that the
-   *   provider refused cannot be made to fit by changing a dropdown.
+   *   answer is a compression card below it (`startPointerHandoff` / `compressHandoff`),
+   *   because a request that the provider refused cannot be made to fit by changing a
+   *   dropdown.
    * - `'drift'` — the chain's frozen setup and the live one disagree (`setupState`, whose
    *   `drift` covers **both** the user's dropdown pick and the harness's own change): the
    *   answer is a fork under the live setup (`forkTree`), so the old tree keeps the bytes
@@ -3952,8 +4026,9 @@ export class SessionRuntime {
 
   /**
    * True when a **window can be opened from this node right now**, whatever its fill level —
-   * the precondition of both handoff answers (`docs/agents/invariants/compress-node.md` §1):
-   * the Simple pointer rollover and the Agentic compression node.
+   * the precondition of both handoff answers (`docs/agents/invariants/compress-node.md`):
+   * the Simple pointer card (`startPointerHandoff`) and the Agentic compression card
+   * (`compressHandoff`).
    *
    * It is `canWindowStart` and nothing else on purpose. The user's own click is the trigger
    * here: a right-click on Send (or the composer's new-epoch entry) says "move this
@@ -3962,6 +4037,11 @@ export class SessionRuntime {
    */
   canCompress(nodeId: string): boolean {
     return this.canWindowStart(nodeId);
+  }
+
+  /** True when this node is a compression card that already carries its handoff. */
+  handoffReady(nodeId: string): boolean {
+    return hasHandoff(this.session.nodes[nodeId]);
   }
 
   /**
@@ -3999,75 +4079,45 @@ export class SessionRuntime {
   }
 
   /**
-   * Continue the conversation in a **new, empty context window**, handed over by the
-   * **pointer** — the Simple answer of the composer's new-epoch entry. See
-   * `docs/agents/invariants/context-rollover.md`; in short:
+   * The **Simple** answer of the composer's window entry: open a compression card below
+   * `nodeId` that carries the harness-written pointer handoff and runs **no turn at all**.
    *
-   *  - the new node is an ordinary child of this one (`freshContext`), so the tree
-   *    stays connected and a dashed edge marks the window break — only the *message
-   *    prefix* is cut, which is exactly what `contextBaseId` does;
-   *  - the message is harness-written and carries a pointer to this node's on-disk
-   *    transcript, the original task and the last request verbatim, the files the window
-   *    changed, and the killed-work list — so nothing has to be summarised and nothing is
-   *    lost when a detail is needed;
-   *  - this node is **also** union-killed first (the composer's Stop path): its
-   *    background terminals and its whole sub-agent subtree cannot deliver into a
-   *    full window, and their results would never reach the new one, so leaving them
-   *    running would be work nobody can read. Their notices are written back into
-   *    this node (the existing mechanism) and the transcript is re-dumped, so the new
-   *    window really can read what happened.
+   * The card is ready the moment it exists; the user continues by sending below it, which is
+   * what opens the window (the compression-card branch of `onUserMessage`). See
+   * `docs/agents/invariants/compress-node.md` and `docs/agents/invariants/context-rollover.md`;
+   * the pointer text is the same one a rollover always carried:
    *
-   * A node that cannot start a window (or — without `force` — one whose chain is not near
-   * full) is continued **in place** instead (`continueFrom`): one behaviour, so a stale
-   * card can never dead-end the button. `force` is the deliberate entry's rule: the user
-   * asked for a new window explicitly (`compressNow`, the composer's right-click), and a
-   * window that still has room is a legitimate moment to move on.
+   *  - it points at this node's on-disk transcript, the original task and the last request
+   *    verbatim, the files the window changed, and the killed-work list — so nothing has to be
+   *    summarised and nothing is lost when a detail is needed;
+   *  - this node is **also** union-killed first (the composer's Stop path): its background
+   *    terminals and its whole sub-agent subtree cannot deliver into a full window, and their
+   *    results would never reach the new one, so leaving them running would be work nobody can
+   *    read. Their notices are written back into this node (the existing mechanism) and the
+   *    transcript is re-dumped, so the window the card opens really can read what happened.
    *
-   * When it returns true the new node is checked out and running, and this node keeps
-   * its full history on its stopped line.
-   *
-   * `opts.text` is the composer's own text: it is sent as a **real user message** in the
-   * new window, right after the harness message — the user asked for this turn, so the
-   * model has to receive it as the turn's request.
-   *
-   * The **Agentic** answer is not this method: it is `compressAndContinue` below, which
-   * needs a whole turn between the two windows (`docs/agents/invariants/compress-node.md`).
+   * Returns the new card's id, or null when a window cannot start here.
    */
-  async rolloverContext(
-    nodeId: string,
-    setup: 'current' | 'latest' = 'current',
-    opts?: {
-      /** The composer's text, sent as the new window's own user message (may be empty). */
-      text?: string;
-      /** Open a window even though this chain is not near full (a deliberate entry). */
-      force?: boolean;
-    },
-  ): Promise<boolean> {
+  async startPointerHandoff(nodeId: string): Promise<string | null> {
     const node = this.session.nodes[nodeId];
     if (!node || isSidecar(node)) {
-      return false;
+      return null;
     }
-    if (opts?.force ? !this.canWindowStart(nodeId) : !this.canRollover(nodeId)) {
-      return this.continueFrom(nodeId);
+    if (!this.canWindowStart(nodeId)) {
+      return null;
     }
     if (this.host.isHeld()) {
       this.postNotice(
         'warning',
         vscode.l10n.t('An external controller is rebooting the window; please wait a moment.'),
       );
-      return false;
+      return null;
     }
-    // The facts both handoff shapes carry — captured **before** the union kill, because the
-    // kill appends its notices to this node as `role:'user'` messages, and none of those is
-    // the request the user actually made. The window's source is selected the same way, from
-    // the context base down (`docs/agents/invariants/context-rollover.md` §7).
+    // The facts the pointer carries — captured **before** the union kill, because the kill
+    // appends its notices to this node as `role:'user'` messages, and none of those is the
+    // request the user actually made. The window's source is selected the same way, from the
+    // context base down (`docs/agents/invariants/context-rollover.md` §7).
     const handoff = await this.prepareHandoff(node);
-    // Windows are numbered per branch: the session's first window is window 1, and
-    // every window below it adds one, so the first rollover of a session is 2.
-    const windows = pathIds(this.session, nodeId).filter(
-      (id) => this.session.nodes[id]?.contextBaseId === id,
-    ).length;
-    const windowNo = windows + 2;
     const message = buildContextRolloverMessage({
       reason: this.rolloverReason(node),
       sessionId: this.sessionId,
@@ -4083,53 +4133,59 @@ export class SessionRuntime {
       killedSubAgents: handoff.killedSubAgents,
       usage: handoff.usage,
     });
-    const run = this.beginTurn(vscode.l10n.t('Context window {0}', windowNo), {
-      parentId: nodeId,
-      freshContext: true,
-      // "Continue with Latest setup" freezes the live configuration into the new node;
-      // "current" inherits the parent's envelope. Both are free here — a new context has no
-      // cached prefix to lose — which is why the choice can be offered at all.
-      freshEpoch: setup === 'latest',
-    });
-    if (!run) {
-      // The one path that reached here without a turn: nothing is streaming any more, so
-      // the busy state (and the summary status line) must not outlive the attempt.
-      this.setBusy(this.runs.size > 0);
-      return false;
-    }
-    // `beginTurn` treats the basis node as "the user is continuing this line" and
-    // clears its stopped line; here the conversation continues in the *new* node, so
-    // the old one stays killed — nothing produced under it may open a turn there.
-    this.stoppedLines.add(nodeId);
-    run.items.push({ kind: 'harness', text: message });
-    this.post({ type: 'harnessNote', nodeId: run.node.id, text: message });
-    // The composer's own text: a REAL user message of this window, after the harness
-    // message — one request carrying both, never a quotation of somebody else's turn. The
-    // card shows it as the user bubble it is, and nothing is cleared here (the host does
-    // that with `composerClear` once the turn really started).
-    const text = (opts?.text ?? '').trim();
-    if (text) {
-      run.items.push({ kind: 'user', text });
-      this.post({ type: 'user', text, attachments: [] });
-    }
-    this.setBusy(true);
-    this.lastStatus = vscode.l10n.t('Thinking…');
-    this.post({ type: 'status', text: this.lastStatus });
-    this.post({ type: 'nodeUpdate', ...this.nodeStatePatch(run.node) });
-    void run.agent.sendUserMessage(message, text || undefined);
-    return true;
+    return this.createHandoffCard(node, message).id;
   }
 
   /**
-   * The window number `n` of "Context window {0}": the session's first window is 1, and
-   * every window-starting node on this branch adds one, so the first rollover of a session
-   * is window 2. Read off the **display** path (a new child must not count itself).
+   * The context windows on this node's own path, compression cards excluded: a compression
+   * card is a boundary between two windows, not a window of its own, and a session's first
+   * window is window 1 even though no card starts it.
    */
-  private windowNumber(node: TreeNode): number {
-    const windows = pathIds(this.session, node.id).filter(
-      (id) => this.session.nodes[id]?.contextBaseId === id,
-    ).length;
-    return windows + 2;
+  private windowsOnPath(node: TreeNode): number {
+    return pathIds(this.session, node.id).filter((id) => {
+      const n = this.session.nodes[id];
+      return !!n && n.contextBaseId === id && n.role !== 'compress';
+    }).length;
+  }
+
+  /** The window number a send below `card` opens: `Context window {n}`, one per send. */
+  private producedWindowNumber(card: TreeNode): number {
+    const produced = card.children.filter((id) => this.session.nodes[id]?.role === 'resume').length;
+    return this.windowsOnPath(card) + 2 + produced;
+  }
+
+  /**
+   * Create the compression card below `previous` that already carries `note` as its handoff,
+   * and nothing else: this is the Simple answer's whole action, and there is no turn. The card
+   * is a `role:'compress'` node with its own context base and a title that names the window it
+   * compressed, drawn by the webview exactly like the Agentic card (which `beginTurn` builds,
+   * so it also gets an envelope; a card that runs no turn sends nothing and needs none).
+   *
+   * The old line stays killed (the conversation continues **below** the card, in a window a
+   * later send opens), and the note is pushed as the card's one harness item so the user can
+   * read, on the card, exactly what the window below will start with.
+   */
+  private createHandoffCard(previous: TreeNode, note: string): TreeNode {
+    const node = createNode(
+      newId(),
+      previous.id,
+      vscode.l10n.t('Compression of window {0}', this.windowsOnPath(previous) + 1),
+      'done',
+    );
+    node.role = 'compress';
+    node.compressedFrom = previous.id;
+    node.contextBaseId = node.id;
+    node.handoffNote = note;
+    attachNode(this.session, node);
+    // The window this card opens is written by a send, so the old line stays killed.
+    this.stoppedLines.add(previous.id);
+    node.displayItems.push({ kind: 'harness', text: note });
+    this.post({ type: 'harnessNote', nodeId: node.id, text: note });
+    this.post({ type: 'nodeUpdate', ...this.nodeStatePatch(node) });
+    this.postTree('handoff-card');
+    this.postPath('handoff-card');
+    this.persistTurn();
+    return node;
   }
 
   /**
@@ -4216,56 +4272,48 @@ export class SessionRuntime {
   }
 
   /**
-   * Continue the conversation in a window whose handoff a **turn** wrote — the Agentic
-   * answer (`docs/agents/invariants/compress-node.md`).
+   * Continue the conversation in a window whose handoff a **turn** wrote — the Agentic answer
+   * (`docs/agents/invariants/compress-node.md`).
    *
-   * Three nodes, in this order:
+   * Two steps, not three: this method runs the **compression card** C below the window P and
+   * stops there. C's turn reads P's transcript and the workspace and answers with the handoff;
+   * when it ends, `finishHandoff` stores that answer on C (`handoffNote` / `handoffSummary`) and
+   * the card becomes **ready**. The window itself is opened by the user's next send below the
+   * card (the compression-card branch of `onUserMessage`) — or by the auto-send after
+   * "Compress and send", which is the same path. So there is never a turn emitted from here
+   * that nobody asked for, and a card may carry several windows, one per send.
    *
-   *   P (the window being compressed) ──> C (the compression node) ──> R (the new window)
+   *   P (the window being compressed) ──> C (the compression card) ──> R (opened by a send)
    *
    * C is a real turn node: its own context base, its own frozen envelope (the compression
-   * template, the read-only tool set), its own agent and no composer. It reads P's
-   * transcript and the workspace and answers with the handoff. R inherits **P's** envelope —
-   * never C's — so the window that continues the conversation sends the bytes the
-   * conversation was written in, and its first message is C's answer.
+   * template, the read-only tool set) and its own agent. R will inherit **P's** envelope — never
+   * C's — so the window that continues the conversation sends the bytes the conversation was
+   * written in, and its first message is C's handoff.
    *
-   * It returns once the chain has reached its end: `true` when R was started (the handoff
-   * was delivered), `false` when nothing started, when C was stopped, or when C answered
-   * nothing.
+   * Returns C's id once it is ready (`hasHandoff`), or null when nothing started, when C was
+   * stopped, or when C answered nothing — in which case the card keeps its ▶ and the user can
+   * run it again.
    */
-  async compressAndContinue(
-    nodeId: string,
-    opts?: {
-      text?: string;
-      /**
-       * Which envelope the produced window sends with (`confirmHandoffSetup`): `'current'`
-       * inherits the compressed window's frozen bytes, `'latest'` freezes the live setup on it.
-       * The compression turn itself always runs on the chain's own card and freezes fresh — it
-       * summarises the window, so it belongs to the old setup's side of the boundary
-       * (`docs/agents/invariants/compress-node.md` §1).
-       */
-      setup?: 'current' | 'latest';
-    },
-  ): Promise<boolean> {
+  async compressHandoff(nodeId: string): Promise<string | null> {
     const node = this.session.nodes[nodeId];
     if (!node || isSidecar(node)) {
-      return false;
+      return null;
     }
     if (!this.canWindowStart(nodeId)) {
-      return false;
+      return null;
     }
     if (this.host.isHeld()) {
       this.postNotice(
         'warning',
         vscode.l10n.t('An external controller is rebooting the window; please wait a moment.'),
       );
-      return false;
+      return null;
     }
     const handoff = await this.prepareHandoff(node);
-    // The number of the window that **ends** (window 1 for a session's first turn), and the
-    // number the new window will carry. The compression node is titled after the window it
-    // compresses; the window below it is the next one.
-    const nextWindow = this.windowNumber(node);
+    // The number the window a send below the card will open carries. The compression card is
+    // titled after the window it **compresses**, which is this number minus one; the card itself
+    // counts as no window at all (`windowsOnPath` skips it), so the two formulas agree.
+    const nextWindow = this.windowsOnPath(node) + 2;
     const instruction = buildCompressInstruction({
       sessionId: this.sessionId,
       previousNodeId: node.id,
@@ -4277,7 +4325,7 @@ export class SessionRuntime {
       killedBackground: handoff.killedBackground,
       killedSubAgents: handoff.killedSubAgents,
     });
-    // The compression node: its own window, its own envelope (a fresh freeze — `epochFrom:
+    // The compression card: its own window, its own envelope (a fresh freeze — `epochFrom:
     // null`), its own role. `pan` keeps the view on the node the user just caused.
     const run = this.beginTurn(vscode.l10n.t('Compression of window {0}', nextWindow - 1), {
       parentId: nodeId,
@@ -4288,10 +4336,10 @@ export class SessionRuntime {
     });
     if (!run) {
       this.setBusy(this.runs.size > 0);
-      return false;
+      return null;
     }
     // `beginTurn` treats the basis node as "the user is continuing this line"; here the
-    // conversation continues in the window below, so the old line stays killed.
+    // conversation continues below the card, so the old line stays killed.
     this.stoppedLines.add(nodeId);
     run.items.push({ kind: 'harness', text: instruction });
     this.post({ type: 'harnessNote', nodeId: run.node.id, text: instruction });
@@ -4302,42 +4350,30 @@ export class SessionRuntime {
     const startedAt = Date.now();
     void run.agent.sendUserMessage(instruction);
     // The turn's **real** end, not a timer: `finishTurn` resolves this whatever the status,
-    // so a Stop is an ordinary outcome here and the chain simply stops.
+    // so a Stop is an ordinary outcome here and the card simply stays not-ready.
     await run.settled;
-    return this.deliverCompression(run, handoff, nextWindow, startedAt, opts?.text ?? '', opts?.setup ?? 'current');
+    return this.finishHandoff(run, handoff, startedAt);
   }
 
   /**
-   * The second half of `compressAndContinue`: read what C produced, report on its card, and
-   * open the window below it.
+   * The second half of `compressHandoff`: read what the compression card produced and store it
+   * **on that card**. No window is opened here and nothing is sent — a send below the card does
+   * that later, so this method's only job is to turn the card ready.
    *
    * The four outcomes are all normal:
    *
-   *  - **stopped / interrupted** — nothing continues. The card stays as the record of a
-   *    stopped turn, ▶ Continue is still its way to try again, and the chain does not go on.
-   *  - **empty answer** — one notice on the card, and no window: a window opened on nothing
-   *    would be a window whose first message says nothing.
-   *  - **missing required sections** — one notice naming them and one `[compression]` line,
-   *    and the window is opened anyway: the answer is still the only handoff that exists.
-   *  - **a usable handoff** — R is opened from it.
+   *  - **stopped / interrupted** — no handoff is written. The card stays as the record of a
+   *    stopped turn and ▶ Continue is still its way to try again.
+   *  - **empty answer** — one notice on the card and no handoff: a handoff that says nothing
+   *    would open a window whose first message says nothing.
+   *  - **missing required sections** — one notice naming them and one `[compression]` line, and
+   *    the handoff is stored anyway: the answer is still the only one that exists.
+   *  - **a usable handoff** — it goes on the card and the card is ready.
    */
-  private deliverCompression(
-    run: TurnRun,
-    handoff: HandoffFacts,
-    windowNo: number,
-    startedAt: number,
-    text: string,
-    setup: 'current' | 'latest',
-  ): boolean {
+  private finishHandoff(run: TurnRun, handoff: HandoffFacts, startedAt: number): string | null {
     const node = run.node;
     if (this.dead || !this.session.nodes[node.id]) {
-      return false;
-    }
-    // A compression delivers **once** (`docs/agents/invariants/compress-node.md` §4): if its
-    // window somehow already exists (a replayed chain, a reloaded state), this one has nothing
-    // left to deliver and must not open a second one beside it.
-    if (resumeChildOf(this.session, node.id)) {
-      return false;
+      return null;
     }
     const answered = node.status === 'done' ? this.compressionAnswer(node) : '';
     const verdict =
@@ -4356,19 +4392,17 @@ export class SessionRuntime {
       this.postNoticeTo(
         node.id,
         'info',
-        vscode.l10n.t('Compression stopped, so no new window was opened. Continue this card to run it again.'),
+        vscode.l10n.t('Compression stopped, so no handoff was written. Continue this card to run it again.'),
       );
-      return false;
+      return null;
     }
     if (!verdict.ok && verdict.reason === 'empty') {
       this.postNoticeTo(
         node.id,
         'warning',
-        vscode.l10n.t(
-          'The compression returned no answer, so no new window was opened. Continue this card to run it again.',
-        ),
+        vscode.l10n.t('The compression returned no answer, so there is no handoff. Continue this card to run it again.'),
       );
-      return false;
+      return null;
     }
     const summary = verdict.ok ? verdict.summary : answered.trim();
     if (!verdict.ok) {
@@ -4380,14 +4414,17 @@ export class SessionRuntime {
         node.id,
         'warning',
         vscode.l10n.t(
-          'The compression is missing {0} required section(s): {1}. The new window was opened anyway — this answer is what it carries.',
+          'The compression is missing {0} required section(s): {1}. The handoff was stored anyway.',
           missing.length,
           missing.join(', '),
         ),
       );
     }
     const previous = handoff.previous;
-    const message = buildContextRolloverMessage({
+    // The handoff, stored **on the card**: it is what a send below it leads the new window
+    // with, and its presence is the whole definition of "ready" (`hasHandoff`). The card
+    // itself started no conversation, so it keeps no `handoff` / `handoffSummary` of its own.
+    node.handoffNote = buildContextRolloverMessage({
       // The window ended because it was **compressed**, which is neither a refusal nor the
       // 90% entry: the size line states the number without claiming why.
       reason: 'compress',
@@ -4405,54 +4442,11 @@ export class SessionRuntime {
       usage: handoff.usage,
       summary,
     });
-    // The window below: the setup the user chose in the second question. `current` plants P's
-    // **frozen envelope** on the new node (`epochFrom`), so nothing of the compression turn's
-    // own envelope travels into the conversation and the provider's prefix stays cacheable;
-    // `latest` freezes the live setup instead, which is the answer to "stop sending me this
-    // conversation on the old model" and costs one cache miss (`api-retries.md`).
-    const resume = this.beginTurn(vscode.l10n.t('Context window {0}', windowNo), {
-      parentId: node.id,
-      freshContext: true,
-      role: 'resume',
-      ...(setup === 'latest'
-        ? { epochFrom: null, freshEpoch: true }
-        : { epochFrom: previous.id }),
-    });
-    if (!resume) {
-      this.setBusy(this.runs.size > 0);
-      this.postNoticeTo(
-        node.id,
-        'warning',
-        vscode.l10n.t('Could not open the new context window here — try again.'),
-      );
-      return false;
-    }
-    // A diagnostic, not a safety net: the envelope is planted above, and this line says which
-    // bytes the window really sends, so a log can prove the chain inherited P and not C.
-    const fromEpoch = epochForNode(this.session, previous.id);
-    this.host.output.appendLine(
-      `[compression] ${previous.id} -> ${node.id} -> ${resume.node.id} ` +
-        `(window ${windowNo}, envelope ${resume.node.epoch?.kind ?? 'main'}` +
-        `${fromEpoch && setup !== 'latest' ? `, inherited ${fromEpoch.kind ?? 'main'} from ${previous.id}` : ', frozen from the live setup'})`,
-    );
-    resume.node.handoff = 'summary';
-    resume.node.handoffSummary = summary;
-    resume.items.push({ kind: 'harness', text: message });
-    this.post({ type: 'harnessNote', nodeId: resume.node.id, text: message });
-    // The composer's own text: a real user message of the new window, after the handoff —
-    // the request that made the user cross the window in the first place.
-    const typed = text.trim();
-    if (typed) {
-      resume.items.push({ kind: 'user', text: typed });
-      this.post({ type: 'user', text: typed, attachments: [] });
-    }
-    this.setBusy(true);
-    this.lastStatus = vscode.l10n.t('Thinking…');
-    this.post({ type: 'status', text: this.lastStatus });
-    this.post({ type: 'nodeUpdate', ...this.nodeStatePatch(resume.node) });
-    void resume.agent.sendUserMessage(message, typed || undefined);
+    node.handoffSummary = summary;
     this.persistTurn();
-    return true;
+    this.post({ type: 'nodeUpdate', ...this.nodeStatePatch(node) });
+    this.postTree('handoff-ready');
+    return node.id;
   }
 
   /**

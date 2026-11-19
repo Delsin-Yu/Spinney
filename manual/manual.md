@@ -46,7 +46,7 @@ The tree holds one card per turn. A new turn goes below the turn it answers. The
 |---|---|
 | Input box | Holds your message. `Enter` sends, `Shift+Enter` adds a line. |
 | **Send** | Sends the message and starts a turn. The button is disabled in four cases: the input box is empty, the context window is full (section 10.3), this window is read-only, or the checked-out node is a sub-agent branch. `Enter` sends only through this button, so it does nothing while the button is disabled. |
-| **Compress** | Starts a new context window at any fill level (section 10.4). It does not show on the first card of a tree, because there is nothing above it to hand over. A click asks two questions: **Simple** (a pointer handoff, no extra request) or **Agentic** (a compression turn), then which setup the new window uses. The button is disabled in a read-only window and on a sub-agent branch, and it hides while **Stop** shows. The tooltip is `Move this conversation into a new context window: a pointer (Simple) or a compression turn (Agentic). The harness asks which, and which setup the new window uses.` |
+| **Compress** | Moves the conversation into a new context window at any fill level (section 10.4). The label is `Compress and send` when the input box has text or an attachment. It does not show on the first card of a tree, because there is nothing above it to hand over. It does not show on a compression card either. A click asks one question: **Simple** (a pointer handoff, no extra request) or **Agentic** (a compression turn). Spinney then puts a **compression card** below your window. A click does not open a new window: you continue in that card (section 10.4). The button is disabled in a read-only window and on a sub-agent branch, and it hides while **Stop** shows. The tooltip is `Compress this conversation and send this message into the new context window (the harness asks first)` when the box has content, and `Move this conversation into a new context window: a pointer (Simple) or a compression turn (Agentic). The harness asks which, and which setup the new window uses.` when the box is empty. |
 | **Continue with new context** | Shown only when the setup the composer shows differs from the frozen one (section 3.4). A click continues this conversation under the live setup and forks the tree, so the old tree keeps its own bytes. The tooltip is `Continue this conversation under the setup the composer shows now. The tree forks, so the old one keeps its own bytes.` |
 | **Stop** | Ends the turn at the checked-out node. It kills the background terminals and the sub-agents of that node too. Nothing continues. The tooltip is `Stop this turn` or `Stop this node: kill its background tasks and sub-agents (nothing is sent to the model)`. |
 | Prompt snippets | Opens a menu of pre-written instructions. A click inserts the text into the input box. Nothing is sent. Spinney ships `Plan` and `Implement Parallel`. Add your own rows with `spinney.promptSections` (section 11). |
@@ -142,11 +142,11 @@ The value holds the card, the thinking level, and the reply language. Example: `
 
 Spinney does not ask this question on a plain send. A plain send always uses the frozen setup. The two identity lines say so, and the frozen setup keeps the prompt cache of the provider.
 
-Two entries sit beside Send, and each answers one question. **Compress** moves this conversation into a new context window at any fill level: it asks which handoff (section 10.4) and then which setup the new window uses. **Continue with new context** shows only when the setup the composer shows differs from the frozen one: it continues the conversation under the live setup, and forks the tree so the old one keeps its own bytes.
+Two entries sit beside Send, and each answers one question. **Compress** moves this conversation into a new context window at any fill level: it asks which handoff (section 10.4), and it puts a compression card below your window. **Continue with new context** shows only when the setup the composer shows differs from the frozen one: it continues the conversation under the live setup, and forks the tree so the old one keeps its own bytes.
 
 A click on **Continue with new context** asks `Continue with the new workspace or model configuration?` The text names the size of the history in tokens. The answer is **Continue**. Spinney copies this tree into a new tree, and the copy starts under the latest configuration. The old tree keeps its own configuration and its own bytes.
 
-A click on **Compress** asks `Start a new context window?` with **Simple** and **Agentic** (section 10.4). When the two setups differ, a second question follows: `Which setup does the new window continue on?` with **Keep this window’s setup** and **Use the latest setup**.nd the new tree starts with the latest setup. The old tree keeps its own setup and its prompt cache.
+A click on **Compress** asks `Start a new context window?` with **Simple** and **Agentic** (section 10.4). Spinney then puts a compression card below your window, and no new window opens. The setup question belongs to the window, so Spinney asks it when your send opens the window: `Which setup does the new window continue on?` with **Keep this window’s setup** and **Use the latest setup**. Spinney asks it only when the two setups differ. With the same setup on both sides, it sends without a question.
 Press `Escape`, or click the close button, to dismiss the question. A dismissed question sends nothing, kills nothing, and Spinney keeps your text in the input box. Spinney checks the state again before it acts, so a change during the question sends nothing and shows a message.
 
 
@@ -501,11 +501,14 @@ A context window is full when the provider answers with a context-length error. 
 
 Spinney offers this button before a failure too. The button shows from about 90% of the `contextWindow` of the card. Nothing failed there, so the click is your own decision. A plain send at that point is still a normal send. A right-click on **Send** opens the same question at any time, at any fill level.
 
-1. Click **Compress**. The composer sends your message into the new window. If the node still owns running work, a modal asks first. It names the work that will stop.
+1. Click **Compress**, or **Compress and send** when the input box has text. If the node still owns running work, a modal asks first. It names the work that will stop.
 2. Answer the question `Start a new context window?` with `Simple` or `Agentic`. Section 10.4 describes both answers. A dismissed question sends nothing, and the input box keeps your text.
-3. Spinney opens a new card below that node. The edge is dashed, the title is `Context window {0}`, and the badge is `New context`. A window that a compression node produced has a dotted edge.
+3. Spinney puts a **compression card** below that node, and no new window opens. With `Simple`, the card is ready at once. With `Agentic`, Spinney runs the compression turn first, and the card is ready when that turn ends.
+4. Type in the input box of the ready card and press Send. That send opens the new window. When the input box had text at your first click, Spinney sends it for you as soon as the card is ready.
 
-The new window starts with the system prompt, one harness message, and your message. The harness message names the transcript file of the previous window, the work that stopped, and the size of the previous window. With `Simple`, it also holds the first request of the previous window, your last request, the files that the window changed, and the last answer, in a shortened form. With `Agentic`, it starts with the handoff written by the compression node, and your last request in your own words follows it. Attachments cannot cross, so the message names them instead.
+The new window starts below the compression card. Its edge is dotted, its title is `Context window {0}`, and the badge is `New context`. The window keeps the frozen setup of the window it continues, not the setup of the compression turn.
+
+The new window starts with the system prompt, the handoff of the card, and your message. The handoff of a `Simple` card names the transcript file of the previous window, the work that stopped, and the size of the previous window. It also holds the first request of the previous window, your last request, the files that the window changed, and the last answer, in a shortened form. The handoff of an `Agentic` card starts with the brief written by the compression turn, and the same facts follow it. Attachments cannot cross, so the handoff names them instead.
 
 The old branch stays usable. You can send into it again, or press **▶ Continue** there, until it overflows again.
 
@@ -518,22 +521,24 @@ Two details that are not faults:
 
 ### 10.4 The two handoffs
 
-The question has two answers.
+The question has two answers. Both answers put a **compression card** below your window. The card has the badge `Context compression`, and it is **ready** when it carries its handoff. A ready card has a green border and its own input box. Type there to continue, and that send opens the new window.
 
-- **Simple** costs no extra request. The new window is pointed at the record of the old window, and the agent reads that record when it needs a detail. The list of the handoff holds the first request of the old window, your last request, the files that the window changed, and the work that was stopped.
-- **Agentic** runs one more turn first. A **compression node**, with the badge `Context compression`, reads the window that ends. It reads the transcript on disk, the workspace, and the files that the window changed. It writes one short brief: the objective, your standing instructions, the facts, the changes, the checks, the dead ends, and the remaining plan. The new window starts from that brief.
+- **Simple** costs no extra request. The card is ready at once. Its handoff points at the record of the old window, and the agent reads that record when it needs a detail. The list of the handoff holds the first request of the old window, your last request, the files that the window changed, and the work that was stopped.
+- **Agentic** runs one more turn first. A **compression turn** on the card reads the window that ends. It reads the transcript on disk, the workspace, and the files that the window changed. It writes one short brief: the objective, your standing instructions, the facts, the changes, the checks, the dead ends, and the remaining plan. The card is ready when that turn ends.
 
-A compression node cannot change anything. It can read files, list folders, search files and search transcripts. Its card has no input box. While it runs, its card carries its own Stop. When the two setups differ, a second question asks which setup the new window continues on. `Keep this window’s setup` inherits the frozen setup of the conversation, which the provider has already cached. `Use the latest setup` freezes the current model and thinking level instead, so its first request misses the cache. With the same setup on both sides, Spinney does not ask.
+A compression turn cannot change anything. It can read files, list folders, search files and search transcripts. Its card has no input box while the turn runs, and the card carries its own Stop. A `Simple` card has no turn, so it has no Stop.
 
-You can start several windows from the same card. Each attempt is a new branch below it, so you can keep both and compare them: one `Simple` and one `Agentic`, for example. While an attempt still runs, wait for it to finish, then start the next one.
+A ready card has no Compress button. Send below it as often as you want. Each send opens a new window below the card, and the windows sit side by side: `Context window 2`, `Context window 3`, and so on.
 
-The new window starts below the compression node. The window keeps the frozen setup of the window it continues, not the setup of the compression turn. Its badge is `New context`, and its edge is dotted.
+The new window keeps the frozen setup of the window it continues, not the setup of the compression turn. Its badge is `New context`, and its edge is dotted. When the two setups differ, Spinney asks which setup the window uses now, when your send opens the window. `Keep this window’s setup` inherits the frozen setup of the conversation, which the provider has already cached. `Use the latest setup` freezes the current model and thinking level instead, so its first request misses the cache. With the same setup on both sides, Spinney does not ask.
 
-You can stop a compression node. If you stop it, or it writes nothing, no new window opens, and the card keeps its Continue button. Once the new window exists, the compression is finished. To do it again, start again from the window above it.
+You can stop a compression. If you stop it, or it writes nothing, the card has no handoff. It has no green border and no input box, and it keeps its Continue button. Press **▶ Continue** to run the card again. Spinney does not send your text after a stopped compression: your text stays in the input box, and another card shows it.
 
-The window that a compression produced has no delete button. Delete the compression node instead. That removes the compression turn, the window that it produced, and everything below that window.
+Once the card carries its handoff, the Continue button goes away. To compress the window again, start again from the window above.
 
-The compression node is a normal card in the tree. Click it to read what it did. It shows its own tool lines. The answer of a compression node is long. On that card the answer scrolls inside its own box, so the card keeps showing the steps above it.
+The window that a compression produced has no delete button. Delete the compression card instead. That removes the compression turn, every window that the card opened, and everything below those windows.
+
+The compression card is a normal card in the tree. Click it to read what it did. It shows its own tool lines. The answer of a compression is long. On that card the answer scrolls inside its own box, so the card keeps showing the steps above it.
 
 A `HARNESS` block is one line: a blue label and the start of the text. Click the line to read the whole message in a small box that scrolls. Click the line again to close it. The box shows the Markdown of the message: the headings, the lists and the code read as such. Spinney renders the text when you open the box. The `[Harness: …]` title line is not in the box: the blue label is that line. The label names the block: `Compression instruction`, `Handoff summary`, `Context handoff` or `Harness note`.
 

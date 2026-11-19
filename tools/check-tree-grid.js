@@ -69,7 +69,7 @@
  * "exception" classification left to verify. They are still UNREACHABLE IN PRODUCTION
  * (`attachNode`, `src/chat/tree.ts`, appends a sidecar to its parent's `children` and
  * never under a sidecar; the runtime refuses a sidecar as a continuation/rollover target
- * — `continueFrom` / `canRollover` / `rolloverContext`, `src/chat/runtime.ts`), and they
+ * — `continueFrom` / `canWindowStart`, `src/chat/runtime.ts`), and they
  * stay in the list so a session file that carries such a shape cannot crash the layout.
  *
  * HOW: loads the vendored tidy-tree engine and `media/tree.js` into node's `vm` with

@@ -88,7 +88,8 @@
   `contextBase()` and the `pathMessages` cut in `src/chat/tree.ts`,
   `parseContextLengthError()` / `windowFullReason()` in `src/agent/models.ts` (the two
   refusal kinds a full window can be — tokens and image bytes, `invariants/vision-images.md`),
-  `rolloverContext()` /
+  `startPointerHandoff()` / `compressHandoff()` / the compression-card branch of
+  `onUserMessage()` /
   `beginTurn({ freshContext })` / the harness resume text / the `contextFull` flag in
   `src/chat/runtime.ts`, the `rolloverTurn` route and its confirm gate in
   `ChatViewProvider.ts`, the meta field in `src/chat/transcript.ts`, the button variant in

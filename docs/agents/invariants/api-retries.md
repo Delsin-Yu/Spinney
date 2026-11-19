@@ -246,8 +246,9 @@ ends in `error`, and the card is the way back in.
   beside them, but nothing in the webview reads it.
   The host entry point for a new window is `ChatViewProvider.handlePanelMessage` →
   `newContextTurn` → `newContextEntry` → `rt.newEpochTrigger()` / `canRollover` →
-  `confirmEpochChange` → `SessionRuntime.rolloverContext(nodeId, 'current',
-  { text, handoff })`.
+  `confirmCompression` → `SessionRuntime.startPointerHandoff(nodeId)` or
+  `compressHandoff(nodeId)`, and then the setup question at send time
+  (`sendFromHandoff` → `onUserMessage({ handoffSetup })`).
 - **In place, not a new node**: `continueFrom` uses `beginInjectedTurn(node)` —
   the same mechanism the background / sub-agent completion notices use. The run is
   bound to the existing node (`fresh: false`), its reply is appended to that
@@ -300,9 +301,10 @@ ends in `error`, and the card is the way back in.
 - **Don't break**: `continueFrom` must keep going through `beginInjectedTurn`
   (read-only gate, hold gate, per-node `runs` gate, `fresh: false` append) rather than `beginTurn`
   — for a continue/retry, a new node is exactly the visible split this feature
-  exists to avoid. (The rollover is the one variant that *does* want a new card, so it
-  goes through `rolloverContext` instead — which still falls back to `continueFrom`
-  when the node turns out not to be near/full, see `context-rollover.md`.) It must
+  exists to avoid. (The window is the one variant that *does* want a new card: a send below a
+  readable compression card goes through `onUserMessage`'s compression-card branch, which is
+  `beginTurn`, and the entry that makes that card is `startPointerHandoff` / `compressHandoff`
+  — see `context-rollover.md`.) It must
   also keep starting the turn with `resumeTurn` and not `sendUserMessage`: a
   `kind:'user'` item for a resume would both be a message the model never received
   and the wrong thing for the webview to pin (it pins only the *first* user item of a

@@ -133,9 +133,6 @@
   // `cells`): id -> { col, row, busX, chanX, corrY, ... }. drawEdges() routes each
   // parent → sub-agent connector through those card-free corridors.
   let layoutCells = Object.create(null);
-  // The colour a sidecar's connector runs in: id -> { h, s, l, level, idx } (see
-  // `applySubColor`). Kept beside the layout so `drawEdges` can tint an edge like its card.
-  const subColors = Object.create(null);
   let pan = { x: 0, y: 0 };
   let zoom = 1;
   let follow = true;
@@ -6871,6 +6868,12 @@ function addBackgroundNotice(item) {
     }
   }
 
+  /** A compression card that already carries its handoff: green, and it hosts the composer. */
+  function syncHandoffCard(card, meta) {
+    if (!card) return;
+    card.classList.toggle('handoff-ready', !!(meta && meta.role === 'compress' && meta.handoffReady));
+  }
+
   function pathIdsFromTree(nodes, activeId) {
     const out = [];
     const seen = new Set();
@@ -6927,8 +6930,10 @@ function addBackgroundNotice(item) {
     // A window-starting node carries its context marker from the moment its card
     // exists (it is created once, here, and never rebuilt), and so does a sub-agent
     // card its `Sub-agent` / `Research sub-agent` badge — a card restored from a
-    // stored tree must wear the same head a live one does.
+    // stored tree must wear the same head a live one does. A compression card whose
+    // handoff is already in starts green for the same reason.
     syncCtxBadge(card, meta);
+    syncHandoffCard(card, meta);
     syncAgentBadge(card, meta);
 
     // The pinned user ask (sticky at the top of an expanded card).
@@ -7800,84 +7805,6 @@ function addBackgroundNotice(item) {
     return { items: pnode ? pnode.items : meta && meta.items, summary: false };
   }
 
-  // ---- Sub-agent family colours --------------------------------------------------------
-  //
-  // A sub-agent window's colour says WHICH family it belongs to and HOW DEEP it is. The family
-  // is the level-1 window it descends from; the hue comes from a fixed-seed sequence indexed by
-  // that window's order among its node's windows, and every level down raises the saturation
-  // and lowers the lightness — so a level-2 window reads as "the same family, one step deeper"
-  // rather than as an unrelated card. The sequence is a pure function of the index, so a family
-  // keeps its colour across repaints, reloads and sessions, and it never runs out.
-  const FAMILY_SEED = 0x5EED5EED;
-  const familyJitters = [];
-  let familyState = FAMILY_SEED | 0;
-  // Two arcs of the wheel, one per KIND of sidecar: a sub-agent window is warm (red → orange →
-  // yellow), a background job card is cold (cyan → blue → violet). The two classes can therefore
-  // never share a hue, which is what a glance at the tree needs most; keeping them apart matters
-  // more than spreading every family evenly over the whole wheel.
-  const WARM = { from: 330, span: 100 };
-  const COLD = { from: 170, span: 120 };
-  /**
-   * The jitter for family `i`: a fixed-seed mulberry32 STREAM off `FAMILY_SEED`, one value per
-   * index, kept within ±9 degrees so it only softens the ramp below. Cached, so it is a pure
-   * function of the index.
-   */
-  function familyJitter(i) {
-    while (familyJitters.length <= i) {
-      familyState = (familyState + 0x6D2B79F5) | 0;
-      let t = Math.imul(familyState ^ (familyState >>> 15), 1 | familyState);
-      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
-      familyJitters.push((((t ^ (t >>> 14)) >>> 0) % 19) - 9);
-    }
-    return familyJitters[i];
-  }
-  /**
-   * The hue of family `i` inside its arc. The STEP is the arc's own golden section
-   * (`span * 0.618`), so consecutive families land far apart WITHIN the arc instead of marching
-   * along it (a plain fixed-seed stream measured badly here: the first families came out 144, 144,
-   * 146, 131 — the same colour four times in a row). Pure and endless: a family keeps its colour
-   * across repaints, reloads and sessions.
-   */
-  function familyHue(i, arc) {
-    const step = arc.span * 0.6180339887;
-    return Math.round((((arc.from + ((i * step) % arc.span) + familyJitter(i)) % 360) + 360) % 360);
-  }
-  /** A sidecar's family index and level, from the tree the webview already holds. */
-  function subColorOf(id) {
-    const chain = [];
-    let n = treeNodes[id];
-    while (n && isSidecarKind(n.kind)) { chain.unshift(n); n = treeNodes[n.parentId]; }
-    if (!chain.length) return null;
-    const top = chain[0];                 // the level-1 window: the whole family wears its hue
-    const sibs = n ? (n.children || []).filter((c) => treeNodes[c] && isSidecarKind(treeNodes[c].kind)) : [top.id];
-    const idx = Math.max(0, sibs.indexOf(top.id));
-    const level = chain.length;           // 1 for a top-level window, 2 for its windows, …
-    return {
-      idx,
-      level,
-      // A job card walks the cold arc, a sub-agent window the warm one.
-      h: familyHue(idx, top.kind === 'bg' ? COLD : WARM),
-      s: Math.min(92, 44 + (level - 1) * 16),   // deeper = more saturated
-      l: Math.max(28, 64 - (level - 1) * 13),   // deeper = darker
-    };
-  }
-  /** Paint a sidecar card, and remember the colour its connector runs in. */
-  function applySubColor(id) {
-    const c = subColorOf(id);
-    const card = nodeEls[id];
-    if (!c || !card) return;
-    // ONE property is the card's colour. Everything that shows it — the left stripe, the focused
-    // card's outline, and (computed separately for the SVG, which cannot read a card's custom
-    // property) its connector — reads this one value instead of reassembling a
-    // hue/saturation/lightness triple.
-    if (card.style && card.style.setProperty) {
-      card.style.setProperty('--sub-color', 'hsl(' + c.h + ', ' + c.s + '%, ' + c.l + '%)');
-    }
-    card.dataset.subHue = String(c.h);
-    card.dataset.subLevel = String(c.level);
-    subColors[id] = c;
-  }
-
   /**
    * A **sidecar** card (a sub-agent window, or a job card) that is not the focused node
    * renders as a *monitor*: the fixed 200px window of `.node.monitor` in style.css,
@@ -7899,7 +7826,6 @@ function addBackgroundNotice(item) {
     const card = nodeEls[id];
     card.classList.add('monitor');
     card.classList.remove('expanded', 'active');
-    applySubColor(id);
     // A size a previous drag put on the card is parked first: an inline `max-height`
     // (from `createNodeCard`'s `meta.size`, or `endResize`) beats every stylesheet rule,
     // so the class alone could not hold a resized sidecar to its 200px. The focused card
@@ -7970,7 +7896,6 @@ function addBackgroundNotice(item) {
       card._monitorCap = null;
     }
     card.classList.toggle('active', id === treeActiveId);
-    if (isSidecarKind(meta.kind)) applySubColor(id);
     const askEl = card.querySelector('.node-ask');
     const workEl = card.querySelector('.node-work');
     const workWrap = card.querySelector('.node-work-wrap');
@@ -8085,11 +8010,12 @@ function addBackgroundNotice(item) {
     const node = id ? treeNodes[id] : null;
     // A sidecar (sub-agent window / background job card) never hosts the composer:
     // it is driven by the agent, and a job card has no conversation at all. A
-    // **compression node** is the third case: it has no request to type — its one turn
-    // was written by the harness — so its card keeps its own ⏹ Stop / ▶ Continue and no
-    // input box (`docs/agents/invariants/compress-node.md` §2).
-    const hostCard =
-      card && !(node && isSidecarKind(node.kind)) && !(node && node.role === 'compress') ? card : null;
+    // **compression node** hosts it exactly when it is *ready*: while its turn runs it
+    // has no input box (its one request was written by the harness, and its own ⏹ Stop
+    // is the way to stop it), and once its handoff exists the card is an ordinary card
+    // to continue from (`docs/agents/invariants/compress-node.md` §2).
+    const compressing = !!(node && node.role === 'compress' && !node.handoffReady);
+    const hostCard = card && !(node && isSidecarKind(node.kind)) && !compressing ? card : null;
     // Un-hide before mounting so autoGrow() measures a rendered input.
     setComposerVisible(!!hostCard);
     mountComposer(hostCard);
@@ -8117,12 +8043,23 @@ function addBackgroundNotice(item) {
       // only feeds the `near` variant's tooltip.
       if (typeof msg.context === 'string') treeNodes[msg.id].context = msg.context;
       if (typeof msg.contextPct === 'number') treeNodes[msg.id].contextPct = msg.contextPct;
+      // A compression node's handoff appears when its turn finally writes it, and the
+      // card's whole behaviour turns on that fact: it hosts the composer from then on
+      // (`setActiveLeaf`) and wears the green ready border.
+      if (typeof msg.handoffReady === 'boolean') treeNodes[msg.id].handoffReady = msg.handoffReady;
     }
-    if (card) syncContinueButton(card, treeNodes[msg.id] || { id: msg.id, status: msg.status, children: [] });
+    if (card) {
+      syncHandoffCard(card, treeNodes[msg.id]);
+      syncContinueButton(card, treeNodes[msg.id] || { id: msg.id, status: msg.status, children: [] });
+    }
     // The pencil on the ask is offered by the render (`syncAskEdit`), and nothing a `node`
     // patch carries can take it away: a turn starting or ending is not a reason to stop
     // offering an edit that branches beside it.
     if (card) syncAskEdit(card);
+    // A checked-out compression card gains (or loses) its input box with the handoff, so
+    // re-run the focus rather than waiting for the next full tree — `updateComposerButtons`
+    // below then answers for the pane that was just mounted or unmounted.
+    if (typeof msg.handoffReady === 'boolean' && msg.id === treeActiveId) setActiveLeaf(treeActiveId);
     // The context state is half of what the composer's own two buttons read (a refused
     // request disables Send and offers the new-epoch entry), and it can arrive *after*
     // the tree was drawn — exactly how a turn dies on a context-length error.
@@ -8784,9 +8721,7 @@ function relayout() {
           const mx = (pr + cx) / 2;
           d = 'M ' + pr + ' ' + pyMid + ' C ' + mx + ' ' + pyMid + ', ' + mx + ' ' + cyMid + ', ' + cx + ' ' + cyMid;
         }
-        const sc = subColors[id];
-        const tint = sc && !cls ? ' stroke="hsl(' + sc.h + ' ' + Math.min(85, sc.s + 12) + '% ' + Math.min(72, sc.l + 16) + '%)"' : '';
-        parts.push('<path data-agent="' + id + '" class="edge-agent' + cls + '"' + tint + ' d="' + d + '" />');
+        parts.push('<path data-agent="' + id + '" class="edge-agent' + cls + '" d="' + d + '" />');
       } else {
         const childMidX = cx + cw / 2;
         const parentBottomX = px + pw / 2;
@@ -8871,6 +8806,7 @@ function relayout() {
         // still has to pick its context marker and its sub-agent badge up here (never
         // in a streaming patch: the head exists once).
         syncCtxBadge(card, n);
+        syncHandoffCard(card, n);
         syncAgentBadge(card, n);
       }
     }
@@ -10060,9 +9996,11 @@ function relayout() {
    * where a window would have nothing to hand over — because "move this conversation into a new
    * context window" is a normal thing to want at any fill level. The two answers are the
    * compression node (`Agentic`) and the free pointer (`Simple`), and the harness asks which. It
-   * is hidden while Stop shows (one owner of the row) and disabled where no window can start,
-   * with the reason in its tooltip; the host re-checks every precondition and answers a stale
-   * click with a notice.
+   * is hidden while Stop shows (one owner of the row), on a **compression card** (there is nothing
+   * there to compress) and disabled where no window can start, with the reason in its tooltip;
+   * the host re-checks every precondition and answers a stale click with a notice. The label
+   * follows the box: with text in it the button both compresses *and* carries that text into the
+   * new window, without text it only moves the conversation.
    */
   function updateCompressButton() {
     const reason = newContextBlockedReason();
@@ -10070,15 +10008,19 @@ function relayout() {
     // A first card has no conversation to hand over: the window would be one turn long. The
     // right-click on Send is still there for anyone who really means it.
     const hasSomethingToCarry = !!node && !!node.parentId;
-    const show = hasSomethingToCarry && !focusIsRunning() && !focusIsLocked();
-    compressBtn.textContent = tr('Compress');
+    const isCompress = !!(node && node.role === 'compress');
+    const show = hasSomethingToCarry && !isCompress && !focusIsRunning() && !focusIsLocked();
+    const hasContent = hasComposerContent();
+    compressBtn.textContent = hasContent ? tr('Compress and send') : tr('Compress');
     compressBtn.classList.toggle('hidden', !show);
     compressBtn.disabled = !!reason;
     compressBtn.title = reason
       ? reason
-      : tr(
-          'Move this conversation into a new context window: a pointer (Simple) or a compression turn (Agentic). The harness asks which, and which setup the new window uses.',
-        );
+      : hasContent
+        ? tr('Compress this conversation and send this message into the new context window (the harness asks first)')
+        : tr(
+            'Move this conversation into a new context window: a pointer (Simple) or a compression turn (Agentic). The harness asks which, and which setup the new window uses.',
+          );
   }
 
   /**
@@ -10090,8 +10032,12 @@ function relayout() {
   function updateNewContextButton() {
     const drift = !!(SETUP && SETUP.drift);
     const reason = newContextBlockedReason();
+    const node = treeActiveId ? treeNodes[treeActiveId] : null;
     newContextBtn.textContent = tr('Continue with new context');
-    newContextBtn.classList.toggle('hidden', !drift || focusIsRunning() || focusIsLocked());
+    newContextBtn.classList.toggle(
+      'hidden',
+      !drift || focusIsRunning() || focusIsLocked() || !!(node && node.role === 'compress'),
+    );
     newContextBtn.disabled = !!reason;
     newContextBtn.title = reason
       ? reason
@@ -11446,12 +11392,15 @@ function relayout() {
    * the deliberate one (`compressNow`, `docs/agents/invariants/compress-node.md` §1). The
    * modal *is* the menu: nothing is drawn here, the same content a Send would carry is
    * posted, and the host asks Simple or Agentic. It is refused exactly where a window could
-   * not be opened at all — a running node, a read-only window, a sub-agent branch — and
-   * **not** on an empty box: a compression needs the conversation, not a message.
+   * not be opened at all — a running node, a read-only window, a sub-agent branch, and a
+   * **compression card** (there is nothing there to compress: the card *is* the handoff) —
+   * and **not** on an empty box: a compression needs the conversation, not a message.
    */
   sendBtn.addEventListener('contextmenu', (ev) => {
     ev.preventDefault();
     ev.stopPropagation();
+    const node = treeActiveId ? treeNodes[treeActiveId] : null;
+    if (node && node.role === 'compress') return;
     if (readOnly || focusIsRunning() || focusIsLocked() || focusIsAgent()) {
       return;
     }

@@ -203,10 +203,10 @@ the user changed model / effort / language. All three are gone from `src/` and `
 
 | | what it is |
 | --- | --- |
-| label, with content | `Continue with new context` |
-| label, empty box | `Compact and Continue` |
+| label, with content | `Compress and send` |
+| label, empty box | `Compress` |
 | shown when | the host says a new epoch is available — setup drift (`config.setup.drift`), or the focused chain's `context` is `near` / `full` — **and** the box has content or the context is `near` / `full`: the empty-box form is the compaction entry, so a setup drift with an empty box hides the button |
-| hidden when | the focused node is running or locked: Stop owns the row, and both other buttons hide with it |
+| hidden when | the focused node is running or locked: Stop owns the row, and both other buttons hide with it. The window entry also hides on a **compression card**, which has nothing above it left to compress |
 | disabled when | the window is read-only, or the focused node is a sub-agent branch (the tooltip says which). An **empty box does not disable it**: there it is the compaction entry, the one click a full window has left |
 | click | posts `{ type: 'newContextTurn', text, attachments }` — the same content a Send would carry |
 
@@ -232,8 +232,9 @@ setups; the button is the one way to act on the difference.
 The host picks the **backend** from the trigger (`SessionRuntime.newEpochTrigger`), never
 from a choice of the webview:
 
-1. `context` (`contextState(node) !== 'ok'`) → a **new context window**
-   (`rolloverContext`). Its preconditions are `windowStartBlocker(nodeId) === null`: the node
+1. `context` (`contextState(node) !== 'ok'`) → a **compression card** below that node
+   (`startPointerHandoff` for `Simple`, `compressHandoff` for `Agentic`, `compress-node.md`
+   §1/§2). Its preconditions are `windowStartBlocker(nodeId) === null`: the node
    exists, is not a sidecar, is not running, and none of its windows is still being written.
    A child already below it does not block — another attempt is a sibling branch. A failure is
    a notice and nothing happens — nothing is started and nothing is killed.
@@ -250,28 +251,28 @@ Then one modal, whose text depends on the backend (`confirmCompression` / `confi
 | drift | `Continue with the new workspace or model configuration?` | `The conversation history (about {0} tokens for the current model) will be sent to the provider under the new configuration. This request will miss the provider’s cache.` — `{0}` is `chainPromptTokensLive()` | `Continue` |
 
 VS Code adds its own Cancel. Dismissing sends nothing, kills nothing and keeps the input
-box. When the live setup and the chain's frozen one differ, one **second** question follows
-(`Which setup does the new window continue on?`, `confirmHandoffSetup`): keep the frozen setup of
-the conversation, or freeze the live one on the new window (`compress-node.md` §1). With no drift
-it is not asked, because both answers would be the same bytes. The context answer is
-re-validated after the questions (`canCompress(nodeId)` again): a
-turn may have finished, or a child appeared, while the modal was open — and acting on an
-answer given for another state is exactly the bug the check prevents; it posts a notice and
+box. The setup question is **not** asked here: it belongs to the window, so it is asked at send
+time, from the ready card (`sendFromHandoff` → `confirmHandoffSetup`, §5). The context answer is
+re-validated after the question (`canCompress(nodeId)` again): a
+turn may have started, or the node may have gone away, while the modal was open — and acting on
+an answer given for another state is exactly the bug the check prevents; it posts a notice and
 stops instead. The drift answer re-validates its own trigger (`newEpochTrigger() !== 'drift'`).
 
-`Simple` maps to `rolloverContext(nodeId, setup, { text, force: true })` — the pointer
-shape of §6, with `force` relaxing the 90 % condition (the user answered `Simple` for *this*
-node). `Agentic` maps to `compressAndContinue(nodeId, { text, setup })` — the
-compression chain of `compress-node.md`, which records the handoff on the window it produces
-(`TreeNode.handoff = 'summary'`, `TreeNode.handoffSummary`).
+`Simple` maps to `startPointerHandoff(nodeId)` — the pointer shape of §6, written by the harness
+into a card that runs **no turn at all**, so a `Simple` click costs nothing and is ready at
+once. `Agentic` maps to `compressHandoff(nodeId)` — the compression turn of `compress-node.md`,
+which runs **on the card** and stores the handoff there (`TreeNode.handoffNote`, plus
+`handoffSummary`). Neither opens a window: that is a send below the card (§5).
 
-`setup` is the answer to the entry's **second** question (`confirmHandoffSetup`), asked after the
-handoff and only when the live setup differs from the chain's frozen one: `'current'` inherits the
-parent's frozen epoch — the question this entry asks is about the *window*, so a window that
-inherits keeps the bytes the conversation was already written in (and the composer's new-epoch
-entry stays visible, still offering the other answer) — while `'latest'` freezes the live model
-and level on the new window, at one cache miss. With no drift the two answers are the same
-bytes, so no second question is asked.
+`handoffSetup` is the answer to the setup question, and it is asked **at send time**, not here:
+`sendFromHandoff` asks `confirmHandoffSetup` only when the live setup differs from the chain's
+frozen one. `'current'` inherits the compressed window's frozen epoch — the question is about
+the *window*, so a window that inherits keeps the bytes the conversation was already written in
+(and the composer's new-epoch entry stays visible, still offering the other answer) — while
+`'latest'` freezes the live model and level on the new window, at one cache miss. With no drift
+the two answers are the same bytes, so no question is asked, and an inter-session prompt
+(`send_session_prompt`) always takes `'latest'` without asking, because it cannot answer a
+modal.
 
 Killing running work is asked about **separately** and in both answers
 (`confirmKillBackgrounds`, §7): a rollover stops a node's background terminals and sub-agents,
@@ -283,14 +284,20 @@ The host's `rolloverTurn` and `forkTurn` message cases and `rolloverWithSetup` /
 
 ## 5. What the new node is
 
-**Position:** a normal **child** of the overflowing node P (`parentId: P`), so the
-conversation reads continuously and the dashed edge marks the window break. What
-changes is only the message prefix.
+A window is **opened by a send**, from the compression card C the user pressed Compress into
+(`compress-node.md` §1/§2). The click creates C; the send from C creates the window. That is the
+whole difference from the old shape, and it is why a card can open several.
 
-**Creation:** `beginTurn(title, { parentId: P, freshContext: true, freshEpoch: setup === 'latest',
-epochFrom })`. `epochFrom` is the compression chain's override — a node id plants a **copy** of
-that node's frozen envelope on the new node, `null` freezes a fresh one, absent keeps the
-ordinary rule (`compress-node.md` §3).
+**Position:** a normal **child** of the compression card C (`parentId: C`; C is a child of the
+overflowing node P), so the conversation reads continuously and the dashed edge marks the window
+break. What changes is only the message prefix.
+
+**Creation:** `onUserMessage(text, attachments, { basisNodeId: C, handoffSetup })` recognises the
+basis as a `role:'compress'` card and takes its branch:
+`beginTurn(title, { parentId: C, freshContext: true, role: 'resume', freshEpoch: handoffSetup ===
+'latest', epochFrom })`. `epochFrom` is the compression chain's override — a node id
+(`C.compressedFrom`, i.e. P) plants a **copy** of that node's frozen envelope on the new node,
+`null` freezes a fresh one, absent keeps the ordinary rule (`compress-node.md` §3).
 The `freshContext` option must set `node.contextBaseId = node.id` **after**
 `createNode()` and **before** `buildPath()`, or the run's basis is still the full
 chain. `freshEpoch` decides where the run's **epoch** comes from — the parent's
@@ -300,48 +307,55 @@ pending interruption notice (`resetInterruptState()` instead of
 `transferInterruptTo()`): that notice names a tool call in a context the new window
 cannot see.
 
+A send to a card that has **no handoff** is refused instead of creating a plain child
+(*"This compression has not written its handoff yet. Continue it on its card, then send."*): a
+window whose first message says nothing is worse than none.
+
 **Title:** `vscode.l10n.t('Context window {0}', n)`, where `n` is the number of
 windows on that branch: the session's first window is 1 and every window below it adds
-one, so a session's first rollover is `Context window 2`. The title is stored data, snapshotted in the user's language like a
-session title. The card also carries a `CTX` badge (token-like, deliberately
-untranslated, like `SUB` / `BG`), and the dashed edge and the badge are drawn only when
-`contextBaseId === node.id` — the same self-equality test the host applies, so a stale
+one, so a session's first rollover is `Context window 2`. Each further send below the same card
+adds a **sibling** window with the next number (§5b). The title is stored data, snapshotted in
+the user's language like a session title. The card also carries a `CTX` badge (token-like,
+deliberately untranslated, like `SUB` / `BG`), and the dashed edge and the badge are drawn only
+when `contextBaseId === node.id` — the same self-equality test the host applies, so a stale
 value cannot claim a window break the host does not perform.
 
-**Before creating it, the node's leftover work is union-killed** — see §7.
+**Before the card is created, the node's leftover work is union-killed** — see §7.
 
-**History:** `[epoch.prompt, harness text]` plus — when the composer carried text — the
-user's message as a **second, real `role:'user'` message after the harness one**
-(`sendUserMessage(harness, text)`). That order is the point: the harness text is a fact
-about the previous window, the typed text is this turn's request, and a model handed
-only the harness text would be answering a quotation. For a summarized rollover the
-harness text *starts* with the summary (§6a) and the summary is additionally stored on the
-node (`TreeNode.handoffSummary`), beside the messages — the item and the block render the
-same bytes, so a reload shows the same handoff. `buildPath()` prepends the run's
-**epoch prompt** — the frozen envelope of the node this rollover started (inherited, §4),
-or a live render for a chain without one — so what the model receives is
-`[epoch.prompt, harness, userText]` (or `[epoch.prompt, harness]` for an empty box). The
-prompt itself is **not** in the node's `messages`, not put into the transcript dump and
-not rendered in the card: it lives on the node that starts the epoch, once per epoch
-(`docs/agents/invariants/system-prompt.md`).
+**History:** `[epoch.prompt, C.handoffNote, userText]` — the card's **stored handoff** as a real
+`kind:'harness'` message on R, then the user's message as a **second, real `role:'user'`
+message after it** (`sendUserMessage(handoff, text)`). That order is the point: the handoff is a
+fact about the previous window, the typed text is this turn's request, and a model handed only
+the handoff would be answering a quotation. For an `Agentic` card the handoff text *starts* with
+the summary (§6a) and C also stores it as `handoffSummary`; R gets that answer copied onto itself
+(`TreeNode.handoffSummary`) when the card has one, so a reload, and any later feature, can read
+the handoff as data beside the messages. A `Simple` card has no summary and its window claims
+none. `buildPath()` prepends the run's **epoch prompt** — the frozen envelope of the node this
+window inherited from (§4), or a live render for a chain without one — so what the model receives
+is `[epoch.prompt, handoff, userText]`. The prompt itself is **not** in the node's `messages`,
+not put into the transcript dump and not rendered in the card: it lives on the node that starts
+the epoch, once per epoch (`docs/agents/invariants/system-prompt.md`).
 
 **Display:** one `kind:'harness'` item (rendered as the badged block by the existing
 `harnessNote` path), never a fabricated user bubble — the user did not type it — followed
-by the ordinary `kind:'user'` item when the composer had text. The card's pinned prompt is
-therefore the user's own message, or nothing at all when the box was empty.
+by the ordinary `kind:'user'` item for the message that opened the window. The card's pinned
+prompt is therefore the user's own message.
 
 ## 5a. The handoff: the pointer, or a compression turn
 
-The new-context modal offers two answers, and both are implemented:
+The new-context modal offers two answers, and both are implemented. **Both are stored on the
+compression card C** (`TreeNode.handoffNote`), which is what makes the card ready and what a
+send below it leads the new window with (`compress-node.md` §2/§7):
 
-- `Simple` (and every entry that does not ask, such as a rollover started from a script) → the
-  **pointer** shape of §6, which costs no request at all. `TreeNode.handoff` is left absent: the
-  harness wrote the text, no model did.
-- `Agentic` → a **compression node** between the two windows (`compress-node.md`): one real
-  turn reads the previous window and writes the handoff, and the window below it starts from
-  that handoff. `TreeNode.handoff = 'summary'` and `TreeNode.handoffSummary` are recorded on the
-  window the compression produced, persisted with the node and validated by value at load, so
-  an older build reads them as absent.
+- `Simple` → the **pointer** shape of §6, which costs no request at all: the harness writes it
+  into `handoffNote` the moment the card is created, and no turn ever runs.
+  `TreeNode.handoffSummary` is left absent — no model wrote anything.
+- `Agentic` → a **compression turn** on the card (`compress-node.md`): one real turn reads the
+  previous window and writes the handoff, `finishHandoff` stores the full compressed handoff
+  (pointer facts first, summary first in the text) in `handoffNote` and the answer itself in
+  `handoffSummary`. The window opened later from that card starts from it and copies
+  `handoffSummary` onto itself. Both fields are persisted with the node and validated by value
+  at load, so an older build reads them as absent.
 
 The retired shape — `Write a handoff summary`, one `clients.complete` request on the chain's
 card with a fixed eleven-section prompt and a 30 s deadline — is **gone from `src/`**:
@@ -351,9 +365,23 @@ gone. The reason is the one this page opens with: a request whose input is the h
 fire early, while a compression **turn** is a card the user can read, stop, continue and
 delete.
 
-Nothing else changes shape: the plumbing (`sendUserMessage`'s two user messages) is the same,
-the pointer's facts are the same, and a compression that fails or is stopped leaves the
-pointer's window one ▶ Continue away (`compress-node.md` §4/§6).
+Nothing else changes shape: the plumbing (`sendUserMessage`'s two messages) is the same, the
+pointer's facts are the same, and a compression that fails or is stopped keeps its ▶ Continue
+on the card: the retry makes the card ready and opens **no** window (`compress-node.md`
+§4/§6).
+
+## 5b. Several windows below one card
+
+A compression card is a boundary, not a conversation, so it stays usable after the first send:
+every send below it opens a new window, each a **sibling** `role:'resume'` node of the others,
+numbered in order (`Context window 2`, `Context window 3`, …). They are separate branches the
+user can keep side by side and compare, and the card itself is unchanged by them.
+
+What is one-per-card is **▶**: once the card carries its handoff, ▶ is refused
+(`This compression already wrote its handoff; send a message below it to continue in the new
+window.`) and the webview draws none. ▶ is the recovery path of a card with **no** handoff —
+after a Stop, a failure or an empty answer. The windows are not deletable on their own either:
+delete the compression card and the whole chain goes (§8, `compress-node.md` §5).
 
 
 ## 6. The harness text
@@ -436,7 +464,7 @@ Rules for building it:
   file is missing (`rolloverTranscriptOnDisk(prevId)` →
   `fs.existsSync(path.join(host.transcriptDir(sessionId), prevId + '.jsonl'))`, the path
   builder being `rolloverTranscriptPath`; `src/chat/runtime.ts`, both next to
-  `rolloverContext`),
+  `startPointerHandoff`),
   the pointer lines are replaced by: *"The previous window's transcript is not
   available on disk; rely on the carried-over text and ask the user when a detail
   is missing."*
@@ -462,9 +490,10 @@ Rules for building it:
 ## 6a. The compression's input, and its outcome
 
 The input, the bounds, the prompt and the validators live in `src/agent/compaction.ts` (pure,
-`vscode`-free, driven by `npm run check:compaction`). `SessionRuntime.compressAndContinue` owns
-the tree, the turn, the settle wait and the window below it; the outcome table and the
-sealing rule are `compress-node.md` §4/§6.
+`vscode`-free, driven by `npm run check:compaction`). `SessionRuntime.compressHandoff` owns the
+card and the turn, `finishHandoff` the settle wait and what the card then carries; the window
+itself is a later send from the card (`§5`), and the outcome table and the one-window-one-▶ rule
+are `compress-node.md` §4/§6.
 
 **The input is one window, bounded, never the whole chain.** `extractCompactionSource` selects
 from `pathMessages(session, P)` — the context base down to the overflowing node, i.e. exactly
@@ -496,8 +525,9 @@ under "re-read before editing", because the working tree may have moved on since
 **The answer is validated by heading** (`missingCompactionSections`): the seven required
 sections of `COMPRESS_REQUIRED_SECTIONS` are matched tolerantly (any heading level, casing, or
 a trailing colon/period), and `Durable references` — how to retrieve what was left out — is
-asked for and not required. A missing required heading is **not** a failure: the window opens
-anyway and the card is told which sections are missing (`compress-node.md` §6).
+asked for and not required. A missing required heading is **not** a failure: the handoff is
+stored on the card anyway and the card is told which sections are missing (`compress-node.md`
+§6).
 
 
 ## 7. Leaving no orphan work behind
@@ -542,16 +572,16 @@ Three things the rollover must add on top of `stopNode`:
 
 | Piece | File |
 | --- | --- |
-| `contextBaseId`, `contextBase()`, `epochForNode()`, `pathMessages()` cut, `normalizeTreeSession`, `TreeNode.handoff` | `src/chat/tree.ts` |
+| `contextBaseId`, `contextBase()`, `epochForNode()`, `pathMessages()` cut, `normalizeTreeSession`, `TreeNode.handoff` / `handoffSummary` / `handoffNote`, `hasHandoff()` | `src/chat/tree.ts` |
 | `parseContextLengthError()`, `windowFullReason()` | `src/agent/models.ts` |
-| `beginTurn({ freshContext, freshEpoch, epochFrom, role })`, `rolloverContext()`, `canRollover()` / `canCompress()`, `newEpochTrigger()`, `contextState()` / `contextPercent()` / `contextStateLive()`, `chainPromptTokensLive()`, `freezeEpoch()`, the harness text, `rolloverUsage()`, `nodeStatePatch()`, the kill + settle + flush + re-dump (`prepareHandoff`) | `src/chat/runtime.ts` |
-| `newContextTurn` / `compressNow` routing, `newContextEntry()`, `confirmCompression()`, `confirmEpochChange()`, `forkEntry()`, `forkFor()`, the kill modal, the transcript meta field | `src/chat/ChatViewProvider.ts` |
-| `sendUserMessage(content, followUp)` — the harness message and the composer's text as two user messages | `src/agent/agent.ts` |
+| `beginTurn({ freshContext, freshEpoch, epochFrom, role })`, `canRollover()` / `canCompress()`, `windowStartBlocker()`, `startPointerHandoff()` / `createHandoffCard()`, `compressHandoff()` / `finishHandoff()`, `handoffReady()`, `windowsOnPath()` / `producedWindowNumber()`, the send-from-a-card branch of `onUserMessage()` (`handoffSetup`), `newEpochTrigger()`, `contextState()` / `contextPercent()` / `contextStateLive()`, `chainPromptTokensLive()`, `freezeEpoch()`, the harness text, `rolloverUsage()`, `nodeStatePatch()`, the kill + settle + flush + re-dump (`prepareHandoff`) | `src/chat/runtime.ts` |
+| `newContextTurn` / `compressNow` routing, `newContextEntry()`, `confirmCompression()`, `sendFromHandoff()`, `confirmHandoffSetup()`, `confirmEpochChange()`, `forkEntry()`, `forkFor()`, the kill modal, the transcript meta field | `src/chat/ChatViewProvider.ts` |
+| `sendUserMessage(content, followUp)` — the handoff message and the composer's text as two user messages | `src/agent/agent.ts` |
 | AGENTS.md read-at-use (`liveAgentsMdSources`) | `src/chat/agentsMd.ts` |
-| `#new-context-btn` in `#actions`, the composer's own show/disable rules, `syncContinueButton` (▶ / ↻ only), the `context`/`contextPct` merge in `applyNodeUpdate`, dashed edge, `CTX` badge | `src/chat/webviewShell.ts`, `media/main.js` |
-| `#actions #new-context-btn` (and the removed `#new-setup-btn` / `.node-rollover` / `.node-near` rules), `.edge-context`, `.node-ctx-badge` | `media/style.css` |
+| `#new-context-btn` in `#actions`, the composer's own show/disable rules, `syncContinueButton` (▶ / ↻ only, no ▶ on a ready compression card), `syncHandoffCard` (the green ready card), the `Compress` / `Compress and send` label pair, the `context`/`contextPct` merge in `applyNodeUpdate`, dashed edge, `CTX` badge | `src/chat/webviewShell.ts`, `media/main.js` |
+| `#actions #new-context-btn` (and the removed `#new-setup-btn` / `.node-rollover` / `.node-near` rules), `.edge-context`, `.node-ctx-badge`, `.handoff-ready` | `media/style.css` |
 | The handoff texts: the input selection and its 60k bound, the previous-handoff marking, `firstUserRequest`, `editedFilesFromItems`, the pointer text, the compression instruction, the heading validation, the diagnostics line | `src/agent/compaction.ts` |
-| The compression chain: `compressTools`, `compressAndContinue`, `deliverCompression`, `COMPRESS_SYSTEM_PROMPT_TEMPLATE` / `compressSystemPrompt` | `src/chat/runtime.ts`, `src/agent/prompt.ts` (`compress-node.md`) |
+| The compression card: `compressTools`, `compressHandoff` / `finishHandoff`, `startPointerHandoff` / `createHandoffCard`, `COMPRESS_SYSTEM_PROMPT_TEMPLATE` / `compressSystemPrompt` | `src/chat/runtime.ts`, `src/agent/prompt.ts` (`compress-node.md`) |
 | `TreeNode.handoff` / `TreeNode.handoffSummary` and their load-time validation | `src/chat/tree.ts` |
 | The strings of §9 | `l10n/bundle.l10n.zh-Hans.json`, `l10n/bundle.l10n.zh-Hant.json` |
 | The pure-function guards | `tools/check-context-rollover.js` (`npm run check:rollover`), `tools/check-compaction.js` (`npm run check:compaction`) |
@@ -578,10 +608,8 @@ Translated (both catalogs, the source literals in the code):
 | host | `This context window is full, so the request was not sent. Use “Continue with new context” to carry the conversation into a new window.` |
 | host | `Could not continue in a new context here — wait for the running turn to finish and try again.` |
 | webview | `Continue with new context` |
-| webview | `Compact and Continue` |
-| webview | `Send this message in a new context window or under the new setup (the harness asks first)` |
-| webview | `Compact this conversation and continue in a new context window (the harness asks first)` |
-| webview | `Type a message or attach an image to continue in a new context` |
+| webview | `Compress` / `Compress and send` |
+| webview | `Compress this conversation and send this message into the new context window (the harness asks first)` |
 | webview | `Type a message or attach an image to send` |
 | webview | `The context window is full; continue in a new one first` |
 | webview | `A sub-agent branch cannot start a new context window` |
@@ -596,7 +624,11 @@ context window (the current one is full)`, `Context is {0}% full - continue in a
 window`), the harness-drift hint (`Continue with the latest setup (forks this tree and
 sends there)`) and the setup modal (`Continue with current setup`, `Continue with latest
 setup`, `Continue with a new setup?`, its two bodies, and `Send will ask before using the
-old setup (the one this node froze)`).
+old setup (the one this node froze)`). The compression-card change retired the button's old
+pair as well (`Compact and Continue`, `Send this message in a new context window or under the
+new setup (the harness asks first)`, `Compact this conversation and continue in a new context
+window (the harness asks first)` and `Type a message or attach an image to continue in a new
+context`) in favour of `Compress` / `Compress and send`.
 
 The handoff choice is deliberately **setting-free**: it is one answer to the modal's
 question (`Simple` / `Agentic`), it runs on the card the conversation already uses, and
@@ -628,10 +660,10 @@ block), the `CTX` / `CMP` badges (compact dock tokens), and the `[config]` / `[p
   that `#new-context-btn` sits before `#send-btn` in the shell, that a `nodeUpdate`
   carrying `context: 'full'` disables Send and offers the entry, that the `edge-context`
   class lands on the child's connector only, that the `CTX` badge appears on the
-  window-starting card and not on its descendants, that a compression node wears `CMP`
-  instead and shows its own ⏹ Stop while it runs (it has no composer), that the window it
-  produced carries no 🗑 of its own, that its card is sealed (no ▶ once its window exists),
-  that a checked-out compression node hides the composer, and that the Send button's
+  window-starting card and not on its descendants, that a compression card wears `CMP`
+  instead, shows its own ⏹ Stop while its turn runs and has **no** input box then, that it
+  turns **ready** (the green `.handoff-ready` card) and hosts the composer once it carries its
+  handoff, that a resume window carries no 🗑 of its own, and that the Send button's
   right-click posts `compressNow` with the box's text and attachments and clears nothing.
 - `npm run check:compaction` — pure node, against the compiled `src/agent/compaction.ts`: the
   source is one window (harness notes are not user requests), the first user message is
@@ -649,22 +681,25 @@ block), the `CTX` / `CMP` badges (compact dock tokens), and the `[config]` / `[p
 - `npm run check:continue` — the retired setup modal (`askSetups` /
   `discardPendingSetup` / `hasUserDrift`) is gone from `src/`.
 - `node tools/rollover-acceptance.js` (dev only, after `npm run compile`) — drives
-  `rolloverContext()` against the real runtime with the `vscode` module stubbed and an
-  offline client: the new window's first request is `[epoch.prompt, harness]` and carries
-  no ancestor message, the overflowing node's background terminal is killed while another
+  `startPointerHandoff()` against the real runtime with the `vscode` module stubbed and an
+  offline client: the card carries the pointer text, starts no turn, and a send below it opens
+  a window whose first request is `[epoch.prompt, handoff, user]` and carries no ancestor
+  message, the overflowing node's background terminal is killed while another
   node's job is left alone, the kill notice reaches that node's history *and* its
-  re-dumped transcript, the message carries the pointer / clipped tail / attachment
-  count, and a node that is not context-full falls back to the in-place continue. The
+  re-dumped transcript, the handoff carries the pointer / clipped tail / attachment
+  count. The
   **compression chain** is driven the same way, with a scripted assistant turn: C's first
   request is `[compression envelope, harness instruction]` with no ancestor or sibling
   message and carries exactly the four read-only tools, C freezes an envelope of `kind:
-  compress`, R is a `resume` node whose system message is **P's** bytes (not C's), whose
-  first message starts with the handoff and is followed by the pointer facts and the
-  composer's text as its own user message, and the node records `handoff` /
-  `handoffSummary`. A Stop on C leaves the card interrupted with no window below it, an
-  empty answer opens no window, a missing section opens the window anyway with a notice on
-  the card, `continueFrom(C)` is refused once the window exists, and
-  `branchDeletionBlocked` refuses the resume window while allowing the compression node.
+  compress`, and the card carries no handoff while its turn runs. A `Simple` press creates a
+  ready card with the pointer text and no request at all. A send below a ready card opens R:
+  a `resume` node whose system message is **P's** bytes (not C's), whose first message is C's
+  handoff and is followed by the user's message, and which records the handoff's presence
+  (`handoff` / `handoffSummary`). A second send below the same card opens a **sibling**
+  window with the next number. A Stop on C leaves the card interrupted with **no handoff** and
+  no window, an empty answer stores no handoff, a missing section stores the handoff anyway
+  with a notice on the card, `continueFrom(C)` is refused once the handoff exists, and
+  `branchDeletionBlocked` refuses the resume window while allowing the compression card.
   See `testing.md`.
 
 ## 11. Deliberately not done

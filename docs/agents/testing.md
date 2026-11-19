@@ -115,8 +115,8 @@ regression fails *packaging* instead of the user's session:
   `buildCompactionRetryMessages`, `COMPACTION_TIMEOUT_MS`) are **gone** from the module.
   Pure node against `out/`, so like `check:signals` it runs after `compile` in
   `vscode:prepublish` (`npm run check:compaction`). What it can **not** see: the compression
-  **turn** — the settle wait, the outcome table and the window below it live in
-  `SessionRuntime.compressAndContinue` / `deliverCompression`, which
+  **turn** — the settle wait, the outcome table and the handoff stored on the card live in
+  `SessionRuntime.compressHandoff` / `finishHandoff`, which
   `tools/rollover-acceptance.js` drives against a real runtime.
 - `npm run check:continue` (`tools/check-continue.js`, 86 checks) — the **transparent
   re-issue / resume contract** (`invariants/api-retries.md`): the half of a failed turn that
@@ -409,25 +409,26 @@ The rest — `tools/rollover-acceptance.js` first — need neither a window nor 
 dev-only, **not** in `vscode:prepublish`. The guards that only
 reach pure modules cannot see the risky half of a context rollover, which lives in
 `SessionRuntime`: it stubs the `vscode` module (a `Module._load`
-hook) plus an offline client and drives `rolloverContext()` for real. What it pins:
-the new window's first request is `[system, harness]` with no ancestor message in
-it, the old node's background terminal is killed while another node's job is left
-alone, the kill notice lands in that node's history *and* in its re-dumped
-transcript, the harness message carries the user's last request and the last answer
-verbatim **and** names and counts the killed background terminal, the window is
-numbered per branch, and a node that is not context-full falls back to the in-place
-continue. It drives the **compression chain** (P -> C -> R) too, with a scripted assistant
+hook) plus an offline client and drives `startPointerHandoff()` and the send below it for
+real. What it pins: the compression card carries the pointer handoff and starts **no turn**,
+the card owns the view focus and wears `handoffReady`, a send below it opens the window whose
+first request is `[system, handoff, user]` with no ancestor message in it, the old node's
+background terminal is killed while another node's job is left alone, the kill notice lands in
+that node's history *and* in its re-dumped transcript, the handoff carries the user's last
+request and the last answer verbatim **and** names and counts the killed background terminal,
+and the window is numbered per branch (a second send below one card gets the next number).
+It drives the **compression card** (P -> C) too, with a scripted assistant
 turn: C's first request is `[compression envelope, harness instruction]`, carries no ancestor
 or sibling message and advertises exactly the four read-only tools, C freezes an envelope of
-`kind: compress`, R is a `resume` node whose system message is **P's** bytes (never C's),
-whose first message starts with the handoff and is followed by the pointer facts and the
-composer's text as its own user message, and which records `handoff` / `handoffSummary`. A
-Stop on C leaves the card interrupted with no window below it, an empty answer opens no
-window, a missing section opens it anyway with a notice on the card, `continueFrom(C)` is
-refused once its window exists, and `branchDeletionBlocked` refuses the resume window while
-allowing the compression node. `node tools/rollover-acceptance.js` after `npm run compile`
-(its checkout defaults to its own `out/`); it reads a few private fields, so a refactor may
-break the script while the product stays fine.
+`kind: compress`, and the click opens nothing — C stores the handoff and `handoffSummary`, and
+the window it later produces is a `resume` node whose system message is **P's** bytes (never
+C's), whose first message is the card's handoff and whose second is the composer's text. A
+Stop on C, or an empty answer, writes no handoff (so a send is refused and no window is
+opened), a missing section stores the handoff anyway with a notice on the card,
+`continueFrom(C)` is refused once the handoff exists, and `branchDeletionBlocked` refuses the
+resume window while allowing the compression card. `node tools/rollover-acceptance.js` after
+`npm run compile` (its checkout defaults to its own `out/`); it reads a few private fields, so
+a refactor may break the script while the product stays fine.
 
 `tools/modeltree-acceptance.js` is the second of the four, the same shape for the
 Model Card Tree page's host half — dev-only, **not** in `vscode:prepublish`, no

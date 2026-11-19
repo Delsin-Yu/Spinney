@@ -5,6 +5,33 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **A compression card is where the continuation starts.** `Compress` now puts a **compression
+  card** below the window it compresses and stops there: `Simple` creates the card ready, with
+  the harness-written pointer handoff and **no turn at all**, and `Agentic` runs the compression
+  turn on that card, which stores the handoff it wrote. Nothing runs once the compression is
+  over. The card is **ready** when it carries its handoff: a green border, an input box of its
+  own, and no `Compress` entry (`hasHandoff`, shipped to the webview as `handoffReady`). A
+  **send** below a ready card is what opens the new context window — its first message is the
+  handoff, its second is the message someone typed, attachments included — and one card may
+  open several windows, numbered in order. With text in the box the button reads `Compress and
+  send` and the message follows as soon as the card is ready; a compression that was stopped
+  writes no handoff, so it sends nothing and leaves the text in the box. The setup question
+  (`Which setup does the new window continue on?`) moved from the click to the send that opens
+  the window, because it describes the window; an inter-session prompt to a ready card
+  continues on the latest setup with no question.
+
+### Changed
+
+- **Sub-agent and terminal cards use the default card colour.** The fixed-seed family hue is
+  gone entirely: no left stripe, no family-coloured border or outline on the focused card, and
+  no tinted connector. The state colours stay (`agent-done` / `agent-error` on the card, and
+  their connectors); the ready compression card's green is the same `--success` the done chip
+  already used.
+
 ## [0.7.1] - 2026-11-17
 
 ### Added

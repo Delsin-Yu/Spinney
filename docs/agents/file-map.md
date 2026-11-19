@@ -45,14 +45,15 @@
   to one line, caps it at 60 characters and stores it on the `DisplayItem` **and** on the
   `toolStart` message, so the card's step row shows the model's label even though the
   display copy of `args` is clipped to 8 KiB — and it survives every repaint.
-  A full context window is continued rather than compressed by `rolloverContext()` (the
-  union kill + settle + flush + re-dump, `beginTurn({ freshContext })`, the harness resume
-  text and the `contextFull` flag it ships) — see `invariants/context-rollover.md`. The
-  **compression node** is the other answer to the same question (`compressAndContinue` →
-  `prepareHandoff` → `deliverCompression`, the P -> C -> R chain; `beginTurn({ role,
-  epochFrom })`; `TurnRun.settled`, the promise the chain awaits; `compressTools`, the
-  read-only registry the compression turn runs on; the compress/`resume` roles that seal a
-  card and block its deletion) — see `invariants/compress-node.md`.
+  A full context window is continued rather than compressed by `startPointerHandoff()` (the
+  union kill + settle + flush + re-dump, the compression card that carries the pointer text, the
+  `handoffReady` flag it ships) — see `invariants/context-rollover.md`. The **compression
+  card** is the other answer to the same question (`compressHandoff` → `prepareHandoff` →
+  `finishHandoff`, the P -> C chain; `beginTurn({ role, epochFrom })`; `TurnRun.settled`, the
+  promise the card awaits; `compressTools`, the read-only registry the compression turn runs
+  on). A send below a ready card opens the window (`onUserMessage`'s compression-card branch,
+  with `epochFrom` P and the handoff as the lead message); the compress/`resume` roles draw the
+  dotted edge and block a resume window's own deletion — see `invariants/compress-node.md`.
 - `src/chat/SubAgentPool.ts` — `SubAgentPool`: the per-session concurrency limit for
   level-1 sub-agents (`spinney.maxConcurrentSubagents`), a FIFO queue that runs the
   rest as slots free. `setMaxConcurrent` is the live settings path (raising it wakes

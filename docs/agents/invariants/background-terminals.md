@@ -389,8 +389,9 @@
   small, separate path: it answers `[command wait was interrupted]`, restores the job's notice
   and leaves the command running, because stopping the *wait* is not stopping the **work** —
   the union kill above is what ends the work, and it runs on the same node.
-- **A context rollover is the union kill's third caller** (`SessionRuntime.rolloverContext`,
-  see `context-rollover.md`). It begins with the *same* path a Stop takes — the node's
+- **A context rollover is the union kill's third caller**
+  (`SessionRuntime.startPointerHandoff` / `compressHandoff`, see `context-rollover.md`). It
+  begins with the *same* path a Stop takes — the node's
   background terminals, its whole sub-agent subtree (with the terminals the sub-agents own) and
   any notice already queued for it, all converted into **writebacks** into that node's own card
   and history — and only the aftermath differs: P is flushed and explicitly **re-dumped**, so

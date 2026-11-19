@@ -1006,13 +1006,22 @@ export class Agent {
    *
    * `followUp` is the one caller that sends **two** user messages in one turn: a context
    * rollover stores the harness' own account of the previous window and, immediately
-   * after it, the text the user actually typed (`SessionRuntime.rolloverContext`). The
+   * after it, the text the user actually typed (`SessionRuntime.onUserMessage`). The
    * two are deliberately not folded into one message — the harness text is a fact about
    * the old window and the typed text is this turn's request, and a model that reads them
    * as one paragraph tends to answer the quotation. Both are pushed before the turn's
    * start index, so the rollback below keeps them together.
+   *
+   * `lead` is the **third** slot and comes first: it is the harness handoff block a
+   * window opened from a compression card starts with (`SessionRuntime.onUserMessage`,
+   * `docs/agents/invariants/compress-node.md`), pushed before `content` exactly like
+   * `followUp` is pushed after it — and for the same reason. The handoff describes the
+   * window being left, `content` is this turn's request, and folding them into one
+   * message makes the model answer the description. The order in the history is
+   * `[lead, content, followUp]`, after the interrupt notice when there is one, and every
+   * piece is pushed before the turn's start index so the rollback keeps them together.
    */
-  sendUserMessage(content: string | ContentPart[], followUp?: string): void {
+  sendUserMessage(content: string | ContentPart[], followUp?: string, lead?: string): void {
     if (this.isRunning) {
       return;
     }
@@ -1036,7 +1045,13 @@ export class Agent {
       this.lastInterruptedTools = [];
     }
 
-    // Everything appended during this turn; rolled back on failure.
+    // Everything appended during this turn; rolled back on failure. The lead comes first
+    // (the handoff the window opened from a compression card starts with), then the
+    // request, then the caller's follow-up.
+    const opening = typeof lead === 'string' ? lead.trim() : '';
+    if (opening) {
+      this.messages.push({ role: 'user', content: opening });
+    }
     this.messages.push({ role: 'user', content });
     const extra = typeof followUp === 'string' ? followUp.trim() : '';
     if (extra) {

@@ -4899,10 +4899,25 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
           'Report it to your user: only a human can continue that conversation in a new window.',
       };
     }
+    // A send that lands on a **compression card** opens the window below it
+    // (`docs/agents/invariants/compress-node.md`): the card must carry its handoff, and an
+    // inter-session prompt cannot answer the setup question, so it always continues on the
+    // live setup (`'latest'`).
+    const basisNode = session.activeNodeId ? session.nodes[session.activeNodeId] : undefined;
+    const onHandoffCard = !!basisNode && basisNode.role === 'compress';
+    if (onHandoffCard && basisNode && !rt.handoffReady(basisNode.id)) {
+      return {
+        ok: false,
+        error:
+          `session ${session.id} is checked out at a compression card that has not written its handoff yet, ` +
+          'so nothing was sent. Report it to your user: only the card\'s own Continue can run it again.',
+      };
+    }
     const outcome = await rt.onUserMessage(message, [], {
       from: opts?.from,
       rounds: opts?.rounds,
       quiet: true,
+      ...(onHandoffCard ? { handoffSetup: 'latest' as const } : {}),
     });
     if (outcome.ok) {
       return { ok: true, nodeId: outcome.nodeId };
@@ -5677,10 +5692,29 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       );
       return;
     }
+    const basisId = rt.session.activeNodeId ?? null;
+    const basisNode = basisId ? rt.session.nodes[basisId] : undefined;
+    let handoffSetup: 'current' | 'latest' | undefined;
+    if (basisNode && basisNode.role === 'compress') {
+      // A send from a compression card opens the window below it, and the window's setup is
+      // that send's own question (`docs/agents/invariants/compress-node.md`).
+      if (!rt.handoffReady(basisNode.id)) {
+        rt.postNotice('warning', vscode.l10n.t('This compression has not written its handoff yet. Continue it on its card, then send.'));
+        return;
+      }
+      if (from) {
+        // An inter-session prompt cannot answer a modal: it continues on the live setup.
+        handoffSetup = 'latest';
+      } else {
+        const answer = await this.confirmHandoffSetup(rt, basisNode.id);
+        if (!answer) return;
+        handoffSetup = answer;
+      }
+    }
     // A send is the moment a key matters: nudge once (never block — the request
     // itself reports the real error).
     void this.warnMissingApiKey();
-    await rt.onUserMessage(text, attachments, from || rounds !== undefined ? { from, rounds } : undefined);
+    await rt.onUserMessage(text, attachments, { ...(from || rounds !== undefined ? { from, rounds } : {}), ...(handoffSetup ? { handoffSetup } : {}) });
     // The composer holds the text until this point: a refused send must not eat what the
     // user typed (`composerClear`).
     this.postTo(rt.sessionId, { type: 'composerClear' });
@@ -5701,7 +5735,8 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    * so nothing here moves the view.
    *
    * Each refusal is one sentence and starts no turn: a node this session does not have,
-   * a sidecar (a sub-agent window or job card has no prompt of its own), an empty text, and
+   * a sidecar (a sub-agent window or job card has no prompt of its own), a compression card
+   * (it is a handoff, not an ask), an empty text, and
    * the two window-level gates every turn start shares (the reboot hold and read-only).
    * **A running turn is not one of them.** The edit is a branch from the edited node's
    * *parent*, so the node that is streaming is not touched at all: its `messages`, its
@@ -5730,7 +5765,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       );
       return;
     }
-    if (isSidecar(node)) {
+    if (isSidecar(node) || node.role === 'compress') {
       rt.postNotice('warning', vscode.l10n.t('This card has no prompt of its own to edit.'));
       return;
     }
@@ -5774,13 +5809,20 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    *
    *  - context `near`/`full` (or the right-click) → a **new context window**, asked as one
    *    question with two answers (`confirmCompression`): the pointer rollover (Simple, no
-   *    extra request) or a compression node (Agentic, one more turn, a written handoff).
-   *    Its preconditions are re-checked here (a node, not a sidecar, not running, no
+   *    extra request) or a compression node (Agentic, one more turn, a written handoff). Its
+   *    preconditions are re-checked here (a node, not a sidecar, not running, no
    *    conversational child) and a failure is a notice — nothing is started, nothing killed.
+   *    The setup question is **not** asked here: it belongs to the window, so it is asked when
+   *    a message is sent from the compression card (`sendFromHandoff`, `dispatchUserMessage`).
    *  - setup drift only → a **fork** under the live setup (`forkTree`), so the old tree
    *    keeps the bytes and the provider cache entry it was built with. The composer's
    *    text becomes a normal send in the new tree; with an empty box there is nothing to
    *    send and the fork alone is the whole action.
+   *
+   * The two compression answers end on a **compression card**, which is where the user
+   * continues; the composer's text, when there is any, is sent there by the ordinary send path
+   * once the card carries its handoff (`sendFromHandoff`). A compression that is stopped or
+   * writes nothing sends nothing and leaves the typed text alone.
    *
    * Dismissing the modal sends nothing, kills nothing and leaves the composer's text alone.
    */
@@ -5799,6 +5841,11 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     }
     if (this.readOnly) {
       rt.postNotice('warning', this.readOnlyNotice());
+      return;
+    }
+    const entryNode = rt.session.nodes[rt.session.activeNodeId ?? ''];
+    if (entryNode && entryNode.role === 'compress') {
+      rt.postNotice('warning', vscode.l10n.t('This card is already a compression; send a message below it instead.'));
       return;
     }
     // The right-click on Send is a deliberate entry (`compressNow`): it asks for a new window
@@ -5845,15 +5892,6 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     if (!choice) {
       return;
     }
-    // **Second question**: which setup does the window continue on? The chain's frozen envelope
-    // is what the conversation was written in, and the live one is what the composer shows now;
-    // inheriting keeps the provider's cached prefix, freezing the live one costs that cache but
-    // stops the composer from asking about it afterwards. Only asked when the two differ — with
-    // no drift the answer would be the same bytes twice.
-    const setup = await this.confirmHandoffSetup(rt);
-    if (!setup) {
-      return;
-    }
     // Re-validated after the question: a turn may have finished, or a child appeared, while
     // it was open — and acting on an answer given for another state is the bug this check
     // exists for.
@@ -5877,31 +5915,24 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         return;
       }
     }
-    // The new window inherits the checked-out chain's frozen epoch unless the user asked for the
-    // live setup, in which case it freezes that one: the question this entry asked is about the
-    // *window*, and the second question answered where its bytes come from.
     if (choice === 'agentic') {
-      // The chain runs on after this method returns: the compression turn, then the window.
-      // The composer is cleared only when the handoff was really delivered — a compression
-      // the user stops must not eat the text they typed.
-      void rt.compressAndContinue(nodeId, { text, setup }).then((delivered) => {
-        if (delivered) {
-          this.postTo(rt.sessionId, { type: 'composerClear' });
-        }
-      });
+      // The compression turn writes the handoff on its own card; nothing opens a window.
+      const cardId = await rt.compressHandoff(nodeId);
+      // A stopped or empty compression is a notice on that card and nothing else: the typed
+      // text stays in the composer, and no send follows (`compress-node.md`).
+      if (!cardId) return;
+      await this.sendFromHandoff(rt, cardId, text, attachments);
       return;
     }
-    // `force`: the user answered this question about this node, and a window that still has
-    // room is a legitimate moment to move on (the right-click entry has no fill condition).
-    const started = await rt.rolloverContext(nodeId, setup, { text, force: true });
-    if (!started) {
+    const cardId = await rt.startPointerHandoff(nodeId);
+    if (!cardId) {
       rt.postNotice(
         'warning',
         vscode.l10n.t('Could not continue in a new context here — wait for the running turn to finish and try again.'),
       );
       return;
     }
-    this.postTo(rt.sessionId, { type: 'composerClear' });
+    await this.sendFromHandoff(rt, cardId, text, attachments);
   }
 
   /**
@@ -5919,6 +5950,39 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     void this.warnMissingApiKey();
     await rt.onUserMessage(text, attachments);
     this.postTo(rt.sessionId, { type: 'composerClear' });
+  }
+
+  /**
+   * Send the composer's message into the window a **compression card** opens
+   * (`docs/agents/invariants/compress-node.md`).
+   *
+   * One path for every send from such a card: the automatic one a `Compress and send` click
+   * follows once the handoff exists, and the ordinary one the user types later. It asks the
+   * setup question here, at send time, because the answer belongs to the window, not to the
+   * compression; with no drift the question is not asked. An empty message is not a send: the
+   * ready card is the whole result of the click, and the user types when they want.
+   */
+  private async sendFromHandoff(
+    rt: SessionRuntime,
+    cardId: string,
+    text: string,
+    attachments: UserAttachment[],
+  ): Promise<void> {
+    if (!text.trim() && attachments.length === 0) {
+      return;
+    }
+    if (!rt.handoffReady(cardId)) {
+      return;
+    }
+    const setup = await this.confirmHandoffSetup(rt, cardId);
+    if (!setup) {
+      return;
+    }
+    void this.warnMissingApiKey();
+    const sent = await rt.onUserMessage(text, attachments, { basisNodeId: cardId, handoffSetup: setup });
+    if (sent.ok) {
+      this.postTo(rt.sessionId, { type: 'composerClear' });
+    }
   }
 
   /**
@@ -5968,7 +6032,7 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   }
 
   /**
-   * The **second** question of the new-epoch entry: which setup the window continues on
+   * The **setup** question a new context window asks, and its answer
    * (`docs/agents/invariants/compress-node.md` §1).
    *
    *  - `current` — inherit the frozen envelope of the window being handed over. The provider has
@@ -5978,12 +6042,17 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
    *  - `latest` — freeze the live setup on the new window. The user's dropdowns are what the next
    *    request runs on, at the price of one cache miss (`api-retries.md`).
    *
+   * It is asked when a window is **opened**, that is at send time from a compression card
+   * (`sendFromHandoff`, `dispatchUserMessage`), not when the compression is started. `nodeId` is
+   * the compression card the window opens under: the question describes that card's chain even
+   * when the view focus has moved since.
+   *
    * Asked **only when the two disagree**: with no drift, "inherit" and "freeze" produce the same
    * bytes, and a modal that cannot change the outcome is noise. A dismissed question returns
    * `null`, which the caller treats as "nothing happens".
    */
-  private async confirmHandoffSetup(rt: SessionRuntime): Promise<'current' | 'latest' | null> {
-    if (!rt.hasSetupDrift()) {
+  private async confirmHandoffSetup(rt: SessionRuntime, nodeId?: string): Promise<'current' | 'latest' | null> {
+    if (!rt.hasSetupDrift(nodeId)) {
       return 'current';
     }
     const keep = vscode.l10n.t('Keep this window’s setup');
