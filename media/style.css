@@ -2547,13 +2547,19 @@ body.vscode-high-contrast-light {
   transform-origin: 0 0;
   user-select: none;
   -webkit-user-select: none;
-  /* Its own composited layer, so a pan is a transform the compositor applies instead of a
-     main-thread repaint of everything under it. Measured on a 111-card session: a
-     free-spinning wheel (alt + wheel, 639 events in 22 s) still cost 26 long tasks and
-     4.4 s of blocked main thread with every JS-side deferral in place, no DOM mutation
-     and no slow layout pass in the log — the frame's work was the paint of the canvas the
-     transform moved. The layer is tiled by the compositor, and `.node.cv-skip` below keeps
-     the tiles a pan is not looking at cheap. */
+}
+
+/* Its own composited layer, **only while the camera moves**. A permanent one is what made
+   the wheel smooth before, and it is also what left cards looking soft: the compositor keeps
+   the tiles it rastered at whatever scale they had, and at a zoom it did not raster for it
+   scales that old raster instead of painting it again — a blurry transcript that a single
+   invalidated card (unfolding a step) snaps back into focus. So the hint is put on for the
+   gesture and taken off when the view settles: the pan is a compositor transform, and the
+   layer is destroyed and repainted at the real scale the moment the reader stops.
+   Measured before the hint existed at all: a free-spinning wheel (alt + wheel, 639 events
+   in 22 s) cost 26 long tasks and 4.4 s of blocked main thread with every JS-side deferral
+   in place, no DOM mutation and no slow layout pass in the log. */
+body.panning #tree-canvas {
   will-change: transform;
 }
 

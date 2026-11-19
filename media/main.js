@@ -7064,9 +7064,12 @@ function addBackgroundNotice(item) {
   // wait; one timer, a quarter second after the last movement, lets everything resume.
   const VIEW_MOVE_MS = 250;
   const DEFERRED_RENDER_BATCH = 3;
+  /** How long the composited-layer hint outlives the last camera move (see `body.panning`). */
+  const PAN_SETTLE_MS = 200;
   let lastViewMoveAt = -1e9;
   let viewIdleTimer = null;
   let deferredItemsTimer = null;
+  let panClassTimer = null;
 
   /** Is the camera still settling from a move? */
   function viewMoving() {
@@ -7076,6 +7079,18 @@ function addBackgroundNotice(item) {
   /** The camera moved (drag, wheel, autoscroll or pinch): hold the expensive work. */
   function noteViewMove() {
     lastViewMoveAt = perfNow();
+    // The composited layer exists for the gesture only (see `body.panning` in the
+    // stylesheet): smooth while moving, repainted at the real scale when the view settles.
+    try {
+      document.body.classList.add('panning');
+      if (panClassTimer != null) clearTimeout(panClassTimer);
+      panClassTimer = setTimeout(() => {
+        panClassTimer = null;
+        document.body.classList.remove('panning');
+      }, PAN_SETTLE_MS);
+    } catch (err) {
+      /* a class that cannot be set costs a frame, never the pan */
+    }
     if (viewIdleTimer != null) clearTimeout(viewIdleTimer);
     viewIdleTimer = setTimeout(() => {
       viewIdleTimer = null;

@@ -32,6 +32,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   their connectors); the ready compression card's green is the same `--success` the done chip
   already used.
 
+### Fixed
+
+- **Text no longer stays soft after a pan or a zoom.** The canvas held a composited layer for
+  its whole life once the wheel was made smooth, and the compositor reused the tiles it had
+  rastered at an older scale: a card's text stayed blurry until something invalidated that one
+  card, which is why unfolding a step snapped it back into focus. The layer now exists only
+  while the camera moves, and it is dropped 200 ms after the view settles, so the canvas is
+  repainted at its real scale.
+
 ## [0.7.1] - 2026-11-17
 
 ### Added
