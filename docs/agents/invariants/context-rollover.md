@@ -210,17 +210,15 @@ the user changed model / effort / language. All three are gone from `src/` and `
 | disabled when | the window is read-only, or the focused node is a sub-agent branch (the tooltip says which). An **empty box does not disable it**: there it is the compaction entry, the one click a full window has left |
 | click | posts `{ type: 'newContextTurn', text, attachments }` — the same content a Send would carry |
 
-**Its second entry is the Send button's own right-click.** `media/main.js` listens for
-`contextmenu` on `#send-btn`, calls `preventDefault` and posts
-`{ type: 'compressNow', text, attachments }` — the same content a Send would carry. No menu is
-drawn: the modal *is* the menu, and both entries land in the same host method
-(`ChatViewProvider.newContextEntry`, `opts.compress` marks the right-click). The right-click is
-the **deliberate** entry, so it consults no trigger: `canCompress(nodeId)` is the structural
-precondition only (a conversational node whose own turn is not streaming and whose windows are
-not still being written — a card that already has a continuation below is *not* refused, because
-several attempts are how the two handoffs are compared), and a window
-that still has room is a legitimate moment to move on. `compress-node.md` §1 has the whole
-rule.
+**The button is the only entry, and it is the deliberate one.** Its click posts
+`{ type: 'newContextTurn', mode: 'compression', text, attachments }` — the same content a Send
+would carry — and `ChatViewProvider.newContextEntry` reads `mode: 'compression'` as a **forced**
+trigger: it consults no `newEpochTrigger()`, because the click *is* the user's "move this
+conversation now", so a window that still has room is a legitimate moment to move on.
+`canCompress(nodeId)` is the structural precondition only (a conversational node whose own turn is
+not streaming and whose windows are not still being written — a card that already has a
+continuation below is *not* refused, because several attempts are how the two handoffs are
+compared). `compress-node.md` §1 has the whole rule.
 
 **Send** keeps its own rules and loses the drift mark: it is hidden while Stop shows,
 and it is **disabled** when `!hasContent || context === 'full' || readOnly || isAgent`.
@@ -575,7 +573,7 @@ Three things the rollover must add on top of `stopNode`:
 | `contextBaseId`, `contextBase()`, `epochForNode()`, `pathMessages()` cut, `normalizeTreeSession`, `TreeNode.handoff` / `handoffSummary` / `handoffNote`, `hasHandoff()` | `src/chat/tree.ts` |
 | `parseContextLengthError()`, `windowFullReason()` | `src/agent/models.ts` |
 | `beginTurn({ freshContext, freshEpoch, epochFrom, role })`, `canRollover()` / `canCompress()`, `windowStartBlocker()`, `startPointerHandoff()` / `createHandoffCard()`, `compressHandoff()` / `finishHandoff()`, `handoffReady()`, `windowsOnPath()` / `producedWindowNumber()`, the send-from-a-card branch of `onUserMessage()` (`handoffSetup`), `newEpochTrigger()`, `contextState()` / `contextPercent()` / `contextStateLive()`, `chainPromptTokensLive()`, `freezeEpoch()`, the harness text, `rolloverUsage()`, `nodeStatePatch()`, the kill + settle + flush + re-dump (`prepareHandoff`) | `src/chat/runtime.ts` |
-| `newContextTurn` / `compressNow` routing, `newContextEntry()`, `confirmCompression()`, `sendFromHandoff()`, `confirmHandoffSetup()`, `confirmEpochChange()`, `forkEntry()`, `forkFor()`, the kill modal, the transcript meta field | `src/chat/ChatViewProvider.ts` |
+| `newContextTurn` routing, `newContextEntry()`, `confirmCompression()`, `sendFromHandoff()`, `confirmHandoffSetup()`, `confirmEpochChange()`, `forkEntry()`, `forkFor()`, the kill modal, the transcript meta field | `src/chat/ChatViewProvider.ts` |
 | `sendUserMessage(content, followUp)` — the handoff message and the composer's text as two user messages | `src/agent/agent.ts` |
 | AGENTS.md read-at-use (`liveAgentsMdSources`) | `src/chat/agentsMd.ts` |
 | `#new-context-btn` in `#actions`, the composer's own show/disable rules, `syncContinueButton` (▶ / ↻ only, no ▶ on a ready compression card), `syncHandoffCard` (the green ready card), the `Compress` / `Compress and send` label pair, the `context`/`contextPct` merge in `applyNodeUpdate`, dashed edge, `CTX` badge | `src/chat/webviewShell.ts`, `media/main.js` |
@@ -663,8 +661,7 @@ block), the `CTX` / `CMP` badges (compact dock tokens), and the `[config]` / `[p
   window-starting card and not on its descendants, that a compression card wears `CMP`
   instead, shows its own ⏹ Stop while its turn runs and has **no** input box then, that it
   turns **ready** (the green `.handoff-ready` card) and hosts the composer once it carries its
-  handoff, that a resume window carries no 🗑 of its own, and that the Send button's
-  right-click posts `compressNow` with the box's text and attachments and clears nothing.
+  handoff, and that a resume window carries no 🗑 of its own.
 - `npm run check:compaction` — pure node, against the compiled `src/agent/compaction.ts`: the
   source is one window (harness notes are not user requests), the first user message is
   verbatim while every user message is clipped to 500 chars with the count, only the last 8

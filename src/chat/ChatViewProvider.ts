@@ -5909,21 +5909,22 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   }
 
   /**
-   * The composer's **one** new-epoch entry (`newContextTurn`, and the Send button's own
-   * right-click, `compressNow`) — the replacement for the three entries that used to
+   * The composer's **one** new-epoch entry (`newContextTurn`, each of its two buttons saying
+   * which answer it wants) — the replacement for the three entries that used to
    * disagree: the card's `⧉ Continue in a new window`, the harness-drift `⧉` hint, and the
    * modal a plain send raised when the user changed the model / effort / language.
    *
    * The backend is the **trigger**, never a choice of the webview
-   * (`SessionRuntime.newEpochTrigger`) — with one exception, the right-click: that one *is*
+   * (`SessionRuntime.newEpochTrigger`) — with one exception, `#compress-btn`: that one *is*
    * the user's explicit "move this conversation now", so it skips the trigger question and
    * opens the window whatever the fill level.
    *
-   *  - context `near`/`full` (or the right-click) → a **new context window**, asked as one
-   *    question with two answers (`confirmCompression`): the pointer rollover (Simple, no
-   *    extra request) or a compression node (Agentic, one more turn, a written handoff). Its
-   *    preconditions are re-checked here (a node, not a sidecar, not running, no
-   *    conversational child) and a failure is a notice — nothing is started, nothing killed.
+   *  - context `near`/`full` (or the Compress button, which forces it) → a **new context
+   *    window**, asked as one question with two answers (`confirmCompression`): the pointer
+   *    rollover (Simple, no extra request) or a compression node (Agentic, one more turn, a
+   *    written handoff). Its preconditions are re-checked here (a node, not a sidecar, not
+   *    running, no conversational child) and a failure is a notice — nothing is started,
+   *    nothing killed.
    *    The setup question is **not** asked here: it belongs to the window, so it is asked when
    *    a message is sent from the compression card (`sendFromHandoff`, `dispatchUserMessage`).
    *  - setup drift only → a **fork** under the live setup (`forkTree`), so the old tree
@@ -5960,10 +5961,10 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       rt.postNotice('warning', vscode.l10n.t('This card is already a compression; send a message below it instead.'));
       return;
     }
-    // The right-click on Send is a deliberate entry (`compressNow`): it asks for a new window
-    // here and now, so the trigger question does not apply to it.
-    // The two buttons say what they mean; a message with no mode (an older tab, or the composer's
-    // own send path) keeps the trigger-driven behaviour (`newEpochTrigger`).
+    // The Compress button is a deliberate entry: it asks for a new window here and now, so the
+    // trigger question does not apply to it.
+    // The buttons say what they mean; a message with no mode (an older tab) keeps the
+    // trigger-driven behaviour (`newEpochTrigger`).
     const fork = opts?.mode === 'fork';
     const forced = opts?.mode === 'compression';
     const trigger = fork ? 'drift' : forced ? 'context' : rt.newEpochTrigger();
@@ -6337,13 +6338,6 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
         // shows now", which forks the tree). No mode keeps the old "whatever is needed" path.
         return void this.newContextEntry(rt, String(message.text ?? ''), message.attachments ?? [], {
           mode: message.mode === 'fork' ? 'fork' : message.mode === 'compression' ? 'compression' : undefined,
-        });
-      case 'compressNow':
-        // The Send button's own right-click (`media/main.js`): the modal is the menu, so the
-        // webview posts the same content a Send would carry and the host asks the question —
-        // the same method the composer's entry uses, so the two entries cannot drift apart.
-        return void this.newContextEntry(rt, String(message.text ?? ''), message.attachments ?? [], {
-          mode: 'compression',
         });
       case 'continueTurn':
         // The ▶ button on a card whose turn was interrupted / failed: the harness

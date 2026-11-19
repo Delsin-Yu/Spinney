@@ -501,7 +501,7 @@ A button carries the work. You do not type the instruction yourself. A **Stop** 
 
 A context window is full when the provider answers with a context-length error. A request also carries its images as uploaded bytes, and the provider caps these bytes at 200 MB for one request. A refusal for that reason is also a full window. For example, the message reads `Total image size exceeds the limit: max 200 MB per request, got 203 MB`. Spinney does not guess a limit from the `ctx` readout. The card shows a **⚠️** message. The composer shows **Compress**, and **Send** is disabled.
 
-Spinney offers this button before a failure too. The button shows from about 90% of the `contextWindow` of the card. Nothing failed there, so the click is your own decision. A plain send at that point is still a normal send. A right-click on **Send** opens the same question at any time, at any fill level.
+Spinney offers this button before a failure too. The button shows from about 90% of the `contextWindow` of the card. Nothing failed there, so the click is your own decision. A plain send at that point is still a normal send.
 
 1. Click **Compress**, or **Compress and send** when the input box has text. If the node still owns running work, a modal asks first. It names the work that will stop.
 2. Answer the question `Start a new context window?` with `Simple` or `Agentic`. Section 10.4 describes both answers. A dismissed question sends nothing, and the input box keeps your text.

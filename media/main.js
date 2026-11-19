@@ -10225,8 +10225,8 @@ function relayout() {
   function updateCompressButton() {
     const reason = newContextBlockedReason();
     const node = treeActiveId ? treeNodes[treeActiveId] : null;
-    // A first card has no conversation to hand over: the window would be one turn long. The
-    // right-click on Send is still there for anyone who really means it.
+    // A first card has no conversation to hand over: the window would be one turn long, so
+    // the button does not appear there at all.
     const hasSomethingToCarry = !!node && !!node.parentId;
     const isCompress = !!(node && node.role === 'compress');
     const show = hasSomethingToCarry && !isCompress && !focusIsRunning() && !focusIsLocked();
@@ -11607,26 +11607,6 @@ function relayout() {
 
   // ---- Input handlers ----
   sendBtn.addEventListener('click', send);
-  /**
-   * The Send button's **own right-click** is the second entry to a new context window —
-   * the deliberate one (`compressNow`, `docs/agents/invariants/compress-node.md` §1). The
-   * modal *is* the menu: nothing is drawn here, the same content a Send would carry is
-   * posted, and the host asks Simple or Agentic. It is refused exactly where a window could
-   * not be opened at all — a running node, a read-only window, a sub-agent branch, and a
-   * **compression card** (there is nothing there to compress: the card *is* the handoff) —
-   * and **not** on an empty box: a compression needs the conversation, not a message.
-   */
-  sendBtn.addEventListener('contextmenu', (ev) => {
-    ev.preventDefault();
-    ev.stopPropagation();
-    const node = treeActiveId ? treeNodes[treeActiveId] : null;
-    if (node && node.role === 'compress') return;
-    if (readOnly || focusIsRunning() || focusIsLocked() || focusIsAgent()) {
-      return;
-    }
-    setFollow(true);
-    vscode.postMessage({ type: 'compressNow', text: inputEl.value.trim(), attachments: pendingAttachments });
-  });
   newContextBtn.addEventListener('click', () => newContextTurn('fork'));
   compressBtn.addEventListener('click', () => newContextTurn('compression'));
   stopBtn.addEventListener('click', () => {

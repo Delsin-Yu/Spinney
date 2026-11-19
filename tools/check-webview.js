@@ -4035,58 +4035,11 @@ if (contextLabel !== 'ctx 50%') {
   if (!cards.get(CINT).classList.contains('handoff-ready')) {
     problems.push('a `nodeUpdate` carrying the handoff did not turn the card green');
   }
-  // Back to an ordinary card for the right-click test below (a compression card is a no-op
-  // there, which that test asserts at the end).
+  // Back to an ordinary card, so the next section starts from the conversational tree.
   dispatch(Object.assign({}, tree, { viewId: P }));
 
-  // The Send button's own right-click is the deliberate compression entry
-  // (`compressNow`, §1): the modal is the menu, so nothing is drawn — the same content a
-  // Send would carry is posted, and the input keeps its text (only the host clears it).
-  {
-    const input = elementById('input');
-    const send = elementById('send-btn');
-    input.value = 'compress this, then continue';
-    const ctx = send._listeners && send._listeners.contextmenu;
-    if (typeof ctx !== 'function') {
-      problems.push('the Send button has no contextmenu handler (the right-click is the compression entry)');
-    } else {
-      let prevented = false;
-      posted.length = 0;
-      ctx({ preventDefault() { prevented = true; }, stopPropagation() {} });
-      if (!prevented) {
-        problems.push("the Send button's right-click did not preventDefault (VS Code's own menu would open)");
-      }
-      const sent = posted.find((m) => m && m.type === 'compressNow');
-      if (!sent) {
-        problems.push(`the Send button's right-click posted ${JSON.stringify(posted)}, expected a compressNow`);
-      } else {
-        if (sent.text !== 'compress this, then continue') {
-          problems.push(`compressNow carried ${JSON.stringify(sent.text)}, expected the box's text`);
-        }
-        if (!Array.isArray(sent.attachments)) {
-          problems.push('the compressNow message carries no attachments array');
-        }
-      }
-      if (input.value !== 'compress this, then continue') {
-        problems.push('posting compressNow cleared the input (only the host clears it)');
-      }
-      const others = posted.filter((m) => m && m.type !== 'compressNow');
-      if (others.length > 0) {
-        problems.push(`the right-click also posted ${JSON.stringify(others)}`);
-      }
-      // …and on a compression card it is a no-op: there is nothing to compress there.
-      dispatch(Object.assign({}, tree, { viewId: CRDY }));
-      posted.length = 0;
-      ctx({ preventDefault() {}, stopPropagation() {} });
-      if (posted.length > 0) {
-        problems.push(`the Send right-click on a compression card posted ${JSON.stringify(posted)}, expected nothing`);
-      }
-      dispatch(Object.assign({}, tree, { viewId: P }));
-    }
-    input.value = '';
-  }
   notes.push(
-    'compression: Context compression badge, no 🗑 on the produced window, its own Stop, the composer only once the handoff exists (green border), no Compress on a card, and the Send right-click',
+    'compression: Context compression badge, no 🗑 on the produced window, its own Stop, the composer only once the handoff exists (green border), no Compress on a card',
   );
 }
 

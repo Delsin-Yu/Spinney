@@ -39,12 +39,10 @@ why `Durable references` — how to retrieve what was left out — is asked for 
 | --- | --- | --- |
 | `#compress-btn` (the composer's window entry, left of Send) | `media/main.js` `newContextTurn('compression')` | always: the button is on screen while the composer is, and the host answers a stale click with a notice |
 | `#new-context-btn` (the drift-only setup entry) | `media/main.js` `newContextTurn('fork')` | only when the live setup differs from the frozen one (`hasSetupDrift`), because with no drift the answer would be the same bytes |
-| **right-click on `#send-btn`** | `media/main.js`, a `contextmenu` listener that `preventDefault`s and posts `{ type: 'compressNow', text, attachments }` | always: the click *is* the request, so no trigger is consulted |
 
-All three land in `ChatViewProvider.newContextEntry` (`opts.mode` says which entry asked), so
-the entries cannot drift apart. There is deliberately **no menu drawn** on the right
-click: the modal is the menu, because the choice is one question with two answers, not a list
-of commands.
+Both land in `ChatViewProvider.newContextEntry` (`opts.mode` says which entry asked), so the
+entries cannot drift apart. There is no second entry on the Send button: the composer's one
+button is the only way in, which is why nothing else has to repeat its refusals.
 
 Both compression entries **end at the card**. `newContextEntry` creates C below the checked-out
 window and returns: `startPointerHandoff(nodeId)` for `Simple`, `compressHandoff(nodeId)` for
@@ -305,7 +303,7 @@ counts the resume children it already has).
 | the selection and its bound, `firstUserRequest`, `editedFilesFromItems`, `buildCompressInstruction`, `COMPRESS_INSTRUCTION`, `buildContextRolloverMessage`, `missingCompactionSections`, `classifyCompactionAnswer`, `compactionDiagLine` | `src/agent/compaction.ts` |
 | `compressTools` / `compressToolSchemas`, `freezeEpoch` (compress template + kind), `setupState` (like-for-like), `beginTurn({ epochFrom, role, compressedFrom })`, `canCompress`, `windowStartBlocker`, `startPointerHandoff` / `createHandoffCard` (Simple, no turn), `compressHandoff` / `finishHandoff` (Agentic, the card only), `handoffReady`, `prepareHandoff`, `postNoticeTo`, `windowsOnPath` / `producedWindowNumber`, the send-from-a-card branch of `onUserMessage` and `handoffSetup`, `continueFrom` (▶ refused once the handoff exists), `TurnRun.settled` | `src/chat/runtime.ts` |
 | `newContextEntry` (both entries, the compression-card refusal), `confirmCompression`, `sendFromHandoff` / `confirmHandoffSetup` (the setup question at send time), the resume-node delete refusal, the compress delete line | `src/chat/ChatViewProvider.ts` |
-| `compressNow` / `contextmenu` on `#send-btn`, `syncCtxBadge` (`CMP`), `syncHandoffCard` (`handoff-ready`: the green border and badge), `syncContinueButton` (the card's Stop, no ▶ once ready), the composer rule (`!handoffReady`), no 🗑 on a resume card, `Compress` / `Compress and send` and their tooltips | `media/main.js`, `media/style.css` |
+| `syncCtxBadge` (`CMP`), `syncHandoffCard` (`handoff-ready`: the green border and badge), `syncContinueButton` (the card's Stop, no ▶ once ready), the composer rule (`!handoffReady`), no 🗑 on a resume card, `Compress` / `Compress and send` and their tooltips | `media/main.js`, `media/style.css` |
 | the checks | `npm run check:compaction`, `npm run check:webview`, `node tools/rollover-acceptance.js` |
 
 ## 9. i18n

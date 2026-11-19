@@ -4019,8 +4019,8 @@ export class SessionRuntime {
    * click would open a sibling window beside the one it already opened.
    *
    * It says nothing about how full the window is: that is `canRollover`'s question, and a
-   * deliberate entry (the composer's right-click, `compressNow`) may open a window from a
-   * window that still has room.
+   * deliberate entry (the composer's Compress button) may open a window from a window that
+   * still has room.
    */
   private canWindowStart(nodeId: string): boolean {
     return this.windowStartBlocker(nodeId) === null;

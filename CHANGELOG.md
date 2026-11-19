@@ -62,6 +62,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Loading…` label animated with the same per-character wave a running step's verb uses. The
   ask and the log box appear with the content.
 
+### Removed
+
+- **The Send button's right-click no longer starts a compression.** It was the second entry to
+  the new-context question, and it was the only one a **first** card offered: `#compress-btn`
+  hides on a card with no parent, so the right-click was the escape hatch for anyone who meant
+  it. That hatch is gone with the gesture, and so is `{ type: 'compressNow' }` — the composer's
+  Compress button (`newContextTurn`, `mode: 'compression'`) is the one entry, and a root card
+  offers no compression at all. Right-clicking Send now behaves like right-clicking any other
+  button in the composer: there is no listener, so nothing is drawn and nothing is sent.
+
 ### Fixed
 
 - **A reload puts the tab back on the card you were standing on.** A checkout is view-only, so
