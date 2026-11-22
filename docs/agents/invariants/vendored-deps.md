@@ -1,6 +1,6 @@
 # Invariant: vendored dependencies are pinned forever
 
-Six assets under `media/vendor/` are **vendored, frozen** copies of published
+Seven assets under `media/vendor/` are **vendored, frozen** copies of published
 artifacts, shipped inside the `.vsix`:
 
 | Asset | Vendored copy | Pin record |
@@ -11,6 +11,7 @@ artifacts, shipped inside the `.vsix`:
 | TextMate tokenizer `vscode-textmate@9.3.2` (MIT) | `media/vendor/vscode-textmate/` | that directory's `PROVENANCE.md` |
 | its regex engine `vscode-oniguruma@2.0.1` (MIT, wasm = oniguruma BSD-2) | `media/vendor/vscode-oniguruma/` | that directory's `PROVENANCE.md` |
 | the grammars: `microsoft/vscode` @ 1.146.0 plus `tm-grammars@1.32.22` | `media/vendor/textmate-grammars/` | that directory's `PROVENANCE.md` + `SHA256SUMS` |
+| pinyin table: `mozillazg/pinyin-data` `pinyin.txt` @ `0.16.0` (MIT), **derived** | `media/vendor/pinyin/` | that directory's `PROVENANCE.md` |
 
 ## Rules
 
@@ -25,14 +26,20 @@ artifacts, shipped inside the `.vsix`:
    Its existence is not a reason to relax the pin, and no runtime code may import from
    `node_modules`. The same goes for ripgrep: it is **not** an npm dependency
    (`@vscode/ripgrep` is not installed), the binary comes from the upstream GitHub
-   release and is checked in.
+   release and is checked in. The pinyin table is further still: there is no npm package
+   to depend on — it is a **derived** file generated from a plain text file in a GitHub
+   repository, so it is not merely kept out of `package.json`; there is no package entry
+   it could take.
 2. **Do not edit the vendored files.** They are byte-exact copies of the published
    tarball, and their sha256s are recorded in each `PROVENANCE.md`. An edit invalidates
    the audit trail. The engine's `dist/` is what the webview loads and its `src/` exists
    only so the minified bundle can be re-audited offline; for `markdown-it` only the
    minified browser bundle ships (`LICENSE` + `PROVENANCE.md` are the paperwork). For
    ripgrep only the `rg` binary ships — not `doc/`, not `README.md`, not the shell
-   completions.
+   completions. The pinyin table ships as one generated file, `pinyin.json`: like the
+   binaries, its bytes are `-text` in `.gitattributes` (`media/vendor/** -text`) and pinned
+   by the sha256 in its `PROVENANCE.md`, so a re-serialised or re-sorted table is a
+   different file, not a reformat — see its own section below.
 3. **Do not update a version.** "Pinned forever" is the design. A new version would
    need a fresh supply-chain audit (see the checklist below) and a new `PROVENANCE.md`
    before it may be vendored — including a later patch of a package already vendored.
@@ -105,6 +112,45 @@ candidate used to disable ripgrep for the whole session. So:
   `file` for the machine class, and `rg --version` for the one binary the developer's
   machine can run. The hashes, sizes and the archive URLs are in
   `media/vendor/ripgrep/PROVENANCE.md`.
+
+## The pinyin table: derived data, regenerated only by its converter
+
+`media/vendor/pinyin/pinyin.json` is the Unicode → tone-less pinyin table behind the `@`
+picker's last matching band (`src/chat/pinyin.ts` is its only reader, resolving it as
+`path.resolve(__dirname, '..', '..')` + `media/vendor/pinyin/pinyin.json` — the same
+relative path in a checkout and inside the `.vsix`). It is **data, not code**: nothing in
+it is executed, so it is outside the CSP, outside `eval`-freedom and outside every load
+order.
+
+- **Upstream** `https://github.com/mozillazg/pinyin-data`, source file `pinyin.txt` (its
+  header reads `# version: 0.16.0`), fetched 2026-11-19 — **985 559 bytes**, sha256
+  `2342a6f98c85dbc3c8d26aef31744876a36326c6466e51e9a0f16898c36c2011`.
+- **Licence MIT**, `Copyright (c) 2016 mozillazg`; the text is reproduced at the end of
+  `media/vendor/pinyin/PROVENANCE.md`, because the notice must travel with the data (no
+  separate `LICENSE` file ships here).
+- **Vendored output 189 257 bytes**, sha256
+  `6c6e16a96d4fe5526d4bd21220f1d1eb26bc89bef3af8c0acb52eb5f47fefbb6`, **26 713 entries**.
+- **It is derived, so its bytes are not the upstream bytes.** The converter keeps only the
+  first (canonical) reading of each row, only the three CJK ranges `U+3400–U+4DBF`,
+  `U+4E00–U+9FFF`, `U+F900–U+FAFF` (44 440 upstream rows → 26 713 kept, 17 727 dropped),
+  folds the reading to the IME spelling (`ü`/`ǖǘǚǜ` → `v` **before** NFD and the
+  combining-mark strip, or `nv` becomes `nu`), keeps only `[a-z]+`, sorts by code point and
+  emits the two parallel `chars` / `readings` strings. Do not "improve" any of those steps
+  locally: the count, the ranges and the `v` spelling are what `src/chat/pinyin.ts`
+  assumes.
+- **Never edit it by hand, and never re-format it.** Its bytes are pinned twice: `-text`
+  in `.gitattributes` (`media/vendor/** -text`, so no EOL normalisation on add or
+  checkout, and `core.autocrlf=true` cannot rewrite it out from under the pin) and the
+  sha256 in its `PROVENANCE.md`. A line-ending "fix" or a re-serialisation produces
+  *another table*, not the pinned one.
+- **The recorded converter is the only way to regenerate it**, and it is reproduced
+  verbatim in `media/vendor/pinyin/PROVENANCE.md` (`build-pinyin.js`, driven by the
+  recorded `curl` and the two `sha256sum` checks). A regeneration is a fresh supply-chain
+  decision, not a routine refresh: new source bytes mean a new source sha256, a new output
+  sha256 and an updated `PROVENANCE.md` in the same change.
+- **No npm dependency, and none is possible**: there is no package to install — the
+  artifact is generated from a text file in a repository. Nothing about it is resolved at
+  install, build or package time.
 
 ## Engine semantics `media/tree.js` depends on
 
@@ -194,8 +240,12 @@ numbers quoted above.
 - `media/vendor/ripgrep/PROVENANCE.md` — pin record for the search binary: release
   URLs, archive and binary sha256s, the MIT text, and the artifact that 14.1.1 does not
   publish.
+- `media/vendor/pinyin/PROVENANCE.md` — pin record for the pinyin table: source URL and
+  source sha256, the five filtering/normalisation steps and their counts, the output
+  sha256 and byte count, the `-text` rule and the converter that alone may regenerate it
+  (reproduced verbatim, with the MIT text at the end).
 - `THIRD_PARTY_NOTICES.md` (repository root, shipped in the `.vsix`) — the
-  redistribution notice: all three assets, their copyright lines and the paths of the
+  redistribution notice: all seven assets, their copyright lines and the paths of the
   bundled `LICENSE`/`PROVENANCE` files.
 - The pre-vendoring survey (registry/OSV JSONs, benchmark scripts, prior-art notes)
   was removed from the repository when it went open source. The `PROVENANCE.md` files

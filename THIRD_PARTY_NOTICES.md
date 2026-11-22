@@ -1,12 +1,12 @@
 # Third-Party Notices
 
 Spinney (the `spinney` VS Code extension) is licensed under the MIT License — see
-`LICENSE`. The published extension (`.vsix`) additionally redistributes the six
+`LICENSE`. The published extension (`.vsix`) additionally redistributes the seven
 third-party assets listed below. All are vendored: byte-exact copies of published
-artifacts (npm tarballs, grammar files from two pinned repositories, and, for ripgrep,
-the official release binaries), pinned at a fixed version, with the archive integrity and
-the per-file sha256 recorded next to them. Nothing is resolved from the npm registry or
-the network at install, build or package time.
+artifacts (npm tarballs, grammar files from two pinned repositories, the official ripgrep
+release binaries, and one generated data table), pinned at a fixed version, with the
+archive integrity and the per-file sha256 recorded next to them. Nothing is resolved from
+the npm registry or the network at install, build or package time.
 
 ## 1. markdown-it 14.3.1
 
@@ -118,9 +118,35 @@ recorded verbatim in the two notices shipped beside the grammars:
 - Index and per-file sha256: [`media/vendor/textmate-grammars/PROVENANCE.md`](media/vendor/textmate-grammars/PROVENANCE.md),
   `media/vendor/textmate-grammars/SHA256SUMS`.
 
-No other third-party code is redistributed in the extension package. The six bundled
+## 7. pinyin-data pinyin.txt (version 0.16.0)
+
+The Unicode → tone-less pinyin table behind the `@` picker's CJK matching, read by
+`src/chat/pinyin.ts`. The shipped file is a **derived** table, not the upstream file as
+published: the converter keeps the first (canonical) reading of every character in three
+CJK ranges only, folds it to the spelling a Chinese IME accepts, sorts by code point and
+emits two parallel strings. It is data, not code — nothing in it is executed. No npm
+package is involved: the source is a plain text file in a GitHub repository.
+
+- Upstream: https://github.com/mozillazg/pinyin-data — `pinyin.txt`, whose own header
+  reads `# version: 0.16.0`
+- Source file: https://raw.githubusercontent.com/mozillazg/pinyin-data/master/pinyin.txt
+  — 985 559 bytes, sha256
+  `2342a6f98c85dbc3c8d26aef31744876a36326c6466e51e9a0f16898c36c2011`, fetched 2026-11-19
+- License: MIT — `Copyright (c) 2016 mozillazg`
+- License text: reproduced at the end of
+  [`media/vendor/pinyin/PROVENANCE.md`](media/vendor/pinyin/PROVENANCE.md) (the MIT notice
+  travels with the data; no separate `LICENSE` file ships for this asset). Upstream copy:
+  https://github.com/mozillazg/pinyin-data/blob/master/LICENSE
+- Shipped file: `media/vendor/pinyin/pinyin.json` — 189 257 bytes, sha256
+  `6c6e16a96d4fe5526d4bd21220f1d1eb26bc89bef3af8c0acb52eb5f47fefbb6`, 26 713 entries
+- Pin record: [`media/vendor/pinyin/PROVENANCE.md`](media/vendor/pinyin/PROVENANCE.md)
+  — the exact source URL, the five filtering/normalisation steps, the counts they produce,
+  and the converter script (`build-pinyin.js`) reproduced verbatim, which is the only way
+  the file may be regenerated.
+
+No other third-party code is redistributed in the extension package. The seven bundled
 `LICENSE`/`PROVENANCE` records carry the full MIT text for `markdown-it`, for
-`non-layered-tidy-tree-layout`, for `ripgrep`, for `vscode-textmate` and for
-`vscode-oniguruma`, plus oniguruma's BSD-2 text and the two grammar notices; the
-attributions for the five libraries inlined in the Markdown bundle (all MIT, except
-`entities`) are listed above.
+`non-layered-tidy-tree-layout`, for `ripgrep`, for `vscode-textmate`, for
+`vscode-oniguruma` and for the pinyin data, plus oniguruma's BSD-2 text and the two
+grammar notices; the attributions for the five libraries inlined in the Markdown bundle
+(all MIT, except `entities`) are listed above.
