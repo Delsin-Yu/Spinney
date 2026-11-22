@@ -119,6 +119,12 @@ import { BackgroundTask } from '../tools/background';
 import { formatDuration } from '../duration';
 import { defaultSessionTitle, isDefaultSessionTitle } from '../i18n';
 import { BackgroundHub, BackgroundOwner } from './backgroundHub';
+// The attach button's dialog, routed by extension (§9), and the one normaliser that turns a
+// chosen file inside the agent root into the relative path a `@` pick inserts. The picker
+// keeps that function as an argument on purpose (see `handlePickAttachment`), so the import
+// direction is the runtime's: the picker itself stays free of the index's ripgrep and listeners.
+import { pickAttachment } from './imagePick';
+import { workspaceRelativePath } from './mentionIndex';
 import { PromptSnippet } from './promptSnippets';
 import { SubAgentPool } from './SubAgentPool';
 import { hasPendingTranscriptWrite, sumUsage, summarizeTranscript } from './transcript';
@@ -5138,29 +5144,41 @@ export class SessionRuntime {
     this.stop();
   }
 
-  /** Open a file picker, read the chosen image, and send a base64 data URL back. */
-  async handlePickImage(): Promise<void> {
-    const result = await vscode.window.showOpenDialog({
-      canSelectMany: false,
-      filters: { [vscode.l10n.t('Images')]: ['png', 'jpg', 'jpeg', 'gif', 'webp'] },
-      openLabel: vscode.l10n.t('Attach Image'),
-    });
-    if (!result || result.length === 0) {
+  /**
+   * The attach button's one dialog (`docs/agents/plans/mention-syntax.md` §9): the picker
+   * routes the chosen file by extension, and this method only decides which message the
+   * composer gets back.
+   *
+   * An image keeps the route it has always had — `imagePicked` with a `data:` URL, which the
+   * webview's own handler turns into a pending attachment and the vision gate then applies at
+   * send time — while every other file becomes a **reference**: `mentionPicked` is the very
+   * message the `@` menu posts for a row it accepts, so quoting, the trailing space, the caret
+   * and `afterComposerWrite` stay inside the webview's one insertion function and "typed `@`"
+   * cannot drift from "clicked Attach".
+   *
+   * `workspaceRelativePath` is handed over as the picker's normaliser because the picker
+   * deliberately imports nothing from `./mentionIndex` (that module owns ripgrep, its child
+   * process and the workspace listeners, none of which a dialog should pay for), and because it
+   * is the one function that maps a file inside the agent root back to the forward-slash
+   * relative path a menu pick inserts — so a file reached either way inserts one spelling.
+   *
+   * A cancelled dialog posts **nothing**: there is no event behind it, and a message would make
+   * the composer react to a dismissal the user already saw happen. A failure posts the
+   * `{ type: 'error' }` shape this button has always used, wrapped in the one localized sentence
+   * the picker refuses to write itself (it hands back the OS reason and nothing else).
+   */
+  async handlePickAttachment(): Promise<void> {
+    const picked = await pickAttachment(workspaceRelativePath);
+    if (picked.kind === 'image') {
+      this.post({ type: 'imagePicked', dataUrl: picked.dataUrl, name: picked.name });
       return;
     }
-    const filePath = result[0].fsPath;
-    try {
-      const buffer = await fs.promises.readFile(filePath);
-      const ext = path.extname(filePath).toLowerCase();
-      const mime =
-        ext === '.png' ? 'image/png' : ext === '.gif' ? 'image/gif' : ext === '.webp' ? 'image/webp' : 'image/jpeg';
-      const dataUrl = `data:${mime};base64,${buffer.toString('base64')}`;
-      this.post({ type: 'imagePicked', dataUrl, name: path.basename(filePath) });
-    } catch (err) {
-      this.post({
-        type: 'error',
-        message: `Could not read image: ${err instanceof Error ? err.message : String(err)}`,
-      });
+    if (picked.kind === 'path') {
+      this.post({ type: 'mentionPicked', path: picked.path });
+      return;
+    }
+    if (picked.kind === 'failed') {
+      this.post({ type: 'error', message: vscode.l10n.t('Could not attach the file: {0}', picked.error) });
     }
   }
 

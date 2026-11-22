@@ -9834,13 +9834,28 @@ function relayout() {
     if (snippetMenuEl && e.target !== snippetsBtn && !(snippetMenuEl.contains && snippetMenuEl.contains(e.target))) {
       closeSnippetMenu();
     }
+    // The `@` menu is the same surface with the same rule, with two exceptions: a press
+    // inside the dock is a caret move (the token under it decides, through the `click`
+    // listener), and a press on a row is a `mousedown` this capture-phase handler must
+    // not pre-empt — accepting a row closes the menu itself.
+    if (mentionMenu) {
+      const target = e ? e.target : null;
+      const inMenu = mentionMenu.el && mentionMenu.el.contains && mentionMenu.el.contains(target);
+      const inComposer = target && (target === inputEl || (composerEl.contains && composerEl.contains(target)));
+      if (!inMenu && !inComposer) mentionClose();
+    }
   }, true);
   // Zooming / panning moves the cards out from under a viewport-anchored menu, and
   // so does losing the window.
-  window.addEventListener('wheel', () => { closeNodeMenu(); closeSnippetMenu(); }, { passive: true });
-  window.addEventListener('blur', () => { closeNodeMenu(); closeSnippetMenu(); });
+  window.addEventListener('wheel', (e) => {
+    // Scrolling the `@` menu's own rows is not a pan of the canvas.
+    if (mentionMenu && !(mentionMenu.el.contains && mentionMenu.el.contains(e && e.target))) mentionClose();
+    closeNodeMenu();
+    closeSnippetMenu();
+  }, { passive: true });
+  window.addEventListener('blur', () => { closeNodeMenu(); closeSnippetMenu(); mentionClose(); });
   window.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape') { closeNodeMenu(); closeSnippetMenu(); }
+    if (e.key === 'Escape') { closeNodeMenu(); closeSnippetMenu(); mentionDismiss(); }
   });
 
   // Zoom around a screen-space cursor position.
@@ -10930,6 +10945,590 @@ function relayout() {
     snippetsBtn.classList.toggle('hidden', SNIPPETS.length === 0);
   }
 
+  // ---- `@` references: the composer's file picker ---------------------------
+  // Typing `@` at the start of a token opens a caret-anchored list of files. The
+  // *syntax* — where a token starts and ends, and the wash that replaces it — is
+  // `media/mention.js`, a script of its own because a Node guard has to run the same
+  // bytes (`tools/check-mention.js`, the `vm` + `window = ctx` pattern of
+  // `tools/check-tree-grid.js`). This half is the popup, and the host does the matching
+  // (three engines, one comparator): the webview posts the raw query and paints the rows
+  // it gets back.
+  //
+  // Three rules live here and nowhere else:
+  //   * A STALE ANSWER IS DROPPED. `mentionSeq` is bumped by every query posted *and* by
+  //     every token that disappears, so an answer can only ever paint its own query — a
+  //     slow reply for `@src` can never land on a menu that has moved on to `@docs`.
+  //   * THE `@` IS NEVER SENT. Accepting a row washes the whole token out, so what the
+  //     model reads is what the user would have typed by hand (plan §3).
+  //   * A COMPOSING IME OWNS THE BOX. A Chinese word arrives as composition text, and a
+  //     list opening under the caret mid-composition would sit inside the IME's own
+  //     candidate window. No menu is opened or updated until the composition commits.
+  const MENTION_DEBOUNCE_MS = 100;   // trailing: one query per pause in typing
+  const MENTION_RECENT_MAX = 20;     // this tab's own picks, memory only (never persisted)
+  const MENTION_MAX_H = 240;         // the menu scrolls past this
+  const MENTION_MIN_W = 280;
+  const MENTION_MAX_W = 560;
+  const MENTION_GAP = 4;             // between the caret's line and the menu
+  const MENTION_EDGE = 8;            // the viewport margin the menu never crosses
+  const MENTION_PAGE = 5;            // PageUp / PageDown rows
+  // The gap between the two columns of a row: the flex `gap` plus the detail's own left padding
+  // (`media/style.css`). The path fitter subtracts it from the width the directory column gets.
+  const MENTION_COLUMN_SPARE = 20;
+  // The keys that move the caret without firing `input`: the token under it can be another
+  // one, or none, so it is read again after the key's own default action has run.
+  const MENTION_CARET_KEYS = new Set([
+    'ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End', 'PageUp', 'PageDown',
+  ]);
+
+  let mentionSeq = 0;                // the newest requestId issued (posted or voided)
+  let mentionRecent = [];            // paths this tab inserted, most recent first
+  let mentionToken = null;           // the token the menu belongs to (null: no token)
+  let mentionMenu = null;            // { el, rows: [{ item, el }], index } or null
+  let mentionMirror = null;          // the hidden div the caret is measured with
+  let mentionQueryTimer = null;      // the pending debounce tick
+  let mentionComposing = false;      // between compositionstart and compositionend
+  let mentionDismissedAt = -1;       // the `@` whose menu Esc closed (§3: keep the text)
+
+  /** The syntax module, or null when its script is not in the shell (a stale bundle). */
+  function mentionSyntax() {
+    const api = window.mentionSyntax;
+    return api && typeof api.token === 'function' && typeof api.wash === 'function' ? api : null;
+  }
+
+  /** The textarea's value and its selection, defensively (no layout, no caret assumed). */
+  function mentionCaret() {
+    const value = typeof inputEl.value === 'string' ? inputEl.value : '';
+    const start = typeof inputEl.selectionStart === 'number' ? inputEl.selectionStart : value.length;
+    const stop = typeof inputEl.selectionEnd === 'number' ? inputEl.selectionEnd : start;
+    const caret = Math.max(0, Math.min(start, value.length));
+    const end = Math.max(caret, Math.min(stop, value.length));
+    return { value, caret, end };
+  }
+
+  /** The `@` token under the caret, or null. */
+  function mentionTokenAtCaret() {
+    const api = mentionSyntax();
+    if (!api) return null;
+    const { value, caret } = mentionCaret();
+    return api.token(value, caret);
+  }
+
+  /**
+   * A viewport rect, or an empty one. Every measurement below is defensive: the offline
+   * guard's DOM stub answers `getBoundingClientRect()` with zeros and has no `offsetLeft`
+   * / `offsetTop` at all, so a caret handler must still place *something* instead of
+   * throwing inside a keystroke.
+   */
+  function mentionRect(node) {
+    if (node && typeof node.getBoundingClientRect === 'function') {
+      try {
+        const rect = node.getBoundingClientRect();
+        if (rect) return rect;
+      } catch (err) {
+        /* a detached node: the empty rect below is the honest answer */
+      }
+    }
+    return { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 };
+  }
+
+  /** The computed style of one node, or `{}` when the platform has none to give. */
+  function mentionStyle(node) {
+    const read = window.getComputedStyle;
+    if (typeof read !== 'function') return {};
+    try {
+      return read(node) || {};
+    } catch (err) {
+      return {};
+    }
+  }
+
+  function mentionPx(value) {
+    const parsed = parseFloat(value);
+    return isFinite(parsed) ? parsed : 0;
+  }
+
+  // The properties the mirror shares with the textarea: the ones that decide where a glyph
+  // lands and where a line breaks (plan §5). Anything else (colour, borders' style) cannot
+  // move a caret.
+  const MENTION_MIRROR_STYLES = [
+    'fontFamily', 'fontSize', 'fontWeight', 'fontStyle', 'letterSpacing', 'lineHeight',
+    'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft',
+    'borderTopWidth', 'borderRightWidth', 'borderBottomWidth', 'borderLeftWidth',
+    'boxSizing',
+  ];
+
+  /** The one reusable mirror div: created on first use, kept for the tab's life. */
+  function mentionEnsureMirror() {
+    if (mentionMirror) return mentionMirror;
+    const mirror = el('div', 'mention-mirror');
+    // The layout-critical properties are inline as well as in `media/style.css`: a caret
+    // measured with the wrong `white-space` is a popup a line away from the caret, and
+    // that must not depend on which stylesheet happened to load.
+    mirror.style.position = 'fixed';
+    mirror.style.left = '0';
+    mirror.style.top = '0';
+    mirror.style.visibility = 'hidden';
+    mirror.style.pointerEvents = 'none';
+    mirror.style.whiteSpace = 'pre-wrap';
+    mirror.style.wordWrap = 'break-word';
+    mirror.style.overflow = 'hidden';
+    if (document.body && document.body.appendChild) document.body.appendChild(mirror);
+    mentionMirror = mirror;
+    return mirror;
+  }
+
+  /**
+   * Where the caret is, in viewport coordinates — `{ left, top, bottom, lineHeight }` —
+   * or null when it cannot be measured at all.
+   *
+   * A `<textarea>` reports no caret geometry, so the position comes from the mirror: the
+   * text up to the caret, then one empty marker span, and the marker's own rect relative
+   * to the mirror's (plan §5). The deltas are taken between the two *client* rects, so the
+   * padding and border-width copied from the textarea are already in the answer; all that
+   * is left is `scrollTop` (the box scrolls internally past `INPUT_MAX_H`) — and the
+   * composer's place on the zoomed canvas, which the rect-to-`clientWidth` ratio gives
+   * without reading the canvas transform.
+   */
+  function mentionCaretPoint() {
+    const mirror = mentionEnsureMirror();
+    if (!mirror || !mirror.parentElement) return null;
+    const width = typeof inputEl.clientWidth === 'number' ? inputEl.clientWidth : 0;
+    // A hidden (or not yet laid out) textarea has no line breaking to copy, and a mirror
+    // sized 0 would put the marker on a line the box never draws.
+    if (width <= 0) return null;
+    const style = mentionStyle(inputEl);
+    for (const prop of MENTION_MIRROR_STYLES) {
+      const value = style[prop];
+      if (typeof value === 'string' && value) mirror.style[prop] = value;
+    }
+    mirror.style.width = width + 'px';
+    const { value, caret } = mentionCaret();
+    // `textContent` replaces the previous pass's marker as well: one marker, every time.
+    mirror.textContent = value.slice(0, caret);
+    const marker = el('span');
+    mirror.appendChild(marker);
+    const box = mentionRect(mirror);
+    const point = mentionRect(marker);
+    const base = mentionRect(inputEl);
+    // The composer lives inside the pannable/zoomable canvas, so its client rect is the
+    // scaled one; the mirror is not scaled. The ratio puts the caret back on screen.
+    const scale = base.width > 0 && width > 0 ? base.width / width : 1;
+    const scrollTop = typeof inputEl.scrollTop === 'number' ? inputEl.scrollTop : 0;
+    const lineHeight = (point.height > 0 ? point.height : mentionPx(style.lineHeight) || 18) * scale;
+    const left = base.left + (point.left - box.left) * scale;
+    const top = base.top + (point.top - box.top) * scale - scrollTop * scale;
+    if (!isFinite(left) || !isFinite(top) || !isFinite(lineHeight)) return null;
+    return { left, top, bottom: top + lineHeight, lineHeight };
+  }
+
+  /**
+   * Put the open menu at the caret (plan §5): `x` on the caret, `y` under the caret's
+   * line and flipped above it when the viewport below is the tighter half. Idempotent and
+   * cheap, because it is also the answer to a `scroll`, a `resize` and a moved composer.
+   */
+  function mentionPosition() {
+    if (!mentionMenu) return;
+    const menu = mentionMenu.el;
+    // Measured, then clamped to the bounds `media/style.css` gives the surface: the
+    // placement must hold even if a stale stylesheet leaves it unsized.
+    const width = clamp(menu.offsetWidth || MENTION_MIN_W, MENTION_MIN_W, MENTION_MAX_W);
+    const height = clamp(menu.offsetHeight || MENTION_MAX_H, 0, MENTION_MAX_H);
+    const innerW = window.innerWidth > 0 ? window.innerWidth : 1280;
+    const innerH = window.innerHeight > 0 ? window.innerHeight : 800;
+    let x = 0;
+    let anchorTop = 0;
+    let anchorBottom = 0;
+    const point = mentionCaretPoint();
+    if (point) {
+      x = point.left;
+      anchorTop = point.top;
+      anchorBottom = point.bottom;
+    } else {
+      // No caret geometry to trust (a hidden box, or the guard's layoutless DOM): the
+      // composer's own rect is the anchor, and it is never null.
+      const rect = mentionRect(composerEl);
+      x = rect.left + 10;
+      anchorTop = rect.top;
+      anchorBottom = rect.bottom;
+    }
+    const below = innerH - anchorBottom;
+    const above = anchorTop;
+    const flip = below < height + MENTION_GAP && above > below;
+    let y = flip ? anchorTop - MENTION_GAP - height : anchorBottom + MENTION_GAP;
+    y = clamp(y, MENTION_EDGE, Math.max(MENTION_EDGE, innerH - height - MENTION_EDGE));
+    x = clamp(x, MENTION_EDGE, Math.max(MENTION_EDGE, innerW - width - MENTION_EDGE));
+    menu.style.left = Math.round(x) + 'px';
+    menu.style.top = Math.round(y) + 'px';
+  }
+
+  /** Close the menu and stop querying. The *typed text* is never touched here (§3). */
+  function mentionClose() {
+    if (mentionQueryTimer != null) {
+      clearTimeout(mentionQueryTimer);
+      mentionQueryTimer = null;
+    }
+    if (mentionMenu) {
+      mentionMenu.el.remove();
+      mentionMenu = null;
+    }
+    mentionToken = null;
+    // Every answer still in flight belongs to a menu that no longer exists.
+    mentionSeq += 1;
+  }
+
+  /** `Esc`: the menu goes, the typed text stays, and this `@` stays closed until it ends. */
+  function mentionDismiss() {
+    if (mentionToken) mentionDismissedAt = mentionToken.at;
+    mentionClose();
+  }
+
+  /**
+   * Read the caret's token and bring the menu in step. This is the single entry point
+   * every trigger calls (`input`, the caret keys, a click, the IME's commit), so "a token
+   * appeared" and "the token is gone" cannot disagree between handlers.
+   */
+  function mentionSync() {
+    if (readOnly || inputEl.disabled) {
+      mentionDismissedAt = -1;
+      mentionClose();
+      return;
+    }
+    // An IME owns the box: no menu is opened or updated while it composes (§3).
+    if (mentionComposing) return;
+    const token = mentionTokenAtCaret();
+    if (!token) {
+      // The token is gone: the menu closes, the pending query is cancelled, and an
+      // earlier `Esc` is forgotten — the next `@` is a new one.
+      mentionDismissedAt = -1;
+      mentionClose();
+      return;
+    }
+    // `Esc` dismissed this very token: it stays closed while the query is edited, and
+    // reopens only once the `@` itself is gone (§3, JetBrains behaviour).
+    if (token.at === mentionDismissedAt) return;
+    mentionToken = token;
+    if (mentionQueryTimer != null) clearTimeout(mentionQueryTimer);
+    mentionQueryTimer = setTimeout(mentionPostQuery, MENTION_DEBOUNCE_MS);
+    if (mentionMenu) {
+      // Rows from the previous query are still on screen while this one is in flight.
+      mentionPosition();
+    }
+  }
+
+  /** One debounce tick: ask the host for the token's rows. */
+  function mentionPostQuery() {
+    mentionQueryTimer = null;
+    if (!mentionToken) return;
+    mentionSeq += 1;
+    vscode.postMessage({
+      type: 'mentionQuery',
+      requestId: mentionSeq,
+      query: mentionToken.query,
+      recent: mentionRecent.slice(0, MENTION_RECENT_MAX),
+    });
+  }
+
+  /**
+   * One row's label with the host's highlight indices wrapped in `<b class="mention-hit">`.
+   * The indices are in the coordinate space of `label` — for a pinyin hit they are whole
+   * Chinese characters (§6.5) — so this side paints exactly what it was told to paint.
+   */
+  function mentionLabel(label, matches) {
+    const span = el('span', 'mention-label');
+    const text = typeof label === 'string' ? label : '';
+    const hit = new Set();
+    const marks = Array.isArray(matches) ? matches : [];
+    for (const index of marks) {
+      if (typeof index === 'number' && index >= 0 && index < text.length) hit.add(index);
+    }
+    let run = '';
+    let runHit = false;
+    const flush = () => {
+      if (!run) return;
+      if (runHit) span.appendChild(el('b', 'mention-hit', run));
+      else span.appendChild(document.createTextNode(run));
+      run = '';
+    };
+    for (let i = 0; i < text.length; i++) {
+      const on = hit.has(i);
+      if (on !== runHit) {
+        flush();
+        runHit = on;
+      }
+      run += text.charAt(i);
+    }
+    flush();
+    return span;
+  }
+
+  /** The highlighted row, or null (a menu of notes only has nothing to accept). */
+  function mentionActiveRow() {
+    if (!mentionMenu || mentionMenu.index < 0) return null;
+    return mentionMenu.rows[mentionMenu.index] || null;
+  }
+
+  /** Paint the highlight and keep it in view without scrolling the transcript (§5). */
+  function mentionPaintActive() {
+    if (!mentionMenu) return;
+    const rows = mentionMenu.rows;
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i] && rows[i].el;
+      if (!row || !row.classList) continue;
+      row.classList.toggle('active', i === mentionMenu.index);
+    }
+    const active = mentionActiveRow();
+    if (!active || !active.el || typeof active.el.scrollIntoView !== 'function') return;
+    try {
+      active.el.scrollIntoView({ block: 'nearest' });
+    } catch (err) {
+      /* an older renderer takes no options object; the row is on screen regardless */
+    }
+  }
+
+  /**
+   * Paint the host's answer. A stale one is dropped: only the newest `requestId` may
+   * paint, because its rows were computed from a query the user may already have typed
+   * past. Zero matches close the menu and leave the buffer exactly as typed (§3).
+   */
+  function applyMentionResult(msg) {
+    if (!msg || msg.requestId !== mentionSeq) return;
+    if (!mentionToken) return;
+    if (readOnly || inputEl.disabled) return;
+    const items = Array.isArray(msg.items) ? msg.items : [];
+    if (items.length === 0) {
+      mentionClose();
+      return;
+    }
+    openMentionMenu(items, msg);
+  }
+
+  /** Build the popup from the host's rows: `{ kind, label, detail, insert, matches }`. */
+  function openMentionMenu(items, msg) {
+    const menu = el('div', 'mention-menu');
+    const rows = [];
+    for (const item of items) {
+      if (!item || typeof item.label !== 'string') continue;
+      // A `note` row is the host talking (the index source, a `readdir` failure, the
+      // scope): it is information, never something to pick.
+      if (item.kind === 'note') {
+        menu.appendChild(el('div', 'mention-note', item.label));
+        continue;
+      }
+      if (typeof item.insert !== 'string') continue;
+      const row = el('div', 'mention-row');
+      row.appendChild(mentionLabel(item.label, item.matches));
+      const detail = typeof item.detail === 'string' && item.detail ? el('span', 'mention-detail', item.detail) : null;
+      if (detail) row.appendChild(detail);
+      // The tooltip is the string that will land in the box, so a row can be inspected
+      // without accepting it.
+      row.title = item.insert;
+      const entry = { item, el: row, detail };
+      row.addEventListener('mousedown', (event) => {
+        // `mousedown`, not `click`, and `preventDefault()`: the caret must stay in the
+        // textarea, so the composer's focus-restore ladder is never involved (§5). A click takes
+        // the row as it stands, exactly like `Enter`; walking INTO a directory is `Tab` (§3.1).
+        mentionPrevent(event);
+        if (event && event.stopPropagation) event.stopPropagation();
+        if (!mentionMenu) return;
+        mentionAccept(entry);
+      });
+      rows.push(entry);
+      menu.appendChild(row);
+    }
+    // The dialog row, pinned last and outside the highlight ring: it opens a chooser, it
+    // does not insert anything the user has already seen named.
+    const browse = el('div', 'mention-row mention-browse');
+    browse.appendChild(el('span', 'mention-label', tr('Browse…')));
+    browse.addEventListener('mousedown', (event) => {
+      mentionPrevent(event);
+      if (event && event.stopPropagation) event.stopPropagation();
+      mentionClose();
+      vscode.postMessage({ type: 'mentionBrowse' });
+    });
+    menu.appendChild(browse);
+    if (typeof msg.note === 'string' && msg.note) {
+      menu.appendChild(el('div', 'mention-note', msg.note));
+    } else if (msg.truncated === true) {
+      // The host capped its answer (the 50-row list, the 50k-path index): say so, in the
+      // one place the user is already looking.
+      menu.appendChild(el('div', 'mention-note', tr('Showing the first matches only — keep typing to narrow the list.')));
+    }
+    if (mentionMenu) mentionMenu.el.remove();
+    if (document.body && document.body.appendChild) document.body.appendChild(menu);
+    mentionMenu = { el: menu, rows, index: rows.length > 0 ? 0 : -1 };
+    // The directory column is FITTED, not clipped: `fitPathText` keeps the segments nearest the
+    // file and drops the far end of the path, so a narrow menu still says where the file is
+    // instead of showing the head of a path whose tail is the useful part. The label (the file
+    // name) is never fitted — it is the thing being chosen.
+    for (const entry of rows) {
+      if (!entry.detail || !entry.item || typeof entry.item.detail !== 'string') continue;
+      registerPathFit(entry.detail, entry.item.detail, entry.el, { spare: MENTION_COLUMN_SPARE });
+    }
+    // Re-measured after the rows are in the DOM: the width the placement clamps against
+    // is the rendered one (`max-content` up to 560px, per `media/style.css`).
+    mentionPaintActive();
+    mentionPosition();
+  }
+
+  /** `preventDefault()` where the event really has one (a synthetic one may not). */
+  function mentionPrevent(event) {
+    if (event && typeof event.preventDefault === 'function') event.preventDefault();
+  }
+
+  /** Move the highlight by `delta` rows, stopping at either end. */
+  function mentionMoveActive(delta) {
+    if (!mentionMenu) return;
+    const count = mentionMenu.rows.length;
+    if (count === 0) return;
+    mentionMenu.index = Math.max(0, Math.min(count - 1, mentionMenu.index + delta));
+    mentionPaintActive();
+  }
+
+  /**
+   * The menu's own keys (§5). Returns true when it consumed the key — the composer then
+   * leaves it alone, which is exactly what keeps `Enter`-to-send untouched while the menu
+   * is closed.
+   */
+  function mentionHandleKey(event) {
+    if (!mentionMenu || !event) return false;
+    const key = event.key;
+    if (key === 'Escape') {
+      mentionPrevent(event);
+      mentionDismiss();
+      return true;
+    }
+    if (key === 'ArrowDown' || key === 'ArrowUp' || key === 'PageDown' || key === 'PageUp') {
+      mentionPrevent(event);
+      const back = key === 'ArrowUp' || key === 'PageUp';
+      const step = key === 'PageDown' || key === 'PageUp' ? MENTION_PAGE : 1;
+      mentionMoveActive(back ? -step : step);
+      return true;
+    }
+    if (key === 'Enter' || key === 'Tab') {
+      // Shift+Enter is the composer's newline even while the menu is up: it ends the
+      // token, and the menu closes by itself on the `input` that follows.
+      if (event.shiftKey) return false;
+      const active = mentionActiveRow();
+      // Nothing to accept (a scope note, or a failed `readdir`): the key stays the
+      // composer's, so a send is never swallowed by an empty menu.
+      if (!active) return false;
+      mentionPrevent(event);
+      // `Tab` walks INTO a directory; `Enter` takes the row as it stands (§3.1). That is the pair
+      // that lets a folder be referenced on its own (`Enter` on `chat/` gives `src/chat`) while the
+      // same row still works as one step of a long path (`Tab`).
+      mentionAccept(active, key === 'Tab');
+      return true;
+    }
+    return false;
+  }
+
+  /** One accepted path is remembered for the empty query (§8: memory only, max 20). */
+  function mentionRemember(path) {
+    if (typeof path !== 'string' || path === '') return;
+    mentionRecent = [path].concat(mentionRecent.filter((seen) => seen !== path)).slice(0, MENTION_RECENT_MAX);
+  }
+
+  /**
+   * The one write both entry points share: the value, the caret, and the composer's own refresh —
+   * a programmatic write fires no `input` event, so `autoGrow` and the buttons would otherwise be
+   * stale (§3 step 5).
+   */
+  function mentionWriteValue(result) {
+    if (!result || typeof result.value !== 'string') return;
+    mentionDismissedAt = -1;
+    inputEl.value = result.value;
+    const caret = typeof result.caret === 'number' ? result.caret : result.value.length;
+    if (inputEl.setSelectionRange) inputEl.setSelectionRange(caret, caret);
+    afterComposerWrite();
+    if (inputEl.focus) inputEl.focus();
+  }
+
+  /** A finished pick: the write, then the menu goes. */
+  function mentionApplyInsert(result) {
+    mentionWriteValue(result);
+    mentionClose();
+  }
+
+  /**
+   * Take a row (§3.2).
+   *
+   * With `drill` (the `Tab` key) a **directory** row walks INTO it: the `@` stays, the text after
+   * it becomes the directory plus its separator, and the menu answers for that directory, so a long
+   * path is built one `Tab` at a time.
+   *
+   * Otherwise the row is the answer: the whole `@token` is washed out and the row's path takes its
+   * place. On a directory that is how a whole folder is referenced (`Enter` on `chat/` gives
+   * `src/chat`), and on a file it is how the reference is finished.
+   */
+  function mentionAccept(entry, drill) {
+    if (!entry || !entry.item) return;
+    // The token is re-read here and never trusted from the answer: the rows may describe a query
+    // that is already a beat old.
+    const token = mentionTokenAtCaret() || mentionToken;
+    if (!token) return;
+    if (drill && entry.item.kind === 'dir') {
+      mentionDrill(entry, token);
+      return;
+    }
+    const path = entry.item.insert;
+    if (typeof path !== 'string') return;
+    const api = mentionSyntax();
+    if (!api) return;
+    const { value } = mentionCaret();
+    mentionRemember(path);
+    mentionApplyInsert(api.wash(value, token, api.quotePath(path)));
+  }
+
+  /**
+   * One step down a path (§3.1), the `Tab` half of taking a directory row: only the text between the
+   * token's own `@` and the token's end is rewritten, so the `@` — and with it the menu's anchor —
+   * survives the step. The query for the new directory is asked for here because a programmatic
+   * write fires no `input` event.
+   */
+  function mentionDrill(entry, token) {
+    const insert = entry && entry.item && entry.item.insert;
+    if (typeof insert !== 'string' || insert === '') return;
+    if (readOnly || inputEl.disabled) return;
+    // The separator the path already uses: a drive path grows `\`, a workspace path grows `/`.
+    const separator = insert.indexOf('\\') >= 0 ? '\\' : '/';
+    const next = insert.replace(/[\\/]+$/, '') + separator;
+    const { value } = mentionCaret();
+    const head = value.slice(0, token.at + 1);
+    const tail = value.slice(token.end);
+    mentionWriteValue({ value: head + next + tail, caret: head.length + next.length });
+    mentionSync();
+  }
+
+  /**
+   * The path at the caret, quoted when it must be, and separated from whatever is already on
+   * either side of it — the shape the attach dialog's answer inserts.
+   */
+  function mentionResultAtCaret(api, path) {
+    const { value, caret, end } = mentionCaret();
+    const insert = api.quotePath(path);
+    const before = value.slice(0, caret);
+    const after = value.slice(end);
+    const lead = before !== '' && !/\s$/.test(before) ? ' ' : '';
+    const trail = after !== '' && !/^\s/.test(after) ? ' ' : '';
+    return {
+      value: before + lead + insert + trail + after,
+      caret: before.length + lead.length + insert.length + trail.length,
+    };
+  }
+
+  /**
+   * `mentionPicked` (§9): the attach dialog's answer, inserted by the same rules as a finished
+   * row. There is no `@` token to wash here — the path lands at the caret, quoted when it has
+   * to be, and separated from the text on either side.
+   */
+  function insertMentionPath(path) {
+    const api = mentionSyntax();
+    if (!api || typeof path !== 'string' || path === '') return;
+    if (readOnly || inputEl.disabled) return;
+    mentionRemember(path);
+    mentionApplyInsert(mentionResultAtCaret(api, path));
+  }
+
   /**
    * Remember which session this webview shows. VS Code persists the state set
    * here across window reloads and hands it to the host's webview panel
@@ -11111,6 +11710,8 @@ function relayout() {
         // The same refresh the `input` event does: an emptied box must disable Send
         // again, not keep the previous value's verdict.
         afterComposerWrite();
+        // An emptied box has no `@` token left: the picker goes with it.
+        mentionSync();
         break;
       case 'harnessNote':
         // An in-place continue (`SessionRuntime.continueFrom`): the block belongs in
@@ -11130,6 +11731,14 @@ function relayout() {
         break;
       case 'imagePicked':
         addPendingAttachment(msg.dataUrl, msg.name);
+        break;
+      case 'mentionResult':
+        // The answer to one `mentionQuery`; a stale one is dropped inside (§8).
+        applyMentionResult(msg);
+        break;
+      case 'mentionPicked':
+        // The attach dialog's answer: the path lands at the caret (§9).
+        insertMentionPath(msg.path);
         break;
       case 'delta':
         addTpsTokens(msg.text);
@@ -11581,8 +12190,13 @@ function relayout() {
       card.appendChild(composerEl);   // last child = the card's bottom
     } else {
       composerEl.remove();
+      // The box is out of the document, so there is no caret to anchor a popup to.
+      mentionClose();
     }
     autoGrow();
+    // The pane may have moved into another card, and another place on screen: the `@`
+    // popup is anchored to the caret, so it is measured again rather than left behind.
+    mentionPosition();
     if (hadFocus && card) {
       // The caret goes back where it was, selection included (see `restoreComposerFocus`).
       if (sel) composerSel = sel;
@@ -11616,7 +12230,9 @@ function relayout() {
     vscode.postMessage({ type: 'stop', nodeId: treeActiveId });
   });
   attachBtn.addEventListener('click', () => {
-    vscode.postMessage({ type: 'pickImage' });
+    // One button, one dialog: the host routes the chosen file by extension — an image
+    // becomes an attachment (`imagePicked`), anything else a reference (`mentionPicked`).
+    vscode.postMessage({ type: 'pickAttachment' });
   });
   modelSelect.addEventListener('change', () => {
     if (busy) {
@@ -11648,12 +12264,19 @@ function relayout() {
   inputEl.addEventListener('paste', handlePaste);
 
   inputEl.addEventListener('keydown', (event) => {
+    // The open `@` menu owns its keys; while it is closed this returns false and the
+    // composer's own Enter-to-send below is exactly what it always was. Before the Enter
+    // branch, so Enter/Tab accept a row instead of sending the half-typed query.
+    if (mentionHandleKey(event)) return;
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault();
       // Enter is the Send button's other face: a disabled Send means Enter does
       // nothing too, instead of sending something the button refuses to.
       if (!sendBtn.disabled) send();
     }
+    // A caret move fires no `input`: the token under the caret after the key's own
+    // default action may be another one, or none at all.
+    if (MENTION_CARET_KEYS.has(event.key)) setTimeout(mentionSync, 0);
   });
 
   inputEl.addEventListener('input', () => {
@@ -11665,7 +12288,31 @@ function relayout() {
     perfGestureEvent(perfTyping, perfNow() - t0);
     if (perfTypingTimer != null) clearTimeout(perfTypingTimer);
     perfTypingTimer = setTimeout(perfTypingEnd, TYPING_IDLE_MS);
+    // Deliberately *after* the typing probe: the `@` picker is a feature of its own (one
+    // scan of the value, then a debounced post), and charging it to "typing is laggy"
+    // would blame the wrong thing.
+    mentionSync();
   });
+
+  // ---- `@` reference triggers ----
+  // Every way a caret can reach or leave a token: the typed character (`input` above), a
+  // navigation key (the keydown tail above), a click, and the IME's commit. The trailing
+  // debounce means a burst of them costs one query.
+  inputEl.addEventListener('click', () => mentionSync());
+  inputEl.addEventListener('select', () => mentionSync());
+  inputEl.addEventListener('compositionstart', () => {
+    // An IME owns the box now: no menu is opened or moved until it commits (§3).
+    mentionComposing = true;
+    mentionClose();
+  });
+  inputEl.addEventListener('compositionend', () => {
+    mentionComposing = false;
+    mentionSync();
+  });
+  // Past `INPUT_MAX_H` the box scrolls inside itself, so the caret moves with no `input`
+  // and no `keydown` at all: the popup follows it here or it drifts (§5).
+  inputEl.addEventListener('scroll', () => mentionPosition());
+  window.addEventListener('resize', () => mentionPosition());
 
   // The caret's own intent, tracked where it happens (see the composer focus block):
   // `#composer` as a whole so a press on one of the dock's controls clears it too, and

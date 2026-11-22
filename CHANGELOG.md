@@ -9,6 +9,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **The composer's `@` opens a file picker that walks a path.** Typing `@` at the start of a word
+  lists the workspace's files at the caret, and the list is built to be walked: a row with a folder
+  walks **into** it with `Tab` (the `@` stays and the text after it becomes that folder, so a long
+  path is one segment per keystroke), while `Enter`, or a click, takes the row as it stands — a
+  folder's own path, or a finished file. The `@` is a trigger and nothing else: the token is washed
+  out when a row is taken, so nothing but the path ever reaches the model, and there is no change to
+  the send path or to the system prompt. Each row shows the **file name whole** on the left and the
+  containing directory, dimmed, on the right, shortened from its own left by the same fitter the
+  file tool cards use, so the part near the file survives a narrow menu. A query is matched against
+  **file names only**: never the directory, which is a place to look instead; a bare name is searched
+  over the whole index, a query with a `/` (or a `~`, a drive letter, `./`, `../`) lists that folder
+  and matches the fragment after its last separator; globs, regexes and Chinese names by pinyin
+  (full spelling and initials) all work on that fragment, and a capital in the query may only land on
+  a capital in the name, so `Iss` finds `ItemSpreaderService.cs` and `iss` finds it and lowercased
+  names alike. The workspace list comes from the **vendored ripgrep** with the same flags and
+  exclusion sources as `search_files`, so what the agent can find and what the picker offers are the
+  same set; `Browse…` is the last row, for a path the index cannot see. The picker adds no setting:
+  it is always on.
+- **The composer's `Attach image` button is one `Attach` button.** It opens one dialog for any file
+  and routes by extension: an image becomes an attachment as before, anything else is inserted as a
+  path reference. A file inside the workspace goes in relative, anything else absolute.
+
 - **The checked-out card's outline shows its prompt-cache hit rate.** The 2 px ring around
   the current card is now a red → purple → blue colour over the whole range: `#4daafc` when
   every prompt token of the card's requests came out of the provider's cache, `#fc4d5f` when

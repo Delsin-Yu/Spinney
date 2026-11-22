@@ -11,10 +11,10 @@
  *
  * Behaviour-preserving is the requirement: this is the byte-for-byte template
  * `ChatViewProvider.getHtml()` used to render — same script set and order (the vendored
- * layout engine, `markdown-it`, `media/tree.js`, `media/main.js`), same CSP, same
- * per-document nonce, same `window.__spinneyL10n` injection, same element ids, same
- * localized shell strings. `npm run check:webview` (the renderer) is the guard that decides
- * whether it still is.
+ * layout engine, `markdown-it`, `media/tree.js`, `media/mention.js`, `media/main.js`), same
+ * CSP, same per-document nonce, same `window.__spinneyL10n` injection, same element ids,
+ * same localized shell strings. `npm run check:webview` (the renderer) is the guard that
+ * decides whether it still is.
  */
 import * as vscode from 'vscode';
 import { displayLocale, webviewL10n } from '../i18n';
@@ -44,6 +44,10 @@ export function buildChatShell(webview: vscode.Webview, opts: ChatShellOptions):
   const scriptUri = withV(String(webview.asWebviewUri(vscode.Uri.joinPath(opts.extensionUri, 'media', 'main.js'))));
   const markdownItUri = withV(String(webview.asWebviewUri(vscode.Uri.joinPath(opts.extensionUri, 'media', 'vendor', 'markdown-it', 'markdown-it.min.js'))));
   const treeUri = withV(String(webview.asWebviewUri(vscode.Uri.joinPath(opts.extensionUri, 'media', 'tree.js'))));
+  // The `@` reference syntax (`window.mentionSyntax`), pure functions with no DOM, in a
+  // script of its own so the build-time guard can run the same bytes in Node — loaded
+  // before `media/main.js`, exactly like `media/tree.js` above.
+  const mentionUri = withV(String(webview.asWebviewUri(vscode.Uri.joinPath(opts.extensionUri, 'media', 'mention.js'))));
   // Vendored, pinned tree-layout engine (non-layered-tidy-tree-layout@2.0.2, MIT).
   // Not an npm dependency — see media/vendor/non-layered-tidy-tree-layout/PROVENANCE.md.
   const layoutEngineUri = withV(String(webview.asWebviewUri(vscode.Uri.joinPath(opts.extensionUri, 'media', 'vendor', 'non-layered-tidy-tree-layout', 'dist', 'non-layered-tidy-tree-layout.js'))));
@@ -84,7 +88,7 @@ export function buildChatShell(webview: vscode.Webview, opts: ChatShellOptions):
         <button id="snippets-btn" class="icon-btn" title="${vscode.l10n.t('Prompt snippets')}" aria-label="${vscode.l10n.t('Prompt snippets')}" aria-haspopup="true">
           <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h16M4 11h10M4 16h13"/></svg>
         </button>
-        <button id="attach-btn" class="icon-btn" title="${vscode.l10n.t('Attach image')}" aria-label="${vscode.l10n.t('Attach image')}">
+        <button id="attach-btn" class="icon-btn" title="${vscode.l10n.t('Attach or reference a file')}" aria-label="${vscode.l10n.t('Attach or reference a file')}">
           <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/></svg>
         </button>
         <select id="model-select" title="${vscode.l10n.t('Model')}"></select>
@@ -134,6 +138,7 @@ export function buildChatShell(webview: vscode.Webview, opts: ChatShellOptions):
   <script nonce="${nonce}" src="${markdownItUri}"></script>
   <script nonce="${nonce}" src="${layoutEngineUri}"></script>
   <script nonce="${nonce}" src="${treeUri}"></script>
+  <script nonce="${nonce}" src="${mentionUri}"></script>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;

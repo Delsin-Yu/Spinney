@@ -3553,13 +3553,15 @@ body.panning #tree-canvas {
 .node-del:focus-visible { opacity: 1; }
 .node-del:hover { background: var(--error-bg); border-color: var(--error-bg); color: #fff; }
 
-/* Node header menu (RMB on a card header — `openNodeMenu` in media/main.js) and the
-   composer's snippet menu (`openSnippetMenu`): one floating surface, pinned to the
-   viewport, not to whatever opened it — it must not scale with the canvas zoom or be
-   clipped by the card's `overflow: hidden`. Above everything the panel draws (cards
-   reach z-index 3, the autoscroll origin 1000). */
+/* Node header menu (RMB on a card header — `openNodeMenu` in media/main.js), the
+   composer's snippet menu (`openSnippetMenu`) and the composer's `@` file picker
+   (`openMentionMenu`): one floating surface, pinned to the viewport, not to whatever
+   opened it — it must not scale with the canvas zoom or be clipped by the card's
+   `overflow: hidden`. Above everything the panel draws (cards reach z-index 3, the
+   autoscroll origin 1000). */
 .node-menu,
-.snippet-menu {
+.snippet-menu,
+.mention-menu {
   position: fixed;
   z-index: 2000;
   min-width: 150px;
@@ -3593,6 +3595,117 @@ body.panning #tree-canvas {
 .snippet-menu-item:focus-visible {
   background: var(--user-bg);
   color: var(--user-fg);
+}
+
+/* ---- The composer's `@` file picker (`openMentionMenu`, media/main.js) ----
+   Same floating surface as the two menus above (it inherits `position: fixed`,
+   `z-index: 2000` and the panel's own background from that shared rule), sized to its
+   widest row and capped in both directions: 280–560px wide, 240px high with its own
+   scroll, so a 50-row answer is a list instead of a curtain over the transcript. The
+   highlighted row is kept in view by the script, never by the surface. */
+.mention-menu {
+  width: max-content;
+  min-width: 280px;
+  max-width: 560px;
+  max-height: 240px;
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+/* One selectable row: the label, and the detail (a directory, a scope) on the right.
+   `.active` is the keyboard highlight and is painted whether or not the pointer is on
+   the row, so `↑`/`↓` and a mouse hover cannot disagree about which row Enter takes. */
+.mention-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 4px 8px;
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.mention-row.active,
+.mention-row:hover {
+  background: var(--user-bg);
+  color: var(--user-fg);
+}
+
+/* The name comes first and is NEVER shortened: it is what the user is choosing. A path longer
+   than the cap gives the row its own ellipsis as a last resort (a 560px menu cannot hold an
+   80-character name whole), which is the one case the name loses characters. */
+.mention-row .mention-label {
+  flex: 0 0 auto;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The directory second, dimmed and pushed to the right edge. Its text is fitted by
+   `registerPathFit` (`fitPathText`), which keeps the segments nearest the file and drops the far
+   end — `…/Services/ItemSpreaderService` — so the column says where the file is even when it
+   cannot hold the whole path. `min-width: 0` lets the flex box shrink at all. */
+.mention-row .mention-detail {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-left: auto;
+  padding-left: 12px;
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.mention-row.active .mention-detail,
+.mention-row:hover .mention-detail {
+  color: inherit;
+  opacity: 0.75;
+}
+
+/* The characters the host matched (`item.matches`): the path's own letters, or a whole
+   Chinese character for a pinyin hit. */
+.mention-hit {
+  font-weight: 700;
+  color: var(--focus);
+}
+
+.mention-row.active .mention-hit,
+.mention-row:hover .mention-hit {
+  color: inherit;
+  text-decoration: underline;
+}
+
+/* A row the host sends as information — the live index source, a `readdir` failure, the
+   truncation footer. Never selectable (`kind: 'note'` rows are not in the highlight ring). */
+.mention-note {
+  padding: 4px 8px;
+  font-size: 11px;
+  font-style: italic;
+  color: var(--text-dim);
+  cursor: default;
+  white-space: normal;
+}
+
+/* The hidden mirror a `textarea` caret is measured with (`mentionCaretPoint`): it copies
+   the box's font and padding inline, so the marker span lands on the caret's own line.
+   Fixed and never painted; it must not take part in the panel's layout. */
+.mention-mirror {
+  position: fixed;
+  left: 0;
+  top: 0;
+  visibility: hidden;
+  pointer-events: none;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  overflow: hidden;
 }
 
 /* Agent connector edge: dim while running, green on done, red on error. */

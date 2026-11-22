@@ -40,6 +40,12 @@
 // the composer's two identities + the harness-drift fork hint (`setup`), and the rule
 // that only `composerClear` empties the input (neither Send nor Enter may).
 //
+// The `@` file picker is one more sequence with a block of its own, because its messages
+// cannot be proved by replay: a `mentionResult` is a silent no-op unless the webview asked
+// for it, so the block types `@` into `#input`, catches the `mentionQuery` the webview
+// posts (with the `requestId` only it knows), answers that id, accepts the row, then feeds
+// the attach dialog's answer and clicks the button that asks for it.
+//
 // The DOM stub resolves a plain `.class` selector against the element's own
 // subtree, so "which card holds this dock" is answerable per card — and it gives a
 // node exactly one parent (an append moves it), so "which zone holds the answer" is
@@ -267,6 +273,16 @@ const TURN_MESSAGES = [
   { type: 'status', text: 'smoke' },
   { type: 'user', text: 'smoke prompt', attachments: [] },
   { type: 'imagePicked', dataUrl: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB', name: 'smoke.png' },
+  // The `@` picker's two provider answers (§8, §9 of `plans/mention-syntax.md`). They are
+  // replayed here for the "does a handler throw" half only: a `mentionResult` is a silent
+  // no-op unless the webview asked for it — the handler drops any answer whose `requestId`
+  // is not the newest one — so `requestId: -1` can never paint, and `mentionPicked` lands at
+  // the caret and is wiped by the `composerClear` below. The real sequence (type `@`, catch
+  // the `mentionQuery`, answer it, accept the row, then the dialog's answer and the button
+  // that asks for it) is in its own block at the bottom of this file, where the guard can
+  // wait out the query's debounce.
+  { type: 'mentionResult', requestId: -1, items: [] },
+  { type: 'mentionPicked', path: 'src/smoke.ts' },
   { type: 'toolCallDelta', nodeId: NODE_ID, index: 0, id: 'smoke-tool', name: 'read_file', args: '{"path":"a"}' },
   // `startedAt` / `ms` are the two numbers the elapsed chips are built from (the
   // webview ticks the first locally and freezes at the second).
@@ -852,12 +868,18 @@ if (!fs.existsSync(scriptPath)) {
 try {
   vm.createContext(sandbox);
   // The webview's other scripts, in the order the HTML shell loads them: the
-  // pinned layout engine (it attaches itself to `window`) and `media/tree.js`
-  // (`window.treeLayout`). Without them a `tree`/`path` message throws inside
-  // real layout code — exactly the class of failure this checker exists to catch.
+  // pinned layout engine (it attaches itself to `window`), `media/tree.js`
+  // (`window.treeLayout`) and `media/mention.js` (`window.mentionSyntax`, which the
+  // composer's `@` handlers call on every keystroke). Without them a `tree`/`path`
+  // message throws inside real layout code, and a `@` typed in the box throws inside
+  // the input listener — exactly the class of failure this checker exists to catch.
   for (const file of [
     path.join(root, 'media', 'vendor', 'non-layered-tidy-tree-layout', 'dist', 'non-layered-tidy-tree-layout.js'),
     path.join(root, 'media', 'tree.js'),
+    // Loaded before `media/main.js`, as the shell does: `mentionSyntax()` reads it at
+    // call time and answers null when the script is absent (a stale bundle), so a shell
+    // that forgot it would make the whole picker a silent no-op.
+    path.join(root, 'media', 'mention.js'),
   ]) {
     vm.runInContext(fs.readFileSync(file, 'utf8'), sandbox, { filename: path.relative(root, file) });
   }
@@ -9438,6 +9460,283 @@ setTimeout(async () => {
           );
         }
       }
+    }
+  }
+
+  // --- the `@` file picker's messages, in the order a session produces them -----------
+  // A `mentionResult` replay is a **silent no-op** unless the webview asked for it: the
+  // handler drops any answer whose `requestId` is not the newest one (`applyMentionResult`
+  // in `media/main.js`). So the replay at the top of this file cannot check the menu with
+  // one — it only proves the handler does not throw. The sequence below is the real one:
+  //
+  //   type `@`  →  the webview posts `mentionQuery` (after its ~100 ms debounce)
+  //             →  answer it with THAT `requestId`  →  the menu appears with one row
+  //             →  accept the row  →  the path is in the textarea, no `@` left
+  //             →  `mentionPicked`  →  the dialog's path is inserted, quoted
+  //             →  click Attach  →  the button posts `pickAttachment`
+  //
+  // Everything after the typing is a provider message, which is why this lives here and
+  // not with the other replay: the assertion needs a `requestId` the webview itself issued,
+  // and the debounce needs a real wait.
+  {
+    /** The text of a stub subtree: text nodes carry `textContent`, elements carry children. */
+    const textOf = (node) => {
+      if (!node) return '';
+      if (typeof node.textContent === 'string' && node.textContent) return node.textContent;
+      let out = '';
+      for (const child of node.children || []) out += textOf(child);
+      return out;
+    };
+    const pickerComposer = document.getElementById('composer');
+    const pickerInput = document.getElementById('input');
+    // The block above ends on a read-only window; this fixture needs the writable dock on a
+    // plain turn card (a disabled box has no caret to type into).
+    dispatch({ type: 'state', busy: false, status: '', sessionId: 'smoke-session', runningNodes: [], lockedNodes: [], readOnly: false });
+    dispatch({
+      type: 'tree',
+      viewId: FOCUS_NODE,
+      activeId: FOCUS_NODE,
+      rootId: FOCUS_NODE,
+      rootIds: [FOCUS_NODE],
+      nodes: [
+        {
+          id: FOCUS_NODE,
+          parentId: null,
+          children: [],
+          title: 'mention',
+          status: 'done',
+          createdAt: 0,
+          preview: 'mention',
+          usage: null,
+          size: null,
+          context: 'ok',
+        },
+      ],
+    });
+    const menuOf = () => findByClass(document.body, 'mention-menu');
+    if (pickerComposer.classList.contains('hidden') || pickerInput.disabled) {
+      problems.push(
+        'the @ picker fixture needs a visible, enabled composer, and this one left it ' +
+          `hidden=${pickerComposer.classList.contains('hidden')} disabled=${pickerInput.disabled}`,
+      );
+    } else {
+      // A real `input` event, the way typing fires one: this is what arms the debounce.
+      pickerInput.value = '@';
+      pickerInput.selectionStart = 1;
+      pickerInput.selectionEnd = 1;
+      for (const handler of handlersOf(pickerInput, 'input')) handler({ type: 'input', target: pickerInput });
+      if (menuOf()) {
+        problems.push('typing `@` painted a menu before the host answered — the rows must come from a `mentionResult`');
+      }
+      await sleep(250); // the query's debounce (~100 ms), plus a margin
+      const asked = posted.filter((message) => message && message.type === 'mentionQuery');
+      if (asked.length !== 1) {
+        problems.push(
+          `typing \`@\` posted ${asked.length} \`mentionQuery\` message(s), expected exactly one after the debounce: ` +
+            JSON.stringify(posted.map((message) => message && message.type)),
+        );
+      } else {
+        const query = asked[0];
+        if (typeof query.requestId !== 'number' || typeof query.query !== 'string') {
+          problems.push(`the \`mentionQuery\` posted ${JSON.stringify(query)}, expected { requestId, query, recent }`);
+        }
+        // Answered with the WRONG requestId first: that answer must be dropped. It is the
+        // exact shape the replay at the top of this file sends, and the reason it proves
+        // nothing about the menu.
+        dispatch({
+          type: 'mentionResult',
+          requestId: query.requestId - 1,
+          items: [{ kind: 'file', label: 'stale.ts', insert: 'stale.ts' }],
+        });
+        if (menuOf()) {
+          problems.push(
+            'a `mentionResult` with a stale `requestId` painted the menu — an answer that is not the newest one must be dropped',
+          );
+        }
+        posted.length = 0;
+        dispatch({
+          type: 'mentionResult',
+          requestId: query.requestId,
+          // The host's row shape (§7): the label is the entry name, the detail is the directory, and
+          // the insert is that entry's path. The indices are the label's own coordinates.
+          items: [
+            { kind: 'dir', label: 'chat/', detail: 'src', insert: 'src/chat' },
+            { kind: 'file', label: 'smoke.ts', detail: 'src', insert: 'src/smoke.ts', matches: [0, 1] },
+          ],
+        });
+        const menu = menuOf();
+        if (!menu) {
+          problems.push(
+            `a \`mentionResult\` carrying the requestId the webview asked with (${query.requestId}) painted no ` +
+              '`.mention-menu` — an answer is matched to its own query, never to "some query"',
+          );
+        } else {
+          const rows = (menu.children || []).filter(
+            (child) => hasClass(child, 'mention-row') && !hasClass(child, 'mention-browse'),
+          );
+          if (rows.length !== 2) {
+            problems.push(`the menu offered ${rows.length} row(s), expected the 2 rows the host sent`);
+          } else {
+            const fileRow = rows[1];
+            const label = findByClass(fileRow, 'mention-label');
+            const detail = findByClass(fileRow, 'mention-detail');
+            if (!label || textOf(label) !== 'smoke.ts') {
+              problems.push(
+                `the row reads ${JSON.stringify(textOf(fileRow))}, expected the file name "smoke.ts" as its label`,
+              );
+            }
+            if (!detail || textOf(detail) !== 'src') {
+              problems.push('the row has no dimmed directory column beside the name (§7)');
+            }
+            if (fileRow.title !== 'src/smoke.ts') {
+              problems.push(`the row's title is ${JSON.stringify(fileRow.title)}, expected the string it will insert`);
+            }
+            if (!findByClass(fileRow, 'mention-hit')) {
+              problems.push('the row carries no `.mention-hit` for the indices the host sent (the highlight is the point)');
+            }
+            const finish = fileRow._listeners && fileRow._listeners.mousedown;
+            if (typeof finish !== 'function') {
+              problems.push('a menu row has no `mousedown` accept handler (§5: accepting must not take the caret)');
+            } else {
+              // §3.1: `Tab` and `Enter` are different answers. `Enter` on a DIRECTORY takes that
+              // directory as the reference and finishes; only `Tab` walks into it.
+              const press = (key) => {
+                for (const handler of handlersOf(pickerInput, 'keydown')) {
+                  handler({ type: 'keydown', key, shiftKey: false, preventDefault() {}, stopPropagation() {} });
+                }
+              };
+              press('Enter');
+              if (String(pickerInput.value) !== 'src/chat') {
+                problems.push(
+                  `\`Enter\` on a directory row left ${JSON.stringify(String(pickerInput.value))}, expected the ` +
+                    'folder path alone "src/chat"',
+                );
+              }
+              if (String(pickerInput.value).indexOf('@') >= 0) {
+                problems.push('`Enter` on a directory row left an `@` in the composer — it washes the token like a file');
+              }
+              if (pickerInput.selectionStart !== 'src/chat'.length) {
+                problems.push(`the caret sits at ${pickerInput.selectionStart} after a folder pick, expected the end`);
+              }
+              if (menuOf()) {
+                problems.push('`Enter` on a directory row left the menu on screen — that row was the answer');
+              }
+
+              // The long-path case, from a fresh `@`: `Tab` walks INTO the directory instead.
+              pickerInput.value = '@';
+              pickerInput.selectionStart = 1;
+              pickerInput.selectionEnd = 1;
+              posted.length = 0;
+              for (const handler of handlersOf(pickerInput, 'input')) {
+                handler({ type: 'input', target: pickerInput });
+              }
+              await sleep(250);
+              const reopen = posted.filter((message) => message && message.type === 'mentionQuery').pop();
+              if (!reopen) {
+                problems.push('the second `@` posted no `mentionQuery`');
+              } else {
+                dispatch({
+                  type: 'mentionResult',
+                  requestId: reopen.requestId,
+                  items: [
+                    { kind: 'dir', label: 'chat/', detail: 'src', insert: 'src/chat' },
+                    { kind: 'file', label: 'smoke.ts', detail: 'src', insert: 'src/smoke.ts' },
+                  ],
+                });
+                posted.length = 0;
+                press('Tab');
+                if (String(pickerInput.value) !== '@src/chat/') {
+                  problems.push(
+                    `\`Tab\` on a directory row left ${JSON.stringify(String(pickerInput.value))}, expected "@src/chat/" — ` +
+                      'the `@` stays and the text after it becomes the directory',
+                  );
+                }
+                if (pickerInput.selectionStart !== '@src/chat/'.length) {
+                  problems.push(
+                    `the caret sits at ${pickerInput.selectionStart} after a \`Tab\`, expected the end of the path`,
+                  );
+                }
+                // The walk's own query is on the picker's trailing debounce, exactly like a typed one.
+                await sleep(250);
+                const step = posted.filter((message) => message && message.type === 'mentionQuery').pop();
+                if (!step) {
+                  problems.push('a `Tab` into a directory posted no `mentionQuery` for it');
+                } else if (step.query !== 'src/chat/') {
+                  problems.push(`the walk posted query ${JSON.stringify(step.query)}, expected "src/chat/"`);
+                }
+                // The menu answers for that directory, and taking a FILE finishes the reference.
+                dispatch({
+                  type: 'mentionResult',
+                  requestId: step ? step.requestId : reopen.requestId,
+                  items: [{ kind: 'file', label: 'smoke.ts', detail: 'src/chat', insert: 'src/chat/smoke.ts' }],
+                });
+                const inner = menuOf();
+                const innerRows = inner
+                  ? (inner.children || []).filter(
+                      (child) => hasClass(child, 'mention-row') && !hasClass(child, 'mention-browse'),
+                    )
+                  : [];
+                if (innerRows.length !== 1) {
+                  problems.push('the row of the directory that was walked into did not paint');
+                } else {
+                  const take = innerRows[0]._listeners && innerRows[0]._listeners.mousedown;
+                  if (typeof take !== 'function') {
+                    problems.push('the row of the directory that was walked into has no accept handler');
+                  } else {
+                    take({ type: 'mousedown', preventDefault() {}, stopPropagation() {} });
+                    if (String(pickerInput.value) !== 'src/chat/smoke.ts') {
+                      problems.push(
+                        `finishing a walked path left ${JSON.stringify(String(pickerInput.value))}, expected the path alone`,
+                      );
+                    }
+                    if (String(pickerInput.value).indexOf('@') >= 0) {
+                      problems.push('finishing a walked path left an `@` in the composer — the wash must remove the token');
+                    }
+                    if (pickerInput.selectionStart !== 'src/chat/smoke.ts'.length) {
+                      problems.push(`the caret sits at ${pickerInput.selectionStart} after the final pick, expected the end`);
+                    }
+                    if (menuOf()) {
+                      problems.push('the menu stayed on screen after a file was taken — a finished reference closes it');
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      // The attach dialog's answer (§9): the same insertion rules, with no `@` token to wash.
+      pickerInput.value = 'look ';
+      pickerInput.setSelectionRange(5, 5);
+      dispatch({ type: 'mentionPicked', path: 'src/a b.ts' });
+      if (String(pickerInput.value) !== 'look "src/a b.ts"') {
+        problems.push(
+          `\`mentionPicked\` left ${JSON.stringify(String(pickerInput.value))} in the composer, expected the dialog's ` +
+            'path inserted, quoted, with the text around it kept',
+        );
+      }
+      // The button that asks for that dialog: one Attach button, routed by extension (§9).
+      posted.length = 0;
+      const attach = document.getElementById('attach-btn');
+      const click = attach._listeners && attach._listeners.click;
+      if (typeof click !== 'function') {
+        problems.push('the Attach button has no click handler');
+      } else {
+        click({ type: 'click' });
+        if (!posted.some((message) => message && message.type === 'pickAttachment')) {
+          problems.push(`clicking Attach posted ${JSON.stringify(posted)}, expected { type: 'pickAttachment' }`);
+        }
+        if (posted.some((message) => message && message.type === 'pickImage')) {
+          problems.push('clicking Attach still posts the retired `pickImage` message');
+        }
+      }
+      notes.push(
+        'the @ file picker: typing `@` posts one debounced `mentionQuery`, an answer with a stale `requestId` is dropped, ' +
+          'the matching answer paints a row with its highlight (file name first, dimmed directory second), `Tab` on a ' +
+          'directory keeps the `@` and walks into it by posting the directory query, `Enter` on a directory takes that ' +
+          'folder and washes the token out, taking a FILE finishes the same way, `mentionPicked` inserts the quoted ' +
+          'dialog path, and Attach posts `pickAttachment`',
+      );
     }
   }
 

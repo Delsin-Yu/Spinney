@@ -83,6 +83,10 @@ import { SessionTreeItem } from './SessionsProvider';
 import { ModelTreeController, apiKeySecretName, searchKeySecretName } from './modelTree';
 import { resolvePromptSnippets } from './promptSnippets';
 import { highlightEntries, warmUpCodeHighlight } from './codeHighlight';
+// The `@` picker's host half (§8): the index, its directory listing and the `Browse…` dialog.
+// One instance belongs to this window (`mentionIndexFor`), because the thing it indexes is the
+// agent root this window is anchored to.
+import { MentionAnswer, MentionIndex } from './mentionIndex';
 import {
   removeTranscriptDir,
   removeTranscriptFile,
@@ -674,6 +678,30 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   private refreshCount = 0;
   private refreshWindow = 0;
   private titleDrainTimer: ReturnType<typeof setTimeout> | null = null;
+  /**
+   * The `@` picker's file index — the ripgrep cache, the directory listing and the two
+   * dialogs, built by the first mention query and disposed with the provider. One per window
+   * like the panels and the background hub: the index belongs to the agent root this window is
+   * anchored to, and a second copy would only be a second `rg --files` over the same tree. It
+   * stays `null` until a composer actually types `@`, so a window that never uses the picker
+   * never spawns ripgrep for it.
+   */
+  private mentionIndex: MentionIndex | null = null;
+
+  /**
+   * {@link mentionIndex}, built on the first `@` keystroke and cached for the window's life.
+   *
+   * The output channel goes in because the index logs its own build (`rg` candidate chosen, the
+   * file count, a user `--glob` that ripgrep rejected) and it has no other sink: those lines are
+   * the only way to tell "the index is slow" from "the exclusions are wrong", and they belong in
+   * the same channel as every other diagnostic of this window.
+   */
+  private get mentionIndexFor(): MentionIndex {
+    if (!this.mentionIndex) {
+      this.mentionIndex = new MentionIndex(this.output);
+    }
+    return this.mentionIndex;
+  }
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -6366,8 +6394,25 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       case 'layoutDiagnostic':
         rt.logLayoutDiagnostic(message.nodes, message.overlaps, message.connections, message.force);
         return;
-      case 'pickImage':
-        void rt.handlePickImage();
+      case 'pickAttachment':
+        // One button, one dialog (§9): the runtime owns the whole round trip — the picker
+        // routes the chosen file by extension and posts `imagePicked` for an image or
+        // `mentionPicked` for a reference — so nothing here looks at the answer.
+        void rt.handlePickAttachment();
+        return;
+      case 'mentionQuery':
+        // The `@` menu asking for rows (§8). A **read**: no turn starts, no session state
+        // moves, nothing is written — so none of the turn gates apply, not the reboot hold
+        // (`isHeld`), not the read-only window refusal, not the full-context check. Those
+        // exist to keep a *turn* from racing a queued reload or a second window's writes, and
+        // the composer that could type this `@` is disabled in a read-only window anyway;
+        // gating here would only ever turn a keystroke into a refusal the user cannot act on.
+        void this.answerMentionQuery(session.id, message);
+        return;
+      case 'mentionBrowse':
+        // The menu's `Browse…` row (§8): the dialog's answer travels back as the same
+        // `mentionPicked` a row pick inserts, so the composer keeps one insertion path.
+        void this.browseMention(session.id);
         return;
       case 'stop':
         // `stop {nodeId}` is the composer's Stop: a union kill of everything that node
@@ -6488,6 +6533,88 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   }
 
   /**
+   * Answer one `@` menu query (§8) — the host half of the picker's keystroke.
+   *
+   * `requestId` is echoed untouched. The webview matches the answer to the query it issued and
+   * drops anything that is not the newest one, so the echo is also what lets a stale index build
+   * land harmlessly: the rows paint the menu their own query belongs to, and never the one the
+   * user has already typed past.
+   *
+   * `recent` is that tab's own pick history and only the empty query reads it, but it is
+   * re-checked here rather than trusted: the message comes from a webview, `recentMentions` walks
+   * it entry by entry, and §8 already fixes the list at 20 entries — so anything longer or
+   * non-string is trimmed instead of being ranked.
+   *
+   * The `try` is deliberate insurance, not distrust of the index: `MentionIndex.query` promises
+   * never to throw (every failure becomes a `note` row, because a menu that raises over the
+   * composer steals the focus the next keystroke needs). But that promise lives in another file,
+   * and the one place where breaking it is invisible is a keystroke — the composer would simply
+   * keep the previous rows, or none, and no error would ever name the query that did it. One row
+   * saying so costs nothing and keeps a broken index visible.
+   *
+   * The reply goes out through `postTo`, which is exactly the sink `SessionRuntime.post` forwards
+   * to (`host.postTo(this.sessionId, …)`): the `@` menu is answered on the session whose composer
+   * asked, and a session with no open tab has no view to paint.
+   */
+  private async answerMentionQuery(sessionId: string, message: any): Promise<void> {
+    const requestId = message?.requestId;
+    const query = typeof message?.query === 'string' ? message.query : '';
+    const recent = Array.isArray(message?.recent)
+      ? message.recent.filter((entry: unknown): entry is string => typeof entry === 'string').slice(0, 20)
+      : [];
+    const index = this.mentionIndexFor;
+    let answer: MentionAnswer;
+    try {
+      answer = await index.query(query, recent);
+    } catch (err) {
+      // The same sentence the index uses for its own answer, deliberately: one failure, one
+      // wording, whichever half of the pair noticed it.
+      const reason = err instanceof Error ? err.message : String(err);
+      answer = {
+        scope: 'workspace',
+        items: [{ kind: 'note', label: vscode.l10n.t('The file index is unavailable: {0}', reason), insert: '' }],
+      };
+    }
+    // No folder is open, so the index answered with a listing instead of a search — and it says
+    // nothing about that on purpose, because one footer sentence is the contract and this is the
+    // caller that owns it (§7). The fact has to arrive before the user concludes a file is
+    // missing from a workspace that does not exist. It is set, not appended: in that mode the
+    // index's own answers carry no other note, and two sentences would be a second footer row.
+    if (!index.info().hasFolder) {
+      answer.note = vscode.l10n.t('No folder is open, so @ lists the scratch folder and the paths you type.');
+    }
+    this.postTo(sessionId, {
+      type: 'mentionResult',
+      requestId,
+      scope: answer.scope,
+      items: answer.items,
+      note: answer.note,
+      truncated: answer.truncated,
+    });
+  }
+
+  /**
+   * The menu's `Browse…` row (§8): open the dialog and send its answer back as `mentionPicked` —
+   * the same message the attach button posts, so quoting, the trailing space and the caret stay
+   * in the webview's one insertion function (§9).
+   *
+   * The index normalises the answer itself (`workspaceRelativePath` inside `browse`), so a file
+   * inside the agent root arrives as the relative path a menu pick inserts, and one outside it as
+   * the native absolute path — the only spelling the agent can read back.
+   *
+   * A cancelled dialog posts **nothing** (`browse` answers `null`): there is no insertion to make
+   * and nothing to report, and a message would hand the composer an event to react to that the
+   * user already settled by pressing Escape.
+   */
+  private async browseMention(sessionId: string): Promise<void> {
+    const picked = await this.mentionIndexFor.browse();
+    if (!picked) {
+      return;
+    }
+    this.postTo(sessionId, { type: 'mentionPicked', path: picked });
+  }
+
+  /**
    * Colour the fences one render could not, and hand them back in one message.
    *
    * A pull, not a push: the webview asks on the render it believes complete (a finished
@@ -6600,6 +6727,11 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       rt.dispose();
     }
     this.runtimes.clear();
+    // The picker's index subscribes to VS Code's own create/delete/rename events; left alive it
+    // would be woken by them for a window that no longer exists, and its ripgrep cache would
+    // outlive the tree it describes.
+    this.mentionIndex?.dispose();
+    this.mentionIndex = null;
     // Nothing may outlive the provider: every registry the hub still holds is
     // torn down with its process tree.
     this.backgroundHub.killAll();

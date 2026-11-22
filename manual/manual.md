@@ -50,7 +50,7 @@ The tree holds one card per turn. A new turn goes below the turn it answers. The
 | **Continue with new context** | Shown only when the setup the composer shows differs from the frozen one (section 3.4). A click continues this conversation under the live setup and forks the tree, so the old tree keeps its own bytes. The tooltip is `Continue this conversation under the setup the composer shows now. The tree forks, so the old one keeps its own bytes.` |
 | **Stop** | Ends the turn at the checked-out node. It kills the background terminals and the sub-agents of that node too. Nothing continues. The tooltip is `Stop this turn` or `Stop this node: kill its background tasks and sub-agents (nothing is sent to the model)`. |
 | Prompt snippets | Opens a menu of pre-written instructions. A click inserts the text into the input box. Nothing is sent. Spinney ships `Plan` and `Implement Parallel`. Add your own rows with `spinney.promptSections` (section 11). |
-| **Attach image** | Opens a file picker. You can also paste an image into the input box. See section 9. |
+| **Attach** | Opens one file dialog for any file. An image file becomes an attachment (section 9). Any other file goes into the input box as a path reference (section 3.6). The tooltip is `Attach or reference a file`. You can also paste an image into the input box. |
 | Model dropdown | Picks the model card for a new node. A send that continues this conversation keeps the frozen setup (section 3.4). The list groups the cards by provider. |
 | Gear button | Opens the model-cards page. The tooltip is `Manage model cards…`. |
 | Thinking-effort dropdown | Picks the thinking level. The list is the list of the active card. |
@@ -161,6 +161,52 @@ A chat tab can show an old picture of the conversation. For example, a card stop
 Run **`Spinney: Reload Chat Webview`** to build the tab again from the state of the session. Use the command when the tab shows a frozen picture, or when a card does not change.
 
 The command does not change the conversation. It does not stop a running turn. With no chat tab open, Spinney answers `Spinney: no chat tab is open for this window.`
+
+### 3.6 File references with @
+
+Type `@` at the start of a word in the input box. A file list opens at the cursor. The list holds the files of the workspace, and the files of any folder that you name.
+
+`@` is a trigger. A row with a folder walks into that folder: the `@` stays, and the text after it becomes the folder. The list then shows what is inside the folder. A row with a file finishes the reference: Spinney removes the `@` and the text after it, and the path takes their place. No `@` reaches the model.
+
+A pick from the workspace inserts a path relative to the workspace root. Example: `src/chat/runtime.ts`. A pick from another folder inserts an absolute path. Example: `C:\repos\app\notes.md`, or `/home/me/notes.md`.
+
+Type one of these prefixes to start an absolute path:
+
+- `/` starts at the root of the file system.
+- `~` starts at your home folder.
+- `C:` starts at a drive. Any drive letter works.
+- `./` starts at the workspace root, and `../` starts at the folder above it.
+
+An absolute path matches names inside one folder only: the folder that you name. When nothing matches, the list is empty.
+
+The last row is **Browse…**. It opens the file dialog. A file inside the workspace goes in as a relative path. Any other file goes in as an absolute path.
+
+The list matches three shapes. Only the file name takes part in a match, never the folder that holds it.
+
+- A file name, or a part of a file name. The case does not matter.
+- A pattern with `*`, `?` or `[...]`. The list reads the text as a glob or as a regular expression on the file name.
+- A Chinese file name, by pinyin. The whole spelling and the initials both match.
+
+If you type a path, the list shows what is inside that folder. Text after the last `/` filters that list.
+
+Each row shows the file name first. The folder path follows it on the right, in grey. Spinney shortens the folder path from its left when the row is too narrow, so the part near the file stays.
+
+Capital letters matter. If you type a capital letter, Spinney shows only names that have a capital letter at that position. Example: `ISS` finds `ItemSpreaderService.cs`. The name in lower case, `iss`, finds that file and lowercased names too.
+
+The list shows 50 rows at most. Keep typing to make the list shorter.
+
+The keyboard works as follows:
+
+- `↑` and `↓` move one row. `Page Up` and `Page Down` move one page.
+- `Enter` takes the row: a folder's own path, or a file's path. `Tab` goes into a folder.
+- `Escape` closes the list. Your text stays in the input box.
+- A click on a row accepts that row.
+
+With an empty `@`, the files that you picked earlier in this session come first. The other files follow in path order.
+
+A reference is a path only. Spinney does not send the file content. The agent reads the file itself with the `read_file` tool. The agent can read one line range of the file.
+
+With no folder open, the list shows the scratch folder instead (section 16).
 
 ## 4. Branches
 
@@ -429,7 +475,7 @@ You cannot remove a running job from the dock. Terminate it first, and then remo
 
 ## 9. Images
 
-Attach an image with the **Attach image** button, or paste one into the input box. Pending attachments show as small pictures with an **×** button.
+Attach an image with the **Attach** button, or paste one into the input box. Pending attachments show as small pictures with an **×** button.
 
 Only a card with `vision.enabled` accepts an image. Spinney ships `deepseek-flash` with image support on.
 
