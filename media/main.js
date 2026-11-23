@@ -2097,7 +2097,7 @@
   /** The controller's own hook on its container, so a memory restore is not a gesture. */
   const FOLLOW = '_follow';
 
-  function createScrollController(container, onChange, locked) {
+  function createScrollController(container, onChange, locked, onRead) {
     // `lastTop` is the offset the controller last knows about: written before a programmatic
     // pin, and updated from every `scroll` the engine reports.
     const state = { locked: locked !== false, lastTop: container.scrollTop || 0 };
@@ -2167,7 +2167,13 @@
       const movedUp = top < state.lastTop;
       state.lastTop = top;
       if (atBottom()) {
-        if (!state.locked) setLocked(true);
+        if (!state.locked) {
+          setLocked(true);
+          // The reader scrolled **to** the newest content: whatever was behind them has been
+          // read, and `onRead` is where that is acted on (the card folds the groups that
+          // nobody is holding, `settleStepsRead`).
+          if (onRead) onRead();
+        }
       } else if (movedUp && state.locked) {
         setLocked(false);
       }
@@ -2196,7 +2202,16 @@
       },
       lock() { setLocked(true); },
       unlock() { setLocked(false); },
-      toggle() { setLocked(!state.locked); },
+      /**
+       * The light's own switch. Engaging it here is the reader's move in both directions:
+       * clicking a dim dot says "take me to the newest content", which is as much a
+       * read-finished signal as scrolling there (`onRead`).
+       */
+      toggle() {
+        const next = !state.locked;
+        setLocked(next);
+        if (next && onRead) onRead();
+      },
     };
     // `restoreScroll` hands the offset it is about to write back to the controller (see
     // `syncOffset`): a repaint is not a gesture in either direction.
@@ -2262,12 +2277,12 @@
   // the open form of a thinking row, which is a 240px scroller of its own
   // (`attachRowLock`, below). Both lights are positioned by measurement (`syncLockDot`), so
   // the vertical offset is the stylesheet's and the horizontal one is the gutter's own.
-  function attachLock(container, host, locked) {
+  function attachLock(container, host, locked, onRead) {
     const dot = el('div', 'scroll-lock-dot' + (locked === false ? '' : ' locked'));
     const ctrl = createScrollController(container, (isLocked) => {
       dot.classList.toggle('locked', isLocked);
       dot.title = isLocked ? LOCK_TITLE_ON : LOCK_TITLE_OFF;
-    }, locked);
+    }, locked, onRead);
     dot.title = ctrl.locked ? LOCK_TITLE_ON : LOCK_TITLE_OFF;
     dot.addEventListener('click', (ev) => {
       ev.stopPropagation();
@@ -2308,7 +2323,7 @@
     const ctrl = createScrollController(container, (isLocked) => {
       dot.classList.toggle('locked', isLocked);
       dot.title = isLocked ? LOCK_TITLE_ON : LOCK_TITLE_OFF;
-    }, true);
+    }, true, () => releaseStepsHold(row));
     dot.title = ctrl.locked ? LOCK_TITLE_ON : LOCK_TITLE_OFF;
     dot.addEventListener('click', (ev) => {
       ev.stopPropagation();
@@ -2641,8 +2656,9 @@
   /**
    * One **new** group: `.steps` with `data-kind="steps"`, its own `Ran N steps` header,
    * its own `.steps-body` and its own fold state. It is born at the first tool row of a
-   * run and it is open while that run's turn is live; the header click folds it, and a
-   * click always wins for that one group (`_userTouched`).
+   * run and it is open while that run's turn is live; the header click folds it. That click
+   * is a plain toggle and **not** a hold: what keeps a group open is a row inside it that the
+   * reader is reading (`groupHoldsReader`).
    */
   function newStepsGroup() {
     const group = el('div', 'steps');
@@ -2656,8 +2672,11 @@
     group._head = head;
     group._body = body;
     head.addEventListener('click', () => {
-      group._userTouched = true;
       if (group._folded) paintStepsBody(group);
+      // A plain toggle, and nothing is written down: the header is not a hold on the group.
+      // What keeps a group open is something **inside** it that the reader is reading
+      // (`groupHoldsReader`), so closing the last such row folds the group even though this
+      // click once opened it.
       setStepsFold(group, !group._folded);
     });
     messagesEl.appendChild(group);
@@ -2697,32 +2716,85 @@
   }
 
   /**
-   * Does this group's body hold a row the reader is reading (`readerHoldsRow`)? A
-   * group folds behind its own header at the end of the turn, but never over a
-   * reasoning row the reader unlocked — folding the group would take that row off
-   * screen, which is worse than folding the row itself.
+   * Is this group **in the reader's hands** — the one thing that keeps it open? Two holds, and
+   * each one ends when the reader ends it:
+   *
+   *  - a thinking row they opened themselves and have not closed (`_userTouched` while it is
+   *    still open): clicking a row open is a deliberate "I want to read this";
+   *  - a thinking row whose own box they scrolled away from its bottom (its light released):
+   *    they went looking into the middle of that reasoning.
+   *
+   * What is **not** a hold: a row that is merely open (the live stream opened it, and the
+   * answer taking over closes it), a row closed again, the group's own header (a click is a
+   * plain toggle), and `_userTouched` on its own. That last one is the whole point of this
+   * rule: the flag is written once and never cleared, so reading it as "the reader is here"
+   * kept a group open after its reasoning row had been folded back under it, with nothing
+   * left that would ever end the hold.
    */
-  function groupHoldsReaderRow(group) {
-    const body = group && group._body;
-    for (const row of (body && body.children) || []) {
-      if (row && row.dataset && row.dataset.kind === 'thinking' && readerHoldsRow(row)) return true;
+  function groupHoldsReader(group) {
+    if (!group) return false;
+    for (const row of (group._body && group._body.children) || []) {
+      if (!row || !row.dataset || row.dataset.kind !== 'thinking') continue;
+      // Only an **open** row can be taken off the screen by a fold. A closed one is a single
+      // ellipsised line and says nothing about where the reader is now.
+      if (!row._open) continue;
+      if (row._userTouched) return true;
+      if (row._scroll && row._scroll.locked === false) return true;
     }
     return false;
   }
 
+  /** The steps group a row rides in, or `null` (a row standing in the flow itself). */
+  function groupOfRow(row) {
+    let node = row ? row.parentElement : null;
+    // A row inside a run sits in its `.steps-body`; one in the flow sits in the log itself.
+    if (node && node.classList && node.classList.contains('steps-body')) node = node.parentElement;
+    return node && node.dataset && node.dataset.kind === 'steps' ? node : null;
+  }
+
   /**
-   * The turn is over: **every** group of the card tucks itself behind its own header —
-   * a group the user opened or closed by hand (`_userTouched`), or one holding a row the
-   * reader unlocked, stays exactly where it is — and the others do not move it. No answer
-   * leaves a group here, because no answer ever entered one.
+   * A hold on one row just ended — the reader closed the row, or scrolled its box back to the
+   * bottom: its group tucks itself away **now** if nothing else holds it. This is the half
+   * that was missing. A fold only ever happened at a fold event (the next tool call starting,
+   * the turn ending), so after a turn was over there was no event left to come and a held
+   * group stayed open for the rest of the session.
+   */
+  function releaseStepsHold(row) {
+    const group = groupOfRow(row);
+    if (!group || groupHoldsReader(group)) return;
+    const card = cardOfLog(group);
+    // A run that is still open keeps taking rows: folding it here would hide the calls
+    // arriving into it.
+    if (card && card._openGroup === group) return;
+    setStepsFold(group, true);
+  }
+
+  /**
+   * The reader is back at the newest content of a card's log — its light re-engaged, by
+   * scrolling there or by clicking the dim dot: what was behind them has been read, so every
+   * group that nobody is holding tucks itself away. The live run is left alone, and so is
+   * anything still in their hands.
+   */
+  function settleStepsRead(card) {
+    if (!card) return;
+    for (const group of card._groups || []) {
+      if (group === card._openGroup) continue;
+      if (groupHoldsReader(group)) continue;
+      setStepsFold(group, true);
+    }
+  }
+
+  /**
+   * The turn is over: **every** group of the card tucks itself behind its own header — one
+   * still in the reader's hands (`groupHoldsReader`) stays exactly where it is, and no group
+   * moves another. No answer leaves a group here, because no answer ever entered one.
    */
   function settleSteps(card) {
     if (!card) return;
     card._openGroup = null;
     if (openSteps && inSubtree(card, openSteps)) openSteps = null;
     for (const group of card._groups || []) {
-      if (group._userTouched) continue;
-      if (groupHoldsReaderRow(group)) continue;
+      if (groupHoldsReader(group)) continue;
       setStepsFold(group, true);
     }
   }
@@ -3402,6 +3474,10 @@
     row.addEventListener('click', () => {
       markRowTouched(row);
       setThinkingOpen(row, !isRowOpen(row));
+      // Closing it is the reader saying they are done with this reasoning, so a group their
+      // read was holding open tucks itself away now (`releaseStepsHold`). Opening is not a
+      // "done": the row is still theirs, and the group stays put.
+      if (!row._open) releaseStepsHold(row);
     });
     return row;
   }
@@ -3687,15 +3763,13 @@
   /**
    * A response **ends its round**: every steps group above it tucks itself behind its own
    * header at that moment, instead of waiting for the whole turn to end (`settleSteps`).
-   * A group the reader opened or closed by hand (`_userTouched`), and one holding a row the
-   * reader unlocked (`groupHoldsReaderRow`), stay exactly where they are.
+   * A group still in the reader's hands (`groupHoldsReader`) stays exactly where it is.
    */
   function foldStepsAbove(row) {
     if (!row) return;
     for (let sib = row.previousElementSibling; sib; sib = sib.previousElementSibling) {
       if (!sib.dataset || sib.dataset.kind !== 'steps') continue;
-      if (sib._userTouched) continue;
-      if (groupHoldsReaderRow(sib)) continue;
+      if (groupHoldsReader(sib)) continue;
       setStepsFold(sib, true);
     }
   }
@@ -6156,7 +6230,9 @@ function addBackgroundNotice(item) {
         group._lazy.push({ kind: 'assistant', thinking: item.thinking });
         group._count = (group._count || 0) + 1;
         updateStepsHead(group);
-        if (!group._userTouched) setStepsFold(group, true);
+        // A repaint builds every group fresh, so none of them can be in the reader's hands:
+        // their open rows went with the old DOM, and `_held` is not carried across a repaint.
+        setStepsFold(group, true);
         return;
       }
     }
@@ -6176,7 +6252,7 @@ function addBackgroundNotice(item) {
         group._count = (group._count || 0) + 1;
         updateStepsHead(group);
         // A finished card's groups are folded: its rows come with the click.
-        if (!group._userTouched) setStepsFold(group, true);
+        setStepsFold(group, true);
         return;
       }
     }
@@ -7315,7 +7391,7 @@ function addBackgroundNotice(item) {
 
     // The log's scroll + green lock dot. A live turn follows its own output (locked); a
     // finished node starts unlocked so it scrolls freely.
-    card._itemScroll = attachLock(work, workWrap, meta.status === 'running');
+    card._itemScroll = attachLock(work, workWrap, meta.status === 'running', () => settleStepsRead(cardOfLog(work)));
 
     // The log remembers where its reader is (`rememberScroll`): a repaint or a window
     // extension puts them back — see the memory block at the top.

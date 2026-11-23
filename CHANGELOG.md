@@ -107,6 +107,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   folds the moment the text under it is complete — the next tool call starting to compose,
   or the turn ending — while a group the reader opened or closed by hand, or one holding a
   reasoning row they unlocked, stays exactly where it is.
+- **A group of steps stays open exactly as long as you are reading something inside it.** The
+  hold used to be `_userTouched`, a flag written on the first click and never cleared: once you
+  had opened a header or a reasoning row, the group stayed open for the rest of the session
+  however you left it, and folding the row back folded nothing. Two holds replace it, and both
+  end when you end them: a thinking row you opened yourself and have not closed, and one whose
+  box you scrolled away from the bottom. A header click is a plain toggle and holds nothing.
+  The fold is no longer tied to a fold event either, which is what made the old flag
+  permanent: closing that row folds the group there and then, and scrolling the work log back
+  to its end folds every group nobody is holding. A repaint still folds them all, because the
+  rows it builds come back closed.
 
 ### Removed
 

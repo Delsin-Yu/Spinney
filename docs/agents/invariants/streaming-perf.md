@@ -31,12 +31,19 @@
   and a click opens its detail. The **steps groups** follow the same hand-over rule per
   group: each is open while its run is live, folded when the response under it is complete
   (the next call's first `toolCallDelta`, or the turn's end), and a click on its
-  own header always wins for that one group — and a group holding a row the reader released
-  stays open, or its fold would hide that row. `setThinkingOpen` / `setToolOpen` /
-  `setActiveRow` / `clearActiveRow` / `closeActiveRows` / `setStepsFold` / `foldStepsAbove` in
-  `media/main.js`; `tools/check-webview.js` asserts both halves ("the two rows of a turn"), the
-  per-run groups ("steps groups: one per run") and the fold at the response's end ("a response
-  ends at the next tool call").
+  own header is a **plain toggle** — it protects nothing. What keeps a group open is a row
+  inside it that the reader is reading (`groupHoldsReader`): a thinking row they opened by
+  hand and have not closed, or one whose own box they scrolled away from the bottom. The hold
+  ends where the reader ends it, so closing that row folds the group **there and then**
+  (`releaseStepsHold`), and reaching the newest content of the log does the same for every
+  unheld group (`settleStepsRead`, wired through the log light's own `onRead`).
+  `_userTouched` is deliberately **not** a group's hold: it is written once and never
+  cleared, so reading it as "the reader is here" kept a group open after the row under it had
+  been folded back, with no event left to end it. `setThinkingOpen` / `setToolOpen` /
+  `setActiveRow` / `clearActiveRow` / `closeActiveRows` / `setStepsFold` / `foldStepsAbove` /
+  `releaseStepsHold` / `settleStepsRead` in `media/main.js`; `tools/check-webview.js` asserts
+  both halves ("the two rows of a turn"), the per-run groups ("steps groups: one per run") and
+  the holds ("a group is held open by the thinking row the reader is reading").
 - Transcript scrolling is **per-card and event-driven**, and a card has exactly one
   scroller: `.node-work`, which holds the whole turn (see §"One card, one flow"). It has
   a `createScrollController` with a green follow dot
@@ -175,7 +182,7 @@ containers and no more:
   and the next tool row opens another — so a turn can hold several `Ran N steps` groups
   (`Ran 1 step` when it is one), each with its own `.steps-body`, its own count and its
   own fold state (open while its round runs, folded when the response under it is complete,
-  and a click on that header toggles it and always wins **for that group**). A thinking row, a notice, a
+  and a click on that header toggles it — the click is not a hold, `groupHoldsReader` is). A thinking row, a notice, a
   background/sub-agent notice and a `HARNESS` block join the open group's body when there
   is one and stand in the log itself when there is not. **The text always stays in the
   flow**: an assistant text row is appended to `.node-work` itself, never into a group's
@@ -187,7 +194,7 @@ containers and no more:
 **A text block ends where the model stopped writing it, not where the turn ends.** The first
 `toolCallDelta` of the next call is the moment: the block's words are settled and its markdown
 goes in (`finalizeStreamingAnswer`), and the steps group above it folds there too
-(`foldStepsAbove`, with `_userTouched` and `groupHoldsReaderRow` still exempt). The finalize
+(`foldStepsAbove`, which leaves a group the reader holds open alone — `groupHoldsReader`). The finalize
 must therefore **not** reach for the log's last child: `toolCallDelta` appends the next run's
 draft row — and its group — *before* anything is finalized, so by then the block is one group
 up. The container carries the block it is streaming (`messagesEl._streamingAnswer`, set in

@@ -6313,7 +6313,108 @@ if (contextLabel !== 'ctx 50%') {
     dispatch({ type: 'done', nodeId: NODE });
   }
 
+  /** A finished card holding one run: a thought that joined it, one tool call, one response. */
+  const holdFixture = () => {
+    mountEmpty('done');
+    dispatch({
+      type: 'path',
+      ids: [NODE],
+      nodes: [
+        {
+          id: NODE,
+          status: 'done',
+          items: [
+            { kind: 'user', text: 'the ask' },
+            { kind: 'assistant', thinking: 'a thought inside the run' },
+            { kind: 'tool', id: 'hold-1', name: 'read_file', args: '{"path":"a.ts"}', status: 'done', content: 'ok', ms: 5 },
+            { kind: 'assistant', text: 'the response' },
+          ],
+        },
+      ],
+    });
+  };
+  const thinkingIn = (group) =>
+    ((bodyOf(group) && bodyOf(group).children) || []).filter(
+      (child) => (child.dataset || {}).kind === 'thinking',
+    )[0] || null;
+  const clickRow = (row) => {
+    for (const handler of handlersOf(row, 'click')) handler({ stopPropagation() {} });
+  };
+
+  // (f) A group is held open by a **row the reader is reading**, and by nothing else. The
+  // usual way to read a finished run is: open its header, open the thinking row inside it,
+  // read, then fold the row back. That last click has to fold the group too, or the group
+  // stays open for the rest of the session — `_userTouched` was written once and never
+  // cleared, so nothing ever ended the reader's hold on it, and after a turn is over there is
+  // no fold event left to come.
+  {
+    holdFixture();
+    const group = groupsOf()[0];
+    if (!group) {
+      problems.push('the reader-hold fixture built no steps group');
+    } else if (clickHead(group)) {
+      const row = thinkingIn(group);
+      if (!row) {
+        problems.push('opening a finished group painted no thinking row, so the hold case has nothing to click');
+      } else {
+        clickRow(row);
+        if (!row._open) {
+          problems.push('clicking a thinking row did not open it');
+        }
+        if (group.classList.contains('steps-folded')) {
+          problems.push(
+            'opening a thinking row folded its group — the row the reader is reading is what keeps the group open',
+          );
+        }
+        clickRow(row);
+        if (row._open) {
+          problems.push('clicking an open thinking row did not close it');
+        }
+        if (!group.classList.contains('steps-folded')) {
+          problems.push(
+            'folding a thinking row back left its group open — the reader just ended their last hold on it, so the ' +
+              'group has to tuck itself away at that moment',
+          );
+        }
+      }
+    }
+  }
+
+  // (g) Reaching the newest content is a read-finished signal of its own. A finished card's
+  // log starts released, so scrolling back to its bottom re-engages the light, and every
+  // group nobody is holding tucks itself away then (`settleStepsRead`). A group the reader
+  // opened by its header is not a hold on itself: the header is a plain toggle.
+  {
+    holdFixture();
+    const group = groupsOf()[0];
+    const log = logOf();
+    if (!group || !log) {
+      problems.push('the read-finished fixture built no log or no steps group');
+    } else if (clickHead(group)) {
+      if (group.classList.contains('steps-folded')) {
+        problems.push('opening a finished group by its header did not open it');
+      }
+      log.scrollHeight = 600;
+      log.clientHeight = 200;
+      log.scrollTop = 0;
+      const handlers = handlersOf(log, 'scroll');
+      if (!handlers.length) {
+        problems.push('the card log registered no scroll handler, so no scroll can be read as the reader’s move');
+      }
+      // The reader's own move to the bottom: `handleScroll` re-engages the released light.
+      log.scrollTop = 400;
+      for (const handler of handlers) handler({ type: 'scroll' });
+      if (!group.classList.contains('steps-folded')) {
+        problems.push(
+          'scrolling the log back to its bottom left an unheld group open — being at the newest content means what ' +
+            'was behind the reader has been read',
+        );
+      }
+    }
+  }
+
   notes.push('steps groups: one per run, the text between them in the flow, each group folded and lazy on its own');
+  notes.push('a group is held open by the thinking row the reader is reading, and folds the moment they close it');
   notes.push('a response ends at the next tool call: its markdown is rendered and the run above it folds');
   notes.push('a turn that answered only with its reasoning: a banner, then the thinking in the flow (live and repaint)');
 }

@@ -504,7 +504,9 @@
   body, and the following tool row opens a second group. So a turn can hold several groups,
   each with its own count, its own body and its own fold state (open while its round runs,
   folded when the response under it is complete — the next tool call's first `toolCallDelta`,
-  or the turn's end — and a click on that header always wins); thinking rows ride the open
+  or the turn's end — and a header click is a plain toggle, not a hold: a group stays open
+  only while a thinking row inside it is one the reader is reading, `groupHoldsReader`);
+  thinking rows ride the open
   group, or the log when none is open. A group's header stays on the log's left edge, and
   the only rows inset under it are the **step lines** (`.steps-body > .msg.tool`): a
   reasoning row that rides the same body keeps the prose's left edge, so the inset marks one
