@@ -145,6 +145,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   card, which is why unfolding a step snapped it back into focus. The layer now exists only
   while the camera moves, and it is dropped 200 ms after the view settles, so the canvas is
   repainted at its real scale.
+- **A released card keeps the box it had, so the view stays where the reader put it.** Card
+  virtualization hands a far card's content back and keeps its height in
+  `contain-intrinsic-size`, so the tidy-tree layout does not re-place the tree around a hole —
+  but the release wrote that placeholder **before** wiping the card, and the wipe
+  (`renderNodeItems`) wakes the card for measure (`cvWakeForMeasure`), which takes the class and
+  the placeholder off again. The emptied card then reported its head-only height into the next
+  layout pass: panning down released the cards above the reader, and every card below them was
+  placed up by the height they used to have, up to four cards a tick. The placeholder is now
+  written after the wipe, and the wake leaves an unloaded card alone — nothing could repair it
+  afterwards, because the card sits far outside the skip margin and only a pan all the way back
+  would have it skipped again.
+- **The three remaining ways a card's box moved the reader's view are closed.** A skipped
+  card's box was held in `contain-intrinsic-size` alone, which describes the *content* box, so a
+  card with a border came back a pixel taller every time it was skipped and a pixel shorter every
+  time it was woken — once per card, all the way through a pan. It is now held as an inline
+  height (the number `relayout()` reads back exactly) with the intrinsic size as the skip's
+  fallback. A wait whose answer never arrived dropped the box it had been pinned to, collapsing a
+  764 px card to its 77 px head and moving every card below it by 687 px, once for every card the
+  host was late for; the box now survives the expiry as long as the card is off screen, only a
+  card the reader can see gives it back, and the next approach asks again. And an expired card
+  that keeps its box no longer loses its request for good.
 
 ## [0.7.1] - 2026-11-17
 

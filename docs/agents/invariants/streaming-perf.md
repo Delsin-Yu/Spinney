@@ -739,17 +739,26 @@ does, the surface had to be rebuilt, and the next suspect is the layer itself.
 `canvas=7928x8278` and `5749x11194` at `dpr=1.44`, against a viewport of a few hundred thousand
 pixels — and every card in it used to be laid out and rastered whether or not anyone could see
 it. A card that is far outside the viewport is now skipped by the engine
-(`.node.cv-skip { content-visibility: auto }`), with the box it last measured written into
-`contain-intrinsic-size` **first**, because `relayout()` reads `offsetHeight` and a skipped card
-would otherwise feed a placeholder height into the tidy-tree layout. A live card, the focused
+(`.node.cv-skip { content-visibility: auto }`), with the box it last measured held **first**
+(`holdCardBox`): an inline `height`, which `relayout()` reads back exactly, plus a
+`contain-intrinsic-size` for the skip to fall back on — the intrinsic size alone describes the
+card's *content* box, so every skip came back a pixel taller and every wake a pixel shorter.
+A live card, the focused
 node, a card being dragged and any card something is written into (`cvWake`) are never skipped,
 and the margin is 1000px, so the un-skip happens well before a card becomes visible. **The
 stored box is invalidated by a change to the card itself**: a fold, an expand, a monitor or a
 replaced transcript wakes the card first (`cvWakeForMeasure`), and the `relayout()` that follows
 writes its **new** box back, so the placeholder can never describe the card as it was before the
-change. Without that, checking out an earlier node collapsed the cards below it while the layout
+change. A card whose content was **unloaded** is the one exception: its box was handed back
+already, so a fold or an expand leaves its placeholder alone (`cvWakeForMeasure` refuses it) and
+the wake waits for the content to land — waking an empty card there would feed its head-only
+height into the layout, and nothing would re-skip it, the card being far outside the margin.
+Without that, checking out an earlier node collapsed the cards below it while the layout
 still placed them at their unfolded heights, and every card after them was misplaced until
-something forced a re-measure. Whether
+something forced a re-measure. A card that **waits** for its content is pinned to the height it
+finished at last time, and a wait that runs out keeps that box as long as the card is off
+screen: dropping it collapsed a 764 px card to its 77 px head and moved every card below it,
+once per card, while the host climbed its retry ladder. Whether
 that is enough to stop the stale corner is what the `canvas=` / `dom=` fields on the next real
 stall will say — and the 2026-10-03 re-report raised the number rather than settling it: its
 worst canvas was `1865x26602` at `dpr=1.5` with `dom=33432`, i.e. ~40 000 device pixels of one

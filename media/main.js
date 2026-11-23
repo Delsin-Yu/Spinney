@@ -7546,7 +7546,7 @@ function addBackgroundNotice(item) {
    * summary on screen is not the log (`_itemsSummary`), so it does not end the wait — or
    * when the wait above is up.
    */
-  function setCardLoading(card, on) {
+  function setCardLoading(card, on, keepBox) {
     if (!card) return;
     if (card._itemsTimer) {
       clearTimeout(card._itemsTimer);
@@ -7555,8 +7555,10 @@ function addBackgroundNotice(item) {
     card.classList.toggle('items-loading', !!on);
     if (!on) {
       card.removeAttribute('aria-busy');
-      // The content is here (or the wait is over): it decides the height again.
-      clearLoadingSize(card);
+      // The content is here (or the wait is over): it decides the height again. `keepBox` is
+      // the one case where it does not — the wait is over and the content still is not here —
+      // so the box the card was promised has to outlive the strip.
+      if (!keepBox) clearLoadingSize(card);
       return;
     }
     card.setAttribute('aria-busy', 'true');
@@ -7565,12 +7567,16 @@ function addBackgroundNotice(item) {
     applyLoadingSize(card);
     card._itemsTimer = setTimeout(() => {
       card._itemsTimer = null;
-      card.classList.remove('items-loading');
-      card.removeAttribute('aria-busy');
-      clearLoadingSize(card);
-      // An unloaded card whose answer never came must not stay invisible: give its box
-      // back (it is empty, but it is there) instead of keeping a placeholder forever.
-      if (card._itemsUnloaded) {
+      // A late answer is not a missing one. A card nobody can see keeps the box it was
+      // pinned to: dropping it collapses the card to its head and moves every card below it
+      // by the height it used to have (measured: 764 px to 77 px, twice over, while the host
+      // was climbing its retry ladder). A card the reader is looking at gives the box back
+      // instead, because claiming content it does not have is a lie the reader can see.
+      const seen = itemsVisible.has(card._nodeId || '');
+      const keep = !!card._itemsUnloaded && !seen;
+      if (keep) card._itemsRequested = false;
+      setCardLoading(card, false, keep);
+      if (!keep && card._itemsUnloaded) {
         card._itemsUnloaded = false;
         cvWake(card);
       }
@@ -7586,9 +7592,10 @@ function addBackgroundNotice(item) {
   // the viewport is skipped by the engine.
   //
   // Two rules keep it honest:
-  //  - the box the card last measured is written into `contain-intrinsic-size` BEFORE it is
-  //    skipped, because `relayout()` reads `offsetHeight` and a skipped card would otherwise
-  //    report a placeholder height into the tidy-tree layout;
+  //  - the box the card last measured is held BEFORE it is skipped (`holdCardBox`): an inline
+  //    height, which is what `relayout()` reads back exactly, plus a `contain-intrinsic-size`
+  //    for the skip to fall back on — the intrinsic size alone came back a pixel taller on
+  //    every skip, because it describes the content box and a card has a border;
   //  - a card that is live (running), focused, or being dragged is never skipped, and
   //    `cvWake` un-skips one that is written into.
   // The margin is deliberately much larger than the viewport so the un-skip happens well
@@ -7599,6 +7606,33 @@ function addBackgroundNotice(item) {
       ? new IntersectionObserver(onCardVisibility, { root: null, rootMargin: CV_ROOT_MARGIN, threshold: 0 })
       : null;
   const cvSkipped = new Set();
+
+  /**
+   * Hold a card's box at what it measures right now, and keep holding it while the engine
+   * skips the card.
+   *
+   * Two writes, one number. `contain-intrinsic-size` is what the skip consults and the
+   * fallback if the height is ever released; the inline `height` is what `relayout()` really
+   * reads, because the intrinsic size describes the **content** box, so a card with a border
+   * came back one pixel taller the moment it was skipped and one pixel shorter the moment it
+   * was woken — measured 812 to 813 to 812 across a single crossing, and once per card the
+   * whole way through a pan.
+   *
+   * The height is the same one a waiting card is pinned to (`_loadingHeight`): both say "the
+   * box is a promise until the content is back", and `clearLoadingSize` is the one release.
+   */
+  function holdCardBox(card, w, h) {
+    try {
+      if (!card || !(w > 0) || !(h > 0)) return;
+      card.style.containIntrinsicSize = w + 'px ' + h + 'px';
+      card._loadingHeight = h;
+      card.style.height = h + 'px';
+      card.classList.add('cv-skip');
+      cvSkipped.add(card);
+    } catch (err) {
+      /* a layout aid must never break the UI */
+    }
+  }
 
   function cvMaySkip(card) {
     const id = card._nodeId;
@@ -7625,8 +7659,14 @@ function addBackgroundNotice(item) {
       if (!card || !cvSkipped.has(card)) return;
       // An unloaded card is still skipped on purpose: its placeholder height IS its box
       // until the content is back. Waking it early would collapse a card the reader has
-      // not reached yet, and the layout would re-place the tree around a hole.
-      if (card._itemsUnloaded) return;
+      // not reached yet, and the layout would re-place the tree around a hole. Coming this
+      // near is also the second chance to ask: the wait's expiry cleared `_itemsRequested`
+      // without giving the box up, and nothing else would ask again while the card stays
+      // inside the margin.
+      if (card._itemsUnloaded) {
+        if (!card._itemsRequested) reloadCardItems(card);
+        return;
+      }
       // The card is 1,000 px away while the camera moves: it can wait for the settle, and
       // the layout it would cost then lands on a still screen.
       if (viewMoving() && treeActiveId !== card._nodeId) {
@@ -7648,6 +7688,10 @@ function addBackgroundNotice(item) {
       cvSkipped.delete(card);
       card.classList.remove('cv-skip');
       card.style.containIntrinsicSize = '';
+      // The box was held for the skip, not for a load: the content decides again. A card
+      // that is still waiting keeps its pin (`items-loading`), because that promise has not
+      // been answered yet.
+      if (!card.classList.contains('items-loading')) clearLoadingSize(card);
       // `relayout()` measures the new box and hands it back, so the engine may skip this
       // card again instead of leaving a card of a big tree fully laid out for good.
       card._cvFresh = true;
@@ -7685,9 +7729,7 @@ function addBackgroundNotice(item) {
       const w = card.offsetWidth || 0;
       const h = card.offsetHeight || 0;
       if (!w || !h) return;
-      card.style.containIntrinsicSize = w + 'px ' + h + 'px';
-      card.classList.add('cv-skip');
-      cvSkipped.add(card);
+      holdCardBox(card, w, h);
     } catch (err) {
       /* a layout aid must never break the UI */
     }
@@ -7716,17 +7758,25 @@ function addBackgroundNotice(item) {
    *
    * Without it, a tall card folded by a checkout keeps its unfolded height in the layout —
    * and takes every card below it with it, which is the "it folds but stays where it was"
-   * misplacement. It is called at the four places where a card's structure or content
-   * changes, and it deliberately wakes an **unloaded** card too: the placeholder is its box
-   * only until its structure changes, and a fold is a structural change. The engine
-   * re-skips the card (with the new box) the next time it leaves the viewport.
+   * misplacement. It is called at the places where a card's structure or content changes.
+   *
+   * An **unloaded** card is deliberately not woken here, the same refusal `cvWake` and
+   * `cvWakeNow` already make, and for a sharper reason: its box was handed back by
+   * `unloadCardItems`, so waking it drops the placeholder around a card that holds nothing
+   * and feeds the head-only height into the tidy-tree layout — every card below it moves up
+   * by the height it used to have. Nothing re-skips it either: it is far outside the skip
+   * margin, so the observer reports it again only if the reader pans all the way back. The
+   * placeholder stands in for content nobody can see, and the real measurement happens when
+   * the content lands (`renderNodeItems` clears `_itemsUnloaded` before it wakes).
    */
   function cvWakeForMeasure(card) {
     try {
       if (!card || !cvSkipped || !cvSkipped.has(card)) return;
+      if (card._itemsUnloaded) return;
       cvSkipped.delete(card);
       card.classList.remove('cv-skip');
       card.style.containIntrinsicSize = '';
+      if (!card.classList.contains('items-loading')) clearLoadingSize(card);
     } catch (err) {
       /* a layout aid must never break the UI */
     }
@@ -7827,15 +7877,11 @@ function addBackgroundNotice(item) {
   /** Hand one card's ask and log back to the browser, keeping its box. */
   function unloadCardItems(card) {
     // Measured before the content goes: this is the height the layout will keep reading.
+    let w = 0;
+    let h = 0;
     try {
-      const w = card.offsetWidth || 0;
-      const h = card.offsetHeight || 0;
-      if (w && h) {
-        card.style.containIntrinsicSize = w + 'px ' + h + 'px';
-        card.classList.add('cv-skip');
-        cvSkipped.add(card);
-        rememberCardSize(card._nodeId, h);
-      }
+      w = card.offsetWidth || 0;
+      h = card.offsetHeight || 0;
     } catch (err) {
       /* a layout aid must never break the UI */
     }
@@ -7848,7 +7894,27 @@ function addBackgroundNotice(item) {
     card._itemsDeferred = null;
     card._itemCount = 0;
     card._itemsUnloaded = true;
+    // The box is written **after** the wipe, never before: `renderNodeItems` wakes the card
+    // for measure, and written first the box it had just measured was taken back off two
+    // lines later. An emptied card with no box reports its head-only height into the
+    // tidy-tree layout, and every card below it moves up by the height it used to have —
+    // the reader's view jumping out from under them while the queue drains, up to
+    // `VIRT_UNLOAD_BATCH` cards a tick.
+    //
+    // `holdCardBox` writes the measured height as an inline one as well as the skip's
+    // placeholder, because that is the number the layout reads back exactly: the placeholder
+    // alone came back a pixel taller, once per release.
+    //
+    // `setCardLoading(false)` runs *first*, because it is the release of the box a wait was
+    // pinning: the hold below has to be the last word on the height.
     setCardLoading(card, false);
+    if (w && h) {
+      holdCardBox(card, w, h);
+      // The box is this card's own answer now, so the next `relayout()` must not replace it
+      // with the empty one it would measure (`_cvFresh`).
+      card._cvFresh = false;
+      rememberCardSize(card._nodeId, h);
+    }
     if (itemsObserver && card) itemsObserver.unobserve(card);
     scheduleLayout();
   }
@@ -8976,11 +9042,7 @@ function relayout() {
       // layout is using, never the one it was before the fold.
       if (card._cvFresh) {
         card._cvFresh = false;
-        if (cvMaySkip(card)) {
-          card.style.containIntrinsicSize = widths[id] + 'px ' + heights[id] + 'px';
-          card.classList.add('cv-skip');
-          cvSkipped.add(card);
-        }
+        if (cvMaySkip(card)) holdCardBox(card, widths[id], heights[id]);
       }
       // A card that is showing its whole log is the size it will be next time: remember
       // that box for the waiting card of a later load (`applyLoadingSize`). A summary, an
