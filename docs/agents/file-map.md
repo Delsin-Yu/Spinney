@@ -502,8 +502,9 @@
   `Ran N steps` / `Ran 1 step` header over its own `.steps-body`, and the next assistant
   **text** closes it — the prose is appended to `.node-work` itself, never into a group's
   body, and the following tool row opens a second group. So a turn can hold several groups,
-  each with its own count, its own body and its own fold state (open while its turn runs,
-  folded when it ends, and a click on that header always wins); thinking rows ride the open
+  each with its own count, its own body and its own fold state (open while its round runs,
+  folded when the response under it is complete — the next tool call's first `toolCallDelta`,
+  or the turn's end — and a click on that header always wins); thinking rows ride the open
   group, or the log when none is open. A group's header stays on the log's left edge, and
   the only rows inset under it are the **step lines** (`.steps-body > .msg.tool`): a
   reasoning row that rides the same body keeps the prose's left edge, so the inset marks one

@@ -101,6 +101,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and moves the view. The waiting card is also the wait and nothing else: its head and the
   `Loading…` label animated with the same per-character wave a running step's verb uses. The
   ask and the log box appear with the content.
+- **A run of steps folds when its response ends, not when the turn does.** The steps group
+  above an answer tucked itself behind its header only once the whole turn was over, so a
+  turn of three rounds kept every finished round open until the last one answered. It now
+  folds the moment the text under it is complete — the next tool call starting to compose,
+  or the turn ending — while a group the reader opened or closed by hand, or one holding a
+  reasoning row they unlocked, stays exactly where it is.
 
 ### Removed
 
@@ -114,6 +120,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A mid-turn answer is rendered as Markdown, and its line breaks survive.** Only the turn's
+  **last** text block was ever finalized: `finalizeStreamingAnswer` reached for the log's own
+  last child, and a tool call opens its draft row — with the next steps group around it —
+  while the answer above is still streaming, so by the time `toolStart` asked, the last child
+  was a `.steps` group and the finalize did nothing. Every earlier text block stayed a bare
+  text node: its Markdown markers sat on screen as source and its newlines collapsed into one
+  paragraph. A text block now ends where it really ends (the first `toolCallDelta` of the next
+  call, and the turn's end), the log remembers the block it is streaming instead of assuming
+  it is the last child, and that block goes through `renderMarkdown` like the final answer.
 - **A reload puts the tab back on the card you were standing on.** A checkout is view-only, so
   it never wrote anything: `session.activeNodeId` lives in the session header, which is written
   only together with the content, so the stored focus was always the node of the last content

@@ -6254,7 +6254,67 @@ if (contextLabel !== 'ctx 50%') {
     }
   }
 
+  // (e) A response is **over the moment the next tool call starts composing**, and it is
+  // markdown from then on. The order that breaks the naive test is the provider's own:
+  // `toolCallDelta` appends the draft row and opens the next group *before* `toolStart`
+  // finalizes anything, so a finalize that only looked at the log's last child found a
+  // `.steps` group and rendered nothing — the block stayed a bare text node, its newlines
+  // collapsed and its `**` / `##` sat on screen as source. The run above the response folds
+  // at that same moment (its round is over), and the run below it is still open.
+  {
+    mountEmpty('running');
+    dispatch({ type: 'state', busy: true, status: '', sessionId: 'runs-session', runningNodes: [NODE] });
+    runTool('fin-a1', 'read_file', '{"path":"a.ts"}');
+    dispatch({ type: 'delta', nodeId: NODE, text: '## Heading **bold**' });
+    const rowBefore = assistantRows(logOf(), [])[0];
+    if (!rowBefore) {
+      problems.push('a turn with one run and one text block rendered no assistant row');
+    } else {
+      if (!rowBefore._streaming) {
+        problems.push('a text block that is still streaming is not flagged as streaming — nothing can tell it from a finished one');
+      }
+      const groupsBefore = groupsOf();
+      if (groupsBefore.length !== 1 || groupsBefore[0].classList.contains('steps-folded')) {
+        problems.push(
+          'the run above a response is already folded while that response is still streaming — the fold belongs to the ' +
+            'response ending, not to the text starting',
+        );
+      }
+      // The next call starts composing: its draft row and its group are appended now, and
+      // the response above it ends with them.
+      dispatch({ type: 'toolCallDelta', nodeId: NODE, index: 0, id: 'fin-b1', name: 'exec_command' });
+      if (rowBefore._streaming) {
+        problems.push(
+          'the text block above a composing tool call is still streaming — `toolCallDelta` is where its response ends',
+        );
+      }
+      const rendered = String((rowBefore._answerEl && rowBefore._answerEl.innerHTML) || '');
+      if (rendered.indexOf('## Heading **bold**') < 0) {
+        problems.push(
+          `the text block above a composing call holds ${JSON.stringify(rendered)} as its rendered body, expected its own ` +
+            'text through `renderMarkdown` (the sandbox renders that as escaped text, so the markers stay)',
+        );
+      }
+      const groups = groupsOf();
+      if (groups.length !== 2) {
+        problems.push(`two runs around one response built ${groups.length} steps group(s), expected 2 (one per run)`);
+      } else {
+        if (!groups[0].classList.contains('steps-folded')) {
+          problems.push('the run above a finished response is still open — it tucks itself when its response ends');
+        }
+        if (groups[1].classList.contains('steps-folded')) {
+          problems.push('the run that has just opened is already folded — only the run above the response folds');
+        }
+      }
+    }
+    dispatch({ type: 'toolStart', nodeId: NODE, index: 0, id: 'fin-b1', name: 'exec_command', args: '{"command":"ls"}', startedAt: Date.now() });
+    dispatch({ type: 'toolEnd', nodeId: NODE, id: 'fin-b1', content: 'ok', ms: 10 });
+    dispatch({ type: 'delta', nodeId: NODE, text: 'the final answer' });
+    dispatch({ type: 'done', nodeId: NODE });
+  }
+
   notes.push('steps groups: one per run, the text between them in the flow, each group folded and lazy on its own');
+  notes.push('a response ends at the next tool call: its markdown is rendered and the run above it folds');
   notes.push('a turn that answered only with its reasoning: a banner, then the thinking in the flow (live and repaint)');
 }
 

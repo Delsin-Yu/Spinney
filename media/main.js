@@ -3610,6 +3610,9 @@
     }
     if (finalize) {
       node._streaming = false;
+      // The block is over: the container must stop pointing at it, or the next finalize
+      // would render this one a second time instead of the block that is actually live.
+      if (messagesEl && messagesEl._streamingAnswer === node) messagesEl._streamingAnswer = null;
       // **Merge before the render.** The newest characters of the stream exist only in
       // the pending span, and `innerHTML` is about to replace the subtree it lives in.
       mergeChunk(answer);
@@ -3621,6 +3624,11 @@
     const full = node._text || '';
     if (!node._streaming) {
       node._streaming = true;
+      // **The container remembers the block it is streaming.** The row is not reliably the
+      // log's last child when the block ends: a tool call opens its draft row (and the
+      // steps group around it) while the answer above is still streaming, so the finalize
+      // that arrives at `toolStart` has to be able to find this row (`streamingAnswerRow`).
+      if (messagesEl) messagesEl._streamingAnswer = node;
       answer._settled = 0;
       dropChunk(answer);
       // `appendData` and not `nodeValue`: it is the streaming surface's one write (and it
@@ -3645,6 +3653,58 @@
     enqueueWords(answer, ensureStreamText(answer), full.slice(have));
   }
 
+  /** Does `row` still hang in the log this container paints? A repaint wipes the log
+   * (`renderNodeItems`), and a row it remembered would then be a detached element whose
+   * `renderAnswer` would write into nothing. */
+  function inLog(row) {
+    for (let el = row ? row.parentElement : null; el; el = el.parentElement) {
+      if (el === messagesEl) return true;
+    }
+    return false;
+  }
+
+  /**
+   * The text block that is still streaming in this container, or `null`.
+   *
+   * **It is not necessarily the log's last child.** A tool call opens its draft row — and
+   * the steps group around it — while the block above is still streaming (`toolCallDelta`),
+   * so by the time `toolStart` asks for the finalize that block is already one group up.
+   * The container carries the row it is streaming (`messagesEl._streamingAnswer`, set by
+   * `renderAnswer`), and the last child is only the fallback for a log whose answer never
+   * went through that pointer.
+   */
+  function streamingAnswerRow() {
+    if (!messagesEl) return null;
+    const tracked = messagesEl._streamingAnswer;
+    if (tracked && tracked._streaming && inLog(tracked) && !tracked.classList.contains('error')) return tracked;
+    const last = messagesEl.lastElementChild;
+    if (last && last.dataset && last.dataset.kind === 'assistant' && last._streaming && !last.classList.contains('error')) {
+      return last;
+    }
+    return null;
+  }
+
+  /**
+   * A response **ends its round**: every steps group above it tucks itself behind its own
+   * header at that moment, instead of waiting for the whole turn to end (`settleSteps`).
+   * A group the reader opened or closed by hand (`_userTouched`), and one holding a row the
+   * reader unlocked (`groupHoldsReaderRow`), stay exactly where they are.
+   */
+  function foldStepsAbove(row) {
+    if (!row) return;
+    for (let sib = row.previousElementSibling; sib; sib = sib.previousElementSibling) {
+      if (!sib.dataset || sib.dataset.kind !== 'steps') continue;
+      if (sib._userTouched) continue;
+      if (groupHoldsReaderRow(sib)) continue;
+      setStepsFold(sib, true);
+    }
+  }
+
+  /**
+   * The text block is over — the next tool call started, or the turn ended: its words stop
+   * rising, its thinking row folds back to its one line, its markdown goes in, and the steps
+   * that led to it tuck themselves behind their header.
+   */
   function finalizeStreamingAnswer() {
     if (!messagesEl) return;
     // Everything that is still fading is part of the message: settle it before anything
@@ -3653,14 +3713,12 @@
     // The message is complete: nothing in it is streaming any more, so its thinking
     // row collapses back to its one line.
     closeActiveRows('thinking');
-    // A streaming answer is a text row, and a text row always lives in the flow — the
-    // log's own last child is the one that can still be mid-stream.
-    const last = messagesEl.lastElementChild;
-    if (last && last.dataset.kind === 'assistant' && !last.classList.contains('error')) {
-      renderAnswer(last, true);
-      followActive();
-      relayout();
-    }
+    const row = streamingAnswerRow();
+    if (!row) return;
+    renderAnswer(row, true);
+    foldStepsAbove(row);
+    followActive();
+    relayout();
   }
 
   /**
@@ -6172,6 +6230,9 @@ function addBackgroundNotice(item) {
     const keepWork = scrollMemory(workEl);
     workEl.innerHTML = '';
     askEl.innerHTML = '';
+    // The container's remembered streaming block went with the wipe: it is a detached
+    // element now, and the items painted below set their own.
+    workEl._streamingAnswer = null;
     // A full render replaces the log, and its steps groups with it: the next render that
     // has steps builds fresh ones (`ensureStepsGroup`), and the old list must not point
     // at elements the wipe above detached.
@@ -12630,7 +12691,11 @@ function relayout() {
         // argument bytes are a payload nothing renders. The tok/s readout still counts the
         // name it did get.
         addTpsTokens(msg.name || '');
-        routeTo(msg.nodeId, () => appendLiveTool(msg.index, msg.id, msg.name), 'toolCallDelta');
+        // The text block above ends **here**, not at `toolStart`: the draft row is about to
+        // be appended, and the finalize reaches an answer only while it is the log's last
+        // streaming block (`streamingAnswerRow`). Doing it first also means the markdown is
+        // on screen for the whole time the arguments are still arriving.
+        routeTo(msg.nodeId, () => { finalizeStreamingAnswer(); appendLiveTool(msg.index, msg.id, msg.name); }, 'toolCallDelta');
         break;
       case 'toolStart':
         routeTo(msg.nodeId, () => { finalizeStreamingAnswer(); finalizeLiveTool(msg.index, msg.id, msg.name, msg.args, msg.startedAt, null, msg.title); }, 'toolStart');

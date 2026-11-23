@@ -29,12 +29,14 @@
   open when the turn ends — and the rule then leaves it exactly where they put it. A tool row
   is folded at rest whatever it is doing — its one line already says what the step was —
   and a click opens its detail. The **steps groups** follow the same hand-over rule per
-  group: each is open while its run is live, folded when the turn ends, and a click on its
+  group: each is open while its run is live, folded when the response under it is complete
+  (the next call's first `toolCallDelta`, or the turn's end), and a click on its
   own header always wins for that one group — and a group holding a row the reader released
   stays open, or its fold would hide that row. `setThinkingOpen` / `setToolOpen` /
-  `setActiveRow` / `clearActiveRow` / `closeActiveRows` / `setStepsFold` in `media/main.js`;
-  `tools/check-webview.js` asserts both halves ("the two rows of a turn") and the per-run
-  groups ("steps groups: one per run").
+  `setActiveRow` / `clearActiveRow` / `closeActiveRows` / `setStepsFold` / `foldStepsAbove` in
+  `media/main.js`; `tools/check-webview.js` asserts both halves ("the two rows of a turn"), the
+  per-run groups ("steps groups: one per run") and the fold at the response's end ("a response
+  ends at the next tool call").
 - Transcript scrolling is **per-card and event-driven**, and a card has exactly one
   scroller: `.node-work`, which holds the whole turn (see §"One card, one flow"). It has
   a `createScrollController` with a green follow dot
@@ -172,8 +174,8 @@ containers and no more:
   (`.steps`, `data-kind="steps"`) when none is open, an assistant **text** row closes it,
   and the next tool row opens another — so a turn can hold several `Ran N steps` groups
   (`Ran 1 step` when it is one), each with its own `.steps-body`, its own count and its
-  own fold state (open while its turn runs, folded when the turn ends, and a click on that
-  header toggles it and always wins **for that group**). A thinking row, a notice, a
+  own fold state (open while its round runs, folded when the response under it is complete,
+  and a click on that header toggles it and always wins **for that group**). A thinking row, a notice, a
   background/sub-agent notice and a `HARNESS` block join the open group's body when there
   is one and stand in the log itself when there is not. **The text always stays in the
   flow**: an assistant text row is appended to `.node-work` itself, never into a group's
@@ -181,6 +183,19 @@ containers and no more:
   nothing to lift out, and no second place an answer could live (`.msg.assistant` has no
   background or border; the error variant keeps its tint). A turn with no tool calls has
   no group at all: its reasoning line and its answer are the flow.
+
+**A text block ends where the model stopped writing it, not where the turn ends.** The first
+`toolCallDelta` of the next call is the moment: the block's words are settled and its markdown
+goes in (`finalizeStreamingAnswer`), and the steps group above it folds there too
+(`foldStepsAbove`, with `_userTouched` and `groupHoldsReaderRow` still exempt). The finalize
+must therefore **not** reach for the log's last child: `toolCallDelta` appends the next run's
+draft row — and its group — *before* anything is finalized, so by then the block is one group
+up. The container carries the block it is streaming (`messagesEl._streamingAnswer`, set in
+`renderAnswer`), and that pointer is the one finalize reads (`streamingAnswerRow`). Reaching
+for `lastElementChild` instead is what left every earlier text block a bare text node: its
+markdown markers on screen as source, its newlines collapsed, and only the turn's final
+answer rendered — `check:webview`'s "a response ends at the next tool call" case pins all
+three.
 
 That is the whole structure. It replaced a three-zone card (`ask` / `work` / `answer`)
 whose third zone was a *move* of the log's trailing answer run, and the machinery that
