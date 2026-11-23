@@ -301,6 +301,7 @@
   "The key is removed with the next save.": "该密钥将在下次保存时移除。",
   "The keyless backends need no configuration: web_search tries them in order and skips the ones that recently failed. The first row is the model card’s own search provider — it answers only when the card selects it and a token resolves.": "免费后端无需任何配置：web_search 会按此顺序尝试，并跳过最近失败过的后端。第一行是模型卡自己的搜索服务商 —— 只有在卡片选择了它并且能解析出令牌时才会应答。",
   "The list falls back to the editor search, which does not honour .gitignore.": "列表回退到编辑器搜索，它不遵守 .gitignore。",
+  "The model returned no answer text this turn. What follows is its last thinking.": "模型这一轮没有返回回答正文，下面是它最后的思考内容。",
   "The new key is written with the next save.": "新密钥将在下次保存时写入。",
   "The new token is written with the next save.": "新令牌将在下次保存时写入。",
   "The page sent no model configuration.": "页面没有发送任何模型配置。",

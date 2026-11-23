@@ -77,8 +77,14 @@
   `ensureThinkingRow` opens the group before the row is created, `tuckReasoningIntoRun` moves
   the row directly above a newly opened group into its body (live and repaint alike), and
   `paintFinishedItem` queues a thinking-only item into the group it belongs to. No reasoning
-  row is ever loose in the flow. A thought that arrives **while** a run is open rides that run
-  — the long-standing rule — which is why the split of steps between two runs is not pinned.
+  row is ever loose in the flow, with **one** exception: a turn whose model answered only with
+  its reasoning (`DisplayItem.noAnswer`). That item is not an answer — the harness mirrored its
+  reasoning into the message's `content` only to keep the history API-valid — and it is not a
+  step either, so the card draws a warning banner and then the thinking itself in the flow
+  (`addNoAnswerBlock`, and `liftNoAnswerRow` on the live path, which lifts the row it already
+  streamed rather than rebuilding it), and `clearActiveRow` leaves that one row open. A thought
+  that arrives **while** a run is open rides that run — the long-standing rule — which is why
+  the split of steps between two runs is not pinned.
 - **A completion notice that starts a round is a boundary.** `DisplayItem.round` (set by
   `renderSignalCards(..., startsRound)`) means "this notice ends the run above it and opens the
   next one": the live path closes the group and appends one accent line

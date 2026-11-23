@@ -2436,6 +2436,9 @@
     // reading it, so the turn ending leaves it open — and it is marked as theirs, or a
     // later pass (`settleRowsFinished`, a repaint) would fold it after all.
     if (row.classList.contains('thinking-row')) {
+      // A row that **is** the turn's output (`_noAnswer`) is not a step to fold away: the
+      // banner above it promises the text below it, so the turn ending leaves it open.
+      if (row._noAnswer) return;
       if (readerHoldsRow(row)) {
         row._userTouched = true;
         return;
@@ -3347,6 +3350,88 @@
     // all (a turn that only thought before it answered still folds that thought away).
     ensureStepsGroup();
     return addThinkingRow('');
+  }
+
+  // ---- A turn whose model answered only with its reasoning ----------------------
+  // The one exception to "no reasoning row is ever loose in the flow", and the one case a
+  // thought is not a step. The model can write its entire reply on the reasoning channel
+  // and send no answer text at all; the harness then mirrors that reasoning into the
+  // message's `content` so the history stays API-valid (a message with neither content nor
+  // tool_calls is refused, and thinking mode demands the reasoning be passed back). The
+  // mirror is bookkeeping, not an answer: the card says what actually happened — a banner,
+  // then the thinking itself — instead of filing the text as a step the reader has to open
+  // to discover, and instead of dressing it as an answer the turn never got.
+
+  /** The banner of that turn, in the flow, right above the thinking it introduces. */
+  function addNoAnswerBanner() {
+    return addNotice('warning', tr('The model returned no answer text this turn. What follows is its last thinking.'));
+  }
+
+  /**
+   * The block, built from the item (the repaint path): the banner, then the thinking, in
+   * the flow. The row is opened and marked `_noAnswer`, which is what keeps a later pass
+   * (`clearActiveRow` / `settleRowsFinished`) from folding away the text the banner
+   * promises.
+   */
+  function addNoAnswerBlock(thinking) {
+    closeStepsGroup();
+    addNoAnswerBanner();
+    const row = addThinkingRow(thinking);
+    row._noAnswer = true;
+    setThinkingOpen(row, true);
+    followActive();
+    return row;
+  }
+
+  /**
+   * The same block on the **live** path, where the text is already on screen: the row its
+   * deltas opened is lifted out of the run instead of rebuilt (rebuilding it would throw
+   * away the `Text` node the word animation is still merging into), and the banner takes
+   * the place above it. A run the row leaves empty is dropped — a `Ran 0 steps` header
+   * would be a fold around nothing.
+   */
+  function liftNoAnswerRow() {
+    const group = openSteps;
+    const body = group && group._body ? group._body : null;
+    let row = null;
+    if (body) {
+      for (let i = (body.children || []).length - 1; i >= 0; i--) {
+        const kid = body.children[i];
+        if (kid.dataset && kid.dataset.kind === 'thinking') {
+          row = kid;
+          break;
+        }
+      }
+    }
+    // Nothing to lift (this tab never streamed the turn): the item on the node already
+    // carries `noAnswer`, so the next repaint draws the block.
+    if (!row) return null;
+    if (row.parentElement) row.parentElement.removeChild(row);
+    closeStepsGroup();
+    addNoAnswerBanner();
+    row._noAnswer = true;
+    // Not live any more, and — by the `_noAnswer` rule — not folded either.
+    clearActiveRow(row);
+    messagesEl.appendChild(row);
+    setThinkingOpen(row, true);
+    if (body) {
+      if (!body.children.length) dropStepsGroup(group);
+      else updateStepsHead(group);
+    }
+    followActive();
+    return row;
+  }
+
+  /** A steps group that owns no row any more: its header would invite a click that paints
+   * nothing, and the card's fold bookkeeping has to forget it. */
+  function dropStepsGroup(group) {
+    const card = logCard();
+    if (card && card._groups) {
+      const at = card._groups.indexOf(group);
+      if (at >= 0) card._groups.splice(at, 1);
+    }
+    if (card && card._openGroup === group) card._openGroup = null;
+    if (group.parentElement) group.parentElement.removeChild(group);
   }
 
   /**
@@ -5898,6 +5983,14 @@ function addBackgroundNotice(item) {
    * that arrives with no run open is the flow's own line.
    */
   function paintFinishedItem(item) {
+    // A turn whose model answered **only with its reasoning** (`noAnswer`, set from the
+    // `noAnswerText` event): the banner and the thinking itself, both in the flow. The text
+    // is not an answer and the row is not a step, so neither the bubble branch below nor
+    // the "only reasoning" one may take it.
+    if (item.kind === 'assistant' && item.noAnswer && !item.error && String(item.thinking || '').length) {
+      addNoAnswerBlock(item.thinking);
+      return;
+    }
     // The text of a turn always lives in the flow, and it closes the run of steps above
     // it: `addAssistant` renders the reasoning row that travels with the item where the
     // live path put it (inside the open group) and then closes the run before the prose
@@ -11779,6 +11872,13 @@ function relayout() {
       }
       case 'toolEnd':
         routeTo(msg.nodeId, () => updateTool(msg.id, msg.content, msg.ms, msg.diff), 'toolEnd');
+        break;
+      case 'noAnswerText':
+        // The round wrote nothing but its reasoning: the host's item now carries
+        // `noAnswer`, and the text this card already streamed becomes the block that says
+        // so — the banner, then the thinking itself in the flow (`liftNoAnswerRow`). The
+        // repaint path builds the same block from the item (`paintFinishedItem`).
+        routeTo(msg.nodeId, () => liftNoAnswerRow(), 'noAnswerText');
         break;
       case 'agentStart':
         onAgentStart(msg);

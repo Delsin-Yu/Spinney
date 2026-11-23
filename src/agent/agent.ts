@@ -1990,6 +1990,14 @@ export class Agent {
     // reasoning into content so the message is API-valid and not lost.
     const hasToolCalls = toolCalls.length > 0;
     const effectiveContent = hasToolCalls ? content : content || reasoning || '';
+    // Everything this round wrote came through the reasoning channel, so the content
+    // above is that reasoning **mirrored** (the mirror itself is API bookkeeping: a
+    // message with neither content nor tool_calls is refused, and thinking mode demands
+    // the reasoning be passed back). The card must not present the mirror as an answer
+    // the model never wrote, so the display layer is told (`noAnswerText`).
+    if (!hasToolCalls && !content.trim() && reasoning.trim()) {
+      this.onEvent({ type: 'noAnswerText' });
+    }
 
     return {
       message: {

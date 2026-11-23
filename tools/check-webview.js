@@ -297,6 +297,10 @@ const TURN_MESSAGES = [
   // for a missing card can never be silent again").
   { type: 'delta', nodeId: UNKNOWN_NODE_ID, text: 'x' },
   { type: 'thinkingDelta', nodeId: NODE_ID, text: 'smoke thought' },
+  // The one exception to "a thought is a step": a round that wrote nothing but its
+  // reasoning (`noAnswerText`) lifts the row it streamed out of the run. Replayed here for
+  // the "no handler throws" half; the block that pins the shape is further down.
+  { type: 'noAnswerText', nodeId: NODE_ID },
   { type: 'usage', nodeId: NODE_ID, usage: { prompt_tokens: 10, completion_tokens: 2, total_tokens: 12 } },
   { type: 'agentStart', id: 'smoke-agent', name: 'smoke agent', instruction: 'smoke', model: 'smoke-model', startedAt: Date.now() - 1500 },
   { type: 'agentDone', id: 'smoke-agent', status: 'done', summary: 'smoke summary', elapsedMs: 1500 },
@@ -6163,7 +6167,90 @@ if (contextLabel !== 'ctx 50%') {
     }
   }
 
+  // (d) A turn whose model answered **only with its reasoning** — the `noAnswer` item the
+  // host marks when `requestAssistantMessage` had to mirror the reasoning into the
+  // message's `content`. The card says what happened: a banner, then the thinking itself,
+  // both in the flow — not folded into the run, and not dressed as an answer. Both build
+  // paths are pinned, because they make the block differently (the live one lifts the row
+  // its deltas opened, the repaint builds it from the item).
+  {
+    mountEmpty('running');
+    dispatch({ type: 'state', busy: true, status: '', sessionId: 'runs-session', runningNodes: [NODE] });
+    runTool('na-1', 'read_file', '{"path":"a.ts"}');
+    dispatch({ type: 'thinkingDelta', nodeId: NODE, text: 'everything the turn said' });
+    dispatch({ type: 'noAnswerText', nodeId: NODE });
+    dispatch({ type: 'done', nodeId: NODE });
+    const liveNoAnswer = kindsOf();
+    if (liveNoAnswer.join(',') !== 'steps,notice,thinking') {
+      problems.push(
+        `a turn that answered only with its reasoning renders ${JSON.stringify(liveNoAnswer)}, expected ` +
+          '"steps,notice,thinking" (the banner, then the thinking in the flow — not folded into the run)',
+      );
+    } else {
+      const [group, banner, row] = blocksOf();
+      if (!hasClass(banner, 'warning')) {
+        problems.push('the no-answer banner is not a warning block — it reports a defect, it is not a step');
+      }
+      if (!/no answer text/i.test(String(banner.textContent || ''))) {
+        problems.push(`the no-answer banner reads ${JSON.stringify(String(banner.textContent || ''))}, expected the sentence about a missing answer`);
+      }
+      if (!row._open) {
+        problems.push('the thinking row of a no-answer turn is collapsed — the banner promises the text below it');
+      }
+      // The stub's `textContent` is a property, not a computed subtree: a live row carries
+      // its words in the child text node / word spans of `_textEl`.
+      const rowText = ((row._textEl && row._textEl.children) || [])
+        .map((child) => String(child.textContent || ''))
+        .join('');
+      if (rowText.indexOf('everything the turn said') < 0) {
+        problems.push(
+          `the no-answer row reads ${JSON.stringify(rowText)}, expected the text the model streamed`,
+        );
+      }
+      const body = bodyOf(group);
+      const held = body
+        ? (body.children || []).filter((child) => (child.dataset || {}).kind === 'thinking').length
+        : 0;
+      if (held) {
+        problems.push(`the run of a no-answer turn still holds ${held} thinking row(s) — the row is lifted out of it`);
+      }
+      if (labelOf(group) !== 'Ran 1 step') {
+        problems.push(
+          `the run of a no-answer turn reads ${JSON.stringify(labelOf(group))}, expected "Ran 1 step" (the thought left it)`,
+        );
+      }
+    }
+    mountEmpty('done');
+    dispatch({
+      type: 'path',
+      ids: [NODE],
+      nodes: [
+        {
+          id: NODE,
+          status: 'done',
+          items: [
+            { kind: 'user', text: 'the ask' },
+            { kind: 'tool', id: 'na-1', name: 'read_file', args: '{"path":"a.ts"}', status: 'done', content: 'ok', ms: 500 },
+            { kind: 'assistant', thinking: 'everything the turn said', noAnswer: true },
+          ],
+        },
+      ],
+    });
+    const repaintNoAnswer = kindsOf();
+    if (repaintNoAnswer.join(',') !== liveNoAnswer.join(',')) {
+      problems.push(
+        `a repainted no-answer turn renders ${JSON.stringify(repaintNoAnswer)}, but the live turn rendered ` +
+          `${JSON.stringify(liveNoAnswer)} — the two paths have to build the same block`,
+      );
+    }
+    const tail = blocksOf()[blocksOf().length - 1];
+    if (tail && (tail.dataset || {}).kind === 'thinking' && !tail._open) {
+      problems.push('the repainted no-answer row is collapsed — its banner says the text follows');
+    }
+  }
+
   notes.push('steps groups: one per run, the text between them in the flow, each group folded and lazy on its own');
+  notes.push('a turn that answered only with its reasoning: a banner, then the thinking in the flow (live and repaint)');
 }
 
 // --- A turn is one flow: no zones, one scroller --------------------------------

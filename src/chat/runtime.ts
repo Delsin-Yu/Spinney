@@ -5216,6 +5216,18 @@ export class SessionRuntime {
       case 'assistantDone':
         if (run) this.flushStreamDeltas(run);
         break;
+      case 'noAnswerText':
+        // The round wrote nothing but its reasoning: the message the agent keeps carries
+        // that reasoning mirrored into `content` (an API requirement), so the item
+        // remembers it was **no answer** and the card says so instead of filing the text
+        // as a step (`paintFinishedItem` / `liftNoAnswerRow` in `media/main.js`).
+        if (run) {
+          this.flushStreamDeltas(run);
+          const last = run.items[run.items.length - 1];
+          if (last && last.kind === 'assistant' && !last.error) last.noAnswer = true;
+          this.post({ type: 'noAnswerText', nodeId: run.nodeId });
+        }
+        break;
       case 'usage':
         if (run) {
           this.flushStreamDeltas(run);

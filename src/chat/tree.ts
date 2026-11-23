@@ -159,6 +159,15 @@ export interface DisplayItem {
   id?: string;
   text?: string;
   thinking?: string;
+  /**
+   * `kind:'assistant'` only: this round wrote **no answer text** — everything came through
+   * the reasoning channel, and the harness mirrored that reasoning into the message's
+   * `content` to keep the history API-valid (`requestAssistantMessage` in `agent.ts`).
+   * The card draws such an item as a banner plus the thinking itself: the text really is
+   * the model's thinking, and a card that showed it as prose would claim an answer the
+   * turn never got. `SessionRuntime` sets it from the `noAnswerText` event.
+   */
+  noAnswer?: boolean;
   noticeKind?: 'warning' | 'info';
   /**
    * `kind:'notice'` only: the block's identity while it is **updated in place** rather

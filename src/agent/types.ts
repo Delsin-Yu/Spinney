@@ -191,6 +191,14 @@ export type AgentEvent =
   | { type: 'streamDelta'; content: string }
   | { type: 'reasoningDelta'; content: string }
   | { type: 'assistantDone' }
+  /**
+   * This round produced **no answer text at all**: everything it wrote arrived on the
+   * reasoning channel. `requestAssistantMessage` mirrors that reasoning into the
+   * message's `content` so the history stays API-valid, and this event is how the
+   * display layer learns that the text it would otherwise have to show as an answer is
+   * the model's own thinking: the card says so instead of filing it as a step.
+   */
+  | { type: 'noAnswerText' }
   | { type: 'usage'; usage: Usage }
   | {
       /** A tool call's arguments are being drafted (streamed incrementally). */
