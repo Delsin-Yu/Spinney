@@ -87,6 +87,9 @@ import { highlightEntries, warmUpCodeHighlight } from './codeHighlight';
 // One instance belongs to this window (`mentionIndexFor`), because the thing it indexes is the
 // agent root this window is anchored to.
 import { MentionAnswer, MentionIndex } from './mentionIndex';
+// Conversation search (`plans/conversation-search.md`): the corpus is the sessions this window
+// already holds, so the host half is four methods and one map of the newest request per session.
+import { FindHit, FindScope, findInSessions } from './find';
 import {
   removeTranscriptDir,
   removeTranscriptFile,
@@ -491,6 +494,12 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
   private readonly backgroundHub = new BackgroundHub();
   /** One runtime per session, created on demand (see `runtimeFor`). */
   private readonly runtimes = new Map<string, SessionRuntime>();
+  /**
+   * The newest `find` requestId each session's tab has asked for (see `handleFind`). A scan
+   * that a later keystroke has already replaced is dropped instead of painting a stale list:
+   * the webview would drop it too, but the host is the side that pays to produce it.
+   */
+  private readonly findRequestIds = new Map<string, number>();
   /**
    * One API client per provider, plus the provider/card concurrency gates. Every
    * runtime's agent and every sub-agent reaches the network through it, so
@@ -4287,6 +4296,97 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
     }
   }
 
+  /**
+   * `Spinney: Find in Conversation` / `Find in All Sessions` — the Command Palette's way into
+   * the two shortcuts (`plans/conversation-search.md` §2.7): reveal the active session's tab
+   * and ask it to open the find bar. The tab may be cold, but `ChatPanel.post` holds the
+   * message until its document is ready, so nothing here has to wait for it.
+   */
+  public openFindPanel(scope: FindScope): void {
+    const sessionId = this.activeSessionId;
+    if (!sessionId) {
+      return;
+    }
+    this.openSession(sessionId);
+    this.postTo(sessionId, { type: 'findOpen', scope });
+  }
+
+  /**
+   * `Find in All Sessions` additionally opens a QuickPick **navigator** (§2.7).
+   *
+   * The picker navigates rather than queries, because its own filter cannot be turned off: the
+   * search runs on `onDidChangeValue`, and each row's *label* is the snippet, so a hit whose
+   * match sits in the answer rather than in a title is never filtered out of view. `seq` drops
+   * an answer the user has already typed past; the find panel stays the view.
+   */
+  public showFindQuickPick(): void {
+    this.openFindPanel('all');
+    const qp = vscode.window.createQuickPick<vscode.QuickPickItem & { hit?: FindHit }>();
+    qp.title = vscode.l10n.t('Find in All Sessions');
+    qp.placeholder = vscode.l10n.t('Search every conversation of this workspace');
+    qp.matchOnDescription = true;
+    qp.matchOnDetail = true;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    // The newest query this picker has issued; an answer for an older one is not painted.
+    let seq = 0;
+    qp.onDidChangeValue((value) => {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      const mine = ++seq;
+      // The same 120 ms the find bar uses: one scan per pause, not one per keystroke.
+      timer = setTimeout(() => {
+        timer = null;
+        qp.busy = true;
+        void findInSessions(this.sessions, {
+          scope: 'all',
+          query: value,
+          deadlineAt: Date.now() + 2000,
+        }).then((result) => {
+          if (mine !== seq) {
+            return;
+          }
+          qp.busy = false;
+          const items: (vscode.QuickPickItem & { hit?: FindHit })[] = [];
+          if (result.invalid) {
+            items.push({ label: vscode.l10n.t('Invalid regular expression: {0}', result.invalid) });
+          } else {
+            for (const hit of result.hits) {
+              items.push({
+                label: hit.snippet,
+                description: `${hit.sessionTitle} · ${hit.nodeTitle}`,
+                detail: hit.field === 'answer' ? vscode.l10n.t('Answer') : vscode.l10n.t('Question'),
+                hit,
+              });
+            }
+          }
+          qp.items = items;
+        });
+      }, 120);
+    });
+    qp.onDidAccept(() => {
+      const picked = qp.selectedItems[0];
+      const typed = qp.value;
+      qp.hide();
+      const hit = picked?.hit;
+      if (hit) {
+        // The picker's search is always a plain, case-insensitive substring (it is a
+        // navigator, not the find bar), so the seed it hands the tab says the same thing.
+        this.gotoFindHit(hit.sessionId, hit.nodeId, {
+          scope: 'all',
+          query: typed,
+          caseSensitive: false,
+          wholeWord: false,
+          regex: false,
+          nodeId: hit.nodeId,
+        });
+      }
+    });
+    qp.onDidHide(() => qp.dispose());
+    qp.show();
+  }
+
   newSession(): void {
     if (this.readOnly) {
       void vscode.window.showWarningMessage(this.readOnlyNotice());
@@ -6315,6 +6415,12 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       // right now (a window reload restores every tab at once).
       startRepaintOp('panel-repaint', session.id);
     }
+    if (message?.type === 'find') {
+      // A read, answered before `runtimeFor`: a tab that only searches must never build
+      // a session runtime. The corpus is the sessions already in memory (see the plan).
+      void this.handleFind(session.id, message);
+      return;
+    }
     const rt = this.runtimeFor(session);
     switch (message?.type) {
       case 'ready': {
@@ -6376,6 +6482,22 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       case 'checkout':
         rt.handleCheckout(String(message.id ?? ''));
         return;
+      case 'findJump': {
+        // A hit is a card, so the jump is the checkout the tree already has: the runtime posts
+        // `path`/`panTo`/config itself when the focus really moves, and the session may also
+        // belong to another tab (`gotoFindHit` owns both cases). The query rides along, so a
+        // jump into another conversation opens that tab's find bar on the same search.
+        const seed = {
+          scope: message.scope === 'all' ? ('all' as const) : ('session' as const),
+          query: String(message.query ?? ''),
+          caseSensitive: message.caseSensitive === true,
+          wholeWord: message.wholeWord === true,
+          regex: message.regex === true,
+          nodeId: String(message.nodeId ?? ''),
+        };
+        this.gotoFindHit(String(message.sessionId ?? session.id), String(message.nodeId ?? ''), seed);
+        return;
+      }
       case 'setNodeSize':
         rt.onSetNodeSize(String(message.id ?? ''), Math.round(Number(message.w)), Math.round(Number(message.h)));
         return;
@@ -6612,6 +6734,87 @@ export class ChatViewProvider implements ControlHost, RuntimeHost {
       return;
     }
     this.postTo(sessionId, { type: 'mentionPicked', path: picked });
+  }
+
+  /**
+   * Answer one `find` query (`plans/conversation-search.md` §3.2) — the host half of Ctrl+F.
+   *
+   * A **read**: it scans strings this window already holds and writes nothing, which is why it
+   * is answered before `runtimeFor` (a tab that only searches must never build a session
+   * runtime) and why none of the turn gates apply.
+   *
+   * `requestId` is echoed untouched, and `findRequestIds` keeps the newest one per session: a
+   * scan a later keystroke has already replaced is dropped here rather than painting a stale
+   * list. The budget is a keystroke's, not a turn's — 500 ms is one conversation, 2000 ms is
+   * every conversation of the workspace (§6) — and `findInSessions` never throws.
+   */
+  private async handleFind(sessionId: string, message: any): Promise<void> {
+    const requestId = Number(message.requestId) || 0;
+    this.findRequestIds.set(sessionId, requestId);
+    const scope: FindScope = message.scope === 'all' ? 'all' : 'session';
+    const query = String(message.query ?? '');
+    const deadlineAt = Date.now() + (scope === 'all' ? 2000 : 500);
+    const result = await findInSessions(this.sessions, {
+      scope,
+      sessionId,
+      query,
+      caseSensitive: message.caseSensitive === true,
+      wholeWord: message.wholeWord === true,
+      regex: message.regex === true,
+      deadlineAt,
+    });
+    if (this.findRequestIds.get(sessionId) !== requestId) {
+      return;
+    }
+    this.postTo(sessionId, { type: 'findResults', requestId, scope, ...result });
+    // The one measurement §6 owes: what a query cost, and over what corpus. The query goes in
+    // as one line and cut short, because it is the user's own typing.
+    const q = sliceText(query.replace(/\s+/g, ' ').trim(), 40);
+    perf(
+      `find scope=${scope} hits=${result.hits.length} nodes=${result.scannedNodes} ` +
+        `sessions=${result.scannedSessions} ms=${result.ms} q="${q}"`,
+    );
+  }
+
+  /**
+   * Go to one hit: the jump of §2.6, which is the checkout the tree already has.
+   *
+   * With a runtime, `handleCheckout` moves the focus and posts `path`/`panTo`/config itself.
+   * Without one (a session this window never opened), the focus pointer moves instead, so the
+   * tab `openSession` is about to build opens on the hit. The trailing `panTo` is not a
+   * duplicate: a focus that did **not** move still needs centring, and a tab that is not ready
+   * yet holds the message until it is (`ChatPanel.post`).
+   *
+   * `seed` is the query the hit came from. When the jump crosses into **another** conversation,
+   * the tab that opens is told to show the same find bar on the same search (`findOpen`), with
+   * this card as its current hit — otherwise clicking a result would silently end the search.
+   */
+  private gotoFindHit(
+    sessionId: string,
+    nodeId: string,
+    seed?: { scope: FindScope; query: string; caseSensitive: boolean; wholeWord: boolean; regex: boolean; nodeId: string },
+  ): void {
+    const session = this.sessions.find((s) => s.id === sessionId);
+    if (!session || !nodeId || !session.nodes[nodeId]) {
+      return;
+    }
+    const wasActive = this.activeSessionId;
+    if (session.activeNodeId !== nodeId) {
+      const rt = this.runtimes.get(sessionId);
+      if (rt) {
+        rt.handleCheckout(nodeId);
+      } else {
+        session.activeNodeId = nodeId;
+        this.noteFocus(sessionId, nodeId);
+      }
+    }
+    if (wasActive !== sessionId || !this.panels.get(sessionId)) {
+      this.openSession(sessionId);
+    }
+    this.postTo(sessionId, { type: 'panTo', id: nodeId });
+    if (seed && seed.query && wasActive !== sessionId) {
+      this.postTo(sessionId, { type: 'findOpen', ...seed });
+    }
   }
 
   /**

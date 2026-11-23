@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **A conversation can be searched, and so can every conversation of the workspace.** `Ctrl+F`
+  searches the conversation of the tab it is pressed in and `Ctrl+Shift+F` searches them all. The
+  corpus is each card's **question and its final answer** — the steps between them are not
+  searched — over **every branch**, sub-agent cards and compression cards included and
+  background terminal cards out, and the matching is the VS Code search box's own: `Match case`,
+  `Match whole word` (ignored while a regular expression is on) and `Use regular expression`, an
+  invalid pattern drawn with a red border and the engine's reason instead of thrown. `Enter` /
+  `F3` and `Shift+Enter` / `Shift+F3` walk the hits and `Esc` closes the bar. A hit is a card, so
+  it checks that card out, opens the tab of its conversation, centres it and marks the matched
+  text in place. The panel groups by conversation and by card, counts the hits, and says when the
+  list stopped early — too many hits, or the scan ran out of its time. Two limits are deliberate:
+  only this workspace's conversations are read, never another folder's or another window's, and
+  tool output is not searched.
+- **Two Command Palette entries reach that search from outside the chat tab:**
+  `Spinney: Find in Conversation` and `Spinney: Find in All Sessions`. The `Ctrl+Shift+F`
+  shadowing only works while the chat tab has the focus — outside it VS Code opens its own file
+  search — so the palette is the way in from anywhere, and the second entry also opens a
+  QuickPick navigator that lists the hits as they are typed.
 - **The composer's `@` opens a file picker that walks a path.** Typing `@` at the start of a word
   lists the workspace's files at the caret, and the list is built to be walked: a row with a folder
   walks **into** it with `Tab` (the `@` stays and the text after it becomes that folder, so a long

@@ -728,7 +728,13 @@ it. A card that is far outside the viewport is now skipped by the engine
 `contain-intrinsic-size` **first**, because `relayout()` reads `offsetHeight` and a skipped card
 would otherwise feed a placeholder height into the tidy-tree layout. A live card, the focused
 node, a card being dragged and any card something is written into (`cvWake`) are never skipped,
-and the margin is 1000px, so the un-skip happens well before a card becomes visible. Whether
+and the margin is 1000px, so the un-skip happens well before a card becomes visible. **The
+stored box is invalidated by a change to the card itself**: a fold, an expand, a monitor or a
+replaced transcript wakes the card first (`cvWakeForMeasure`), and the `relayout()` that follows
+writes its **new** box back, so the placeholder can never describe the card as it was before the
+change. Without that, checking out an earlier node collapsed the cards below it while the layout
+still placed them at their unfolded heights, and every card after them was misplaced until
+something forced a re-measure. Whether
 that is enough to stop the stale corner is what the `canvas=` / `dom=` fields on the next real
 stall will say — and the 2026-10-03 re-report raised the number rather than settling it: its
 worst canvas was `1865x26602` at `dpr=1.5` with `dom=33432`, i.e. ~40 000 device pixels of one

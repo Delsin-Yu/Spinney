@@ -134,6 +134,10 @@ export function activate(context: vscode.ExtensionContext): void {
     // broken screen visible and repairs nothing on its own (see `ChatViewProvider.onStallReport`),
     // so rebuilding the document is a command the user runs while looking at it.
     vscode.commands.registerCommand('spinney.reloadChatWebview', () => chatProvider?.reloadActiveChatWebview()),
+    // The palette entry for the two find shortcuts inside a chat tab: a keyboard that is not
+    // in the webview still has to reach the same find bar (plans/conversation-search.md §2.7).
+    vscode.commands.registerCommand('spinney.findInConversation', () => chatProvider?.openFindPanel('session')),
+    vscode.commands.registerCommand('spinney.findInAllSessions', () => chatProvider?.showFindQuickPick()),
     // Reachability of the search backends is a property of *this machine's
     // network*, not of any setting: the same list is half-dead behind a firewall
     // and half-dead without it. So the user's interface to that fact is a

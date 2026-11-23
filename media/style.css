@@ -2213,7 +2213,8 @@ body.vscode-high-contrast-light {
   top: 44px;
   right: 10px;
   z-index: 1500;
-  width: 340px;
+  width: min(340px, 45vw);
+  min-width: 220px;
   max-width: calc(100vw - 20px);
   display: flex;
   flex-direction: column;
@@ -3873,4 +3874,288 @@ body.anim .node.expanded.items-loading .node-loading .w {
 @keyframes verb-glow {
   0%, 100% { color: var(--text-dim); }
   50% { color: var(--text); }
+}
+
+/* ---- Find (Ctrl+F / Ctrl+Shift+F): the bar, the result list, the marks -------------
+   `plans/conversation-search.md`. Both surfaces are `position: fixed`: `#tree-wrap` is
+   the transformed canvas, so a control inside it would pan and scale with the tree. The
+   bar sits under the tree toolbar (the corner the terminal dock uses, one row lower) and
+   the list is pinned to the left, because a hit's card is what it points at. */
+#find-bar {
+  position: fixed;
+  /* 10px below the tree toolbar's row: the toolbar ends around 34px, and the terminal
+     dock starts at 44px on the right, so the bar has the centre to itself. */
+  top: 44px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 1600;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  background: var(--assistant-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+  font-size: 11px;
+}
+
+#find-bar.hidden,
+#find-results.hidden {
+  display: none;
+}
+
+#find-input {
+  width: 240px;
+  max-width: 40vw;
+  padding: 3px 6px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--bg3);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  outline: none;
+}
+
+#find-input:focus {
+  border-color: var(--focus);
+}
+
+/* An unparsable pattern says so on the input itself, before any result does; the
+   sentence that explains it is `#find-count` (VS Code paints the same border). */
+#find-bar.invalid #find-input {
+  border-color: var(--error-text);
+}
+
+#find-count {
+  min-width: 0;
+  max-width: 220px;
+  padding: 0 2px;
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+#find-count.error {
+  color: var(--error-text);
+}
+
+.find-toggle,
+.find-btn {
+  flex: 0 0 auto;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 4px;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--text-dim);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.find-toggle:hover,
+.find-btn:hover {
+  color: var(--text);
+  background: var(--bg2);
+}
+
+/* A toggle that is on reads as pressed, not as a hover: the state is the point. */
+.find-toggle.active {
+  color: var(--text);
+  border-color: var(--focus);
+  background: var(--bg2);
+}
+
+/* Whole word yields to the regular expression (VS Code's rule), so its button says it. */
+.find-toggle:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* The result list. Left edge, full height under the bar: the tree's own camera is what a
+   jump moves, so a list on the right would cover the card it just centred. */
+#find-results {
+  position: fixed;
+  top: 10px;
+  left: 10px;
+  bottom: 10px;
+  z-index: 1500;
+  width: 340px;
+  max-width: calc(100vw - 20px);
+  display: flex;
+  flex-direction: column;
+  background: var(--assistant-bg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45);
+  font-size: 11px;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+#find-results-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex: 0 0 auto;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--border);
+}
+
+#find-results-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-weight: 600;
+  color: var(--text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+#find-results-count {
+  flex: 0 0 auto;
+  color: var(--text-dim);
+}
+
+#find-results-list {
+  /* The offset parent of the rows: the current one is scrolled into view with arithmetic
+     on this box (`findScrollCurrentIntoView`), never with `scrollIntoView`. */
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 2px 0 6px;
+  overflow: auto;
+}
+
+/* One line per conversation (the `all` scope only): the hits below it belong to it. */
+.find-group {
+  /* Inset to the rows' own text edge: 6px of margin plus 8px of padding below. */
+  padding: 5px 14px 3px;
+  color: var(--text-dim);
+  font-weight: 600;
+  border-top: 1px solid var(--border);
+}
+
+#find-results-list > .find-group:first-child {
+  border-top: 0;
+}
+
+/* A row is a button: a single click selects it, a double-click opens its card (Enter on the
+   focused one is the same). It is **inset** from the panel edges: a full-bleed background
+   reads as a section of the panel rather than as one selectable row of a list. */
+.find-row {
+  display: block;
+  /* A block button fills its line minus this margin, so no `width` is needed and the
+     highlight stays clear of the panel's border on both sides. */
+  margin: 1px 6px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  text-align: left;
+  color: var(--text);
+  background: transparent;
+  border: 0;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.find-row:hover {
+  background: var(--bg2);
+}
+
+.find-row.current {
+  background: var(--bg2);
+}
+
+.find-row-title {
+  display: block;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The field a hit came from (`Answer` / `Question`), and how a status line reads. */
+.find-chip,
+.find-note {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 4px;
+  color: var(--text-dim);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 400;
+}
+
+.find-note {
+  display: block;
+  margin: 6px 14px;
+  padding: 3px 6px;
+  border-color: transparent;
+  color: var(--warn);
+  white-space: normal;
+}
+
+.find-note.error {
+  color: var(--error-text);
+}
+
+.find-row-snippet {
+  display: block;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+
+/* The matched text, in a result row and inside a card. The card mark is painted over the
+   rendered rows only; a folded step or an unloaded card counts as a hit without one
+   (`plans/conversation-search.md` §2.6.1). */
+.find-row .find-match,
+.node mark.find-match {
+  color: inherit;
+  background: var(--vscode-editor-findMatchHighlightBackground, rgba(234, 92, 0, 0.33));
+  border-radius: 2px;
+}
+
+/* The card the current hit lives in. `outline` so the card's own box, its shadow and the
+   layout it sits in are untouched. */
+.node.find-hit {
+  outline: 1px dashed var(--warn);
+  outline-offset: 2px;
+}
+
+.node.find-current {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* A result row's snippet is rendered as **inline** markdown (`findSnippetEl`), so the row
+   has to carry the emphasis and the inline code the cards do, at the row's own small, dim
+   size: a snippet is a pointer to an answer, not a second copy of it. */
+.find-row-snippet code {
+  padding: 0 3px;
+  font-family: var(--vscode-editor-font-family, monospace);
+  font-size: 10px;
+  color: var(--text);
+  background: var(--tool-bg);
+  border-radius: 3px;
+}
+
+.find-row-snippet strong {
+  color: var(--text);
+  font-weight: 600;
+}
+
+.find-row-snippet em {
+  font-style: italic;
+}
+
+.find-row-snippet s,
+.find-row-snippet del {
+  text-decoration: line-through;
 }

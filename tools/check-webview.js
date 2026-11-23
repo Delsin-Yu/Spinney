@@ -345,6 +345,11 @@ const TURN_MESSAGES = [
   { type: 'viewState', visible: true, active: true, focused: true },
   { type: 'probe', id: 1 },
   { type: 'nudge', id: 2, reason: 'visible', force: true },
+  // Find (`plans/conversation-search.md` §3.2). The bar is opened by its own block at the
+  // bottom of this file (the answer has to carry the `requestId` the webview itself issued,
+  // which a fixed fixture cannot know); what the replay can prove on its own is that a
+  // stale answer is inert instead of throwing.
+  { type: 'findResults', requestId: -1, scope: 'session', hits: [], total: 0, capped: false, scannedNodes: 0, scannedSessions: 0, timedOut: false, ms: 0 },
 ];
 
 // --- a DOM just big enough to let the script run ------------------------------
@@ -9825,6 +9830,195 @@ setTimeout(async () => {
           'dialog path, and Attach posts `pickAttachment`',
       );
     }
+  }
+
+  // --- find: the bar, the list, the counter, the marks, the jump ----------------------
+  // The corpus lives on the host (`src/chat/find.ts`), so this side can only get the
+  // wiring wrong: the `requestId` gate, the grouped rows, the counter, the two card
+  // classes and the `findJump` a click posts. The block drives the real sequence — open,
+  // type, catch the `find` the webview posted, answer it — because an answer has to carry
+  // a `requestId` the webview itself issued.
+  {
+    const findBarEl = document.getElementById('find-bar');
+    const findInputEl = document.getElementById('find-input');
+    const findCountStub = document.getElementById('find-count');
+    const findListEl = document.getElementById('find-results-list');
+    const findResultsPanel = document.getElementById('find-results');
+    const findNode = 'find-node';
+    const cardFor = (id) =>
+      elementById('tree-canvas').children.find((child) => child.dataset && child.dataset.id === id) || null;
+    const rowsOf = () => (findListEl.children || []).filter((child) => hasClass(child, 'find-row'));
+    const grouped = () => (findListEl.children || []).filter((child) => hasClass(child, 'find-group'));
+    /** The text of a stub subtree, text nodes included (`findSnippetPlainEl` builds both). */
+    const textOfAll = (node) => {
+      if (!node) return '';
+      if (typeof node.nodeValue === 'string' && node.nodeValue) return node.nodeValue;
+      if (typeof node.textContent === 'string' && node.textContent && !(node.children && node.children.length)) {
+        return node.textContent;
+      }
+      let out = '';
+      for (const child of node.children || []) out += textOfAll(child);
+      return out;
+    };
+    dispatch({ type: 'state', busy: false, status: '', sessionId: 'smoke-session', runningNodes: [], lockedNodes: [], readOnly: false });
+    dispatch({
+      type: 'tree',
+      viewId: findNode,
+      activeId: findNode,
+      rootId: findNode,
+      rootIds: [findNode],
+      nodes: [{ id: findNode, parentId: null, children: [], title: 'find card', status: 'done', createdAt: 0, preview: 'find', usage: null, size: null, context: 'ok' }],
+    });
+    posted.length = 0;
+    dispatch({ type: 'findOpen', scope: 'all' });
+    // A finite card box, so a pan would be observable: `panToNode` centres the card, and a
+    // stub card at (0,0) with a zero-sized viewport makes every camera move the same NaN
+    // transform (which would let the "typing must not move the camera" assertion pass for
+    // the wrong reason).
+    const seededCard = cardFor(findNode);
+    if (seededCard) {
+      seededCard.style.left = '100px';
+      seededCard.style.top = '100px';
+    }
+    if (hasClass(findBarEl, 'hidden')) {
+      problems.push('a `findOpen` left the find bar hidden — the Command Palette entries would open nothing');
+    }
+    if (hasClass(findResultsPanel, 'hidden')) {
+      problems.push('the `all` scope left the result list hidden — the panel is what `Ctrl+Shift+F` opens');
+    }
+    // Typing arms the bar's ~120 ms debounce; then the webview asks the host.
+    findInputEl.value = 'smoke answer';
+    for (const handler of handlersOf(findInputEl, 'input')) handler({ type: 'input', target: findInputEl });
+    await sleep(200);
+    const asked = posted.filter((message) => message && message.type === 'find');
+    if (asked.length !== 1) {
+      problems.push(
+        `typing in the find bar posted ${asked.length} \`find\` message(s), expected exactly one after the debounce: ` +
+          JSON.stringify(posted.map((message) => message && message.type)),
+      );
+    } else {
+      const query = asked[0];
+      if (query.scope !== 'all' || query.query !== 'smoke answer' || query.limit !== 200) {
+        problems.push(`the \`find\` posted ${JSON.stringify(query)}, expected { scope: 'all', query: 'smoke answer', limit: 200, … }`);
+      }
+      const own = { sessionId: 'smoke-session', sessionTitle: 'smoke', nodeId: findNode, nodeTitle: 'find card', nodeKind: 'turn', field: 'answer', branch: [findNode], snippet: '…smoke answer…', matchStart: 3, matchEnd: 15 };
+      const foreign = { sessionId: 'other-session', sessionTitle: 'other', nodeId: 'other-node', nodeTitle: 'other card', nodeKind: 'turn', field: 'question', branch: ['other-node'], snippet: 'another smoke answer', matchStart: 8, matchEnd: 20 };
+      // A stale answer first: painting it would show a result for a query nobody asked.
+      dispatch({ type: 'findResults', requestId: query.requestId - 1, scope: 'all', hits: [own], total: 1, capped: false, scannedNodes: 1, scannedSessions: 1, timedOut: false, ms: 1 });
+      if (rowsOf().length > 0) {
+        problems.push('a stale `findResults` painted a row — an answer that is not the newest one must be dropped');
+      }
+      posted.length = 0;
+      // Typing must never move the camera: an answer arrives asynchronously, and a re-centre
+      // here is the "magnet" a drag has to fight. The canvas transform **is** the camera.
+      const canvasEl = document.getElementById('tree-canvas');
+      const cameraBefore = String(canvasEl.style.transform || '');
+      dispatch({ type: 'findResults', requestId: query.requestId, scope: 'all', hits: [own, foreign], total: 2, capped: false, scannedNodes: 3, scannedSessions: 2, timedOut: false, ms: 1 });
+      if (String(canvasEl.style.transform || '') !== cameraBefore) {
+        problems.push('a `findResults` answer moved the camera — typing must never re-centre the view');
+      }
+      if (String(findCountStub.textContent) !== '1/2') {
+        problems.push(`the find counter reads ${JSON.stringify(findCountStub.textContent)}, expected "1/2" (the first hit of this conversation)`);
+      }
+      if (grouped().length !== 2) {
+        problems.push(`the result list rendered ${grouped().length} conversation group(s), expected 2 — the \`all\` scope names the session once per group`);
+      }
+      if (rowsOf().length !== 2) {
+        problems.push(`the result list rendered ${rowsOf().length} row(s), expected 2`);
+      }
+      const ownCard = cardFor(findNode);
+      if (!ownCard || !hasClass(ownCard, 'find-hit') || !hasClass(ownCard, 'find-current')) {
+        problems.push('the card of the current hit is not marked (`find-hit` + `find-current`)');
+      }
+      // A row shows the matched text: the snippet is rendered as inline markdown in the real
+      // webview (`findSnippetEl`), and this stub has no renderer, so what is asserted here is
+      // the fallback every rendering path still ends on — the query is in the row's text.
+      const snippetEl = findByClass(rowsOf()[0], 'find-row-snippet');
+      const snippetText = textOfAll(snippetEl);
+      if (!snippetText.toLowerCase().includes('smoke answer')) {
+        problems.push(`the first row's snippet reads ${JSON.stringify(snippetText)}, expected the matched text in it`);
+      }
+      // Next walks onto the other conversation's hit, which this tab cannot show: the jump
+      // is the host's (it opens that tab and checks the card out).
+      const rowsBeforeNext = rowsOf();
+      const nextBtn = document.getElementById('find-next');
+      for (const handler of handlersOf(nextBtn, 'click')) handler({ type: 'click', target: nextBtn });
+      if (String(findCountStub.textContent) !== '2/2') {
+        problems.push(`Next left the counter at ${JSON.stringify(findCountStub.textContent)}, expected "2/2"`);
+      }
+      // Next moves the marker, it does not rebuild the list: a rebuild is what throws the
+      // list's scroll position away, and the row objects are the proof that it did not run.
+      if (rowsOf()[0] !== rowsBeforeNext[0]) {
+        problems.push('Next rebuilt the result list — its scroll position (and the reader’s place in it) would be lost');
+      }
+      if (!hasClass(rowsOf()[1], 'current') || hasClass(rowsOf()[0], 'current')) {
+        problems.push('Next did not move the `current` marker to the second row');
+      }
+      const jumps = posted.filter((message) => message && message.type === 'findJump');
+      if (jumps.length !== 1) {
+        problems.push(`Next posted ${jumps.length} \`findJump\` message(s) for a hit in another conversation, expected 1`);
+      } else if (jumps[0].sessionId !== 'other-session' || jumps[0].nodeId !== 'other-node') {
+        problems.push(`the \`findJump\` names ${JSON.stringify(jumps[0])}, expected the other conversation's card`);
+      }
+      // Back to this conversation's hit: its card is the checked-out one, so the camera
+      // moves and nothing is asked of the host.
+      posted.length = 0;
+      const firstRow = rowsOf()[0];
+      for (const handler of handlersOf(firstRow, 'click')) handler({ type: 'click', target: firstRow });
+      if (String(findCountStub.textContent) !== '1/2') {
+        problems.push(`clicking the first row left the counter at ${JSON.stringify(findCountStub.textContent)}, expected "1/2"`);
+      }
+      if (posted.some((message) => message && message.type === 'findJump')) {
+        problems.push('a click on the checked-out card posted a `findJump` — that hit is already on screen');
+      }
+      // A single click only **selects** a row; the double-click is what goes to the card.
+      // The foreign row is the one that proves it: it is not on screen, so opening it has to
+      // ask the host to switch conversations.
+      if (firstRow.title !== 'Double-click to open the card') {
+        problems.push(`a result row's tooltip reads ${JSON.stringify(firstRow.title)}, expected the double-click hint`);
+      }
+      posted.length = 0;
+      const foreignRow = rowsOf()[1];
+      for (const handler of handlersOf(foreignRow, 'click')) handler({ type: 'click', target: foreignRow });
+      if (posted.some((message) => message && message.type === 'findJump')) {
+        problems.push('a single click on a result posted a `findJump` — opening the card is the double-click');
+      }
+      if (String(findCountStub.textContent) !== '2/2') {
+        problems.push(`a single click on the second row left the counter at ${JSON.stringify(findCountStub.textContent)}, expected "2/2"`);
+      }
+      for (const handler of handlersOf(foreignRow, 'dblclick')) handler({ type: 'dblclick', target: foreignRow });
+      const dblJumps = posted.filter((message) => message && message.type === 'findJump');
+      if (dblJumps.length !== 1) {
+        problems.push(`a double-click on a result posted ${dblJumps.length} \`findJump\` message(s), expected 1`);
+      }
+      // An unparsable pattern says so on the input and in the list, and paints no rows.
+      dispatch({ type: 'findResults', requestId: query.requestId, scope: 'all', hits: [], total: 0, capped: false, invalid: 'Invalid pattern', scannedNodes: 0, scannedSessions: 0, timedOut: false, ms: 1 });
+      if (!hasClass(findBarEl, 'invalid')) {
+        problems.push('an invalid regular expression did not mark the find bar (`invalid`)');
+      }
+      if (String(findCountStub.textContent) !== 'Invalid regular expression: Invalid pattern') {
+        problems.push(`the invalid pattern reads ${JSON.stringify(findCountStub.textContent)}, expected the reason the host gave`);
+      }
+      if (rowsOf().length !== 0) {
+        problems.push('an invalid pattern left rows on screen');
+      }
+      // Whole word yields to the regular expression (VS Code's rule): the button says so.
+      const regexBtn = document.getElementById('find-regex');
+      for (const handler of handlersOf(regexBtn, 'click')) handler({ type: 'click', target: regexBtn });
+      if (document.getElementById('find-word').disabled !== true) {
+        problems.push('the whole-word button stays enabled while the regular expression is on — VS Code disables it');
+      }
+      // Closing gives the surface back: no bar, no list, no marks.
+      const closeBtn = document.getElementById('find-close');
+      for (const handler of handlersOf(closeBtn, 'click')) handler({ type: 'click', target: closeBtn });
+      if (!hasClass(findBarEl, 'hidden') || !hasClass(findResultsPanel, 'hidden')) {
+        problems.push('closing the find bar left it (or its list) on screen');
+      }
+      if (hasClass(cardFor(findNode), 'find-hit')) {
+        problems.push('closing the find bar left a card marked (`find-hit`)');
+      }
+    }
+    notes.push('find: the bar, the grouped result list, the counter, the card marks and the `findJump` a click posts, and the invalid-pattern state');
   }
 
   // The fitted paths: each was given a width in the sample section and the fit has run by

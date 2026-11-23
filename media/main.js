@@ -63,6 +63,23 @@
   // render into a dock at the bottom of *that node's* card (see renderBackgrounds).
   const branchBanner = document.getElementById('branch-banner');
   const composerEl = document.getElementById('composer');
+  // Find (`plans/conversation-search.md`): the bar and its list are fixed overlays, and
+  // the corpus lives on the host — a card far off screen has no content in the DOM and a
+  // long log is windowed, so a find over this document could not search a conversation.
+  const findBar = document.getElementById('find-bar');
+  const findInput = document.getElementById('find-input');
+  const findCountEl = document.getElementById('find-count');
+  const findCaseBtn = document.getElementById('find-case');
+  const findWordBtn = document.getElementById('find-word');
+  const findRegexBtn = document.getElementById('find-regex');
+  const findPrevBtn = document.getElementById('find-prev');
+  const findNextBtn = document.getElementById('find-next');
+  const findListBtn = document.getElementById('find-list');
+  const findCloseBtn = document.getElementById('find-close');
+  const findResultsEl = document.getElementById('find-results');
+  const findResultsTitleEl = document.getElementById('find-results-title');
+  const findResultsCountEl = document.getElementById('find-results-count');
+  const findResultsListEl = document.getElementById('find-results-list');
 
   // Session-level: any run in this session is live (status dot, tps meter, the
   // model/effort selects). It says nothing about the *view focus* node.
@@ -91,6 +108,34 @@
   // replay shape (and every fixture in `tools/check-webview.js`) may not carry the
   // field, and the setting's own default is on.
   let streamAnimation = true;
+  // The live find: the newest answer this tab will accept (`requestId`) and what that
+  // answer rendered. `hits` is the host's list (`src/chat/find.ts`), one row per card.
+  const findState = {
+    active: false,
+    scope: 'session',        // 'session' (Ctrl+F) | 'all' (Ctrl+Shift+F)
+    query: '',
+    caseSensitive: false,
+    wholeWord: false,
+    regex: false,
+    requestId: 0,
+    hits: [],
+    index: -1,
+    invalid: '',
+    timedOut: false,
+    capped: false,
+    scanned: 0,
+    listOpen: false,
+    // A jump's own card: the hit a seeded open makes current (see `findOpen`).
+    focusNode: '',
+  };
+  let findTimer = null;
+  let findMarkRaf = null;
+  // A hit this tab cannot show yet (another conversation, or a card not built yet): the
+  // host opens that tab and checks the card out, and the next `tree` / `path` applies it.
+  let findPending = null;
+  // The result rows, in hit order, so the current one can be marked and scrolled into
+  // view without rebuilding the list (a rebuild drops its scroll position).
+  let findRowEls = [];
 
   const NODE_W = 320;
   const H_GAP = 48;
@@ -1969,6 +2014,20 @@
       })
     : null;
 
+  // The **inline** renderer of the find bar's result rows (`findSnippetEl`). A separate
+  // instance, not `md.disable([...])`: `disable` mutates the ruler, and switching links off
+  // for the result list must not switch them off in the cards. A row is one line cut out of
+  // an answer, so blocks cannot apply, and both links and images must not: the row is a
+  // `<button>` (an `<a>` inside it is invalid HTML and would take the click from the jump),
+  // and an `<img>` from a conversation would make the webview fetch an arbitrary URL.
+  const mdInline = window.markdownit
+    ? window.markdownit({ html: false, breaks: true, linkify: false, typographer: false }).disable([
+        'link',
+        'image',
+        'autolink',
+      ])
+    : null;
+
   function escapeHtml(text) {
     return String(text || '').replace(/[&<>"']/g, (ch) => {
       switch (ch) {
@@ -1990,6 +2049,25 @@
     } finally {
       perfMarkdown.ms += perfNow() - t0;
       perfMarkdown.calls++;
+    }
+  }
+
+  /**
+   * A find row's one line, as inline markdown — or `null` when this document has no
+   * markdown-it at all (the build-time stub of `check:webview` loads `media/main.js`
+   * alone), and the caller then shows the raw text.
+   *
+   * Deliberately `renderInline`: the snippet is a ±60-character window of a card's answer,
+   * so every block construct starts outside it and would render as a fragment.
+   */
+  function renderFindSnippet(text) {
+    if (!mdInline) {
+      return null;
+    }
+    try {
+      return mdInline.renderInline(text || '');
+    } catch (err) {
+      return null;
     }
   }
 
@@ -6078,6 +6156,8 @@ function addBackgroundNotice(item) {
     // screen again.
     card._itemCount = (items || []).length;
     card._itemsUnloaded = false;
+    // Its content is being replaced: a skipped card's remembered box is the old content.
+    cvWakeForMeasure(card);
     // The settle stamp of this render (see `virtMayUnload`), and the decay of a hold the
     // card has outlived: escalation is a brake on a ping-pong, not a permanent sentence.
     card._virtFilledAt = perfNow();
@@ -6168,6 +6248,9 @@ function addBackgroundNotice(item) {
     if (!(card._itemScroll && card._itemScroll.locked) && !card._needsBottomScroll) {
       restoreScroll(workEl, keepWork);
     }
+    // A re-render threw the old `<mark>`s away with the rows: put them back (once per
+    // frame, and only while a find is open).
+    if (findState.active) findScheduleMarks();
   }
 
   // ---- How the card's body is laid out -----------------------------------------
@@ -7504,6 +7587,9 @@ function addBackgroundNotice(item) {
       cvSkipped.delete(card);
       card.classList.remove('cv-skip');
       card.style.containIntrinsicSize = '';
+      // `relayout()` measures the new box and hands it back, so the engine may skip this
+      // card again instead of leaving a card of a big tree fully laid out for good.
+      card._cvFresh = true;
     } catch (err) {
       /* a layout aid must never break the UI */
     }
@@ -7557,6 +7643,31 @@ function addBackgroundNotice(item) {
       card._cvWant = null;
       if (want === 'wake') cvWakeNow(card);
       else if (want === 'skip') cvSkipNow(card);
+    }
+  }
+
+  /**
+   * The card's own size just changed, so the box the engine is **pretending** it has is a
+   * lie: `relayout()` reads `offsetHeight`, and a skipped card reports its
+   * `contain-intrinsic-size` instead of its content. Woken here, immediately, so the very
+   * next `relayout()` (a checkout runs one right after the cards are re-folded) measures the
+   * real thing.
+   *
+   * Without it, a tall card folded by a checkout keeps its unfolded height in the layout —
+   * and takes every card below it with it, which is the "it folds but stays where it was"
+   * misplacement. It is called at the four places where a card's structure or content
+   * changes, and it deliberately wakes an **unloaded** card too: the placeholder is its box
+   * only until its structure changes, and a fold is a structural change. The engine
+   * re-skips the card (with the new box) the next time it leaves the viewport.
+   */
+  function cvWakeForMeasure(card) {
+    try {
+      if (!card || !cvSkipped || !cvSkipped.has(card)) return;
+      cvSkipped.delete(card);
+      card.classList.remove('cv-skip');
+      card.style.containIntrinsicSize = '';
+    } catch (err) {
+      /* a layout aid must never break the UI */
     }
   }
 
@@ -8114,6 +8225,8 @@ function addBackgroundNotice(item) {
    */
   function monitorCard(id, meta, pnode) {
     const card = nodeEls[id];
+    // A monitor is a fixed 200px window: never the box a previous skip remembered.
+    if (!card.classList.contains('monitor')) cvWakeForMeasure(card);
     card.classList.add('monitor');
     card.classList.remove('expanded', 'active');
     // A size a previous drag put on the card is parked first: an inline `max-height`
@@ -8175,6 +8288,9 @@ function addBackgroundNotice(item) {
 
   function expandedCard(id, meta, pnode) {
     const card = nodeEls[id];
+    // The card is about to grow (and may take the composer): never the box it was skipped
+    // with, unless it was already expanded.
+    if (!card.classList.contains('expanded') || card.classList.contains('monitor')) cvWakeForMeasure(card);
     card.classList.add('expanded');
     // The focused node is the one card that renders as a full card: the monitor window
     // (and the class it is spelled with) comes off here, and a size the card carried
@@ -8273,6 +8389,9 @@ function addBackgroundNotice(item) {
 
   function collapsedCard(id, meta) {
     const card = nodeEls[id];
+    // The card is about to shrink **if it was open**; an already-collapsed card keeps the
+    // box it was skipped with.
+    if (card.classList.contains('expanded') || card.classList.contains('monitor')) cvWakeForMeasure(card);
     card.classList.remove('expanded', 'active');
     const askEl = card.querySelector('.node-ask');
     const workWrap = card.querySelector('.node-work-wrap');
@@ -8791,6 +8910,17 @@ function relayout() {
       if (!card) continue;
       heights[id] = card.offsetHeight || 120;
       widths[id] = card.offsetWidth || NODE_W;
+      // A card woken because its own size changed gets its **new** box remembered here, so
+      // `content-visibility` can skip it again: the placeholder must describe the card the
+      // layout is using, never the one it was before the fold.
+      if (card._cvFresh) {
+        card._cvFresh = false;
+        if (cvMaySkip(card)) {
+          card.style.containIntrinsicSize = widths[id] + 'px ' + heights[id] + 'px';
+          card.classList.add('cv-skip');
+          cvSkipped.add(card);
+        }
+      }
       // A card that is showing its whole log is the size it will be next time: remember
       // that box for the waiting card of a later load (`applyLoadingSize`). A summary, an
       // unloaded card and a waiting one are all *not* that size.
@@ -9195,6 +9325,9 @@ function relayout() {
     updateFollowButton();
     updateBranchBanner();
     updateComposerButtons();
+    // A reveal waiting for its card consumes this repaint, and a card the repaint rebuilt
+    // has no marks on it any more (see `findAfterRender`).
+    findAfterRender();
   }
 
   // The active path's items (checkout / session switch / panel reopen). This is
@@ -9308,6 +9441,9 @@ function relayout() {
     if (follow) keepActiveInView();
     updateBranchBanner();
     updateComposerButtons();
+    // The checkout a find jump asked for lands here: its card is now expanded, so the
+    // pending reveal can centre it and mark the hit inside it.
+    findAfterRender();
   }
 
   // ---- No-node mode: a bare node card that holds only the input ----
@@ -11682,6 +11818,638 @@ function relayout() {
    * every message — a handler that blocks this thread is the one kind of stutter
    * the webview cannot report about itself from inside the handler.
    */
+  // ---- Find: the bar, the result list, the card marks, the jump ----------------------
+  // `plans/conversation-search.md`. The **corpus and the matcher are the host's**
+  // (`src/chat/find.ts`): a card far off screen has no content in the DOM, a long log is
+  // windowed and a step group is folded, so a find over this document would miss most of
+  // a conversation and every other conversation. What this half owns is the bar, the
+  // list, the marks and the jump.
+  // ------------------------------------------------------------------------------------
+
+  /** Is the bar up? (The list follows it: one surface, two panels.) */
+  function findIsOpen() {
+    return !!(findBar && !findBar.classList.contains('hidden'));
+  }
+
+  /** The hit the counter and the card outline call "current", or null. */
+  function findCurrentHit() {
+    return findState.index >= 0 && findState.hits[findState.index] ? findState.hits[findState.index] : null;
+  }
+
+  /**
+   * Open the bar — and for the `all` scope its list too. A scope change is a new query
+   * under a new id, so an answer still on its way for the old scope is dropped; the same
+   * scope with text in the box re-runs, because the conversation may have grown since.
+   *
+   * `seed` is a jump's own query (`findJump` into another conversation): the tab that
+   * opens shows the same bar and the same hit instead of dropping the search, and
+   * `focusNode` makes that card the current one rather than the conversation's first hit.
+   */
+  function findOpen(scope, seed) {
+    if (!findBar) return;
+    const next = scope === 'all' ? 'all' : 'session';
+    findBar.classList.remove('hidden');
+    findState.active = true;
+    if (findState.scope !== next) {
+      findState.scope = next;
+      findState.hits = [];
+      findState.index = -1;
+      findState.invalid = '';
+      findState.requestId++;
+    }
+    if (seed && typeof seed.query === 'string') {
+      findState.caseSensitive = seed.caseSensitive === true;
+      findState.wholeWord = seed.wholeWord === true;
+      findState.regex = seed.regex === true;
+      findState.focusNode = typeof seed.nodeId === 'string' ? seed.nodeId : '';
+      if (findInput) findInput.value = seed.query;
+    }
+    if (next === 'all') findState.listOpen = true;
+    findSyncToggles();
+    findRenderCount();
+    findRenderResults();
+    findApplyMarks();
+    if (findInput && findInput.value.trim()) findQueryNow();
+    if (findInput) {
+      findInput.focus();
+      if (findInput.value && typeof findInput.select === 'function') findInput.select();
+    }
+  }
+
+  /** Close the bar and its list, drop the marks, and give the focus back to the composer. */
+  function findClose() {
+    if (!findBar) return;
+    findBar.classList.add('hidden');
+    findBar.classList.remove('invalid');
+    if (findResultsEl) findResultsEl.classList.add('hidden');
+    findState.active = false;
+    findState.listOpen = false;
+    findState.hits = [];
+    findState.index = -1;
+    findState.invalid = '';
+    findState.requestId++;   // nothing on its way may paint after the close
+    findPending = null;
+    findClearMarks();
+    if (findResultsListEl) findResultsListEl.innerHTML = '';
+    if (inputEl) inputEl.focus();
+  }
+
+  function findSetListOpen(open) {
+    findState.listOpen = !!open;
+    findRenderResults();
+  }
+
+  /** The three toggles' own state, including the rule that whole word yields to regex. */
+  function findSyncToggles() {
+    const press = (btn, on) => {
+      if (!btn) return;
+      btn.classList.toggle('active', on);
+      if (btn.setAttribute) btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    };
+    press(findCaseBtn, findState.caseSensitive);
+    press(findWordBtn, findState.wholeWord);
+    press(findRegexBtn, findState.regex);
+    if (findWordBtn) findWordBtn.disabled = findState.regex;
+  }
+
+  /** Typing is debounced; a whole-profile scan per keystroke is not what a keystroke means. */
+  function findSchedule() {
+    if (findTimer != null) clearTimeout(findTimer);
+    findTimer = setTimeout(() => {
+      findTimer = null;
+      findQueryNow();
+    }, 120);
+  }
+
+  /** Ask the host. The id is the only thing that says which answer is still wanted. */
+  function findQueryNow() {
+    if (!findInput) return;
+    if (findTimer != null) {
+      clearTimeout(findTimer);
+      findTimer = null;
+    }
+    const query = findInput.value;
+    findState.query = query;
+    findState.requestId++;
+    if (!query.trim()) {
+      findState.hits = [];
+      findState.index = -1;
+      findState.invalid = '';
+      findRenderCount();
+      findRenderResults();
+      findApplyMarks();
+      return;
+    }
+    vscode.postMessage({
+      type: 'find',
+      requestId: findState.requestId,
+      scope: findState.scope,
+      query,
+      caseSensitive: findState.caseSensitive,
+      wholeWord: findState.wholeWord,
+      regex: findState.regex,
+      limit: 200,
+    });
+  }
+
+  function findToggle(which) {
+    if (which === 'case') findState.caseSensitive = !findState.caseSensitive;
+    else if (which === 'word') {
+      if (findState.regex) return;   // the toggle is disabled, and this is its guarantee
+      findState.wholeWord = !findState.wholeWord;
+    } else if (which === 'regex') findState.regex = !findState.regex;
+    findSyncToggles();
+    findQueryNow();
+  }
+
+  /**
+   * The query as the same pattern the host compiled (`src/chat/find.ts`), so a mark can
+   * never disagree with a hit. `null` while the box is empty or the pattern does not
+   * parse — the host says why in `#find-count`.
+   */
+  function findMatcher() {
+    const query = findState.query;
+    if (!query) return null;
+    const flags = findState.caseSensitive ? 'g' : 'gi';
+    try {
+      if (findState.regex) return new RegExp(query, flags);
+      const literal = query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return new RegExp(findState.wholeWord ? '\\b' + literal + '\\b' : literal, flags);
+    } catch (err) {
+      return null;
+    }
+  }
+
+  /** Take every `mark.find-match` out of `root`, giving its text nodes back. */
+  function findUnmarkText(root) {
+    if (!root || !root.querySelectorAll) return;
+    const marks = root.querySelectorAll('mark.find-match');
+    for (const mark of marks) {
+      const parent = mark.parentNode;
+      if (!parent) continue;
+      while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
+      parent.removeChild(mark);
+      if (parent.normalize) parent.normalize();
+    }
+  }
+
+  /**
+   * Mark the query inside one card's rendered text (its pinned ask and its log). Only
+   * text nodes are touched: `textarea` / `input` / `script` / `style` are skipped, and a
+   * zero-width regex match draws nothing rather than an empty `<mark>`.
+   *
+   * The sandbox `check:webview` loads this file into has no `createTreeWalker`, so the
+   * marking is skipped there instead of throwing — the guard asserts the message paths,
+   * not the paint.
+   */
+  function findMarkText(card) {
+    if (!card) return;
+    findMarkZone(card.querySelector && card.querySelector('.node-ask'));
+    findMarkZone(card.querySelector && card.querySelector('.node-work'));
+  }
+
+  /**
+   * Mark the query inside **one element's** rendered text, in the real document only.
+   *
+   * The text nodes are what gets marked, so the mark is found again on what is actually on
+   * screen: that is what makes it work over a snippet rendered from markdown (whose source
+   * markers are gone) as well as over a card's rendered rows. `false` means this document
+   * has no `createTreeWalker` (the build-time stub of `check:webview`), so the caller can
+   * fall back to plain text instead of showing an unmarked shell.
+   */
+  function findMarkZone(zone) {
+    const re = findMatcher();
+    if (!re || !zone || typeof document.createTreeWalker !== 'function') return false;
+    findUnmarkText(zone);
+    const doc = zone.ownerDocument || document;
+    // 4 === NodeFilter.SHOW_TEXT. The filter itself is a plain check in the loop: it
+    // keeps this file free of the `NodeFilter` global, which the guard's DOM lacks.
+    const walker = doc.createTreeWalker(zone, 4);
+    const textNodes = [];
+    while (walker.nextNode()) textNodes.push(walker.currentNode);
+    for (const node of textNodes) {
+      const text = node.nodeValue;
+      const parent = node.parentNode;
+      if (!text || !text.trim() || !parent) continue;
+      const tag = parent.nodeName;
+      if (tag === 'TEXTAREA' || tag === 'INPUT' || tag === 'MARK' || tag === 'SCRIPT' || tag === 'STYLE') continue;
+      re.lastIndex = 0;
+      let match;
+      let last = 0;
+      let frag = null;
+      while ((match = re.exec(text))) {
+        if (match[0] === '') {
+          re.lastIndex++;   // a zero-width match has nothing to paint
+          continue;
+        }
+        const at = match.index;
+        if (!frag) frag = doc.createDocumentFragment();
+        if (at > last) frag.appendChild(doc.createTextNode(text.slice(last, at)));
+        const mark = doc.createElement('mark');
+        mark.className = 'find-match';
+        mark.textContent = match[0];
+        frag.appendChild(mark);
+        last = at + match[0].length;
+        if (last >= text.length) break;
+      }
+      if (!frag) continue;
+      if (last < text.length) frag.appendChild(doc.createTextNode(text.slice(last)));
+      parent.replaceChild(frag, node);
+    }
+    return true;
+  }
+
+  function findClearMarks() {
+    for (const id in nodeEls) {
+      const card = nodeEls[id];
+      if (!card) continue;
+      card.classList.remove('find-hit', 'find-current');
+      findUnmarkText(card);
+    }
+  }
+
+  /**
+   * The two card classes: every card with a hit, and the current one. Cheap (a class
+   * toggle per card), unlike the text marks below.
+   */
+  function findApplyMarks() {
+    if (!findBar) return;
+    const hitIds = Object.create(null);
+    for (const hit of findState.hits) hitIds[hit.nodeId] = true;
+    const current = findCurrentHit();
+    for (const id in nodeEls) {
+      const card = nodeEls[id];
+      if (!card) continue;
+      card.classList.toggle('find-hit', !!hitIds[id]);
+      card.classList.toggle('find-current', !!current && current.nodeId === id);
+    }
+    findScheduleMarks();
+  }
+
+  /**
+   * Text marks are applied lazily, once per frame, and only to cards the reader can see:
+   * the checked-out path plus the current hit. A 200-row result never walks 200 cards,
+   * and a hit card off the path is marked when a jump checks it out.
+   */
+  function findScheduleMarks() {
+    if (!findState.active || findState.hits.length === 0 || findMarkRaf != null) return;
+    const raf = typeof requestAnimationFrame === 'function' ? requestAnimationFrame : (fn) => setTimeout(fn, 16);
+    findMarkRaf = raf(() => {
+      findMarkRaf = null;
+      if (!findState.active) return;
+      const ids = Object.create(null);
+      for (const id in activePathSet) ids[id] = true;
+      const current = findCurrentHit();
+      if (current) ids[current.nodeId] = true;
+      for (const hit of findState.hits) {
+        if (!ids[hit.nodeId]) continue;
+        const card = nodeEls[hit.nodeId];
+        if (card) findMarkText(card);
+      }
+    });
+  }
+
+  /** Re-mark after a turn ended: a grown answer is new text nobody has marked yet. */
+  function findRefreshMarks() {
+    if (!findState.active) return;
+    findScheduleMarks();
+  }
+
+  /** The counter: the current position, or why there is none. */
+  function findRenderCount() {
+    if (!findCountEl) return;
+    if (findBar) findBar.classList.toggle('invalid', !!findState.invalid);
+    findCountEl.classList.toggle('error', !!findState.invalid);
+    if (findState.invalid) {
+      findCountEl.textContent = tr('Invalid regular expression: {0}', findState.invalid);
+      findCountEl.title = findCountEl.textContent;
+      return;
+    }
+    findCountEl.title = '';
+    if (!findState.query.trim()) {
+      findCountEl.textContent = '';
+      return;
+    }
+    if (findState.hits.length === 0) {
+      findCountEl.textContent = tr('No matches in {0} cards', findState.scanned);
+      return;
+    }
+    // `+` is the cap: the list was cut, not the history (see `FindResult.capped`).
+    findCountEl.textContent = `${findState.index + 1}/${findState.hits.length}${findState.capped ? '+' : ''}`;
+  }
+
+  /**
+   * One row's snippet: the line rendered as **inline** markdown, with the match marked.
+   *
+   * Only inline markdown can mean anything in a ±60-character window of an answer: every
+   * block construct starts outside it, so `renderInline` is the right renderer and `mdInline`
+   * (the cards' instance minus links and images) is the right one — a row is a `<button>`,
+   * so an `<a>` inside it is invalid HTML that would also take the click from the jump, and
+   * an `<img>` would make the webview fetch whatever URL a conversation happens to hold.
+   *
+   * With no renderer at all the raw line is shown instead, marked by hand: that is the
+   * build-time stub of `check:webview`, which loads `media/main.js` alone.
+   */
+  function findSnippetEl(text) {
+    const span = el('span', 'find-row-snippet');
+    const html = renderFindSnippet(text);
+    if (html == null) {
+      return findSnippetPlainEl(span, text);
+    }
+    span.innerHTML = html;
+    // The host's offsets describe the markdown source, and rendering removed its markers
+    // (`**`, backticks), so the offsets no longer point at the query: it is located again
+    // in the rendered text, the same walk a card's mark uses.
+    findMarkZone(span);
+    return span;
+  }
+
+  /** The fallback row: the raw line, with the match wrapped by hand. */
+  function findSnippetPlainEl(span, text) {
+    const re = findMatcher();
+    if (!re || typeof document.createTextNode !== 'function') {
+      span.textContent = text;
+      return span;
+    }
+    re.lastIndex = 0;
+    const match = re.exec(text);
+    if (!match || match[0] === '') {
+      span.textContent = text;
+      return span;
+    }
+    const at = match.index;
+    const end = at + match[0].length;
+    if (at > 0) span.appendChild(document.createTextNode(text.slice(0, at)));
+    const mark = el('mark', 'find-match', match[0]);
+    span.appendChild(mark);
+    if (end < text.length) span.appendChild(document.createTextNode(text.slice(end)));
+    return span;
+  }
+
+  /** The result list: one row per hit, grouped by conversation in the `all` scope. */
+  function findRenderResults() {
+    if (!findResultsEl || !findResultsListEl) return;
+    const open = findState.active && findState.listOpen;
+    findResultsEl.classList.toggle('hidden', !open);
+    if (!open) return;
+    // Emptying the list drops its scroll position, so the reader's place is read first and
+    // handed back below. A `Next` press never comes through here (see `findMarkRows`).
+    const keepScroll = findResultsListEl.scrollTop || 0;
+    findResultsListEl.innerHTML = '';
+    findRowEls = [];
+    if (findResultsTitleEl) findResultsTitleEl.textContent = tr('Find results');
+    if (findResultsCountEl) {
+      findResultsCountEl.textContent = findState.hits.length > 0 ? tr('{0} matches', findState.hits.length) : '';
+    }
+    if (findState.invalid) {
+      findResultsListEl.appendChild(el('div', 'find-note error', tr('Invalid regular expression: {0}', findState.invalid)));
+      return;
+    }
+    if (findState.timedOut) {
+      // A page that stopped mid-scan must never read as the end of the history.
+      findResultsListEl.appendChild(el('div', 'find-note', tr('Search stopped early. Narrow the query.')));
+    }
+    let lastSession = null;
+    findState.hits.forEach((hit, index) => {
+      if (findState.scope === 'all' && hit.sessionId !== lastSession) {
+        lastSession = hit.sessionId;
+        findResultsListEl.appendChild(el('div', 'find-group', hit.sessionTitle || hit.sessionId));
+      }
+      const row = el('button', 'find-row');
+      row.type = 'button';
+      // A single click only **selects** the row (the current hit, its card outline and the
+      // counter); it is the double-click that goes there. Opening a card is a checkout,
+      // which moves the composer and can switch the whole tab, so a stray click in a list
+      // of 200 rows must not do it.
+      row.title = tr('Double-click to open the card');
+      if (index === findState.index) row.classList.add('current');
+      const title = el('span', 'find-row-title', hit.nodeTitle || hit.nodeId);
+      const chip = el('span', 'find-chip', hit.field === 'answer' ? tr('Answer') : tr('Question'));
+      title.appendChild(chip);
+      row.appendChild(title);
+      row.appendChild(findSnippetEl(hit.snippet || ''));
+      row.addEventListener('click', () => findSelect(index, false));
+      row.addEventListener('dblclick', () => findSelect(index, true));
+      findResultsListEl.appendChild(row);
+      findRowEls.push(row);
+    });
+    if (findState.hits.length === 0 && !findState.invalid) {
+      findResultsListEl.appendChild(el('div', 'find-note', tr('No matches in {0} cards', findState.scanned)));
+    }
+    findResultsListEl.scrollTop = keepScroll;
+    // …and the current row is the one the reader must be able to see: a jump into another
+    // conversation re-renders this list in the tab that just opened, where the position the
+    // reader left behind does not exist.
+    findScrollCurrentIntoView();
+  }
+
+  /**
+   * The current row, inside the list's own scroller.
+   *
+   * Deliberately arithmetic on this list's own box, never `scrollIntoView`: that scrolls
+   * **every** scrollable ancestor, and the one thing this panel must not do is move the
+   * document or the canvas underneath it. `#find-results-list` is `position: relative` in
+   * the stylesheet, so `offsetTop` is measured from the scroller's own content box.
+   */
+  function findScrollCurrentIntoView() {
+    if (!findResultsListEl || findState.index < 0) return;
+    const row = findRowEls[findState.index];
+    if (!row || typeof row.offsetTop !== 'number') return;
+    const height = typeof row.offsetHeight === 'number' ? row.offsetHeight : 0;
+    const viewTop = findResultsListEl.scrollTop || 0;
+    const viewHeight = findResultsListEl.clientHeight || 0;
+    const viewBottom = viewTop + viewHeight;
+    if (row.offsetTop < viewTop) findResultsListEl.scrollTop = row.offsetTop;
+    else if (row.offsetTop + height > viewBottom) findResultsListEl.scrollTop = row.offsetTop + height - viewHeight;
+  }
+
+  /**
+   * Move the `current` marker between the rows already on screen.
+   *
+   * A rebuild is what `findRenderResults` is for, and it costs the list its scroll position:
+   * a `Next` press (or a click on a row) that rebuilt the list would throw the reader's place
+   * away every time. The rows themselves never change between two hits of one answer.
+   */
+  function findMarkRows() {
+    findRowEls.forEach((row, index) => {
+      if (row) row.classList.toggle('current', index === findState.index);
+    });
+  }
+
+  /** Move the current hit — Next / Previous wrap at both ends, as a find box does. */
+  function findSelect(index, reveal) {
+    if (findState.hits.length === 0) return;
+    const n = findState.hits.length;
+    findState.index = ((index % n) + n) % n;
+    findRenderCount();
+    findMarkRows();
+    findScrollCurrentIntoView();
+    findApplyMarks();
+    if (reveal) findReveal(findState.hits[findState.index]);
+  }
+
+  /**
+   * Go to one hit. Only the **checked-out** card is expanded, so a jump is a checkout:
+   * the host moves the view focus (which is what renders the answer the hit lives in)
+   * and opens the hit's conversation when it belongs to another one. The reveal is
+   * applied by `findAfterRender`, because the card may not exist yet.
+   */
+  function findReveal(hit) {
+    if (!hit) return;
+    const sameTab = !persistedSessionId || hit.sessionId === persistedSessionId;
+    const card = sameTab ? nodeEls[hit.nodeId] : null;
+    if (card && hit.nodeId === treeActiveId) {
+      panToNode(hit.nodeId);
+      findMarkText(card);
+      return;
+    }
+    findPending = { sessionId: hit.sessionId, nodeId: hit.nodeId };
+    vscode.postMessage({
+      type: 'findJump',
+      sessionId: hit.sessionId,
+      nodeId: hit.nodeId,
+      field: hit.field,
+      // The query travels with the jump: the host opens that conversation's tab, and the bar
+      // there re-runs this search with this card as the current hit instead of an empty box.
+      scope: findState.scope,
+      query: findState.query,
+      caseSensitive: findState.caseSensitive,
+      wholeWord: findState.wholeWord,
+      regex: findState.regex,
+    });
+    if (card) panToNode(hit.nodeId);   // instant feedback while the checkout lands
+  }
+
+  /** One answer from the host. A stale `requestId` is dropped, never painted. */
+  function findOnResults(msg) {
+    if (!findState.active) return;
+    if (msg.requestId !== findState.requestId) return;
+    findState.invalid = typeof msg.invalid === 'string' ? msg.invalid : '';
+    findState.hits = Array.isArray(msg.hits) ? msg.hits : [];
+    findState.timedOut = msg.timedOut === true;
+    findState.capped = msg.capped === true;
+    findState.scanned = typeof msg.scannedNodes === 'number' ? msg.scannedNodes : 0;
+    // The current hit starts on this conversation's first row, so Enter walks the list
+    // from where the reader is looking; another conversation's rows are click targets.
+    let first = -1;
+    for (let i = 0; i < findState.hits.length; i++) {
+      if (findState.hits[i].sessionId === persistedSessionId) {
+        first = i;
+        break;
+      }
+    }
+    findState.index = findState.hits.length === 0 ? -1 : first >= 0 ? first : 0;
+    // A seeded open (a jump's own query) names the card the reader clicked: it is the
+    // current hit, not whichever one happens to be first in this conversation.
+    if (findState.focusNode) {
+      const wanted = findState.hits.findIndex((hit) => hit.nodeId === findState.focusNode);
+      if (wanted >= 0) findState.index = wanted;
+      findState.focusNode = '';
+    }
+    findRenderCount();
+    findRenderResults();
+    findApplyMarks();
+    const current = findCurrentHit();
+    // The camera never moves on its own. Typing only *selects* a hit (the row, its counter
+    // and the card's outline); going to a card is an explicit act — a double-click on a row,
+    // `Enter` / `F3`, the arrows, or the seeded jump of a double-clicked row in another
+    // conversation. An answer arrives asynchronously, so re-centring here is exactly the
+    // "magnet" that makes a drag feel like it will not let go: it is gone.
+    if (current) {
+      const card = nodeEls[current.nodeId];
+      if (card) findMarkText(card);
+    }
+  }
+
+  /** After every repaint: apply a pending reveal, and keep the marks on the cards. */
+  function findAfterRender() {
+    if (!findState.active) return;
+    if (findPending && (!persistedSessionId || findPending.sessionId === persistedSessionId)) {
+      const card = nodeEls[findPending.nodeId];
+      if (card) {
+        const pending = findPending;
+        findPending = null;
+        panToNode(pending.nodeId);
+        findMarkText(card);
+      }
+    }
+    if (findState.hits.length > 0) findApplyMarks();
+  }
+
+  // The two shortcuts and the bar's own keys. Capture phase: the composer's textarea
+  // takes Enter and the mention menu takes Esc, and neither may win while the bar has
+  // the focus. `isComposing` first, so an IME never loses a keystroke to a shortcut.
+  window.addEventListener('keydown', (e) => {
+    if (e.isComposing) return;
+    const mod = e.ctrlKey || e.metaKey;
+    const key = (e.key || '').toLowerCase();
+    if (mod && !e.altKey && key === 'f') {
+      // Ctrl+F this conversation, Ctrl+Shift+F every conversation. A key pressed inside
+      // a webview never reaches the workbench, which is what makes the second ours.
+      e.preventDefault();
+      e.stopPropagation();
+      findOpen(e.shiftKey ? 'all' : 'session');
+      return;
+    }
+    if (!findState.active) return;
+    const inBar = !!findBar && ((findBar.contains && findBar.contains(e.target)) || e.target === findInput);
+    if (inBar && e.altKey && !mod) {
+      if (key === 'c') {
+        e.preventDefault();
+        findToggle('case');
+        return;
+      }
+      if (key === 'w') {
+        e.preventDefault();
+        findToggle('word');
+        return;
+      }
+      if (key === 'r') {
+        e.preventDefault();
+        findToggle('regex');
+        return;
+      }
+    }
+    if (e.key === 'F3') {
+      e.preventDefault();
+      findSelect(findState.index + (e.shiftKey ? -1 : 1), true);
+      return;
+    }
+    if (!inBar) return;
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      findClose();
+      return;
+    }
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      findSelect(findState.index + (e.shiftKey ? -1 : 1), true);
+    }
+  }, true);
+
+  if (findInput) {
+    findInput.addEventListener('input', () => {
+      findState.invalid = '';
+      findSchedule();
+    });
+    findInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        findSelect(findState.index + (e.shiftKey ? -1 : 1), true);
+      } else if (e.key === 'Escape') {
+        e.preventDefault();
+        findClose();
+      }
+    });
+  }
+  if (findCaseBtn) findCaseBtn.addEventListener('click', () => findToggle('case'));
+  if (findWordBtn) findWordBtn.addEventListener('click', () => findToggle('word'));
+  if (findRegexBtn) findRegexBtn.addEventListener('click', () => findToggle('regex'));
+  if (findPrevBtn) findPrevBtn.addEventListener('click', () => findSelect(findState.index - 1, true));
+  if (findNextBtn) findNextBtn.addEventListener('click', () => findSelect(findState.index + 1, true));
+  if (findListBtn) findListBtn.addEventListener('click', () => findSetListOpen(!findState.listOpen));
+  if (findCloseBtn) findCloseBtn.addEventListener('click', () => findClose());
+
   function handleMessage(msg) {
     switch (msg.type) {
       case 'tree':
@@ -11711,6 +12479,18 @@ function relayout() {
         break;
       case 'panTo':
         panToNode(String(orElse(msg.id, '')));
+        break;
+      case 'findResults':
+        // The host's answer to a `find` (`src/chat/find.ts` compiled it). A stale answer
+        // is dropped inside `findOnResults` by its `requestId`.
+        findOnResults(msg);
+        break;
+      case 'findOpen':
+        // The Command Palette entries (`Find in Conversation` / `Find in All Sessions`) and a
+        // jump into another conversation: the tab opens the bar itself, so the shortcut, the
+        // palette and the jump all do the same thing. A jump carries its query (`msg`) as the
+        // seed, so the tab that opens marks the hit the reader clicked.
+        findOpen(msg.scope === 'all' ? 'all' : 'session', msg);
         break;
       case 'config': {
         // The card list is authoritative and complete on every `config`: a card the
@@ -11888,6 +12668,8 @@ function relayout() {
         break;
       case 'done':
         endRun(msg);
+        // The answer just grew, and the text nobody has marked yet is the new part.
+        findRefreshMarks();
         break;
       case 'interrupted':
         endRun(msg);

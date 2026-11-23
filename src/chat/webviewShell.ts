@@ -74,6 +74,29 @@ export function buildChatShell(webview: vscode.Webview, opts: ChatShellOptions):
     <button id="follow-btn" class="active" title="${vscode.l10n.t('Follow the active node')}">⦿</button>
     <button id="fit-btn" title="${vscode.l10n.t('Fit the tree to view')}">⤢</button>
   </div>
+  <!-- Find (Ctrl+F in this conversation, Ctrl+Shift+F in all of them): the bar and its
+       result list. Both are fixed overlays on purpose. The canvas (#tree-wrap) is the
+       transformed surface, and a control inside it would pan and scale with the tree. The
+       frame is host-rendered like the composer's; the counter, the rows and every state
+       change are media/main.js (tr()), see plans/conversation-search.md §2.4. -->
+  <div id="find-bar" class="hidden">
+    <input id="find-input" type="text" spellcheck="false" autocomplete="off" autocapitalize="off" autocorrect="off" placeholder="${vscode.l10n.t('Find')}" aria-label="${vscode.l10n.t('Find')}" />
+    <span id="find-count" aria-live="polite"></span>
+    <button id="find-case" class="find-toggle" title="${vscode.l10n.t('Match case')}" aria-label="${vscode.l10n.t('Match case')}" aria-pressed="false">Aa</button>
+    <button id="find-word" class="find-toggle" title="${vscode.l10n.t('Match whole word')}" aria-label="${vscode.l10n.t('Match whole word')}" aria-pressed="false">ab|</button>
+    <button id="find-regex" class="find-toggle" title="${vscode.l10n.t('Use regular expression')}" aria-label="${vscode.l10n.t('Use regular expression')}" aria-pressed="false">.*</button>
+    <button id="find-prev" class="find-btn" title="${vscode.l10n.t('Previous match')}" aria-label="${vscode.l10n.t('Previous match')}">↑</button>
+    <button id="find-next" class="find-btn" title="${vscode.l10n.t('Next match')}" aria-label="${vscode.l10n.t('Next match')}">↓</button>
+    <button id="find-list" class="find-btn" title="${vscode.l10n.t('Find results')}" aria-label="${vscode.l10n.t('Find results')}">☰</button>
+    <button id="find-close" class="find-btn" title="${vscode.l10n.t('Close find')}" aria-label="${vscode.l10n.t('Close find')}">✕</button>
+  </div>
+  <div id="find-results" class="hidden">
+    <div id="find-results-head">
+      <span id="find-results-title">${vscode.l10n.t('Find results')}</span>
+      <span id="find-results-count"></span>
+    </div>
+    <div id="find-results-list"></div>
+  </div>
   <div id="tree-wrap">
     <div id="tree-canvas">
       <svg id="tree-edges"></svg>

@@ -208,6 +208,44 @@ A reference is a path only. Spinney does not send the file content. The agent re
 
 With no folder open, the list shows the scratch folder instead (section 16).
 
+### 3.7 Search a conversation
+
+`Ctrl+F` searches the conversation of the tab that you are in. `Ctrl+Shift+F` searches all conversations of this workspace. Both keys open a find bar at the top of the chat tab.
+
+Spinney searches the question and the final answer of each card. It does not search the steps between them. It searches every branch of the conversation, not only the branch in view. It also searches sub-agent cards and compression cards. It does not search background terminal cards.
+
+The find bar matches text the way the VS Code search box does. Three buttons control a match:
+
+- **Match case** (`Alt+C`) matches the capital letters. The default is off.
+- **Match whole word** (`Alt+W`) matches a whole word only. The default is off.
+- **Use regular expression** (`Alt+R`) reads the query as a regular expression. The default is off.
+
+Spinney ignores **Match whole word** while **Use regular expression** is on. An invalid regular expression puts a red border on the input box. The reason follows the border.
+
+The keyboard works as follows:
+
+- `Enter` or `F3` goes to the next match.
+- `Shift+Enter` or `Shift+F3` goes to the previous match.
+- `Esc` closes the find bar.
+
+The find bar shows the current match and the number of matches. When nothing matches, it says how many cards it searched.
+
+A single click on a result selects it. A double-click on a result opens its card. `Enter` on the current result does the same. Spinney opens the tab of that conversation. It puts the card in the centre of the view, and it marks the matched text inside the card.
+
+`Ctrl+Shift+F` also opens the result panel at the left of the tab. The panel groups the matches by conversation and by card. Each row shows the title of the card, a `Question` or `Answer` label, and the text around the match. The header shows the number of matches. The list stops at 200 rows. When the list stops early, a line at the top of the list says so. Two causes exist: too many matches, or no time left. Narrow the query, then search again.
+
+Two limits are deliberate:
+
+- Spinney searches the conversations of this workspace only. It never reads the data of another folder or another window.
+- Spinney does not search tool output. It searches no tool call, no tool result and no thinking block.
+
+`Ctrl+Shift+F` works only while the focus is in the chat tab. Outside the chat tab, VS Code opens its own file search. To search from any place, use one of the two commands.
+
+Two commands start a search:
+
+- **`Spinney: Find in Conversation`** opens the find bar for the conversation of the current tab.
+- **`Spinney: Find in All Sessions`** opens the find bar for all conversations of this workspace. It also opens a picker. The picker lists the matches while you type, so you can jump to a match without the panel.
+
 ## 4. Branches
 
 ### 4.1 Branch from a turn
@@ -637,6 +675,8 @@ Every command lives in the Command Palette under `Spinney: `.
 | `Spinney: Open Diagnostics Log` | Shows the diagnostics log of this window, and offers to reveal it. |
 | `Spinney: Delete Branch at Checked-out Turn` | Deletes the branch at the checked-out turn. |
 | `Spinney: Clear Conversation` | Empties the conversation of the current session. |
+| `Spinney: Find in Conversation` | Opens the find bar for the conversation of this tab. |
+| `Spinney: Find in All Sessions` | Opens the find bar and the result panel for all conversations of this workspace. |
 | `Spinney: Open Model Cards` | Opens the model-cards page. |
 | `Spinney: Set API Key` | Stores an API key for a provider. |
 | `Spinney: Clear API Key` | Erases a stored API key. |
@@ -647,7 +687,7 @@ Every command lives in the Command Palette under `Spinney: `.
 | `Spinney: Reload Chat Webview` | Builds the chat tab again from the state of the session. |
 | `Spinney: Test Web Search Backends` | Sends one test query to every search backend, and opens a table of the results. |
 
-Spinney adds no default keyboard shortcut.
+Spinney adds no default keyboard shortcut. The find keys of section 3.7 act inside the chat tab only.
 
 ## 13. Instructions for the agent
 
